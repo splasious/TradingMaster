@@ -54,7 +54,7 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "Trading",
     items: [
-      { label: "Paper Trading", href: "/paper-trading", icon: Activity, phase: 6 },
+      { label: "Paper Trading", href: "/paper-trading", icon: Activity },
       { label: "Live Trading", href: "/live-trading", icon: Radio, phase: 7 },
       { label: "Portfolio", href: "/portfolio", icon: Briefcase, phase: 7 },
       { label: "Orders", href: "/orders", icon: ListOrdered, phase: 7 },

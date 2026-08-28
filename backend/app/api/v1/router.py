@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     market_data,
     market_data_ws,
     optimization,
+    paper_trading,
     scanner,
     strategies,
     system,
@@ -28,3 +29,4 @@ api_router.include_router(scanner.router, prefix="/scanner", tags=["scanner"])
 api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(backtests.router, prefix="/backtests", tags=["backtests"])
 api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
+api_router.include_router(paper_trading.router, prefix="/paper-trading", tags=["paper-trading"])

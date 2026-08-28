@@ -14,6 +14,10 @@ import type {
   InstrumentOut,
   OptimizationJobOut,
   OptimizationResultOut,
+  PaperDeploymentOut,
+  PaperOrderOut,
+  PaperPortfolioOut,
+  PaperTradeOut,
   QualityReportOut,
   StrategyOut,
   SystemHealth,
@@ -163,6 +167,38 @@ export function useOptimizationResult(jobId: string | null, enabled: boolean) {
     queryKey: ["optimization-result", jobId],
     queryFn: () => apiFetch<OptimizationResultOut>(`/api/v1/optimization/${jobId}/result`),
     enabled: !!jobId && enabled,
+  });
+}
+
+export function usePaperDeployments() {
+  return useQuery({
+    queryKey: ["paper-deployments"],
+    queryFn: () => apiFetch<PaperDeploymentOut[]>("/api/v1/paper-trading/deployments"),
+    refetchInterval: 5000,
+  });
+}
+
+export function usePaperPortfolio() {
+  return useQuery({
+    queryKey: ["paper-portfolio"],
+    queryFn: () => apiFetch<PaperPortfolioOut>("/api/v1/paper-trading/portfolio"),
+    refetchInterval: 5000,
+  });
+}
+
+export function usePaperOrders(deploymentId: string | null) {
+  return useQuery({
+    queryKey: ["paper-orders", deploymentId],
+    queryFn: () => apiFetch<PaperOrderOut[]>(`/api/v1/paper-trading/orders?deployment_id=${deploymentId}`),
+    enabled: !!deploymentId,
+  });
+}
+
+export function usePaperTrades(deploymentId: string | null) {
+  return useQuery({
+    queryKey: ["paper-trades", deploymentId],
+    queryFn: () => apiFetch<PaperTradeOut[]>(`/api/v1/paper-trading/trades?deployment_id=${deploymentId}`),
+    enabled: !!deploymentId,
   });
 }
 

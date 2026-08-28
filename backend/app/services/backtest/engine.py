@@ -54,7 +54,7 @@ class BacktestOutput:
     final_equity: float = 0.0
 
 
-def _quantity_for(cash: float, price: float, sizing: PositionSizing) -> float:
+def quantity_for(cash: float, price: float, sizing: PositionSizing) -> float:
     if sizing.type == "percent_capital":
         allocation = cash * (sizing.value / 100)
         return max(0.0, allocation / price) if price > 0 else 0.0
@@ -104,7 +104,7 @@ def simulate_trades(
     for i, candle in enumerate(candles):
         if pending_entry and position is None:
             fill = _apply_slippage(candle.open, buying=True)
-            quantity = _quantity_for(cash, fill, sizing)
+            quantity = quantity_for(cash, fill, sizing)
             if quantity > 0:
                 notional = fill * quantity
                 fee = _brokerage(notional)

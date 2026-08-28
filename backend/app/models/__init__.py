@@ -3,6 +3,7 @@ from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, Opti
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
 from app.models.market_data import BackfillJob, OhlcvCandle
+from app.models.paper_trading import PaperDeployment, PaperOrder, PaperPortfolio, PaperPosition, PaperTrade
 from app.models.scan import SavedScan
 from app.models.session import Session
 from app.models.strategy import Strategy, StrategyVersion
@@ -22,6 +23,11 @@ __all__ = [
     "OhlcvCandle",
     "OptimizationJob",
     "OptimizationResult",
+    "PaperDeployment",
+    "PaperOrder",
+    "PaperPortfolio",
+    "PaperPosition",
+    "PaperTrade",
     "SavedScan",
     "Session",
     "Strategy",

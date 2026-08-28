@@ -289,6 +289,65 @@ export interface OptimizationResultOut {
   runs: OptimizationRunOut[];
 }
 
+export interface PaperPositionOut {
+  instrument_symbol: string;
+  quantity: number;
+  avg_entry_price: number;
+  current_price: number | null;
+  unrealized_pnl: number | null;
+  opened_at: string;
+}
+
+export interface PaperDeploymentOut {
+  id: string;
+  strategy_id: string;
+  strategy_name: string;
+  instrument_id: string;
+  instrument_symbol: string;
+  timeframe: string;
+  status: "active" | "stopped";
+  last_evaluated_at: string | null;
+  created_at: string;
+  stopped_at: string | null;
+  open_position: PaperPositionOut | null;
+}
+
+export interface PaperPortfolioOut {
+  cash: number;
+  initial_capital: number;
+  equity: number;
+  unrealized_pnl: number;
+  realized_pnl_total: number;
+  positions: PaperPositionOut[];
+}
+
+export interface PaperOrderOut {
+  id: string;
+  side: string;
+  quantity: number;
+  price: number;
+  status: string;
+  reason: string | null;
+  created_at: string;
+}
+
+export interface PaperTradeOut {
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+}
+
+export interface PaperEvaluationOut {
+  action: string;
+  signal: string | null;
+  price: number | null;
+  reason: string | null;
+}
+
 export interface BacktestTradeOut {
   entry_ts: string;
   entry_price: number;

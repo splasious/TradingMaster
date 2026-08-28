@@ -51,6 +51,11 @@ class TickEngine:
     def unsubscribe(self, instrument_id: uuid.UUID) -> None:
         self._subscriber_counts[instrument_id] = max(0, self._subscriber_counts.get(instrument_id, 0) - 1)
 
+    def get_current_price(self, instrument_id: uuid.UUID) -> float | None:
+        """Non-WebSocket callers (e.g. the paper trading engine) read the
+        latest simulated price directly rather than consuming a queue."""
+        return self._last_price.get(instrument_id)
+
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(TICK_INTERVAL_SECONDS)

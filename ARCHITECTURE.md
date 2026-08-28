@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–5)
+# TradingMaster — Architecture (Phases 1–6)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -266,6 +266,45 @@ A completed backtest is the actual, earned trigger for the strategy's
 `can_transition()` from Phase 4) — the first time anything in the codebase
 sets a status other than `DRAFT`.
 
+## Risk engine and paper trading (Phase 6, PRD sections 21, 24)
+
+```
+Live Market Data -> Strategy -> Signal -> Risk Engine -> Paper Execution -> Paper Portfolio
+```
+
+`services/risk/engine.py` is the literal gate between a signal and an order,
+for both paper trading now and live trading later (Phase 7 reuses it
+unchanged). Three checks, each with a specific auditable reason on
+rejection (PRD section 24's explicit requirement, not a bare "REJECTED"):
+sufficient cash, max open positions, max daily loss. Exits are always
+approved -- risk controls gate new exposure, never trap an existing
+position open.
+
+`services/paper_trading/engine.py`'s `evaluate_deployment()` is the whole
+pipeline for one deployment, one tick -- a plain async function, not baked
+into the background loop, so tests call it directly and deterministically
+(the same pattern already used for backfill/backtest/optimization jobs).
+`services/paper_trading/scheduler.py` calls it for every active deployment
+every ~10s; the "Evaluate Now" button in the UI calls the exact same
+function on demand. Price comes from the tick engine's simulated feed
+(Phase 2) — a paper deployment `subscribe()`s to it independent of any
+browser watching, so it keeps generating prices even with no UI open.
+
+**A real bug this phase surfaced and fixed**: the live evaluation loop
+combines DB-loaded candles with a freshly built "current bar" from the live
+tick price, in the same list, then hands it to the same
+`evaluate_rule_node`/indicator pipeline scanner.py and strategies use.
+SQLite-loaded timestamps come back tzinfo-naive (the recurring gotcha
+documented in `core/time.py`) while the synthetic bar's timestamp is
+`datetime.now(timezone.utc)` — aware. Mixing the two in one pandas column
+crashed `sort_values` with "can't compare offset-naive and offset-aware
+datetimes" the first time a paper deployment used an *indicator-based*
+rule (a raw `close` rule never touches `candles_to_frame`, which is why
+this phase's first pass tests didn't catch it). Fixed once, centrally, in
+`indicators/base.py: candles_to_frame()` — every caller (scanner,
+strategies, paper trading, and Phase 5's backtester) benefits, and
+`test_paper_trading_engine.py` has a named regression test for it.
+
 ## Broker credentials note
 
 The Delta Exchange API key/secret provided during development are **not**
@@ -277,13 +316,16 @@ would violate the platform's own safety rules (PRD Rule 8, section 49).
 
 ## What's deliberately not here yet
 
-No real orders/positions/risk logic, no paper or live trading, no
-options/derivatives data, no drawing tools or multi-panel charting, no
-market-breadth indicators (no data source for OI/PCR yet), no strategy
-edit UI beyond create (the API supports versioning -- tested -- but the
-Strategy Builder page only wires up creation), no walk-forward
-*optimization* specifically (out-of-sample testing and grid search both
-exist independently; combining them into one workflow is a further step).
-PRD section 63 phases the rest in deliberately so building on a shaky
-foundation doesn't mean redoing it later. See the nav sidebar's "P6".."P8"
-badges for which phase each remaining screen belongs to.
+No live trading (real broker orders), no options/derivatives data, no
+drawing tools or multi-panel charting, no market-breadth indicators (no
+data source for OI/PCR yet), no strategy edit UI beyond create (the API
+supports versioning -- tested -- but the Strategy Builder page only wires
+up creation), no walk-forward *optimization* specifically (out-of-sample
+testing and grid search both exist independently; combining them into one
+workflow is a further step), no reconciliation engine (nothing to
+reconcile against until a real broker connects), no order lifecycle beyond
+immediate fill/reject (paper fills are instant by design -- PARTIALLY_FILLED
+etc. matter once a real broker's order book is in the loop). PRD section 63
+phases the rest in deliberately so building on a shaky foundation doesn't
+mean redoing it later. See the nav sidebar's "P7"/"P8" badges for which
+phase each remaining screen belongs to.

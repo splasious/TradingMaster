@@ -17,6 +17,7 @@ from typing import Callable
 
 import pandas as pd
 
+from app.core.time import as_aware_utc
 from app.models.market_data import OhlcvCandle
 
 
@@ -25,7 +26,14 @@ def candles_to_frame(candles: list[OhlcvCandle]) -> pd.DataFrame:
         return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
     df = pd.DataFrame(
         {
-            "ts": [c.ts for c in candles],
+            # Candles loaded from SQLite come back tzinfo-naive even though
+            # they're always UTC (see core/time.py); a caller combining
+            # those with a freshly constructed aware datetime (paper
+            # trading's synthetic "current bar") would otherwise crash
+            # pandas' sort with "can't compare offset-naive and
+            # offset-aware datetimes". Postgres doesn't have this problem;
+            # as_aware_utc() is a no-op there.
+            "ts": [as_aware_utc(c.ts) for c in candles],
             "open": [c.open for c in candles],
             "high": [c.high for c in candles],
             "low": [c.low for c in candles],

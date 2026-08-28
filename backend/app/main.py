@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.services.market_data.tick_engine import tick_engine
+from app.services.paper_trading.scheduler import paper_trading_scheduler
 
 settings = get_settings()
 
@@ -13,7 +14,9 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     tick_engine.start()
+    paper_trading_scheduler.start()
     yield
+    paper_trading_scheduler.stop()
     tick_engine.stop()
 
 
