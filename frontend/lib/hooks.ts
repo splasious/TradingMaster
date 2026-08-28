@@ -10,6 +10,7 @@ import type {
   IndicatorSpecOut,
   InstrumentOut,
   QualityReportOut,
+  StrategyOut,
   SystemHealth,
   UserOut,
 } from "./types";
@@ -102,6 +103,13 @@ export function useChartCandles(instrumentId: string | null, timeframe: string) 
           )
         : apiFetch<CandleOut[]>(`/api/v1/market-data/candles?instrument_id=${instrumentId}&timeframe=${timeframe}`),
     enabled: !!instrumentId,
+  });
+}
+
+export function useStrategies() {
+  return useQuery({
+    queryKey: ["strategies"],
+    queryFn: () => apiFetch<StrategyOut[]>("/api/v1/strategies"),
   });
 }
 

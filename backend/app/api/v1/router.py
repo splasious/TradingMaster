@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     market_data,
     market_data_ws,
     scanner,
+    strategies,
     system,
     users,
 )
@@ -22,3 +23,4 @@ api_router.include_router(market_data.router, prefix="/market-data", tags=["mark
 api_router.include_router(market_data_ws.router, prefix="/ws", tags=["market-data-ws"])
 api_router.include_router(indicators.router, prefix="/indicators", tags=["indicators"])
 api_router.include_router(scanner.router, prefix="/scanner", tags=["scanner"])
+api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])

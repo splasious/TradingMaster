@@ -45,8 +45,8 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "Strategies",
     items: [
-      { label: "Strategies", href: "/strategies", icon: Bot, phase: 4 },
-      { label: "Strategy Builder", href: "/strategy-builder", icon: Wrench, phase: 4 },
+      { label: "Strategies", href: "/strategies", icon: Bot },
+      { label: "Strategy Builder", href: "/strategy-builder", icon: Wrench },
       { label: "Backtesting", href: "/backtesting", icon: TrendingUp, phase: 5 },
       { label: "Optimization", href: "/optimization", icon: Gauge, phase: 5 },
     ],

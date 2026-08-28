@@ -4,15 +4,17 @@ Institutional-grade multi-strategy trading platform. See [`TradingMaster_PRD.md`
 for the full product specification and [`ARCHITECTURE.md`](ARCHITECTURE.md) for
 how this codebase implements it.
 
-**Current status: Phases 1–3.** Auth, RBAC, database schema, app
+**Current status: Phases 1–4.** Auth, RBAC, database schema, app
 shell/navigation, design system, broker abstraction (mock adapter — no real
 Zerodha/Delta order-placing credentials yet), a real market data engine
 (NSE via the optional local `nse-yahoo-data` sidecar, Delta Exchange crypto
-via its public API), and real analytics: 13 technical indicators, a
-multi-timeframe engine (daily → weekly/monthly, no look-ahead), candlestick
-charting, and a market scanner with saved filters. Every later phase
-(strategy engine, backtesting, paper/live trading) builds on this without
-reworking it.
+via its public API), real analytics (13 technical indicators, a
+multi-timeframe engine, candlestick charting, a market scanner with saved
+filters), and a real strategy engine: visual rule-based strategies and
+sandboxed Python strategy import (RestrictedPython + subprocess isolation —
+`import os`, `open()`, `eval()` etc. are all verified-blocked, not just
+assumed). Every later phase (backtesting, paper/live trading) builds on
+this without reworking it.
 
 ## Prerequisites
 

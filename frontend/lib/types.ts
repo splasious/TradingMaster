@@ -140,3 +140,70 @@ export interface SavedScanOut {
   timeframe: string;
   conditions: ScanCondition[];
 }
+
+export type RuleNode = { all: RuleNode[] } | { any: RuleNode[] } | ScanCondition;
+
+export interface PositionSizing {
+  type: "fixed_quantity" | "percent_capital";
+  value: number;
+}
+
+export interface RiskRules {
+  stop_loss_pct: number | null;
+  take_profit_pct: number | null;
+  max_positions: number | null;
+  max_daily_loss_pct: number | null;
+}
+
+export interface StrategyVersionOut {
+  id: string;
+  version_number: number;
+  timeframe: string;
+  instrument_ids: string[];
+  parameters: Record<string, number>;
+  entry_rules: RuleNode | null;
+  exit_rules: RuleNode | null;
+  python_code: string | null;
+  position_sizing: PositionSizing;
+  risk_rules: RiskRules;
+  created_at: string;
+}
+
+export type StrategyStatus =
+  | "draft"
+  | "backtested"
+  | "optimized"
+  | "out_of_sample_tested"
+  | "paper_trading"
+  | "validated"
+  | "approved"
+  | "live";
+
+export interface StrategyOut {
+  id: string;
+  name: string;
+  description: string | null;
+  code_type: "visual" | "python";
+  status: StrategyStatus;
+  owner_id: string;
+  created_at: string;
+  updated_at: string;
+  latest_version: StrategyVersionOut | null;
+}
+
+export interface StrategyVersionCreate {
+  timeframe: string;
+  instrument_ids: string[];
+  parameters: Record<string, number>;
+  entry_rules: RuleNode | null;
+  exit_rules: RuleNode | null;
+  python_code: string | null;
+  position_sizing: PositionSizing;
+  risk_rules: Partial<RiskRules>;
+}
+
+export interface ValidateResult {
+  valid: boolean;
+  error: string | null;
+  sample_signal: string | null;
+}

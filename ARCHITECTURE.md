@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–3)
+# TradingMaster — Architecture (Phases 1–4)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -193,6 +193,44 @@ ever calls known Python operators (`operator.gt`, etc.). No `eval()`, no
 arbitrary code path, consistent with PRD Rule 3 even though this isn't the
 Python-strategy-sandbox that rule was written for.
 
+## Strategy engine and Python sandbox (Phase 4, PRD sections 14, 15, 16, 25, 32)
+
+Two ways to define a strategy, sharing one schema (`strategies` +
+`strategy_versions`, `backend/app/models/strategy.py`):
+
+- **Visual mode**: `entry_rules` / `exit_rules` are the *same* rule-tree
+  shape the scanner already evaluates (`{"all"/"any": [...]}` of
+  `{field, operator, value}` leaves) -- `services/strategy/rules.py` just
+  calls the scanner's `evaluate_condition` per leaf. One condition
+  evaluator, two UIs (Scanner, Strategy Builder), no duplicated logic.
+- **Python mode**: arbitrary code, but never executed directly in the API
+  process (PRD Rule 3). `services/strategy/sandbox_worker.py` runs as a
+  **separate subprocess**, in a **RestrictedPython**-compiled environment
+  whose `safe_builtins` has no `__import__`, `open`, `exec`, or `eval`.
+  Verified both ways in `tests/test_strategy_sandbox.py`: `import os`,
+  `open(...)`, `__import__(...)`, `eval(...)`, and `exec(...)` are all
+  rejected (some at compile time, some at runtime when the missing builtin
+  is referenced) -- and a real infinite loop is killed by the orchestrator's
+  hard timeout (`sandbox.py`, default 5s) with the subprocess actually
+  terminated, not just abandoned. This is two independent isolation layers
+  (AST restriction + OS process boundary); a production deployment should
+  add a third (container/network-namespace isolation) on top -- not built
+  here since this dev environment has no Docker, but nothing above assumes
+  its absence.
+
+The strategy contract is deliberately minimal: Python code defines
+`generate_signal(candles, params) -> "BUY" | "SELL" | "HOLD"`. Backtesting
+(Phase 5) calls this same function bar-by-bar; nothing about the sandbox
+changes when that phase lands.
+
+**Deployment state machine** (`services/strategy/state_machine.py`, PRD
+section 25): all 8 states and their legal transitions are modeled and
+tested now (`DRAFT → BACKTESTED → OPTIMIZED → ... → LIVE`, and any state
+can fall back to `DRAFT`), but only `DRAFT` is reachable through the API
+today. Nothing fabricates a "backtested" strategy without a real backtest
+behind it -- Phase 5 will call `can_transition()` when a backtest actually
+completes, using the same validator these tests already cover.
+
 ## Broker credentials note
 
 The Delta Exchange API key/secret provided during development are **not**
@@ -204,9 +242,11 @@ would violate the platform's own safety rules (PRD Rule 8, section 49).
 
 ## What's deliberately not here yet
 
-No strategies, no backtesting, no real orders/positions/risk logic, no
-options/derivatives data, no drawing tools or multi-panel charting, no
-market-breadth/derivatives indicators (no data source for OI/PCR yet). PRD
-section 63 phases the rest in deliberately so building on a shaky
-foundation doesn't mean redoing it later. See the nav sidebar's "P4".."P8"
-badges for which phase each remaining screen belongs to.
+No backtesting, no real orders/positions/risk logic, no options/derivatives
+data, no drawing tools or multi-panel charting, no market-breadth
+indicators (no data source for OI/PCR yet), no strategy edit UI beyond
+create (the API supports versioning -- `POST /strategies/{id}/versions` --
+tested, but the Strategy Builder page only wires up creation). PRD section
+63 phases the rest in deliberately so building on a shaky foundation
+doesn't mean redoing it later. See the nav sidebar's "P5".."P8" badges for
+which phase each remaining screen belongs to.
