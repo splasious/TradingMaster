@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     seed_admin_email: str = "admin@tradingmaster.internal"
     seed_admin_password: str = "ChangeMe123!"
 
+    # Local nse-yahoo-data service (github.com/.../nse-yahoo-data): real NSE
+    # OHLCV history scraped from Yahoo Finance. Optional -- if it isn't
+    # running, backfills against "yahoo_nse" instruments fail gracefully.
+    yahoo_data_service_url: str = "http://127.0.0.1:8800"
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

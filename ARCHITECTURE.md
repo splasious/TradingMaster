@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phase 1: Foundation)
+# TradingMaster — Architecture (Phases 1–2)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -109,10 +109,66 @@ color-only signaling. Dark is the default theme (a trading terminal is a
 long-session, low-glare tool per section 40); the toggle in the topbar
 switches to light and persists via `next-themes`.
 
+## Market data engine (Phase 2, PRD sections 8–11)
+
+Same pluggable-adapter shape as the broker layer, but for historical OHLCV:
+
+```
+MarketDataSource (ABC)          backend/app/services/market_data/base.py
+   ├── YahooNSEDataSource         real NSE equities/indices via the local
+   │                              nse-yahoo-data sidecar service (its own
+   │                              repo, HTTP API on :8800) -- 750+ symbols,
+   │                              daily history back to listing. Optional:
+   │                              not running → backfills fail with a clear
+   │                              MarketDataSourceError, not a raw traceback.
+   └── DeltaExchangeDataSource     real crypto perpetuals via Delta Exchange
+                                   India's public REST API -- no API key
+                                   needed for market data (candles/products
+                                   are public endpoints).
+```
+
+`registry.py` maps `Instrument.data_source` ("yahoo_nse" / "delta_exchange")
+to an adapter, same pattern as the broker registry. A real Zerodha- or
+Delta-order-flow-sourced data adapter plugs in the same way in a later phase.
+
+**Backfill** (`services/market_data/backfill.py`): `POST /market-data/backfill`
+creates a `BackfillJob` row and runs the actual fetch as a FastAPI
+`BackgroundTask` (opens its own DB session — the request's session is
+already closed by the time it runs). Dedupes against existing candles by
+timestamp before inserting, so re-running a backfill is a no-op rather than
+a constraint violation. "Download completed" and "backfill completed" are
+deliberately different things (PRD section 10) — the job only reaches
+`completed` after real duplicate/insert accounting, not just a successful
+HTTP call.
+
+**Data quality** (`services/market_data/validation.py`): computed on demand
+from stored candles, not persisted — OHLC-relationship sanity, non-positive
+prices, and (for daily bars) a weekday-gap heuristic. That gap check is
+explicitly *not* exchange-holiday-aware yet (no calendar data source wired
+up), so a legitimate NSE holiday shows up as a "possible missing candle" —
+documented in the code and in the Market Data UI rather than hidden.
+
+**Real-time streaming** (PRD section 9): `services/market_data/tick_engine.py`
+is a simulated price engine (random walk seeded from last close) driving a
+real WebSocket (`/api/v1/ws/market-data`, token auth via query param since
+browsers can't set headers on WS) with the actual protocol a live feed will
+use later — subscribe/unsubscribe per connection, heartbeat, connection
+lifecycle (connecting/connected/reconnecting/error). Every tick is tagged
+`"source": "simulated"` end to end, including in the Markets page UI (PRD
+Rule 11: never present synthetic data as real without saying so).
+
+## Broker credentials note
+
+The Delta Exchange API key/secret provided during development are **not**
+in this codebase or its config. They're not needed yet: Phase 2 only uses
+Delta's public market-data endpoints. Authenticated endpoints (balances,
+order placement) are Phase 7 territory, gated by the risk engine and
+paper-trading approval workflow — wiring real order authority in earlier
+would violate the platform's own safety rules (PRD Rule 8, section 49).
+
 ## What's deliberately not here yet
 
-No market data, no strategies, no backtesting, no real orders/positions/risk
-logic, no WebSocket streaming. Building those against a shaky foundation
-(auth, RBAC, a fake broker abstraction) would mean redoing them later — PRD
-section 63 phases them in specifically so that doesn't happen. See the nav
-sidebar's "P2".."P8" badges for which phase each screen belongs to.
+No strategies, no backtesting, no real orders/positions/risk logic, no
+options/derivatives data. PRD section 63 phases them in deliberately so
+building on a shaky foundation doesn't mean redoing it later. See the nav
+sidebar's "P3".."P8" badges for which phase each remaining screen belongs to.

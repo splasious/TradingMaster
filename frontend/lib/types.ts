@@ -33,7 +33,7 @@ export interface BrokerAccountOut {
 
 export interface SystemHealth {
   status: "healthy" | "degraded";
-  components: Record<string, "healthy" | "error">;
+  components: Record<string, "healthy" | "error" | "unreachable">;
 }
 
 export const ROLES = ["administrator", "trader", "analyst", "viewer"] as const;
@@ -44,4 +44,60 @@ export interface UserCreate {
   password: string;
   full_name: string;
   roles: string[];
+}
+
+export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d", "1wk", "1mo"] as const;
+export type Timeframe = (typeof TIMEFRAMES)[number];
+
+export interface InstrumentOut {
+  id: string;
+  exchange: string;
+  symbol: string;
+  name: string;
+  instrument_type: string;
+  data_source: string;
+  is_active: boolean;
+}
+
+export type BackfillStatus = "pending" | "running" | "completed" | "failed";
+
+export interface BackfillJobOut {
+  id: string;
+  instrument_id: string;
+  timeframe: string;
+  status: BackfillStatus;
+  downloaded_count: number;
+  inserted_count: number;
+  duplicate_count: number;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface CandleOut {
+  ts: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number | null;
+}
+
+export interface QualityReportOut {
+  instrument_id: string;
+  timeframe: string;
+  candle_count: number;
+  invalid_ohlc_count: number;
+  non_positive_price_count: number;
+  missing_weekday_gaps: number;
+  quality_score: number;
+}
+
+export interface MarketTick {
+  type: "tick";
+  instrument_id: string;
+  price: number;
+  ts: string;
+  source: "simulated";
 }

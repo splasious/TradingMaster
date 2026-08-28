@@ -36,10 +36,10 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "Research",
     items: [
-      { label: "Markets", href: "/markets", icon: Radio, phase: 2 },
+      { label: "Markets", href: "/markets", icon: Radio },
       { label: "Charts", href: "/charts", icon: LineChart, phase: 3 },
       { label: "Scanner", href: "/scanner", icon: Filter, phase: 3 },
-      { label: "Market Data", href: "/market-data", icon: BarChart3, phase: 2 },
+      { label: "Market Data", href: "/market-data", icon: BarChart3 },
     ],
   },
   {

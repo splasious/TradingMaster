@@ -4,11 +4,13 @@ Institutional-grade multi-strategy trading platform. See [`TradingMaster_PRD.md`
 for the full product specification and [`ARCHITECTURE.md`](ARCHITECTURE.md) for
 how this codebase implements it.
 
-**Current status: Phase 1 — Foundation.** Auth, RBAC, database schema, app
-shell/navigation, design system, and the broker abstraction layer (backed by
-a mock adapter — no real Zerodha/Delta credentials yet). Every later phase
-(market data, strategy engine, backtesting, paper/live trading) builds on
-this without reworking it.
+**Current status: Phases 1–2.** Auth, RBAC, database schema, app
+shell/navigation, design system, broker abstraction (mock adapter — no real
+Zerodha/Delta order-placing credentials yet), and a real market data engine:
+NSE equities/indices (via the optional local `nse-yahoo-data` sidecar) and
+Delta Exchange crypto perpetuals (public API, real data, no key needed).
+Every later phase (strategy engine, backtesting, paper/live trading) builds
+on this without reworking it.
 
 ## Prerequisites
 
@@ -17,6 +19,11 @@ this without reworking it.
 - PostgreSQL 16 + Redis, **or** Docker — for production-like local dev
 - No Postgres/Docker available? The backend falls back to SQLite for local
   dev automatically (see `backend/.env.example`).
+- Optional, for real NSE historical data: the sibling
+  [`nse-yahoo-data`](../nse-yahoo-data) service running on `:8800`
+  (`python app/main.py` in that repo). Without it, NSE backfills fail with a
+  clear error; Delta Exchange market data works regardless (public API,
+  no local service needed).
 
 ## Backend
 
@@ -60,9 +67,9 @@ docker compose up -d postgres redis
 ## Repository layout
 
 ```
-backend/    FastAPI service: auth, RBAC, broker abstraction, DB models, migrations
-frontend/   Next.js app: design system, app shell, dashboard, broker/user settings
+backend/    FastAPI service: auth, RBAC, broker + market-data abstractions, DB models, migrations
+frontend/   Next.js app: design system, app shell, dashboard, markets/market-data, broker/user settings
 docker-compose.yml   Postgres + Redis for local dev
 TradingMaster_PRD.md Master product specification
-ARCHITECTURE.md      Phase 1 architecture and how later phases plug in
+ARCHITECTURE.md      Architecture so far and how later phases plug in
 ```
