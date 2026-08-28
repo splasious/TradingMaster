@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–2)
+# TradingMaster — Architecture (Phases 1–3)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -157,6 +157,42 @@ lifecycle (connecting/connected/reconnecting/error). Every tick is tagged
 `"source": "simulated"` end to end, including in the Markets page UI (PRD
 Rule 11: never present synthetic data as real without saying so).
 
+## Indicator engine, multi-timeframe, and scanner (Phase 3, PRD sections 12, 13, 33)
+
+`backend/app/services/indicators/` -- 13 indicators across all 5 PRD
+categories (trend, momentum, volume, volatility, structure), each a pure
+pandas function of past-and-current bars only (`base.py`'s module docstring
+explains the one deliberate exception: `structure.swing_high_low` is a
+retrospective chart annotation, not safe to feed into live signals). Every
+one has a correctness test against a known reference value or invariant
+(RSI/MFI/Stochastic bounded [0,100], Bollinger upper≥middle≥lower, ATR≥0,
+pivot points provably use only the *previous* bar, etc.) in
+`tests/test_indicators.py`.
+
+`registry.py` maps a code ("rsi", "macd", ...) to its spec — same pattern as
+the broker and market-data registries. `GET /indicators/calculate` computes
+one on demand against stored candles; nothing is precomputed or cached, so
+there's no staleness to manage.
+
+**Multi-timeframe** (`services/market_data/resample.py`): aggregates stored
+daily candles up to weekly/monthly. The PRD's explicit requirement --
+"higher-timeframe information becomes available only after the
+corresponding candle has actually closed" -- is enforced by dropping the
+last resampled bar whenever the underlying period (the current week/month)
+hasn't fully elapsed yet (`only_closed=True`, the default); tested directly
+in `test_resample_drops_still_forming_period_by_default`. Indicator
+calculation itself is only wired up against the stored base timeframe today
+("1d") — the Charts page disables overlay checkboxes when viewing a
+resampled timeframe rather than silently computing something misleading.
+
+**Scanner** (`services/scanner.py`, PRD section 33): filters are a
+structured `{field, operator, value}` triple, not a user-supplied
+expression -- `field` is either a raw OHLCV column or `"indicator.output"`
+resolved through the same indicator registry above, and evaluation only
+ever calls known Python operators (`operator.gt`, etc.). No `eval()`, no
+arbitrary code path, consistent with PRD Rule 3 even though this isn't the
+Python-strategy-sandbox that rule was written for.
+
 ## Broker credentials note
 
 The Delta Exchange API key/secret provided during development are **not**
@@ -169,6 +205,8 @@ would violate the platform's own safety rules (PRD Rule 8, section 49).
 ## What's deliberately not here yet
 
 No strategies, no backtesting, no real orders/positions/risk logic, no
-options/derivatives data. PRD section 63 phases them in deliberately so
-building on a shaky foundation doesn't mean redoing it later. See the nav
-sidebar's "P3".."P8" badges for which phase each remaining screen belongs to.
+options/derivatives data, no drawing tools or multi-panel charting, no
+market-breadth/derivatives indicators (no data source for OI/PCR yet). PRD
+section 63 phases the rest in deliberately so building on a shaky
+foundation doesn't mean redoing it later. See the nav sidebar's "P4".."P8"
+badges for which phase each remaining screen belongs to.

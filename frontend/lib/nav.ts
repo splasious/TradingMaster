@@ -37,8 +37,8 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     label: "Research",
     items: [
       { label: "Markets", href: "/markets", icon: Radio },
-      { label: "Charts", href: "/charts", icon: LineChart, phase: 3 },
-      { label: "Scanner", href: "/scanner", icon: Filter, phase: 3 },
+      { label: "Charts", href: "/charts", icon: LineChart },
+      { label: "Scanner", href: "/scanner", icon: Filter },
       { label: "Market Data", href: "/market-data", icon: BarChart3 },
     ],
   },

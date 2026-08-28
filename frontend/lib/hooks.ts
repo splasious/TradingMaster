@@ -6,6 +6,8 @@ import type {
   BrokerAccountOut,
   BrokerOut,
   CandleOut,
+  IndicatorPoint,
+  IndicatorSpecOut,
   InstrumentOut,
   QualityReportOut,
   SystemHealth,
@@ -86,5 +88,37 @@ export function useCandles(instrumentId: string | null, timeframe: string) {
     queryFn: () =>
       apiFetch<CandleOut[]>(`/api/v1/market-data/candles?instrument_id=${instrumentId}&timeframe=${timeframe}`),
     enabled: !!instrumentId,
+  });
+}
+
+export function useChartCandles(instrumentId: string | null, timeframe: string) {
+  const resampled = timeframe === "1wk" || timeframe === "1mo";
+  return useQuery({
+    queryKey: ["chart-candles", instrumentId, timeframe],
+    queryFn: () =>
+      resampled
+        ? apiFetch<CandleOut[]>(
+            `/api/v1/market-data/candles/resampled?instrument_id=${instrumentId}&base_timeframe=1d&target_timeframe=${timeframe}`,
+          )
+        : apiFetch<CandleOut[]>(`/api/v1/market-data/candles?instrument_id=${instrumentId}&timeframe=${timeframe}`),
+    enabled: !!instrumentId,
+  });
+}
+
+export function useIndicatorList() {
+  return useQuery({
+    queryKey: ["indicators"],
+    queryFn: () => apiFetch<IndicatorSpecOut[]>("/api/v1/indicators"),
+  });
+}
+
+export function useIndicator(instrumentId: string | null, timeframe: string, indicator: string | null) {
+  return useQuery({
+    queryKey: ["indicator", instrumentId, timeframe, indicator],
+    queryFn: () =>
+      apiFetch<IndicatorPoint[]>(
+        `/api/v1/indicators/calculate?instrument_id=${instrumentId}&timeframe=${timeframe}&indicator=${indicator}`,
+      ),
+    enabled: !!instrumentId && !!indicator,
   });
 }

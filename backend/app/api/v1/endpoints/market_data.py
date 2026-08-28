@@ -13,6 +13,7 @@ from app.models.user import User
 from app.schemas.market_data import BackfillJobOut, BackfillRequest, CandleOut, QualityReportOut
 from app.services.audit import write_audit_log
 from app.services.market_data.backfill import run_backfill_job
+from app.services.market_data.resample import resample_candles
 from app.services.market_data.validation import compute_quality
 
 router = APIRouter()
@@ -115,6 +116,29 @@ async def get_candles(
     if end:
         candles = [c for c in candles if c.ts <= end]
     return [CandleOut.model_validate(c, from_attributes=True) for c in candles]
+
+
+@router.get("/candles/resampled", response_model=list[CandleOut])
+async def get_resampled_candles(
+    instrument_id: str = Query(...),
+    base_timeframe: str = Query("1d"),
+    target_timeframe: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[CandleOut]:
+    """Higher-timeframe candles derived from stored `base_timeframe` data
+    (PRD section 13: multi-timeframe engine). Never returns a still-forming
+    period as if it were closed -- see resample.py."""
+    candles = await _load_candles(db, instrument_id, base_timeframe)
+    bars = [
+        {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+        for c in candles
+    ]
+    try:
+        resampled = resample_candles(bars, target_timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [CandleOut(**bar) for bar in resampled]
 
 
 @router.get("/quality", response_model=QualityReportOut)

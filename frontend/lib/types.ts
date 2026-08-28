@@ -101,3 +101,42 @@ export interface MarketTick {
   ts: string;
   source: "simulated";
 }
+
+export interface IndicatorSpecOut {
+  code: string;
+  name: string;
+  category: string;
+  output_fields: string[];
+  default_params: Record<string, number>;
+}
+
+export interface IndicatorPoint {
+  ts: string;
+  values: Record<string, number | null>;
+}
+
+export type ScanOperator = ">" | "<" | ">=" | "<=" | "==";
+
+export interface ScanCondition {
+  field: string;
+  operator: ScanOperator;
+  value: number;
+}
+
+export interface ScanMatch {
+  instrument: InstrumentOut;
+  values: Record<string, number | null>;
+}
+
+export interface ScanResponse {
+  matched: ScanMatch[];
+  scanned_count: number;
+}
+
+export interface SavedScanOut {
+  id: string;
+  name: string;
+  exchange: string | null;
+  timeframe: string;
+  conditions: ScanCondition[];
+}

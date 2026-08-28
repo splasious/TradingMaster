@@ -1,6 +1,16 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, brokers, instruments, market_data, market_data_ws, system, users
+from app.api.v1.endpoints import (
+    auth,
+    brokers,
+    indicators,
+    instruments,
+    market_data,
+    market_data_ws,
+    scanner,
+    system,
+    users,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -10,3 +20,5 @@ api_router.include_router(system.router, prefix="/system", tags=["system"])
 api_router.include_router(instruments.router, prefix="/instruments", tags=["instruments"])
 api_router.include_router(market_data.router, prefix="/market-data", tags=["market-data"])
 api_router.include_router(market_data_ws.router, prefix="/ws", tags=["market-data-ws"])
+api_router.include_router(indicators.router, prefix="/indicators", tags=["indicators"])
+api_router.include_router(scanner.router, prefix="/scanner", tags=["scanner"])
