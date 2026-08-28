@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f6f7f9;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --border: #e2e5eb;
+  --border-strong: #cbd1db;
+
+  --text-primary: #12151a;
+  --text-secondary: #545b68;
+  --text-muted: #88909c;
+
+  --brand: #1d4ed8;
+  --brand-foreground: #ffffff;
+
+  --positive: #15803d;
+  --positive-soft: #dcfce7;
+  --negative: #b91c1c;
+  --negative-soft: #fee2e2;
+  --warning: #b45309;
+  --warning-soft: #fef3c7;
+  --critical: #991b1b;
+  --critical-soft: #fecaca;
+  --neutral: #565e6b;
+  --neutral-soft: #e7e9ed;
+  --active: #1d4ed8;
+  --active-soft: #dbeafe;
+  --inactive: #9aa1ad;
+  --inactive-soft: #eef0f3;
+}
+
+.dark {
+  --background: #0a0c10;
+  --surface: #12151b;
+  --surface-elevated: #171b22;
+  --border: #262b34;
+  --border-strong: #333a46;
+
+  --text-primary: #eef1f5;
+  --text-secondary: #a4acba;
+  --text-muted: #6d7585;
+
+  --brand: #3b6bf5;
+  --brand-foreground: #ffffff;
+
+  --positive: #34d399;
+  --positive-soft: #06301f;
+  --negative: #f87171;
+  --negative-soft: #3a1414;
+  --warning: #fbbf24;
+  --warning-soft: #3a2a06;
+  --critical: #ef4444;
+  --critical-soft: #3f1414;
+  --neutral: #9aa1ad;
+  --neutral-soft: #1c2028;
+  --active: #60a5fa;
+  --active-soft: #10233d;
+  --inactive: #6d7585;
+  --inactive-soft: #1c2028;
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-negative: var(--negative);
+  --color-negative-soft: var(--negative-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-critical: var(--critical);
+  --color-critical-soft: var(--critical-soft);
+  --color-neutral: var(--neutral);
+  --color-neutral-soft: var(--neutral-soft);
+  --color-active: var(--active);
+  --color-active-soft: var(--active-soft);
+  --color-inactive: var(--inactive);
+  --color-inactive-soft: var(--inactive-soft);
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Financial figures always use tabular numerals so columns of numbers align. */
+.font-financial {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
