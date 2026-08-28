@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–4)
+# TradingMaster — Architecture (Phases 1–5)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -231,6 +231,41 @@ today. Nothing fabricates a "backtested" strategy without a real backtest
 behind it -- Phase 5 will call `can_transition()` when a backtest actually
 completes, using the same validator these tests already cover.
 
+## Backtesting engine (Phase 5, PRD sections 17-20)
+
+The look-ahead-bias guarantee is structural, not a rule someone has to
+remember: `services/backtest/signals.py` computes a strategy's signal at
+bar `i` from `candles[: i + 1]` only -- true for both the visual rule-tree
+evaluator and the Python sandbox's batch mode (`sandbox_worker.py`'s
+`run_backtest_signals`, one subprocess call for the whole run rather than
+one per bar, so a multi-year backtest doesn't spawn hundreds of processes).
+`services/backtest/engine.py` then turns those per-bar signals into trades
+with a specific, realistic fill convention: a signal computed from bar i's
+close fills at bar **i+1's open** (never the same bar), while stop-loss/
+take-profit are standing orders allowed to trigger intrabar off the
+*current* bar's high/low. Every formula in `metrics.py` (Sharpe, Sortino,
+CAGR, max drawdown, profit factor, ...) runs against the actual simulated
+trades/equity curve -- nothing is estimated.
+
+Also real, not stubbed:
+- **Out-of-sample testing**: `out_of_sample_split_pct` on a backtest job
+  splits the candle range and runs two independent simulations, returned
+  as separate metric sets.
+- **Monte Carlo** (`monte_carlo.py`): bootstraps the *realized* trade P&Ls
+  (never invents new trades) into many alternate equity paths to show how
+  much of a result could be sequencing luck vs. edge.
+- **Grid search optimization** (`optimization.py`, PRD section 20):
+  Python-strategy only, since `generate_signal(candles, params)` already
+  takes a params dict — a visual rule's conditions use literal values, not
+  named parameters, so extending that DSL to support optimizable
+  thresholds is a real feature this phase didn't build. Capped at 60
+  combinations (each one re-runs a full backtest).
+
+A completed backtest is the actual, earned trigger for the strategy's
+`DRAFT -> BACKTESTED` transition (`runner.py` calls the same
+`can_transition()` from Phase 4) — the first time anything in the codebase
+sets a status other than `DRAFT`.
+
 ## Broker credentials note
 
 The Delta Exchange API key/secret provided during development are **not**
@@ -242,11 +277,13 @@ would violate the platform's own safety rules (PRD Rule 8, section 49).
 
 ## What's deliberately not here yet
 
-No backtesting, no real orders/positions/risk logic, no options/derivatives
-data, no drawing tools or multi-panel charting, no market-breadth
-indicators (no data source for OI/PCR yet), no strategy edit UI beyond
-create (the API supports versioning -- `POST /strategies/{id}/versions` --
-tested, but the Strategy Builder page only wires up creation). PRD section
-63 phases the rest in deliberately so building on a shaky foundation
-doesn't mean redoing it later. See the nav sidebar's "P5".."P8" badges for
-which phase each remaining screen belongs to.
+No real orders/positions/risk logic, no paper or live trading, no
+options/derivatives data, no drawing tools or multi-panel charting, no
+market-breadth indicators (no data source for OI/PCR yet), no strategy
+edit UI beyond create (the API supports versioning -- tested -- but the
+Strategy Builder page only wires up creation), no walk-forward
+*optimization* specifically (out-of-sample testing and grid search both
+exist independently; combining them into one workflow is a further step).
+PRD section 63 phases the rest in deliberately so building on a shaky
+foundation doesn't mean redoing it later. See the nav sidebar's "P6".."P8"
+badges for which phase each remaining screen belongs to.

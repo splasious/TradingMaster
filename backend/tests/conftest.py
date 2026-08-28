@@ -13,6 +13,9 @@ from app.db.session import get_db
 from app.main import app
 from app.models.broker import Broker
 from app.models.user import Role, User, UserRole
+from app.services.backtest import runner as backtest_runner
+from app.services.backtest import optimization_runner
+from app.services.market_data import backfill as market_data_backfill
 
 @pytest_asyncio.fixture
 async def db_engine():
@@ -36,7 +39,7 @@ async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest_asyncio.fixture
-async def client(db_engine) -> AsyncGenerator[AsyncClient, None]:
+async def client(db_engine, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
     session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
 
     async def override_get_db():
@@ -44,6 +47,16 @@ async def client(db_engine) -> AsyncGenerator[AsyncClient, None]:
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
+
+    # BackgroundTasks (backfill, backtests) run after the response is sent
+    # and open their own DB session via a direct `from app.db.session import
+    # AsyncSessionLocal` -- that's a *different* binding than the get_db
+    # override above, so without this they'd silently operate against the
+    # real dev database instead of this test's isolated one.
+    monkeypatch.setattr(market_data_backfill, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(backtest_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(optimization_runner, "AsyncSessionLocal", session_factory)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

@@ -1,4 +1,5 @@
 from app.models.audit import AuditLog
+from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, OptimizationJob, OptimizationResult
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
 from app.models.market_data import BackfillJob, OhlcvCandle
@@ -10,12 +11,17 @@ from app.models.user import Role, User, UserRole
 __all__ = [
     "AuditLog",
     "BackfillJob",
+    "BacktestJob",
+    "BacktestResult",
+    "BacktestTrade",
     "Broker",
     "BrokerAccount",
     "BrokerConnection",
     "BrokerCredential",
     "Instrument",
     "OhlcvCandle",
+    "OptimizationJob",
+    "OptimizationResult",
     "SavedScan",
     "Session",
     "Strategy",

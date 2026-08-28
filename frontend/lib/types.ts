@@ -207,3 +207,95 @@ export interface ValidateResult {
   error: string | null;
   sample_signal: string | null;
 }
+
+export type BacktestStatus = "pending" | "running" | "completed" | "failed";
+
+export interface BacktestJobOut {
+  id: string;
+  strategy_id: string;
+  instrument_id: string;
+  timeframe: string;
+  initial_capital: number;
+  status: BacktestStatus;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface BacktestMetrics {
+  net_profit: number;
+  total_return_pct: number;
+  cagr_pct: number;
+  max_drawdown_pct: number;
+  avg_drawdown_pct: number;
+  sharpe_ratio: number;
+  sortino_ratio: number;
+  profit_factor: number;
+  win_rate_pct: number;
+  loss_rate_pct: number;
+  avg_win: number;
+  avg_loss: number;
+  expectancy: number;
+  num_trades: number;
+  avg_holding_period_days: number;
+  best_trade: number;
+  worst_trade: number;
+  max_consecutive_wins: number;
+  max_consecutive_losses: number;
+  recovery_factor: number;
+}
+
+export interface MonteCarloResult {
+  simulations: number;
+  final_equity_p5: number;
+  final_equity_p50: number;
+  final_equity_p95: number;
+  max_drawdown_pct_p50: number;
+  max_drawdown_pct_p95: number;
+  probability_of_profit_pct: number;
+}
+
+export interface BacktestResultOut {
+  metrics: BacktestMetrics;
+  out_of_sample_metrics: BacktestMetrics | null;
+  monte_carlo: MonteCarloResult | null;
+  equity_curve: [string, number][];
+}
+
+export interface ParamRangeIn {
+  name: string;
+  min: number;
+  max: number;
+  step: number;
+}
+
+export interface OptimizationJobOut {
+  id: string;
+  strategy_id: string;
+  instrument_id: string;
+  status: BacktestStatus;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface OptimizationRunOut {
+  params: Record<string, number>;
+  metrics: BacktestMetrics;
+}
+
+export interface OptimizationResultOut {
+  runs: OptimizationRunOut[];
+}
+
+export interface BacktestTradeOut {
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+  exit_reason: string;
+}

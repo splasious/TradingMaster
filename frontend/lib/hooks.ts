@@ -3,12 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "./api";
 import type {
   BackfillJobOut,
+  BacktestJobOut,
+  BacktestResultOut,
+  BacktestTradeOut,
   BrokerAccountOut,
   BrokerOut,
   CandleOut,
   IndicatorPoint,
   IndicatorSpecOut,
   InstrumentOut,
+  OptimizationJobOut,
+  OptimizationResultOut,
   QualityReportOut,
   StrategyOut,
   SystemHealth,
@@ -110,6 +115,54 @@ export function useStrategies() {
   return useQuery({
     queryKey: ["strategies"],
     queryFn: () => apiFetch<StrategyOut[]>("/api/v1/strategies"),
+  });
+}
+
+export function useBacktestJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["backtest-job", jobId],
+    queryFn: () => apiFetch<BacktestJobOut>(`/api/v1/backtests/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "running" ? 1000 : false;
+    },
+  });
+}
+
+export function useBacktestResult(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["backtest-result", jobId],
+    queryFn: () => apiFetch<BacktestResultOut>(`/api/v1/backtests/${jobId}/result`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function useBacktestTrades(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["backtest-trades", jobId],
+    queryFn: () => apiFetch<BacktestTradeOut[]>(`/api/v1/backtests/${jobId}/trades`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function useOptimizationJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["optimization-job", jobId],
+    queryFn: () => apiFetch<OptimizationJobOut>(`/api/v1/optimization/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "running" ? 1000 : false;
+    },
+  });
+}
+
+export function useOptimizationResult(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["optimization-result", jobId],
+    queryFn: () => apiFetch<OptimizationResultOut>(`/api/v1/optimization/${jobId}/result`),
+    enabled: !!jobId && enabled,
   });
 }
 

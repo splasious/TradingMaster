@@ -2,11 +2,13 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     auth,
+    backtests,
     brokers,
     indicators,
     instruments,
     market_data,
     market_data_ws,
+    optimization,
     scanner,
     strategies,
     system,
@@ -24,3 +26,5 @@ api_router.include_router(market_data_ws.router, prefix="/ws", tags=["market-dat
 api_router.include_router(indicators.router, prefix="/indicators", tags=["indicators"])
 api_router.include_router(scanner.router, prefix="/scanner", tags=["scanner"])
 api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])
+api_router.include_router(backtests.router, prefix="/backtests", tags=["backtests"])
+api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
