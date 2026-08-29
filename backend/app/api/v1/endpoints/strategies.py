@@ -1,14 +1,17 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
+from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, OptimizationJob, OptimizationResult
 from app.models.instrument import Instrument
+from app.models.live_trading import LiveDeployment
 from app.models.market_data import OhlcvCandle
+from app.models.paper_trading import PaperDeployment
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.schemas.strategy import StrategyCreate, StrategyOut, StrategyVersionCreate, StrategyVersionOut, ValidateResult
@@ -106,6 +109,55 @@ async def get_strategy(
     if strategy.owner_id != user.id and "administrator" not in user.role_names:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     return _strategy_out(strategy)
+
+
+@router.delete("/{strategy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_strategy(
+    strategy_id: str, request: Request, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> None:
+    """Refuses to delete a strategy that has ever been paper- or live-
+    deployed -- those carry real trade history (PRD's audit-trail
+    integrity principle), and destroying it is not something a UI click
+    should be able to do. Research-only artifacts (backtests,
+    optimization runs) are safe to delete and are removed explicitly here
+    rather than relying on the DB's ON DELETE CASCADE, which SQLite (used
+    for local dev) does not enforce unless a per-connection PRAGMA is set
+    -- explicit cleanup behaves identically on SQLite and Postgres."""
+    strategy = await _load_strategy(db, strategy_id)
+    _assert_can_edit(strategy, user)
+
+    paper_count = (
+        await db.execute(select(func.count()).select_from(PaperDeployment).where(PaperDeployment.strategy_id == strategy.id))
+    ).scalar_one()
+    live_count = (
+        await db.execute(select(func.count()).select_from(LiveDeployment).where(LiveDeployment.strategy_id == strategy.id))
+    ).scalar_one()
+    if paper_count or live_count:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete a strategy that has paper or live deployment history. Stop its deployments instead -- "
+            "deleting would destroy real trade records.",
+        )
+
+    job_ids = (await db.execute(select(BacktestJob.id).where(BacktestJob.strategy_id == strategy.id))).scalars().all()
+    if job_ids:
+        await db.execute(delete(BacktestResult).where(BacktestResult.job_id.in_(job_ids)))
+        await db.execute(delete(BacktestTrade).where(BacktestTrade.job_id.in_(job_ids)))
+        await db.execute(delete(BacktestJob).where(BacktestJob.strategy_id == strategy.id))
+
+    opt_job_ids = (await db.execute(select(OptimizationJob.id).where(OptimizationJob.strategy_id == strategy.id))).scalars().all()
+    if opt_job_ids:
+        await db.execute(delete(OptimizationResult).where(OptimizationResult.job_id.in_(opt_job_ids)))
+        await db.execute(delete(OptimizationJob).where(OptimizationJob.strategy_id == strategy.id))
+
+    await write_audit_log(
+        db, user_id=user.id, action="STRATEGY_DELETED", object_type="strategy", object_id=str(strategy.id),
+        previous_value={"name": strategy.name, "status": strategy.status},
+        ip_address=request.client.host if request.client else None,
+    )
+
+    await db.delete(strategy)  # cascades to StrategyVersion via the ORM relationship
+    await db.commit()
 
 
 @router.post("/{strategy_id}/versions", response_model=StrategyOut)

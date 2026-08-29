@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 
 import { Badge, type Tone } from "@/components/ui/badge";
@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Modal } from "@/components/ui/modal";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBacktestResult, useBacktestsForStrategy, useStrategies } from "@/lib/hooks";
 import type { StrategyOut, StrategyStatus, ValidateResult } from "@/lib/types";
@@ -76,6 +76,43 @@ function ValidateModal({ strategy, onClose }: { strategy: StrategyOut; onClose: 
   );
 }
 
+function DeleteStrategyModal({ strategy, onClose }: { strategy: StrategyOut; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/strategies/${strategy.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategies"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Delete: ${strategy.name}`}>
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          This permanently deletes the strategy, its versions, and any backtest or optimization results. This cannot be
+          undone.
+        </p>
+
+        {deleteMutation.isError && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {deleteMutation.error instanceof ApiError ? deleteMutation.error.message : "Failed to delete strategy"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={deleteMutation.isPending}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
+            {deleteMutation.isPending ? "Deleting..." : "Delete Strategy"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function StrategyPerformance({ strategyId }: { strategyId: string }) {
   const { data: jobs } = useBacktestsForStrategy(strategyId);
   const latestCompleted = jobs?.find((j) => j.status === "completed") ?? null;
@@ -101,7 +138,17 @@ function StrategyPerformance({ strategyId }: { strategyId: string }) {
   );
 }
 
-function StrategyCard({ strategy, onValidate }: { strategy: StrategyOut; onValidate: () => void }) {
+function StrategyCard({
+  strategy,
+  canDelete,
+  onValidate,
+  onDelete,
+}: {
+  strategy: StrategyOut;
+  canDelete: boolean;
+  onValidate: () => void;
+  onDelete: () => void;
+}) {
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-2">
@@ -124,18 +171,26 @@ function StrategyCard({ strategy, onValidate }: { strategy: StrategyOut; onValid
 
       <div className="mt-auto flex items-center justify-between border-t border-border pt-3 text-xs text-text-muted">
         <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
-        <Button variant="ghost" size="sm" onClick={onValidate}>
-          Validate
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button variant="ghost" size="sm" onClick={onValidate}>
+            Validate
+          </Button>
+          {canDelete && (
+            <Button variant="ghost" size="sm" onClick={onDelete} className="text-text-muted hover:text-negative" title="Delete strategy">
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
       </div>
     </Card>
   );
 }
 
 export default function StrategiesPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   const { data: strategies, isLoading, isError } = useStrategies();
   const [selected, setSelected] = useState<StrategyOut | null>(null);
+  const [toDelete, setToDelete] = useState<StrategyOut | null>(null);
   const queryClient = useQueryClient();
 
   return (
@@ -168,12 +223,19 @@ export default function StrategiesPage() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {strategies.map((s) => (
-            <StrategyCard key={s.id} strategy={s} onValidate={() => setSelected(s)} />
+            <StrategyCard
+              key={s.id}
+              strategy={s}
+              canDelete={s.owner_id === user?.id || hasRole("administrator")}
+              onValidate={() => setSelected(s)}
+              onDelete={() => setToDelete(s)}
+            />
           ))}
         </div>
       )}
 
       {selected && <ValidateModal strategy={selected} onClose={() => setSelected(null)} />}
+      {toDelete && <DeleteStrategyModal strategy={toDelete} onClose={() => setToDelete(null)} />}
     </div>
   );
 }
