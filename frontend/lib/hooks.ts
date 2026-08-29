@@ -12,6 +12,9 @@ import type {
   IndicatorPoint,
   IndicatorSpecOut,
   InstrumentOut,
+  KillSwitchOut,
+  LiveDeploymentOut,
+  LiveOrderOut,
   OptimizationJobOut,
   OptimizationResultOut,
   PaperDeploymentOut,
@@ -19,6 +22,7 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   QualityReportOut,
+  SafetyCheckOut,
   StrategyOut,
   SystemHealth,
   UserOut,
@@ -199,6 +203,38 @@ export function usePaperTrades(deploymentId: string | null) {
     queryKey: ["paper-trades", deploymentId],
     queryFn: () => apiFetch<PaperTradeOut[]>(`/api/v1/paper-trading/trades?deployment_id=${deploymentId}`),
     enabled: !!deploymentId,
+  });
+}
+
+export function useLiveDeployments() {
+  return useQuery({
+    queryKey: ["live-deployments"],
+    queryFn: () => apiFetch<LiveDeploymentOut[]>("/api/v1/live-trading/deployments"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useLiveOrders(deploymentId: string | null) {
+  return useQuery({
+    queryKey: ["live-orders", deploymentId],
+    queryFn: () => apiFetch<LiveOrderOut[]>(`/api/v1/live-trading/orders?deployment_id=${deploymentId}`),
+    enabled: !!deploymentId,
+  });
+}
+
+export function useKillSwitch() {
+  return useQuery({
+    queryKey: ["kill-switch"],
+    queryFn: () => apiFetch<KillSwitchOut>("/api/v1/live-trading/kill-switch"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useSafetyCheck(strategyId: string | null, brokerAccountId: string | null) {
+  return useQuery({
+    queryKey: ["safety-check", strategyId, brokerAccountId],
+    queryFn: () => apiFetch<SafetyCheckOut>(`/api/v1/live-trading/safety-check?strategy_id=${strategyId}&broker_account_id=${brokerAccountId}`),
+    enabled: !!strategyId && !!brokerAccountId,
   });
 }
 

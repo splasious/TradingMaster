@@ -60,7 +60,12 @@ class BrokerInterface(ABC):
     async def modify_order(self, order_id: str, changes: dict[str, Any]) -> dict[str, Any]: ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> dict[str, Any]: ...
+    async def cancel_order(self, order_id: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """`context` carries broker-specific fields a cancel needs beyond
+        the order id (e.g. Delta Exchange requires product_id alongside
+        it) -- optional so brokers that don't need it (MockBroker) ignore
+        it entirely."""
+        ...
 
     @abstractmethod
     async def get_order_status(self, order_id: str) -> dict[str, Any]: ...

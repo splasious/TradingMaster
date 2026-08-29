@@ -1,7 +1,9 @@
 import inspect
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -38,6 +40,26 @@ def test_registry_rejects_unknown_source():
 async def test_delta_source_rejects_unsupported_timeframe():
     with pytest.raises(MarketDataSourceError):
         await DeltaExchangeDataSource().get_historical_data("BTCUSD", "1mo", None, None)
+
+
+async def test_delta_get_ticker_parses_price_and_product_id(monkeypatch):
+    async def fake_get(self, url, **kwargs):
+        payload = {"success": True, "result": {"close": 77637.5, "mark_price": "77637.99025811", "product_id": 27}}
+        return httpx.Response(200, content=json.dumps(payload).encode(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    ticker = await DeltaExchangeDataSource().get_ticker("BTCUSD")
+    assert ticker == {"price": 77637.5, "product_id": 27, "mark_price": pytest.approx(77637.99025811)}
+
+
+async def test_delta_get_ticker_raises_on_api_error(monkeypatch):
+    async def fake_get(self, url, **kwargs):
+        payload = {"success": False, "error": {"code": "invalid_symbol"}}
+        return httpx.Response(400, content=json.dumps(payload).encode(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    with pytest.raises(MarketDataSourceError):
+        await DeltaExchangeDataSource().get_ticker("NOTREAL")
 
 
 def _candle(ts: datetime, o: float, h: float, l: float, c: float) -> OhlcvCandle:

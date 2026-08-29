@@ -74,7 +74,7 @@ class MockBroker(BrokerInterface):
     async def modify_order(self, order_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         return {"order_id": order_id, "status": "REJECTED", "reason": "Mock broker: no live orders exist."}
 
-    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+    async def cancel_order(self, order_id: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"order_id": order_id, "status": "REJECTED", "reason": "Mock broker: no live orders exist."}
 
     async def get_order_status(self, order_id: str) -> dict[str, Any]:

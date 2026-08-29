@@ -341,6 +341,67 @@ export interface PaperTradeOut {
   pnl_pct: number;
 }
 
+export interface SafetyCheckOut {
+  passed: boolean;
+  checks: Record<string, boolean>;
+  failures: string[];
+}
+
+export interface LivePositionOut {
+  instrument_symbol: string;
+  quantity: number;
+  avg_entry_price: number;
+  opened_at: string;
+}
+
+export interface LiveDeploymentOut {
+  id: string;
+  strategy_id: string;
+  strategy_name: string;
+  instrument_id: string;
+  instrument_symbol: string;
+  broker_account_id: string;
+  timeframe: string;
+  status: "active" | "stopped";
+  last_evaluated_at: string | null;
+  created_at: string;
+  stopped_at: string | null;
+  open_position: LivePositionOut | null;
+}
+
+export interface LiveOrderOut {
+  id: string;
+  client_order_id: string;
+  broker_order_id: string | null;
+  side: string;
+  quantity: number;
+  status: string;
+  reason: string | null;
+  created_at: string;
+  confirmed_at: string | null;
+}
+
+export interface LiveEvaluationOut {
+  action: string;
+  signal: string | null;
+  price: number | null;
+  reason: string | null;
+}
+
+export interface KillSwitchOut {
+  active: boolean;
+  activated_at: string | null;
+  reason: string | null;
+}
+
+export interface ReconciliationOut {
+  clean: boolean;
+  matched: Record<string, unknown>[];
+  local_only: Record<string, unknown>[];
+  broker_only: Record<string, unknown>[];
+  quantity_mismatches: Record<string, unknown>[];
+}
+
 export interface PaperEvaluationOut {
   action: string;
   signal: string | null;

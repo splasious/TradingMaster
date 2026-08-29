@@ -134,6 +134,43 @@ async def test_new_version_resets_status_to_draft(client: AsyncClient, seeded_ad
     assert resp.json()["latest_version"]["version_number"] == 2
 
 
+async def test_mark_validated_and_approve_transitions(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Approvable", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = create_resp.json()["id"]
+
+    strategy = await db_session.get(Strategy, uuid.UUID(strategy_id))
+    strategy.status = StrategyStatus.PAPER_TRADING.value
+    await db_session.commit()
+
+    validate_resp = await client.post(f"/api/v1/strategies/{strategy_id}/mark-validated", headers=headers)
+    assert validate_resp.status_code == 200, validate_resp.json()
+    assert validate_resp.json()["status"] == "validated"
+
+    approve_resp = await client.post(f"/api/v1/strategies/{strategy_id}/approve", headers=headers)
+    assert approve_resp.status_code == 200, approve_resp.json()
+    assert approve_resp.json()["status"] == "approved"
+
+
+async def test_cannot_approve_before_validated(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Not Yet Validated", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = create_resp.json()["id"]
+
+    resp = await client.post(f"/api/v1/strategies/{strategy_id}/approve", headers=headers)
+    assert resp.status_code == 400
+
+
 async def test_validate_python_strategy(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     create_resp = await client.post(

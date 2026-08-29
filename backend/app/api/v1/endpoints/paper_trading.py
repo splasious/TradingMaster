@@ -30,6 +30,7 @@ from app.schemas.paper_trading import (
 from app.services.audit import write_audit_log
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.engine import evaluate_deployment
+from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
 
@@ -89,6 +90,12 @@ async def start_deployment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Strategy has no versions")
 
     portfolio = await _get_or_create_portfolio(db, user)
+
+    # Starting paper trading is the real, earned trigger for the
+    # BACKTESTED/OPTIMIZED -> PAPER_TRADING transition (PRD section 25).
+    current_status = StrategyStatus(strategy.status)
+    if can_transition(current_status, StrategyStatus.PAPER_TRADING):
+        strategy.status = StrategyStatus.PAPER_TRADING.value
 
     deployment = PaperDeployment(
         portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,

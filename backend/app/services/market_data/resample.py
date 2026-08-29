@@ -19,7 +19,13 @@ from app.services.market_data.base import Bar
 _FREQ_MAP = {"1wk": "W-FRI", "1mo": "ME"}
 
 
-def resample_candles(bars: list[Bar], target_timeframe: str, only_closed: bool = True) -> list[Bar]:
+def resample_candles(
+    bars: list[Bar], target_timeframe: str, only_closed: bool = True, now: datetime | None = None
+) -> list[Bar]:
+    """`now` defaults to the real current time; tests pass it explicitly so
+    a "which week is still forming" assertion can't flake around a
+    real-clock midnight boundary between when the test builds its bars and
+    when this function checks "today"."""
     freq = _FREQ_MAP.get(target_timeframe)
     if freq is None:
         raise ValueError(f"Cannot resample to '{target_timeframe}' (supported: {sorted(_FREQ_MAP)})")
@@ -37,7 +43,7 @@ def resample_candles(bars: list[Bar], target_timeframe: str, only_closed: bool =
     )
 
     if only_closed and len(resampled):
-        today = datetime.now(timezone.utc).date()
+        today = (now or datetime.now(timezone.utc)).date()
         last_period_end = resampled.index[-1].date()
         if today <= last_period_end:
             resampled = resampled.iloc[:-1]

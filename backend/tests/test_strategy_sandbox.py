@@ -112,3 +112,18 @@ def test_state_machine_any_stage_can_return_to_draft():
 def test_state_machine_live_cannot_jump_elsewhere():
     assert not can_transition(StrategyStatus.LIVE, StrategyStatus.APPROVED)
     assert not can_transition(StrategyStatus.LIVE, StrategyStatus.BACKTESTED)
+
+
+def test_state_machine_backtested_can_go_straight_to_paper_trading():
+    # Optimization/out-of-sample testing are optional analysis tools, not
+    # mandatory gates -- a backtested strategy can go straight to paper
+    # trading without them.
+    assert can_transition(StrategyStatus.BACKTESTED, StrategyStatus.PAPER_TRADING)
+    assert can_transition(StrategyStatus.OPTIMIZED, StrategyStatus.PAPER_TRADING)
+
+
+def test_state_machine_still_cannot_skip_paper_trading_or_validation():
+    assert not can_transition(StrategyStatus.BACKTESTED, StrategyStatus.VALIDATED)
+    assert not can_transition(StrategyStatus.BACKTESTED, StrategyStatus.APPROVED)
+    assert not can_transition(StrategyStatus.BACKTESTED, StrategyStatus.LIVE)
+    assert not can_transition(StrategyStatus.PAPER_TRADING, StrategyStatus.APPROVED)

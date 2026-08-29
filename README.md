@@ -4,22 +4,26 @@ Institutional-grade multi-strategy trading platform. See [`TradingMaster_PRD.md`
 for the full product specification and [`ARCHITECTURE.md`](ARCHITECTURE.md) for
 how this codebase implements it.
 
-**Current status: Phases 1–6.** Auth, RBAC, database schema, app
-shell/navigation, design system, broker abstraction (mock adapter — no real
-Zerodha/Delta order-placing credentials yet), a real market data engine
-(NSE via the optional local `nse-yahoo-data` sidecar, Delta Exchange crypto
-via its public API), real analytics (13 technical indicators, a
-multi-timeframe engine, candlestick charting, a market scanner with saved
-filters), a real strategy engine (visual rule-based strategies and
-sandboxed Python strategy import — `import os`, `open()`, `eval()` etc. are
-all verified-blocked, not just assumed), a real backtesting engine
-(bar-by-bar simulation with no look-ahead bias by construction, the full
-standard metric set, out-of-sample testing, Monte Carlo, grid-search
-optimization), and a real risk engine + paper trading engine: every signal
-passes through cash/position/daily-loss checks with an auditable reason on
-rejection, then simulated execution updates a real paper portfolio, all on
-a live ~10s evaluation loop. Every later phase (live trading) builds on
-this without reworking it.
+**Current status: Phases 1–7.** Auth, RBAC, database schema, app
+shell/navigation, design system, a real market data engine (NSE via the
+optional local `nse-yahoo-data` sidecar, Delta Exchange crypto via its
+public API), real analytics (13 technical indicators, a multi-timeframe
+engine, candlestick charting, a market scanner with saved filters), a real
+strategy engine (visual rule-based strategies and sandboxed Python strategy
+import — `import os`, `open()`, `eval()` etc. are all verified-blocked, not
+just assumed), a real backtesting engine (bar-by-bar simulation with no
+look-ahead bias by construction, the full standard metric set,
+out-of-sample testing, Monte Carlo, grid-search optimization), a real risk
+engine + paper trading engine (every signal gated by cash/position/
+daily-loss checks, simulated execution on a live ~10s loop), and **real
+live trading**: a genuine Delta Exchange broker adapter (HMAC-SHA256
+signing verified against their live API) that places real orders, gated by
+a server-enforced safety checklist, explicit confirmation, the same risk
+engine, order-placement confirmation via a follow-up status check (never
+trusting the initial response alone), and a global kill switch. Zerodha
+Kite is still a mock — only Delta Exchange got a real adapter. Every later
+phase (monitoring, alerts, reports, backups) builds on this without
+reworking it.
 
 ## Prerequisites
 
@@ -33,6 +37,10 @@ this without reworking it.
   (`python app/main.py` in that repo). Without it, NSE backfills fail with a
   clear error; Delta Exchange market data works regardless (public API,
   no local service needed).
+- For live trading on Delta Exchange: Delta requires the calling machine's
+  IP to be whitelisted per API key (Delta Exchange > Account > API
+  Management). Whitelist the IP the machine actually runs this backend
+  from, or `authenticate()` fails with a clear "not whitelisted" error.
 
 ## Backend
 

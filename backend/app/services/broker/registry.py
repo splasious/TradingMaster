@@ -1,16 +1,19 @@
 """Maps a broker catalog code (app.models.broker.Broker.code) to the adapter
 class that implements BrokerInterface for it.
 
-Real adapters (ZerodhaKiteBroker, DeltaExchangeBroker) get registered here in
-a later phase without any change to the code that calls this registry.
+zerodha_kite is still a MockBroker -- no real Zerodha adapter has been
+built. delta_exchange is now the real adapter (Phase 7): it places actual
+orders with actual money once a user connects real credentials through
+Settings > Brokers.
 """
 
 from app.services.broker.base import BrokerInterface
+from app.services.broker.delta_broker import DeltaExchangeBroker
 from app.services.broker.mock_broker import MockBroker
 
 _REGISTRY: dict[str, type[BrokerInterface]] = {
     "zerodha_kite": MockBroker,
-    "delta_exchange": MockBroker,
+    "delta_exchange": DeltaExchangeBroker,
 }
 
 

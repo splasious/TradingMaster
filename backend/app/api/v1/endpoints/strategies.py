@@ -15,7 +15,7 @@ from app.schemas.strategy import StrategyCreate, StrategyOut, StrategyVersionCre
 from app.services.audit import write_audit_log
 from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
-from app.services.strategy.state_machine import StrategyStatus
+from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
 
@@ -188,3 +188,49 @@ async def validate_strategy(
         return ValidateResult(valid=True, sample_signal="BUY" if entry_match else "HOLD")
     except ValueError as exc:
         return ValidateResult(valid=False, error=str(exc))
+
+
+async def _transition_strategy(
+    strategy_id: str, target: StrategyStatus, action_name: str, db: AsyncSession, user: User
+) -> StrategyOut:
+    """Shared by mark-validated/approve: both are explicit human judgment
+    calls (PRD section 15's "User Approval" step, section 25's pipeline) --
+    there's no automatic trigger for either, unlike BACKTESTED or
+    PAPER_TRADING which are earned by real backtest/paper-trading runs."""
+    strategy = await _load_strategy(db, strategy_id)
+    _assert_can_edit(strategy, user)
+
+    current = StrategyStatus(strategy.status)
+    if not can_transition(current, target):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot move from '{current.value}' to '{target.value}'",
+        )
+
+    previous = strategy.status
+    strategy.status = target.value
+    await write_audit_log(
+        db, user_id=user.id, action=action_name, object_type="strategy", object_id=str(strategy.id),
+        previous_value={"status": previous}, new_value={"status": target.value},
+    )
+    await db.commit()
+    # "updated_at" is server-computed (onupdate=func.now()) so commit
+    # expires it specifically -- must be included here too (see the same
+    # fix in create_strategy_version above) or _strategy_out's access to it
+    # triggers a lazy load outside an async context.
+    await db.refresh(strategy, attribute_names=["versions", "updated_at", "status"])
+    return _strategy_out(strategy)
+
+
+@router.post("/{strategy_id}/mark-validated", response_model=StrategyOut)
+async def mark_strategy_validated(
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> StrategyOut:
+    return await _transition_strategy(strategy_id, StrategyStatus.VALIDATED, "STRATEGY_MARKED_VALIDATED", db, user)
+
+
+@router.post("/{strategy_id}/approve", response_model=StrategyOut)
+async def approve_strategy(
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader"))
+) -> StrategyOut:
+    return await _transition_strategy(strategy_id, StrategyStatus.APPROVED, "STRATEGY_APPROVED", db, user)

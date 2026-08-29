@@ -75,6 +75,26 @@ class DeltaExchangeDataSource(MarketDataSource):
             for row in body["result"]
         ]
 
+    async def get_ticker(self, external_ref: str) -> dict:
+        """Real current price + Delta's numeric product_id for one symbol
+        (public endpoint, verified live: GET /v2/tickers/{symbol}) -- this
+        is what live trading uses to decide whether to place a real order,
+        never the simulated tick engine (Phase 2's tick_engine.py is for
+        the Markets page display and paper trading only)."""
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(f"{self.base_url}/v2/tickers/{external_ref}")
+        except httpx.ConnectError as exc:
+            raise MarketDataSourceError("Could not reach Delta Exchange's API.") from exc
+        except httpx.TimeoutException as exc:
+            raise MarketDataSourceError("Delta Exchange API timed out.") from exc
+
+        body = resp.json()
+        if not body.get("success"):
+            raise MarketDataSourceError(f"Delta Exchange API error: {body.get('error')}")
+        result = body["result"]
+        return {"price": float(result["close"]), "product_id": result["product_id"], "mark_price": float(result["mark_price"])}
+
     async def list_products(self) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:

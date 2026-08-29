@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–6)
+# TradingMaster — Architecture (Phases 1–7)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -305,27 +305,99 @@ this phase's first pass tests didn't catch it). Fixed once, centrally, in
 strategies, paper trading, and Phase 5's backtester) benefits, and
 `test_paper_trading_engine.py` has a named regression test for it.
 
+## Live trading (Phase 7, PRD sections 22-24, 28, 49)
+
+The real thing, not a mock: `services/broker/delta_broker.py` is a genuine
+Delta Exchange India adapter -- HMAC-SHA256 request signing verified
+directly against their live API before writing a line of adapter code
+(Rule 1: never invent broker APIs), including reproducing their own
+documented signing example byte-for-byte as a regression test
+(`test_delta_broker.py::test_signature_matches_delta_documented_example`).
+It replaces `MockBroker` in the registry for `delta_exchange` --
+`zerodha_kite` is still mocked, no real Zerodha adapter exists.
+
+**What actually gates a real order from being placed**, in order:
+
+1. **Kill switch** (`services/live_trading/kill_switch.py`) -- a single-row
+   DB flag checked first, before anything else. Active means every live
+   deployment is blocked, full stop.
+2. **Safety checklist** (`services/live_trading/safety.py`, PRD section 49)
+   -- broker actually connected, strategy status is `approved` (the full
+   backtest -> paper-trade -> validate -> approve pipeline from Phase 4/5/6
+   has to have actually happened), risk limits configured, position sizing
+   configured. Checked server-side on deployment start, not trusted from a
+   client checkbox.
+3. **Explicit confirmation** -- `POST /live-trading/deployments` requires
+   `confirmed: true` in the body; the UI's checkbox sets it, but the API
+   itself refuses without it regardless of what the client sends.
+4. **Risk engine** (the same `services/risk/engine.py` from Phase 6,
+   unchanged) -- cash, max positions, daily loss, evaluated fresh against
+   the broker's real balance before every entry.
+
+**Order confirmation** (`services/live_trading/oms.py`, PRD Rule 5): after
+`place_order()` returns, the OMS immediately calls `get_order_status()` and
+only trusts *that* response for the order's recorded state -- Delta's
+initial placement response isn't assumed to be the final word. The order
+lifecycle (`services/live_trading/order_state_machine.py`, PRD section 23)
+models all 9 states with real transition rules, and Delta's 4 documented
+order states map onto it explicitly, not by guessing.
+
+**Live price**, deliberately, is never the simulated tick engine --
+`DeltaExchangeDataSource.get_ticker()` calls Delta's real public `/v2/tickers/{symbol}`
+endpoint (verified live) for both the current price and the numeric
+`product_id` orders need. Using simulated prices to decide real orders
+would defeat the entire point of this being "live."
+
+**Reconciliation** (`services/live_trading/reconciliation.py`, PRD section
+28) is detection-only: it diffs local `LivePosition` rows against the
+broker's real `get_positions()` and reports matches/mismatches/orphans on
+both sides. It never auto-corrects anything -- "never silently overwrite
+state" is enforced by the function simply not having a write path.
+
+**Deliberately not automatic**: unlike paper trading's ~10s background
+scheduler, there's no live-trading equivalent. A live deployment only
+evaluates when explicitly triggered (the "Evaluate Now" button, or a future
+scheduled job someone deliberately wires up) -- one more human-in-the-loop
+safety margin given real money is at stake, not an oversight.
+
+**Credentials**: never written to a file or logged by this codebase. They're
+entered through Settings -> Brokers -> Connect Delta Exchange (the exact
+mechanism built in Phase 1), Fernet-encrypted at rest, decrypted only in
+memory immediately before an authenticated call.
+
 ## Broker credentials note
 
-The Delta Exchange API key/secret provided during development are **not**
-in this codebase or its config. They're not needed yet: Phase 2 only uses
-Delta's public market-data endpoints. Authenticated endpoints (balances,
-order placement) are Phase 7 territory, gated by the risk engine and
-paper-trading approval workflow — wiring real order authority in earlier
-would violate the platform's own safety rules (PRD Rule 8, section 49).
+Real Delta Exchange API credentials were provided during development.
+They're not in this codebase, this repo's git history, or any file on
+disk — they were used exactly once, from an ephemeral scratch script
+outside the repo (deleted immediately after), to verify the real signing
+scheme in `delta_broker.py` against Delta's live API before writing the
+adapter (that single verification hit an IP-whitelist restriction on the
+key, confirming the signing logic was correct without ever placing an
+order). From here on, credentials only ever enter the system through
+Settings -> Brokers -> Connect Delta Exchange, Fernet-encrypted at rest —
+the same mechanism built in Phase 1, never touched directly.
+
+Note for running this locally: Delta Exchange requires the calling
+machine's IP to be whitelisted per API key. Whitelist your own machine's
+real outbound IP in Delta Exchange > Account > API Management before
+expecting `authenticate()` to succeed.
 
 ## What's deliberately not here yet
 
-No live trading (real broker orders), no options/derivatives data, no
+No real Zerodha Kite adapter (still `MockBroker`) -- only Delta Exchange
+got a real live-trading adapter this phase. No options/derivatives data, no
 drawing tools or multi-panel charting, no market-breadth indicators (no
 data source for OI/PCR yet), no strategy edit UI beyond create (the API
 supports versioning -- tested -- but the Strategy Builder page only wires
 up creation), no walk-forward *optimization* specifically (out-of-sample
 testing and grid search both exist independently; combining them into one
-workflow is a further step), no reconciliation engine (nothing to
-reconcile against until a real broker connects), no order lifecycle beyond
-immediate fill/reject (paper fills are instant by design -- PARTIALLY_FILLED
-etc. matter once a real broker's order book is in the loop). PRD section 63
+workflow is a further step), no automatic live-evaluation scheduler
+(deliberate -- see the live trading section above), no consolidated
+cross-environment Portfolio/Orders/Positions/Risk Management screens (paper
+and live each have their own view; a unified one is a later polish pass),
+no reconciliation *remediation* (detection is real and tested; fixing a
+detected mismatch is still a manual, out-of-band action). PRD section 63
 phases the rest in deliberately so building on a shaky foundation doesn't
-mean redoing it later. See the nav sidebar's "P7"/"P8" badges for which
-phase each remaining screen belongs to.
+mean redoing it later. See the nav sidebar's "P8" badges for which phase
+each remaining screen belongs to.

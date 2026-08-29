@@ -189,14 +189,18 @@ def test_resample_weekly_aggregates_ohlc_correctly_and_drops_incomplete_week():
 
 
 def test_resample_drops_still_forming_period_by_default():
-    # A week containing "today" must not appear as a closed candle.
-    today = datetime.now(timezone.utc)
-    monday_this_week = (today - timedelta(days=today.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    days_elapsed_this_week = min(today.weekday(), 4) + 1  # Mon=1 .. Fri=5 sessions so far
+    # A week containing "as_of" must not appear as a closed candle. "now" is
+    # passed explicitly (rather than read from the real clock at call time)
+    # so this can't flake if the real clock happens to cross a day boundary
+    # between building `bars` and resample_candles checking "today" --
+    # every date in this test is relative to the same fixed `as_of`.
+    as_of = datetime(2026, 8, 28, 15, 0, tzinfo=timezone.utc)  # a Friday, mid-session
+    monday_this_week = (as_of - timedelta(days=as_of.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    days_elapsed_this_week = min(as_of.weekday(), 4) + 1  # Mon=1 .. Fri=5 sessions so far
     bars = _weekday_bars(5 + days_elapsed_this_week, monday_this_week - timedelta(days=7))
 
-    closed = resample_candles(bars, "1wk", only_closed=True)
-    unclosed = resample_candles(bars, "1wk", only_closed=False)
+    closed = resample_candles(bars, "1wk", only_closed=True, now=as_of)
+    unclosed = resample_candles(bars, "1wk", only_closed=False, now=as_of)
 
     assert len(unclosed) == len(closed) + 1  # the forming week only appears when explicitly allowed
 

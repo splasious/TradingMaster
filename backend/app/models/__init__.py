@@ -2,6 +2,7 @@ from app.models.audit import AuditLog
 from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, OptimizationJob, OptimizationResult
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
+from app.models.live_trading import KillSwitch, LiveDeployment, LiveOrder, LivePosition
 from app.models.market_data import BackfillJob, OhlcvCandle
 from app.models.paper_trading import PaperDeployment, PaperOrder, PaperPortfolio, PaperPosition, PaperTrade
 from app.models.scan import SavedScan
@@ -20,6 +21,10 @@ __all__ = [
     "BrokerConnection",
     "BrokerCredential",
     "Instrument",
+    "KillSwitch",
+    "LiveDeployment",
+    "LiveOrder",
+    "LivePosition",
     "OhlcvCandle",
     "OptimizationJob",
     "OptimizationResult",

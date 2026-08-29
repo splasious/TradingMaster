@@ -6,6 +6,7 @@ from app.api.v1.endpoints import (
     brokers,
     indicators,
     instruments,
+    live_trading,
     market_data,
     market_data_ws,
     optimization,
@@ -30,3 +31,4 @@ api_router.include_router(strategies.router, prefix="/strategies", tags=["strate
 api_router.include_router(backtests.router, prefix="/backtests", tags=["backtests"])
 api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
 api_router.include_router(paper_trading.router, prefix="/paper-trading", tags=["paper-trading"])
+api_router.include_router(live_trading.router, prefix="/live-trading", tags=["live-trading"])
