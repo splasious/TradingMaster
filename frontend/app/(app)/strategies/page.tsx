@@ -7,10 +7,9 @@ import { useState } from "react";
 
 import { Badge, type Tone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Modal } from "@/components/ui/modal";
-import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBacktestResult, useBacktestsForStrategy, useStrategies } from "@/lib/hooks";
@@ -91,7 +90,7 @@ function StrategyPerformance({ strategyId }: { strategyId: string }) {
 
   const { net_profit, win_rate_pct, num_trades } = result.metrics;
   return (
-    <span className="flex items-center gap-2 text-xs">
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
       <span className={`font-financial font-medium ${net_profit >= 0 ? "text-positive" : "text-negative"}`}>
         {net_profit >= 0 ? "+" : ""}
         {net_profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
@@ -99,6 +98,37 @@ function StrategyPerformance({ strategyId }: { strategyId: string }) {
       <span className="text-text-muted">{win_rate_pct.toFixed(0)}% win</span>
       <span className="text-text-muted">({num_trades} trades)</span>
     </span>
+  );
+}
+
+function StrategyCard({ strategy, onValidate }: { strategy: StrategyOut; onValidate: () => void }) {
+  return (
+    <Card className="flex flex-col gap-3 p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold text-text-primary" title={strategy.name}>
+            {strategy.name}
+          </h3>
+          <p className="mt-0.5 text-xs capitalize text-text-muted">
+            {strategy.code_type} &middot; {strategy.latest_version?.timeframe ?? "--"}
+          </p>
+        </div>
+        <Badge tone={STATUS_TONE[strategy.status]} className="shrink-0">
+          {strategy.status.replace(/_/g, " ")}
+        </Badge>
+      </div>
+
+      <div className="min-h-[1.25rem]">
+        <StrategyPerformance strategyId={strategy.id} />
+      </div>
+
+      <div className="mt-auto flex items-center justify-between border-t border-border pt-3 text-xs text-text-muted">
+        <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
+        <Button variant="ghost" size="sm" onClick={onValidate}>
+          Validate
+        </Button>
+      </div>
+    </Card>
   );
 }
 
@@ -122,62 +152,26 @@ export default function StrategiesPage() {
         )}
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Strategies</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {isLoading ? (
-            <LoadingState />
-          ) : isError ? (
-            <ErrorState description="Could not load strategies." />
-          ) : !strategies?.length ? (
-            <EmptyState
-              title="No strategies yet"
-              action={
-                <Link href="/strategy-builder" className="text-sm text-active hover:underline">
-                  Create one
-                </Link>
-              }
-            />
-          ) : (
-            <Table>
-              <Thead>
-                <tr>
-                  <Th>Name</Th>
-                  <Th>Mode</Th>
-                  <Th>Timeframe</Th>
-                  <Th>Status</Th>
-                  <Th>Latest Backtest</Th>
-                  <Th>Updated</Th>
-                  <Th />
-                </tr>
-              </Thead>
-              <Tbody>
-                {strategies.map((s) => (
-                  <tr key={s.id}>
-                    <Td className="font-medium">{s.name}</Td>
-                    <Td className="capitalize text-text-secondary">{s.code_type}</Td>
-                    <Td className="text-text-secondary">{s.latest_version?.timeframe}</Td>
-                    <Td>
-                      <Badge tone={STATUS_TONE[s.status]}>{s.status.replace(/_/g, " ")}</Badge>
-                    </Td>
-                    <Td>
-                      <StrategyPerformance strategyId={s.id} />
-                    </Td>
-                    <Td className="text-text-muted">{new Date(s.updated_at).toLocaleDateString()}</Td>
-                    <Td className="text-right">
-                      <Button variant="ghost" size="sm" onClick={() => setSelected(s)}>
-                        Validate
-                      </Button>
-                    </Td>
-                  </tr>
-                ))}
-              </Tbody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+      {isLoading ? (
+        <LoadingState />
+      ) : isError ? (
+        <ErrorState description="Could not load strategies." />
+      ) : !strategies?.length ? (
+        <EmptyState
+          title="No strategies yet"
+          action={
+            <Link href="/strategy-builder" className="text-sm text-active hover:underline">
+              Create one
+            </Link>
+          }
+        />
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {strategies.map((s) => (
+            <StrategyCard key={s.id} strategy={s} onValidate={() => setSelected(s)} />
+          ))}
+        </div>
+      )}
 
       {selected && <ValidateModal strategy={selected} onClose={() => setSelected(null)} />}
     </div>
