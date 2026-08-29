@@ -132,6 +132,13 @@ export function useStrategies() {
   });
 }
 
+export function useBacktestsForStrategy(strategyId: string) {
+  return useQuery({
+    queryKey: ["backtests-for-strategy", strategyId],
+    queryFn: () => apiFetch<BacktestJobOut[]>(`/api/v1/backtests?strategy_id=${strategyId}`),
+  });
+}
+
 export function useBacktestJob(jobId: string | null) {
   return useQuery({
     queryKey: ["backtest-job", jobId],

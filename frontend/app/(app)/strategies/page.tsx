@@ -13,7 +13,7 @@ import { Modal } from "@/components/ui/modal";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { useStrategies } from "@/lib/hooks";
+import { useBacktestResult, useBacktestsForStrategy, useStrategies } from "@/lib/hooks";
 import type { StrategyOut, StrategyStatus, ValidateResult } from "@/lib/types";
 
 const STATUS_TONE: Record<StrategyStatus, Tone> = {
@@ -77,6 +77,31 @@ function ValidateModal({ strategy, onClose }: { strategy: StrategyOut; onClose: 
   );
 }
 
+function StrategyPerformance({ strategyId }: { strategyId: string }) {
+  const { data: jobs } = useBacktestsForStrategy(strategyId);
+  const latestCompleted = jobs?.find((j) => j.status === "completed") ?? null;
+  const { data: result } = useBacktestResult(latestCompleted?.id ?? null, !!latestCompleted);
+
+  if (!jobs || (jobs.length > 0 && !latestCompleted)) {
+    return <span className="text-xs text-text-muted">--</span>;
+  }
+  if (!latestCompleted || !result) {
+    return <span className="text-xs text-text-muted">Not backtested</span>;
+  }
+
+  const { net_profit, win_rate_pct, num_trades } = result.metrics;
+  return (
+    <span className="flex items-center gap-2 text-xs">
+      <span className={`font-financial font-medium ${net_profit >= 0 ? "text-positive" : "text-negative"}`}>
+        {net_profit >= 0 ? "+" : ""}
+        {net_profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      </span>
+      <span className="text-text-muted">{win_rate_pct.toFixed(0)}% win</span>
+      <span className="text-text-muted">({num_trades} trades)</span>
+    </span>
+  );
+}
+
 export default function StrategiesPage() {
   const { hasRole } = useAuth();
   const { data: strategies, isLoading, isError } = useStrategies();
@@ -123,6 +148,7 @@ export default function StrategiesPage() {
                   <Th>Mode</Th>
                   <Th>Timeframe</Th>
                   <Th>Status</Th>
+                  <Th>Latest Backtest</Th>
                   <Th>Updated</Th>
                   <Th />
                 </tr>
@@ -135,6 +161,9 @@ export default function StrategiesPage() {
                     <Td className="text-text-secondary">{s.latest_version?.timeframe}</Td>
                     <Td>
                       <Badge tone={STATUS_TONE[s.status]}>{s.status.replace(/_/g, " ")}</Badge>
+                    </Td>
+                    <Td>
+                      <StrategyPerformance strategyId={s.id} />
                     </Td>
                     <Td className="text-text-muted">{new Date(s.updated_at).toLocaleDateString()}</Td>
                     <Td className="text-right">

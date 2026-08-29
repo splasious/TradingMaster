@@ -14,6 +14,55 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { useBacktestJob, useBacktestResult, useBacktestTrades, useInstruments, useStrategies } from "@/lib/hooks";
 import type { BacktestJobOut, BacktestMetrics, InstrumentOut, StrategyOut } from "@/lib/types";
 
+function KpiTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "positive" | "negative" | "neutral" }) {
+  const toneClass = tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
+  return (
+    <div className="rounded-lg border border-border bg-surface-elevated p-4">
+      <div className="text-xs font-medium uppercase tracking-wide text-text-muted">{label}</div>
+      <div className={`mt-1 font-financial text-2xl font-semibold ${toneClass}`}>{value}</div>
+    </div>
+  );
+}
+
+function KpiGrid({ metrics }: { metrics: BacktestMetrics }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+      <KpiTile label="Net Profit" value={metrics.net_profit.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })} tone={metrics.net_profit >= 0 ? "positive" : "negative"} />
+      <KpiTile label="Win Rate" value={`${metrics.win_rate_pct}%`} />
+      <KpiTile label="Profit Factor" value={`${metrics.profit_factor}`} tone={metrics.profit_factor >= 1 ? "positive" : "negative"} />
+      <KpiTile label="Max Drawdown" value={`-${Math.abs(metrics.max_drawdown_pct)}%`} tone="negative" />
+      <KpiTile label="Sharpe Ratio" value={`${metrics.sharpe_ratio}`} tone={metrics.sharpe_ratio >= 0 ? "positive" : "negative"} />
+      <KpiTile label="Total Trades" value={`${metrics.num_trades}`} />
+    </div>
+  );
+}
+
+function RiskBar({ label, valuePct, max, tone }: { label: string; valuePct: number; max: number; tone: "positive" | "warning" | "negative" }) {
+  const width = Math.min(100, Math.max(0, (Math.abs(valuePct) / max) * 100));
+  const barToneClass = tone === "positive" ? "bg-positive" : tone === "warning" ? "bg-warning" : "bg-negative";
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="font-medium uppercase tracking-wide text-text-muted">{label}</span>
+        <span className="font-financial font-medium text-text-primary">{valuePct}%</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
+        <div className={`h-full rounded-full ${barToneClass}`} style={{ width: `${width}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function RiskAnalytics({ metrics }: { metrics: BacktestMetrics }) {
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-surface-elevated p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-text-muted">Risk Analytics</h3>
+      <RiskBar label="Max Drawdown" valuePct={metrics.max_drawdown_pct} max={50} tone="negative" />
+      <RiskBar label="Loss Rate" valuePct={metrics.loss_rate_pct} max={100} tone="warning" />
+    </div>
+  );
+}
+
 function MetricsGrid({ metrics, title }: { metrics: BacktestMetrics; title: string }) {
   const rows: [string, string][] = [
     ["Net Profit", metrics.net_profit.toLocaleString(undefined, { maximumFractionDigits: 2 })],
@@ -201,6 +250,10 @@ export default function BacktestingPage() {
 
             {result && (
               <div className="space-y-6">
+                <KpiGrid metrics={result.metrics} />
+
+                <RiskAnalytics metrics={result.metrics} />
+
                 <div>
                   <h3 className="mb-2 text-sm font-semibold text-text-primary">Equity Curve</h3>
                   <OscillatorChart
@@ -211,9 +264,9 @@ export default function BacktestingPage() {
                   />
                 </div>
 
-                <MetricsGrid metrics={result.metrics} title={result.out_of_sample_metrics ? "In-Sample Metrics" : "Metrics"} />
+                <MetricsGrid metrics={result.metrics} title={result.out_of_sample_metrics ? "Full Metrics (In-Sample)" : "Full Metrics"} />
 
-                {result.out_of_sample_metrics && <MetricsGrid metrics={result.out_of_sample_metrics} title="Out-of-Sample Metrics" />}
+                {result.out_of_sample_metrics && <MetricsGrid metrics={result.out_of_sample_metrics} title="Full Metrics (Out-of-Sample)" />}
 
                 {result.monte_carlo && (
                   <div>
