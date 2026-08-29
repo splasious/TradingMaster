@@ -41,7 +41,7 @@ export function Sidebar() {
                       <Icon className="h-4 w-4" />
                       {item.label}
                     </span>
-                    {item.phase && <span className="text-[10px] text-text-muted">P{item.phase}</span>}
+                    {item.unbuilt && <span className="text-[10px] uppercase tracking-wide text-text-muted">Soon</span>}
                   </Link>
                 );
               })}

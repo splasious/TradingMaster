@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
@@ -86,7 +87,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
 
 export default function UsersSettingsPage() {
   const { hasRole } = useAuth();
-  const { data: users, isLoading } = useUsers();
+  const { data: users, isLoading, isError } = useUsers();
   const [modalOpen, setModalOpen] = useState(false);
 
   if (!hasRole("administrator")) {
@@ -113,7 +114,9 @@ export default function UsersSettingsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load users." />
           ) : (
             <Table>
               <Thead>

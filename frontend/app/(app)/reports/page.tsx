@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { apiDownload } from "@/lib/api";
@@ -16,7 +17,7 @@ export default function ReportsPage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
 
-  const { data: summary, isLoading } = useReportSummary(environment || null, start || null, end || null);
+  const { data: summary, isLoading, isError } = useReportSummary(environment || null, start || null, end || null);
 
   const downloadMutation = useMutation({
     mutationFn: () => {
@@ -68,9 +69,11 @@ export default function ReportsPage() {
           <CardTitle>Summary</CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 pt-4 md:grid-cols-5">
-          {isLoading || !summary ? (
-            <p className="text-sm text-text-muted">Loading...</p>
-          ) : (
+          {isLoading ? (
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load the report summary." />
+          ) : !summary ? null : (
             <>
               <div>
                 <div className="text-xs text-text-muted">Trades</div>

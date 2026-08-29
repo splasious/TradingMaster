@@ -5,6 +5,7 @@ import { DatabaseBackup, Download } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBackups } from "@/lib/hooks";
@@ -16,7 +17,7 @@ function formatSize(bytes: number): string {
 }
 
 export default function BackupSettingsPage() {
-  const { data: backups, isLoading } = useBackups();
+  const { data: backups, isLoading, isError } = useBackups();
   const queryClient = useQueryClient();
 
   const createMutation = useMutation({
@@ -51,9 +52,11 @@ export default function BackupSettingsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load backups." />
           ) : !backups?.length ? (
-            <p className="p-5 text-sm text-text-muted">No backups yet.</p>
+            <EmptyState title="No backups yet" />
           ) : (
             <Table>
               <Thead>

@@ -1,5 +1,5 @@
 import { PhasePlaceholder } from "@/components/dashboard/phase-placeholder";
 
 export default function RiskPage() {
-  return <PhasePlaceholder title="Risk Management" phase={7} />;
+  return <PhasePlaceholder title="Risk Management" />;
 }

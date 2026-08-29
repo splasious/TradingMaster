@@ -4,8 +4,10 @@ import { CheckCircle2, CircleDashed, XCircle } from "lucide-react";
 import Link from "next/link";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { LoadingState } from "@/components/ui/data-state";
 import { useAuth } from "@/lib/auth-context";
 import { useInstruments, useSystemHealth } from "@/lib/hooks";
+import { marketLabel } from "@/lib/market";
 import { cn } from "@/lib/utils";
 
 const COMPONENT_LABELS: Record<string, string> = {
@@ -49,14 +51,14 @@ function SystemHealthPanel() {
   );
 }
 
-function PlaceholderPanel({ title, phase }: { title: string; phase: number }) {
+function PlaceholderPanel({ title }: { title: string }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-text-muted">Arrives in Phase {phase}.</p>
+        <p className="text-sm text-text-muted">Not yet built -- a consolidated cross-environment view is a later polish pass.</p>
       </CardContent>
     </Card>
   );
@@ -74,15 +76,15 @@ function MarketOverviewPanel() {
       </CardHeader>
       <CardContent className="space-y-2">
         {isLoading ? (
-          <p className="text-sm text-text-muted">Loading...</p>
+          <LoadingState />
         ) : (
           <>
             <div className="flex items-center justify-between text-sm">
-              <span className="text-text-secondary">NSE instruments</span>
+              <span className="text-text-secondary">{marketLabel("NSE")} instruments</span>
               <span className="font-financial font-medium text-text-primary">{nse}</span>
             </div>
             <div className="flex items-center justify-between text-sm">
-              <span className="text-text-secondary">Delta Exchange instruments</span>
+              <span className="text-text-secondary">{marketLabel("DELTA")} instruments</span>
               <span className="font-financial font-medium text-text-primary">{delta}</span>
             </div>
             <Link href="/markets" className="mt-1 inline-block text-xs text-active hover:underline">
@@ -107,9 +109,9 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <SystemHealthPanel />
-        <PlaceholderPanel title="Portfolio" phase={7} />
+        <PlaceholderPanel title="Portfolio" />
         <MarketOverviewPanel />
-        <PlaceholderPanel title="Strategy Summary" phase={4} />
+        <PlaceholderPanel title="Strategy Summary" />
       </div>
     </div>
   );

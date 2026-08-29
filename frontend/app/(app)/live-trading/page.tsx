@@ -5,9 +5,11 @@ import { AlertOctagon, CheckCircle2, Play, Square, XCircle, Zap } from "lucide-r
 import { useState } from "react";
 
 import { LiveTradingBanner } from "@/components/layout/live-trading-banner";
+import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
@@ -23,7 +25,14 @@ import {
   useSafetyCheck,
   useStrategies,
 } from "@/lib/hooks";
+import { marketLabel } from "@/lib/market";
 import type { InstrumentOut, LiveDeploymentOut, LiveEvaluationOut, StrategyOut } from "@/lib/types";
+
+function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
+  if (!lastEvaluatedAt) return undefined;
+  const ageSeconds = (Date.now() - new Date(lastEvaluatedAt).getTime()) / 1000;
+  return ageSeconds < 60 ? "live" : "stale";
+}
 
 function KillSwitchPanel() {
   const { hasRole } = useAuth();
@@ -157,7 +166,7 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
                   }}
                   className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
                 >
-                  {i.symbol} ({i.exchange})
+                  {i.symbol} ({marketLabel(i.exchange)})
                 </button>
               ))}
             </div>
@@ -207,9 +216,35 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
 
 function DeploymentDetail({ deployment }: { deployment: LiveDeploymentOut }) {
   const { data: orders } = useLiveOrders(deployment.id);
-  if (!orders?.length) return <div className="border-t border-border bg-surface-elevated/50 p-4 text-sm text-text-muted">No orders yet.</div>;
+  const { data: instruments } = useInstruments("");
+  const { data: brokerAccounts } = useBrokerAccounts();
+  const instrument = instruments?.find((i) => i.id === deployment.instrument_id);
+  const brokerAccount = brokerAccounts?.find((a) => a.id === deployment.broker_account_id);
+
+  const contextBar = instrument && (
+    <MarketContextBar
+      broker={brokerAccount?.broker.name ?? "--"}
+      market={marketLabel(instrument.exchange)}
+      instrument={instrument.symbol}
+      instrumentType={instrument.instrument_type.replace("_", " ")}
+      timeframe={deployment.timeframe}
+      mode="Live"
+      dataStatus={brokerAccount && brokerAccount.connection_status !== "connected" ? "disconnected" : lastEvaluatedDataStatus(deployment.last_evaluated_at)}
+    />
+  );
+
+  if (!orders?.length) {
+    return (
+      <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
+        {contextBar}
+        <EmptyState title="No orders yet" />
+      </div>
+    );
+  }
+
   return (
-    <div className="border-t border-border bg-surface-elevated/50 p-4">
+    <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
+      {contextBar}
       <Table>
         <Thead>
           <tr>
@@ -324,9 +359,9 @@ export default function LiveTradingPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
           ) : !deployments?.length ? (
-            <p className="p-5 text-sm text-text-muted">No live deployments yet.</p>
+            <EmptyState title="No live deployments yet" description="Go live to begin real execution through your connected broker." />
           ) : (
             <Table>
               <Thead>

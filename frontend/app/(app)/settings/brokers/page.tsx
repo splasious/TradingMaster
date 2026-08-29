@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
@@ -91,7 +92,8 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
         </div>
 
         <p className="text-xs text-text-muted">
-          Phase 1 uses a simulated broker adapter — no real orders are placed and no live credentials are required.
+          Zerodha Kite uses a simulated adapter (no real orders, any credentials work). Delta Exchange uses a real adapter --
+          real API credentials are required and will be used for real authenticated calls.
         </p>
 
         {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
@@ -111,7 +113,7 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
 
 export default function BrokersSettingsPage() {
   const { hasRole } = useAuth();
-  const { data: accounts, isLoading } = useBrokerAccounts();
+  const { data: accounts, isLoading, isError } = useBrokerAccounts();
   const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const canManage = hasRole("administrator", "trader");
@@ -127,7 +129,7 @@ export default function BrokersSettingsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
-          <p className="text-sm text-text-muted">Zerodha Kite and Delta Exchange, backed by a simulated adapter in Phase 1.</p>
+          <p className="text-sm text-text-muted">Zerodha Kite (simulated adapter) and Delta Exchange (real adapter, HMAC-signed against the live API).</p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
       </div>
@@ -138,9 +140,11 @@ export default function BrokersSettingsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load broker accounts." />
           ) : !accounts?.length ? (
-            <p className="p-5 text-sm text-text-muted">No broker accounts connected yet.</p>
+            <EmptyState title="No broker accounts connected yet" />
           ) : (
             <Table>
               <Thead>

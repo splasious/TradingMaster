@@ -5,9 +5,11 @@ import { Play, Square, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
+import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
@@ -21,7 +23,14 @@ import {
   usePaperTrades,
   useStrategies,
 } from "@/lib/hooks";
+import { marketLabel } from "@/lib/market";
 import type { InstrumentOut, PaperDeploymentOut, PaperEvaluationOut, StrategyOut } from "@/lib/types";
+
+function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
+  if (!lastEvaluatedAt) return undefined;
+  const ageSeconds = (Date.now() - new Date(lastEvaluatedAt).getTime()) / 1000;
+  return ageSeconds < 60 ? "live" : "stale";
+}
 
 function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -73,7 +82,7 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
                   }}
                   className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
                 >
-                  {i.symbol} ({i.exchange})
+                  {i.symbol} ({marketLabel(i.exchange)})
                 </button>
               ))}
             </div>
@@ -103,9 +112,22 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
 function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
   const { data: orders } = usePaperOrders(deployment.id);
   const { data: trades } = usePaperTrades(deployment.id);
+  const { data: instruments } = useInstruments("");
+  const instrument = instruments?.find((i) => i.id === deployment.instrument_id);
 
   return (
     <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
+      {instrument && (
+        <MarketContextBar
+          broker="Simulated"
+          market={marketLabel(instrument.exchange)}
+          instrument={instrument.symbol}
+          instrumentType={instrument.instrument_type.replace("_", " ")}
+          timeframe={deployment.timeframe}
+          mode="Paper"
+          dataStatus={lastEvaluatedDataStatus(deployment.last_evaluated_at)}
+        />
+      )}
       {trades && trades.length > 0 && (
         <div>
           <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Closed Trades</h4>
@@ -160,7 +182,7 @@ function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
           </Table>
         </div>
       )}
-      {!orders?.length && !trades?.length && <p className="text-sm text-text-muted">No activity yet.</p>}
+      {!orders?.length && !trades?.length && <EmptyState title="No activity yet" />}
     </div>
   );
 }
@@ -297,9 +319,9 @@ export default function PaperTradingPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
           ) : !deployments?.length ? (
-            <p className="p-5 text-sm text-text-muted">No paper trading deployments yet.</p>
+            <EmptyState title="No paper trading deployments yet" description="Start a deployment to begin simulated execution." />
           ) : (
             <Table>
               <Thead>

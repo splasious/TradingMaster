@@ -4,10 +4,14 @@ import { useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { PriceChart, type OverlayLine } from "@/components/charts/price-chart";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { useChartCandles, useIndicator, useInstruments } from "@/lib/hooks";
+import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
 
 const OVERLAY_OPTIONS = [
@@ -25,6 +29,7 @@ function useOverlay(instrumentId: string | null, timeframe: string, code: string
 
 export default function ChartsPage() {
   const [q, setQ] = useState("");
+  const [exchange, setExchange] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
   const [timeframe, setTimeframe] = useState("1d");
   const [showSma, setShowSma] = useState(true);
@@ -38,8 +43,8 @@ export default function ChartsPage() {
   // data but don't (yet) support indicator overlays on top of that.
   const indicatorsAvailable = timeframe === "1d";
 
-  const { data: instruments } = useInstruments(q);
-  const { data: candles, isLoading: candlesLoading } = useChartCandles(selected?.id ?? null, timeframe);
+  const { data: instruments } = useInstruments(q, exchange || undefined);
+  const { data: candles, isLoading: candlesLoading, isError: candlesError } = useChartCandles(selected?.id ?? null, timeframe);
   const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (selected?.id ?? null) : null, timeframe, "rsi");
   const { data: bollinger } = useIndicator(
     indicatorsAvailable && showBollinger ? (selected?.id ?? null) : null,
@@ -69,18 +74,30 @@ export default function ChartsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
+          <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
+            <option value="">All Markets</option>
+            <option value="NSE">NSE Markets</option>
+            <option value="DELTA">Delta Markets</option>
+          </Select>
           <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
-            {instruments?.map((i) => (
-              <button
-                key={i.id}
-                onClick={() => setSelected(i)}
-                className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm ${
-                  selected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
-                }`}
-              >
-                {i.symbol} <span className="text-text-muted">({i.exchange})</span>
-              </button>
-            ))}
+            {instruments?.map((i) => {
+              const category = i.exchange === "DELTA" ? getDeltaCategory(i.symbol) : null;
+              return (
+                <button
+                  key={i.id}
+                  onClick={() => setSelected(i)}
+                  className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm ${
+                    selected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
+                  }`}
+                >
+                  <span>{i.symbol}</span>
+                  <span className="flex items-center gap-1">
+                    {category && <Badge tone="active">{category}</Badge>}
+                    <span className="text-text-muted">{marketLabel(i.exchange)}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </CardContent>
       </Card>
@@ -123,15 +140,25 @@ export default function ChartsPage() {
             </div>
           )}
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {selected && (
+            <MarketContextBar
+              broker={brokerForExchange(selected.exchange)}
+              market={marketLabel(selected.exchange)}
+              instrument={selected.symbol}
+              instrumentType={selected.instrument_type.replace("_", " ")}
+              timeframe={timeframe}
+              dataStatus={candlesError ? "disconnected" : candles?.length ? "live" : undefined}
+            />
+          )}
           {!selected ? (
-            <p className="py-16 text-center text-sm text-text-muted">Pick an instrument to view its chart.</p>
+            <EmptyState title="No instrument selected" description="Pick an instrument to view its chart." />
           ) : candlesLoading ? (
-            <p className="py-16 text-center text-sm text-text-muted">Loading candles...</p>
+            <LoadingState title="Loading candles..." />
+          ) : candlesError ? (
+            <ErrorState description="Could not load candle data for this instrument." />
           ) : !candles?.length ? (
-            <p className="py-16 text-center text-sm text-text-muted">
-              No candles stored for this timeframe yet -- run a backfill from Market Data first.
-            </p>
+            <EmptyState title="No candles stored" description="No candles stored for this timeframe yet -- run a backfill from Market Data first." />
           ) : (
             <div className="space-y-2">
               <PriceChart candles={candles} overlays={overlays} />

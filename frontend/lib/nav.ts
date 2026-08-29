@@ -24,8 +24,8 @@ export interface NavItem {
   label: string;
   href: string;
   icon: LucideIcon;
-  /** Phase this screen ships real functionality in; undefined = live now. */
-  phase?: number;
+  /** True if this screen is still a scaffolded placeholder, not real yet. */
+  unbuilt?: boolean;
 }
 
 export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
@@ -56,10 +56,10 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: "Paper Trading", href: "/paper-trading", icon: Activity },
       { label: "Live Trading", href: "/live-trading", icon: Radio },
-      { label: "Portfolio", href: "/portfolio", icon: Briefcase, phase: 8 },
-      { label: "Orders", href: "/orders", icon: ListOrdered, phase: 8 },
-      { label: "Positions", href: "/positions", icon: Wallet, phase: 8 },
-      { label: "Risk Management", href: "/risk", icon: ShieldAlert, phase: 8 },
+      { label: "Portfolio", href: "/portfolio", icon: Briefcase, unbuilt: true },
+      { label: "Orders", href: "/orders", icon: ListOrdered, unbuilt: true },
+      { label: "Positions", href: "/positions", icon: Wallet, unbuilt: true },
+      { label: "Risk Management", href: "/risk", icon: ShieldAlert, unbuilt: true },
     ],
   },
   {

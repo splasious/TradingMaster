@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Badge, type Tone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Modal } from "@/components/ui/modal";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
@@ -78,7 +79,7 @@ function ValidateModal({ strategy, onClose }: { strategy: StrategyOut; onClose: 
 
 export default function StrategiesPage() {
   const { hasRole } = useAuth();
-  const { data: strategies, isLoading } = useStrategies();
+  const { data: strategies, isLoading, isError } = useStrategies();
   const [selected, setSelected] = useState<StrategyOut | null>(null);
   const queryClient = useQueryClient();
 
@@ -102,15 +103,18 @@ export default function StrategiesPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load strategies." />
           ) : !strategies?.length ? (
-            <p className="p-5 text-sm text-text-muted">
-              No strategies yet.{" "}
-              <Link href="/strategy-builder" className="text-active hover:underline">
-                Create one
-              </Link>
-              .
-            </p>
+            <EmptyState
+              title="No strategies yet"
+              action={
+                <Link href="/strategy-builder" className="text-sm text-active hover:underline">
+                  Create one
+                </Link>
+              }
+            />
           ) : (
             <Table>
               <Thead>

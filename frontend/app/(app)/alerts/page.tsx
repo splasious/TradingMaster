@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Badge, type Tone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
 import { useAlerts } from "@/lib/hooks";
@@ -55,7 +56,7 @@ function AlertRow({ alert }: { alert: AlertOut }) {
 export default function AlertsPage() {
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [severity, setSeverity] = useState<AlertSeverity | "">("");
-  const { data: alerts, isLoading } = useAlerts(unreadOnly, severity || null);
+  const { data: alerts, isLoading, isError } = useAlerts(unreadOnly, severity || null);
   const queryClient = useQueryClient();
 
   const markAllReadMutation = useMutation({
@@ -97,9 +98,11 @@ export default function AlertsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
-            <p className="p-5 text-sm text-text-muted">Loading...</p>
+            <LoadingState />
+          ) : isError ? (
+            <ErrorState description="Could not load alerts." />
           ) : !alerts?.length ? (
-            <p className="p-5 text-sm text-text-muted">No alerts to show.</p>
+            <EmptyState title="No alerts to show" />
           ) : (
             alerts.map((a) => <AlertRow key={a.id} alert={a} />)
           )}
