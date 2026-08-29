@@ -188,7 +188,7 @@ async def _exit_position(
     db.add(
         PaperTrade(
             deployment_id=deployment.id, entry_ts=position.opened_at, entry_price=position.avg_entry_price,
-            exit_ts=now, exit_price=price, quantity=position.quantity, pnl=pnl, pnl_pct=pnl_pct,
+            exit_ts=now, exit_price=price, quantity=position.quantity, pnl=pnl, pnl_pct=pnl_pct, exit_reason=reason,
         )
     )
     db.add(PaperOrder(deployment_id=deployment.id, side="sell", quantity=position.quantity, price=price, status=OrderStatus.FILLED.value, reason=reason))

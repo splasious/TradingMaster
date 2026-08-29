@@ -65,9 +65,9 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "System",
     items: [
-      { label: "Alerts", href: "/alerts", icon: Bell, phase: 8 },
-      { label: "Reports", href: "/reports", icon: FileText, phase: 8 },
-      { label: "System Monitor", href: "/system-monitor", icon: AlertTriangle, phase: 8 },
+      { label: "Alerts", href: "/alerts", icon: Bell },
+      { label: "Reports", href: "/reports", icon: FileText },
+      { label: "System Monitor", href: "/system-monitor", icon: AlertTriangle },
       { label: "Settings", href: "/settings", icon: Cog },
     ],
   },

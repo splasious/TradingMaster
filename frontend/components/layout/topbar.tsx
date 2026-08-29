@@ -1,14 +1,31 @@
 "use client";
 
-import { CheckCircle2, ChevronDown, LogOut, XCircle } from "lucide-react";
+import { Bell, CheckCircle2, ChevronDown, LogOut, XCircle } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 import { useAuth } from "@/lib/auth-context";
-import { useSystemHealth } from "@/lib/hooks";
+import { useSystemHealth, useUnreadAlertCount } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
 import { EnvironmentBadge } from "./environment-badge";
 import { ThemeToggle } from "./theme-toggle";
+
+function AlertsBell() {
+  const { data } = useUnreadAlertCount();
+  const count = data?.unread_count ?? 0;
+
+  return (
+    <Link href="/alerts" className="relative flex h-8 w-8 items-center justify-center rounded-md text-text-secondary hover:bg-surface-elevated hover:text-text-primary">
+      <Bell className="h-4 w-4" />
+      {count > 0 && (
+        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-critical px-1 text-[10px] font-semibold text-white">
+          {count > 99 ? "99+" : count}
+        </span>
+      )}
+    </Link>
+  );
+}
 
 function SystemHealthIndicator() {
   const { data, isLoading } = useSystemHealth();
@@ -38,6 +55,7 @@ export function Topbar() {
 
       <div className="flex items-center gap-3">
         <EnvironmentBadge />
+        <AlertsBell />
         <ThemeToggle />
 
         <div className="relative">

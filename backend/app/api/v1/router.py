@@ -1,8 +1,10 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    alerts,
     auth,
     backtests,
+    backup,
     brokers,
     indicators,
     instruments,
@@ -11,6 +13,7 @@ from app.api.v1.endpoints import (
     market_data_ws,
     optimization,
     paper_trading,
+    reports,
     scanner,
     strategies,
     system,
@@ -32,3 +35,6 @@ api_router.include_router(backtests.router, prefix="/backtests", tags=["backtest
 api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
 api_router.include_router(paper_trading.router, prefix="/paper-trading", tags=["paper-trading"])
 api_router.include_router(live_trading.router, prefix="/live-trading", tags=["live-trading"])
+api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
+api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
+api_router.include_router(backup.router, prefix="/backup", tags=["backup"])

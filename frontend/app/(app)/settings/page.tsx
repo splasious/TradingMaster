@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { ChevronRight, Plug, Users } from "lucide-react";
+import { ChevronRight, DatabaseBackup, Plug, Users } from "lucide-react";
 
 import { Card } from "@/components/ui/card";
 
 const SETTINGS_LINKS = [
   { href: "/settings/brokers", label: "Brokers", description: "Connect and manage broker accounts", icon: Plug },
   { href: "/settings/users", label: "Users", description: "Manage users and role assignments", icon: Users },
+  { href: "/settings/backup", label: "Backup & Restore", description: "Snapshot and download the database", icon: DatabaseBackup },
 ];
 
 export default function SettingsPage() {

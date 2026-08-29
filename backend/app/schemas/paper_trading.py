@@ -61,6 +61,7 @@ class TradeOut(BaseModel):
     quantity: float
     pnl: float
     pnl_pct: float
+    exit_reason: str
 
     model_config = {"from_attributes": True}
 

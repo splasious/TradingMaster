@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "./api";
 import type {
+  AlertOut,
+  AlertSeverity,
   BackfillJobOut,
+  BackupOut,
   BacktestJobOut,
   BacktestResultOut,
   BacktestTradeOut,
@@ -22,9 +25,12 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   QualityReportOut,
+  ReportSummaryOut,
   SafetyCheckOut,
   StrategyOut,
   SystemHealth,
+  SystemMonitorOut,
+  UnreadCountOut,
   UserOut,
 } from "./types";
 
@@ -253,5 +259,50 @@ export function useIndicator(instrumentId: string | null, timeframe: string, ind
         `/api/v1/indicators/calculate?instrument_id=${instrumentId}&timeframe=${timeframe}&indicator=${indicator}`,
       ),
     enabled: !!instrumentId && !!indicator,
+  });
+}
+
+export function useAlerts(unreadOnly: boolean, severity: AlertSeverity | null) {
+  const params = new URLSearchParams();
+  if (unreadOnly) params.set("unread_only", "true");
+  if (severity) params.set("severity", severity);
+  return useQuery({
+    queryKey: ["alerts", unreadOnly, severity],
+    queryFn: () => apiFetch<AlertOut[]>(`/api/v1/alerts?${params.toString()}`),
+    refetchInterval: 15_000,
+  });
+}
+
+export function useUnreadAlertCount() {
+  return useQuery({
+    queryKey: ["alerts-unread-count"],
+    queryFn: () => apiFetch<UnreadCountOut>("/api/v1/alerts/unread-count"),
+    refetchInterval: 15_000,
+  });
+}
+
+export function useSystemMonitor() {
+  return useQuery({
+    queryKey: ["system-monitor"],
+    queryFn: () => apiFetch<SystemMonitorOut>("/api/v1/system/monitor"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useReportSummary(environment: "paper" | "live" | null, start: string | null, end: string | null) {
+  const params = new URLSearchParams();
+  if (environment) params.set("environment", environment);
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  return useQuery({
+    queryKey: ["report-summary", environment, start, end],
+    queryFn: () => apiFetch<ReportSummaryOut>(`/api/v1/reports/summary?${params.toString()}`),
+  });
+}
+
+export function useBackups() {
+  return useQuery({
+    queryKey: ["backups"],
+    queryFn: () => apiFetch<BackupOut[]>("/api/v1/backup"),
   });
 }

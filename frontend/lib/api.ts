@@ -88,4 +88,29 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   return res.json() as Promise<T>;
 }
 
+/** For endpoints that return a file body (CSV export, backup download)
+ * rather than JSON -- apiFetch always parses JSON, so this is a separate
+ * path that triggers a browser save using the same auth header. */
+export async function apiDownload(path: string, suggestedFilename: string): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  });
+  if (!res.ok) throw new ApiError(res.status, res.statusText);
+
+  const disposition = res.headers.get("Content-Disposition");
+  const match = disposition?.match(/filename="?([^"]+)"?/);
+  const filename = match?.[1] ?? suggestedFilename;
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export { refreshAccessToken };

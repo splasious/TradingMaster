@@ -339,6 +339,7 @@ export interface PaperTradeOut {
   quantity: number;
   pnl: number;
   pnl_pct: number;
+  exit_reason: string;
 }
 
 export interface SafetyCheckOut {
@@ -418,4 +419,64 @@ export interface BacktestTradeOut {
   pnl: number;
   pnl_pct: number;
   exit_reason: string;
+}
+
+export type AlertSeverity = "info" | "warning" | "critical";
+
+export interface AlertOut {
+  id: string;
+  alert_type: string;
+  severity: AlertSeverity;
+  title: string;
+  message: string;
+  object_type: string | null;
+  object_id: string | null;
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface UnreadCountOut {
+  unread_count: number;
+}
+
+export interface InfraMetricsOut {
+  cpu_percent: number;
+  memory_percent: number;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  disk_percent: number;
+  disk_used_gb: number;
+  disk_total_gb: number;
+}
+
+export interface ApplicationMetricsOut {
+  uptime_seconds: number;
+  tick_engine_running: boolean;
+  tick_engine_subscribed_instruments: number;
+  paper_trading_scheduler_running: boolean;
+}
+
+export interface TradingMetricsOut {
+  active_paper_deployments: number;
+  active_live_deployments: number;
+}
+
+export interface SystemMonitorOut {
+  infrastructure: InfraMetricsOut;
+  application: ApplicationMetricsOut;
+  trading: TradingMetricsOut;
+}
+
+export interface ReportSummaryOut {
+  trade_count: number;
+  net_pnl: number;
+  win_rate_pct: number;
+  best_trade: number;
+  worst_trade: number;
+}
+
+export interface BackupOut {
+  filename: string;
+  size_bytes: number;
+  created_at: string;
 }

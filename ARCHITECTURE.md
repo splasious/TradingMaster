@@ -1,4 +1,4 @@
-# TradingMaster — Architecture (Phases 1–7)
+# TradingMaster — Architecture (Phases 1–8)
 
 This describes what's actually built. See [`TradingMaster_PRD.md`](TradingMaster_PRD.md)
 for the full product vision and the phase roadmap (section 63).
@@ -376,28 +376,90 @@ adapter (that single verification hit an IP-whitelist restriction on the
 key, confirming the signing logic was correct without ever placing an
 order). From here on, credentials only ever enter the system through
 Settings -> Brokers -> Connect Delta Exchange, Fernet-encrypted at rest —
-the same mechanism built in Phase 1, never touched directly.
+the same mechanism built in Phase 1, never touched directly -- **or**
+through the optional `.env`-based seed bootstrap described in the Phase 8
+section below, which ultimately writes to that exact same encrypted table.
 
 Note for running this locally: Delta Exchange requires the calling
 machine's IP to be whitelisted per API key. Whitelist your own machine's
 real outbound IP in Delta Exchange > Account > API Management before
 expecting `authenticate()` to succeed.
 
+## Monitoring, alerts, reports, and backups (Phase 8, PRD sections 37, 38, 52-54)
+
+**Alerts** (`models/alert.py`, `services/alerts/service.py`, PRD section
+38): a real DB-backed feed, not a UI-only toast. `create_alert()` is called
+directly from inside the paper trading engine and the live trading OMS at
+the moments that actually matter -- order rejected, position entered/exited
+(stop-loss/take-profit/signal each get their own alert type), and from
+`activate_kill_switch()` for every affected deployment owner plus the
+activating admin. Severity is INFO for routine paper-trading events,
+WARNING for paper-trading risk events, and CRITICAL for anything in live
+trading or the kill switch -- reflecting that live money is at stake.
+`GET /alerts`, `/alerts/unread-count`, `POST /alerts/{id}/read`, and
+`POST /alerts/read-all` are scoped to `user_id`, never returning another
+user's alerts. The topbar's bell icon polls unread-count every 15s.
+
+**System monitor** (`services/monitoring/service.py`, `GET
+/system/monitor`, PRD section 37): every number is real, not a
+placeholder -- `psutil` for CPU/memory/disk, `tick_engine`/
+`paper_trading_scheduler` internal state for whether the background loops
+are actually running, and live DB counts of active paper/live deployments.
+
+**Reports** (`services/reports/service.py`, `GET /reports/trades.csv`,
+`GET /reports/summary`, PRD section 54): `get_trade_rows()` merges
+`PaperTrade` and `LiveTrade` -- joined through deployment ownership so a
+user only ever sees their own trades -- into one sorted list, filterable by
+environment and date range. This is also why `LiveTrade` exists
+(`models/live_trading.py`): `LiveOrder` alone only records individual order
+legs with no entry/exit pairing, so `oms._exit_position()` now computes
+`pnl`/`pnl_pct` and writes a `LiveTrade` row on every live exit, mirroring
+what paper trading already had. `PaperTrade` gained a real `exit_reason`
+column in this phase too (it was previously hardcoded to `"signal"` in the
+report layer even though the paper engine already knew the true reason --
+fixed at the source instead of papering over it in the report).
+
+**Backup** (`services/backup/service.py`, `POST`/`GET /backup`, `GET
+/backup/{filename}/download`, PRD section 53, admin-only): for SQLite (the
+default local-dev database), a real consistent snapshot taken through
+`sqlite3`'s own backup API -- safe to run against a live database, unlike a
+plain file copy, which risks reading a half-written page. For PostgreSQL,
+this deliberately does *not* attempt an automated file-copy backup (that
+isn't a valid strategy for a live Postgres server) -- `create_backup()`
+raises `NotImplementedError` naming the exact `pg_dump`/`pg_restore`
+commands an operator should run instead, rather than automating a
+subprocess shell-out with connection credentials. `resolve_backup_path()`
+only ever matches this service's own generated filename format, so a
+`filename` from the API can't path-traverse outside the backup directory.
+
+**Delta Exchange credential bootstrap** (`app/seed.py:_provision_delta_account`,
+PRD section 47): an optional path for local dev -- if `DELTA_API_KEY`/
+`DELTA_API_SECRET` are set in the gitignored, OS-ACL-restricted `.env`
+file, `python -m app.seed` encrypts them into the same `broker_credentials`
+table the Settings -> Brokers UI writes to (never plaintext in the
+database) and attempts one real authenticated call so the initial
+`BrokerConnection.status` reflects reality (CONNECTED, or ERROR with
+Delta's actual error message) instead of defaulting to an untested
+CONNECTING. Idempotent -- running seed again detects the existing account
+and skips.
+
 ## What's deliberately not here yet
 
 No real Zerodha Kite adapter (still `MockBroker`) -- only Delta Exchange
-got a real live-trading adapter this phase. No options/derivatives data, no
-drawing tools or multi-panel charting, no market-breadth indicators (no
-data source for OI/PCR yet), no strategy edit UI beyond create (the API
-supports versioning -- tested -- but the Strategy Builder page only wires
-up creation), no walk-forward *optimization* specifically (out-of-sample
+got a real live-trading adapter. No options/derivatives data, no drawing
+tools or multi-panel charting, no market-breadth indicators (no data source
+for OI/PCR yet), no strategy edit UI beyond create (the API supports
+versioning -- tested -- but the Strategy Builder page only wires up
+creation), no walk-forward *optimization* specifically (out-of-sample
 testing and grid search both exist independently; combining them into one
 workflow is a further step), no automatic live-evaluation scheduler
 (deliberate -- see the live trading section above), no consolidated
 cross-environment Portfolio/Orders/Positions/Risk Management screens (paper
-and live each have their own view; a unified one is a later polish pass),
-no reconciliation *remediation* (detection is real and tested; fixing a
-detected mismatch is still a manual, out-of-band action). PRD section 63
-phases the rest in deliberately so building on a shaky foundation doesn't
-mean redoing it later. See the nav sidebar's "P8" badges for which phase
-each remaining screen belongs to.
+and live each have their own view; a unified one is a later polish pass --
+these four nav items are still scaffolded placeholders), no reconciliation
+*remediation* (detection is real and tested; fixing a detected mismatch is
+still a manual, out-of-band action), no PDF/Excel report export (CSV only
+-- no new heavy dependency pulled in just for this), no automated backup
+scheduling (backups are triggered manually from Settings -> Backup, not on
+a cron). PRD section 63 phases the rest in deliberately so building on a
+shaky foundation doesn't mean redoing it later.

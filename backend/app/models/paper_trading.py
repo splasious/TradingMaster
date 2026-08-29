@@ -93,4 +93,5 @@ class PaperTrade(Base):
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     pnl: Mapped[float] = mapped_column(Float, nullable=False)
     pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(20), nullable=False, default="signal")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

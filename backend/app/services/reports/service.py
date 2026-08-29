@@ -55,7 +55,7 @@ async def get_trade_rows(
             rows.append(TradeRow(
                 environment="paper", strategy_name=strategy_name, entry_ts=trade.entry_ts, entry_price=trade.entry_price,
                 exit_ts=trade.exit_ts, exit_price=trade.exit_price, quantity=trade.quantity, pnl=trade.pnl,
-                pnl_pct=trade.pnl_pct, exit_reason="signal",
+                pnl_pct=trade.pnl_pct, exit_reason=trade.exit_reason,
             ))
 
     if environment in (None, "live"):
