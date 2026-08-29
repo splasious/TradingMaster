@@ -55,6 +55,27 @@ class LivePosition(Base):
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class LiveTrade(Base):
+    """Completed round-trip (entry + exit), mirroring PaperTrade -- added
+    in Phase 8 when reporting needed a real PnL record for live trading and
+    LiveOrder alone (individual order legs, no pairing) couldn't provide
+    one."""
+
+    __tablename__ = "live_trades"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    deployment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("live_deployments.id", ondelete="CASCADE"), nullable=False)
+    entry_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    exit_price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class KillSwitch(Base):
     """Single-row table -- the global emergency stop (PRD section 24.5,
     49). Active by id=1; no other rows are ever created."""

@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from typing import Any
 
 import httpx
@@ -6,8 +7,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.deps import get_current_user
 from app.db.session import get_db
+from app.models.user import User
 from app.services.broker.registry import get_broker_adapter
+from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 
 router = APIRouter()
 settings = get_settings()
@@ -55,3 +59,15 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     overall = "healthy" if all(components[c] == "healthy" for c in CORE_COMPONENTS) else "degraded"
 
     return {"status": overall, "components": components}
+
+
+@router.get("/monitor")
+async def monitor(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> dict[str, Any]:
+    """PRD section 37: infrastructure, application, and trading metrics --
+    every number here is real (psutil for infra, live DB counts for
+    trading), not a placeholder."""
+    return {
+        "infrastructure": asdict(get_infra_metrics()),
+        "application": asdict(get_application_metrics()),
+        "trading": asdict(await get_trading_metrics(db)),
+    }

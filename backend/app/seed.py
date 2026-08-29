@@ -5,13 +5,16 @@ Usage: python -m app.seed
 """
 
 import asyncio
+import json
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.encryption import encrypt_payload
 from app.core.security import hash_password
 from app.db.session import AsyncSessionLocal
-from app.models.broker import Broker
+from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.models.instrument import Instrument
 from app.models.user import Role, User, UserRole
 
@@ -109,8 +112,61 @@ async def seed() -> None:
         else:
             print(f"Admin user already exists: {settings.seed_admin_email}")
 
+        await db.flush()
+
+        if settings.delta_api_key and settings.delta_api_secret:
+            await _provision_delta_account(db, admin)
+
         await db.commit()
         print("Seed complete.")
+
+
+async def _provision_delta_account(db, admin: User) -> None:
+    """If DELTA_API_KEY/DELTA_API_SECRET are set in .env, store them
+    encrypted via the same broker_credentials mechanism the Settings >
+    Brokers UI uses (never as plaintext in the database) and attempt one
+    real authenticated call to set an honest initial connection status."""
+    from app.services.broker.registry import get_broker_adapter
+
+    settings = get_settings()
+    delta = (await db.execute(select(Broker).where(Broker.code == "delta_exchange"))).scalar_one_or_none()
+    if delta is None:
+        return
+
+    existing = (
+        await db.execute(
+            select(BrokerAccount).where(BrokerAccount.user_id == admin.id, BrokerAccount.broker_id == delta.id)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        print("Delta Exchange broker account already provisioned, skipping.")
+        return
+
+    credentials = {"api_key": settings.delta_api_key, "api_secret": settings.delta_api_secret}
+    account = BrokerAccount(user_id=admin.id, broker_id=delta.id, account_label="Primary", environment="live")
+    db.add(account)
+    await db.flush()
+    db.add(BrokerCredential(broker_account_id=account.id, encrypted_payload=encrypt_payload(json.dumps(credentials))))
+
+    connection = BrokerConnection(broker_account_id=account.id, status=ConnectionStatus.CONNECTING.value)
+    db.add(connection)
+    await db.flush()
+
+    try:
+        adapter = get_broker_adapter("delta_exchange")
+        if await adapter.authenticate(credentials):
+            await adapter.connect()
+            connection.status = ConnectionStatus.CONNECTED.value
+            connection.last_heartbeat_at = datetime.now(timezone.utc)
+            print("Delta Exchange broker account provisioned and connected.")
+        else:
+            connection.status = ConnectionStatus.ERROR.value
+            connection.last_error = "Authentication rejected by broker"
+            print("Delta Exchange broker account provisioned, but authentication was rejected.")
+    except Exception as exc:
+        connection.status = ConnectionStatus.ERROR.value
+        connection.last_error = str(exc)
+        print(f"Delta Exchange broker account provisioned, but connection failed: {exc}")
 
 
 if __name__ == "__main__":

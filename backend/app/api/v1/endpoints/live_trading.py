@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
+from app.models.alert import AlertSeverity, AlertType
 from app.models.broker import BrokerAccount
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition
@@ -23,6 +24,7 @@ from app.schemas.live_trading import (
     ReconciliationOut,
     SafetyCheckOut,
 )
+from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.live_trading import kill_switch as kill_switch_service
 from app.services.live_trading.oms import evaluate_live_deployment
@@ -214,7 +216,16 @@ async def activate_kill_switch(
     for deployment in stopped.scalars().all():
         deployment.status = "stopped"
         deployment.stopped_at = datetime.now(timezone.utc)
+        await create_alert(
+            db, user_id=deployment.owner_id, alert_type=AlertType.STRATEGY_STOPPED.value, severity=AlertSeverity.CRITICAL,
+            title="Live deployment stopped by kill switch", message=payload.reason,
+            object_type="live_deployment", object_id=str(deployment.id),
+        )
 
+    await create_alert(
+        db, user_id=user.id, alert_type=AlertType.KILL_SWITCH_ACTIVATED.value, severity=AlertSeverity.CRITICAL,
+        title="Kill switch activated", message=payload.reason,
+    )
     await write_audit_log(db, user_id=user.id, action="KILL_SWITCH_ACTIVATED", new_value={"reason": payload.reason})
     await db.commit()
     return KillSwitchOut(active=switch.active, activated_at=switch.activated_at, reason=switch.reason)

@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # running, backfills against "yahoo_nse" instruments fail gracefully.
     yahoo_data_service_url: str = "http://127.0.0.1:8800"
 
+    # Optional: if set, app/seed.py provisions a Delta Exchange broker
+    # account for the seed admin using these, encrypted at rest via
+    # credential_encryption_key before ever touching the database -- the
+    # plaintext only ever exists in this gitignored, local-only .env file
+    # and briefly in memory. Never logged, never in a git-tracked file.
+    # Leave unset to manage the connection through Settings > Brokers instead.
+    delta_api_key: str | None = None
+    delta_api_secret: str | None = None
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

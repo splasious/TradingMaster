@@ -14,10 +14,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.alert import AlertSeverity, AlertType
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import OrderStatus, PaperDeployment, PaperOrder, PaperPortfolio, PaperPosition, PaperTrade
-from app.models.strategy import StrategyVersion
+from app.models.strategy import Strategy, StrategyVersion
+from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.market_data.tick_engine import tick_engine
@@ -149,8 +151,13 @@ async def _try_enter(
     if not decision.approved:
         db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=quantity, price=price, status=OrderStatus.REJECTED.value, reason=decision.reason))
         await write_audit_log(
-            db, user_id=None, action="PAPER_ORDER_REJECTED", object_type="paper_deployment", object_id=str(deployment.id),
+            db, user_id=portfolio.user_id, action="PAPER_ORDER_REJECTED", object_type="paper_deployment", object_id=str(deployment.id),
             new_value={"reason": decision.reason},
+        )
+        await create_alert(
+            db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.WARNING,
+            title="Paper order rejected", message=decision.reason or "Order rejected by risk engine",
+            object_type="paper_deployment", object_id=str(deployment.id),
         )
         await db.commit()
         return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
@@ -158,6 +165,12 @@ async def _try_enter(
     portfolio.cash -= notional
     db.add(PaperPosition(deployment_id=deployment.id, quantity=quantity, avg_entry_price=price, opened_at=now))
     db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=quantity, price=price, status=OrderStatus.FILLED.value))
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    await create_alert(
+        db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
+        title="Paper order filled", message=f"{strategy.name if strategy else 'Strategy'}: bought {quantity} @ {price:.2f}",
+        object_type="paper_deployment", object_id=str(deployment.id),
+    )
     await db.commit()
     return EvaluationOutcome(action="entered", signal="BUY", price=price)
 
@@ -180,5 +193,27 @@ async def _exit_position(
     )
     db.add(PaperOrder(deployment_id=deployment.id, side="sell", quantity=position.quantity, price=price, status=OrderStatus.FILLED.value, reason=reason))
     await db.delete(position)
+
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    strategy_name = strategy.name if strategy else "Strategy"
+    if reason == "stop_loss":
+        await create_alert(
+            db, user_id=portfolio.user_id, alert_type=AlertType.STOP_LOSS_TRIGGERED.value, severity=AlertSeverity.WARNING,
+            title="Stop loss triggered", message=f"{strategy_name}: closed at {price:.2f}, P&L {pnl:+.2f}",
+            object_type="paper_deployment", object_id=str(deployment.id),
+        )
+    elif reason == "take_profit":
+        await create_alert(
+            db, user_id=portfolio.user_id, alert_type=AlertType.TARGET_TRIGGERED.value, severity=AlertSeverity.INFO,
+            title="Target triggered", message=f"{strategy_name}: closed at {price:.2f}, P&L {pnl:+.2f}",
+            object_type="paper_deployment", object_id=str(deployment.id),
+        )
+    else:
+        await create_alert(
+            db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
+            title="Paper position closed", message=f"{strategy_name}: sold at {price:.2f}, P&L {pnl:+.2f}",
+            object_type="paper_deployment", object_id=str(deployment.id),
+        )
+
     await db.commit()
     return EvaluationOutcome(action="exited", signal="SELL", price=price, reason=reason)

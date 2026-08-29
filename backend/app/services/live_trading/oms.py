@@ -20,11 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_payload
+from app.models.alert import AlertSeverity, AlertType
 from app.models.broker import Broker, BrokerAccount, BrokerCredential
 from app.models.instrument import Instrument
-from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition
+from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition, LiveTrade
 from app.models.market_data import OhlcvCandle
-from app.models.strategy import StrategyVersion
+from app.models.strategy import Strategy, StrategyVersion
+from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.live_trading.kill_switch import get_kill_switch
@@ -108,9 +110,9 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
         stop_price = position.avg_entry_price * (1 - stop_pct / 100) if stop_pct else None
         target_price = position.avg_entry_price * (1 + target_pct / 100) if target_pct else None
         if stop_price is not None and current_price <= stop_price:
-            return await _exit_position(db, deployment, broker_account, position, product_id, now, "stop_loss")
+            return await _exit_position(db, deployment, broker_account, position, product_id, now, "stop_loss", stop_price)
         if target_price is not None and current_price >= target_price:
-            return await _exit_position(db, deployment, broker_account, position, product_id, now, "take_profit")
+            return await _exit_position(db, deployment, broker_account, position, product_id, now, "take_profit", target_price)
 
     if version.python_code:
         bars_dicts = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in bars_for_eval]
@@ -128,7 +130,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     if signal == "BUY" and position is None:
         return await _try_enter(db, deployment, broker_account, version, current_price, product_id, now)
     if signal == "SELL" and position is not None:
-        return await _exit_position(db, deployment, broker_account, position, product_id, now, "signal")
+        return await _exit_position(db, deployment, broker_account, position, product_id, now, "signal", current_price)
 
     await db.commit()
     return LiveOutcome(action="hold", signal=signal, price=current_price)
@@ -200,11 +202,21 @@ async def _try_enter(db, deployment, broker_account, version, price, product_id,
             db, user_id=deployment.owner_id, action="LIVE_ORDER_REJECTED", object_type="live_deployment",
             object_id=str(deployment.id), new_value={"reason": decision.reason},
         )
+        await create_alert(
+            db, user_id=deployment.owner_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.CRITICAL,
+            title="LIVE order rejected", message=decision.reason or "Order rejected by risk engine",
+            object_type="live_deployment", object_id=str(deployment.id),
+        )
         await db.commit()
         return LiveOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
 
     live_order, error = await _submit_and_confirm(db, deployment, broker, "buy", quantity, product_id)
     if error:
+        await create_alert(
+            db, user_id=deployment.owner_id, alert_type=AlertType.BROKER_DISCONNECTED.value, severity=AlertSeverity.CRITICAL,
+            title="Live order failed", message=error, object_type="live_deployment", object_id=str(deployment.id),
+        )
+        await db.commit()
         return LiveOutcome(action="error", signal="BUY", price=price, reason=error)
 
     if live_order.status in (LiveOrderStatus.REJECTED.value,):
@@ -215,21 +227,55 @@ async def _try_enter(db, deployment, broker_account, version, price, product_id,
         db, user_id=deployment.owner_id, action="LIVE_ORDER_PLACED", object_type="live_deployment",
         object_id=str(deployment.id), new_value={"side": "buy", "quantity": quantity, "price": price, "broker_order_id": live_order.broker_order_id},
     )
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    await create_alert(
+        db, user_id=deployment.owner_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
+        title="LIVE order filled", message=f"{strategy.name if strategy else 'Strategy'}: bought {quantity} @ {price:.2f} (real order)",
+        object_type="live_deployment", object_id=str(deployment.id),
+    )
     await db.commit()
     return LiveOutcome(action="entered", signal="BUY", price=price)
 
 
-async def _exit_position(db, deployment, broker_account, position, product_id, now, reason):
+async def _exit_position(db, deployment, broker_account, position, product_id, now, reason, price):
     evaluate_exit()  # always approved; called for symmetry/auditability with paper trading
     broker = await _get_authenticated_broker(db, broker_account)
     live_order, error = await _submit_and_confirm(db, deployment, broker, "sell", position.quantity, product_id)
     if error:
+        await create_alert(
+            db, user_id=deployment.owner_id, alert_type=AlertType.BROKER_DISCONNECTED.value, severity=AlertSeverity.CRITICAL,
+            title="Live exit failed", message=error, object_type="live_deployment", object_id=str(deployment.id),
+        )
+        await db.commit()
         return LiveOutcome(action="error", price=None, reason=error)
 
     await write_audit_log(
         db, user_id=deployment.owner_id, action="LIVE_ORDER_PLACED", object_type="live_deployment",
         object_id=str(deployment.id), new_value={"side": "sell", "quantity": position.quantity, "exit_reason": reason, "broker_order_id": live_order.broker_order_id},
     )
+
+    # Fill price is approximated as the ticker/trigger price at signal
+    # time, not parsed from Delta's order-status response (that would need
+    # average_fill_price handling not built in this pass) -- close enough
+    # for reporting on a market order, not exact to the cent.
+    pnl = (price - position.avg_entry_price) * position.quantity
+    pnl_pct = (price - position.avg_entry_price) / position.avg_entry_price * 100 if position.avg_entry_price else 0.0
+    db.add(
+        LiveTrade(
+            deployment_id=deployment.id, entry_ts=position.opened_at, entry_price=position.avg_entry_price,
+            exit_ts=now, exit_price=price, quantity=position.quantity, pnl=pnl, pnl_pct=pnl_pct, exit_reason=reason,
+        )
+    )
+
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    strategy_name = strategy.name if strategy else "Strategy"
+    alert_type = {"stop_loss": AlertType.STOP_LOSS_TRIGGERED, "take_profit": AlertType.TARGET_TRIGGERED}.get(reason, AlertType.ORDER_EXECUTED)
+    await create_alert(
+        db, user_id=deployment.owner_id, alert_type=alert_type.value,
+        severity=AlertSeverity.WARNING if reason == "stop_loss" else AlertSeverity.INFO,
+        title="LIVE position closed", message=f"{strategy_name}: sold {position.quantity} @ {price:.2f} (real order), P&L {pnl:+.2f}",
+        object_type="live_deployment", object_id=str(deployment.id),
+    )
     await db.delete(position)
     await db.commit()
-    return LiveOutcome(action="exited", signal="SELL", reason=reason)
+    return LiveOutcome(action="exited", signal="SELL", price=price, reason=reason)
