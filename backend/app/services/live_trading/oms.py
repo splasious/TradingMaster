@@ -5,10 +5,14 @@
 
 Deliberately mirrors paper_trading/engine.py's shape (same risk engine, same
 one-position-at-a-time model, same signal evaluators) so the two are easy to
-compare -- but every price here is real (Delta's public ticker, never the
-simulated tick engine) and every order is real (placed through the
-authenticated DeltaExchangeBroker adapter, confirmed via a follow-up status
+compare -- but every price here is real (never the simulated tick engine)
+and every order is real (placed through the authenticated broker adapter --
+DeltaExchangeBroker or ZerodhaKiteBroker -- confirmed via a follow-up status
 check before being trusted -- PRD Rule 5: no unconfirmed orders).
+
+Broker-specific concepts (Delta's numeric product_id vs Kite's
+tradingsymbol/exchange/product) never leak past `_get_live_price_and_context`
+and `_submit_and_confirm` -- everything above that point is broker-agnostic.
 """
 
 import json
@@ -30,7 +34,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.live_trading.kill_switch import get_kill_switch
-from app.services.live_trading.order_state_machine import DELTA_STATE_MAP, LiveOrderStatus
+from app.services.live_trading.order_state_machine import STATE_MAPS, LiveOrderStatus
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
 from app.services.risk.engine import evaluate_entry, evaluate_exit
@@ -64,6 +68,20 @@ async def _get_authenticated_broker(db: AsyncSession, broker_account: BrokerAcco
     return broker
 
 
+async def _get_live_price_and_context(broker_code: str, broker, instrument: Instrument) -> tuple[float, dict]:
+    """Real current price plus whatever broker-specific fields place_order()
+    needs beyond quantity/side (Delta: a numeric product_id; Kite: the
+    tradingsymbol/exchange/product it trades under) -- the only place in
+    this module that knows either broker's vocabulary."""
+    if broker_code == "delta_exchange":
+        ticker = await DeltaExchangeDataSource().get_ticker(instrument.external_ref)
+        return ticker["price"], {"product_id": ticker["product_id"]}
+    if broker_code == "zerodha_kite":
+        quote = await broker.get_ltp("NSE", instrument.external_ref)
+        return quote["price"], {"tradingsymbol": instrument.external_ref, "exchange": "NSE", "product": "CNC"}
+    raise MarketDataSourceError(f"No live pricing wired up for broker '{broker_code}'")
+
+
 async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment) -> LiveOutcome:
     kill_switch = await get_kill_switch(db)
     if kill_switch.active:
@@ -78,13 +96,16 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     position_result = await db.execute(select(LivePosition).where(LivePosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
 
-    data_source = DeltaExchangeDataSource()
+    broker_row = await db.get(Broker, broker_account.broker_id)
     try:
-        ticker = await data_source.get_ticker(instrument.external_ref)
+        broker = await _get_authenticated_broker(db, broker_account)
+    except Exception as exc:
+        return LiveOutcome(action="error", reason=f"Could not authenticate with broker: {exc}")
+
+    try:
+        current_price, order_context = await _get_live_price_and_context(broker_row.code, broker, instrument)
     except MarketDataSourceError as exc:
         return LiveOutcome(action="error", reason=f"Could not fetch live price: {exc}")
-    current_price = ticker["price"]
-    product_id = ticker["product_id"]
 
     candles_result = await db.execute(
         select(OhlcvCandle)
@@ -100,7 +121,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
         open=candles[-1].close if candles else current_price,
         high=max((candles[-1].close if candles else current_price), current_price),
         low=min((candles[-1].close if candles else current_price), current_price),
-        close=current_price, volume=0.0, source="live_delta_ticker",
+        close=current_price, volume=0.0, source=f"live_{broker_row.code}",
     )
     bars_for_eval = [*candles, synthetic_bar]
 
@@ -110,9 +131,9 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
         stop_price = position.avg_entry_price * (1 - stop_pct / 100) if stop_pct else None
         target_price = position.avg_entry_price * (1 + target_pct / 100) if target_pct else None
         if stop_price is not None and current_price <= stop_price:
-            return await _exit_position(db, deployment, broker_account, position, product_id, now, "stop_loss", stop_price)
+            return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "stop_loss", stop_price)
         if target_price is not None and current_price >= target_price:
-            return await _exit_position(db, deployment, broker_account, position, product_id, now, "take_profit", target_price)
+            return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "take_profit", target_price)
 
     if version.python_code:
         bars_dicts = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in bars_for_eval]
@@ -128,15 +149,15 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     deployment.last_evaluated_at = now
 
     if signal == "BUY" and position is None:
-        return await _try_enter(db, deployment, broker_account, version, current_price, product_id, now)
+        return await _try_enter(db, deployment, broker, broker_row.code, version, current_price, order_context, now)
     if signal == "SELL" and position is not None:
-        return await _exit_position(db, deployment, broker_account, position, product_id, now, "signal", current_price)
+        return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "signal", current_price)
 
     await db.commit()
     return LiveOutcome(action="hold", signal=signal, price=current_price)
 
 
-async def _submit_and_confirm(db, deployment, broker, side, quantity, product_id):
+async def _submit_and_confirm(db, deployment, broker, broker_code, side, quantity, order_context):
     client_order_id = f"tm-{uuid.uuid4().hex[:24]}"
 
     live_order = LiveOrder(
@@ -148,7 +169,7 @@ async def _submit_and_confirm(db, deployment, broker, side, quantity, product_id
 
     try:
         placement = await broker.place_order(
-            {"product_id": product_id, "quantity": quantity, "side": side, "order_type": "market_order", "client_order_id": client_order_id}
+            {**order_context, "quantity": quantity, "side": side, "order_type": "market", "client_order_id": client_order_id}
         )
     except Exception as exc:
         live_order.status = LiveOrderStatus.REJECTED.value
@@ -160,11 +181,12 @@ async def _submit_and_confirm(db, deployment, broker, side, quantity, product_id
 
     # PRD Rule 5: an order is not "executed" just because place_order()
     # returned -- confirm its actual state with a follow-up call.
+    state_map = STATE_MAPS.get(broker_code, {})
     try:
         status_check = await broker.get_order_status(placement["broker_order_id"])
-        confirmed_status = DELTA_STATE_MAP.get(status_check.get("status"), LiveOrderStatus.OPEN)
+        confirmed_status = state_map.get(status_check.get("status"), LiveOrderStatus.OPEN)
     except Exception:
-        confirmed_status = DELTA_STATE_MAP.get(placement.get("status"), LiveOrderStatus.OPEN)
+        confirmed_status = state_map.get(placement.get("status"), LiveOrderStatus.OPEN)
 
     live_order.status = confirmed_status.value
     live_order.confirmed_at = datetime.now(timezone.utc)
@@ -172,10 +194,9 @@ async def _submit_and_confirm(db, deployment, broker, side, quantity, product_id
     return live_order, None
 
 
-async def _try_enter(db, deployment, broker_account, version, price, product_id, now):
+async def _try_enter(db, deployment, broker, broker_code, version, price, order_context, now):
     # Live capital tracking comes from the broker's own real balance, never
     # a local ledger -- fetch it before sizing, not after.
-    broker = await _get_authenticated_broker(db, broker_account)
     try:
         balance = await broker.get_balance()
     except Exception as exc:
@@ -210,7 +231,7 @@ async def _try_enter(db, deployment, broker_account, version, price, product_id,
         await db.commit()
         return LiveOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
 
-    live_order, error = await _submit_and_confirm(db, deployment, broker, "buy", quantity, product_id)
+    live_order, error = await _submit_and_confirm(db, deployment, broker, broker_code, "buy", quantity, order_context)
     if error:
         await create_alert(
             db, user_id=deployment.owner_id, alert_type=AlertType.BROKER_DISCONNECTED.value, severity=AlertSeverity.CRITICAL,
@@ -237,10 +258,9 @@ async def _try_enter(db, deployment, broker_account, version, price, product_id,
     return LiveOutcome(action="entered", signal="BUY", price=price)
 
 
-async def _exit_position(db, deployment, broker_account, position, product_id, now, reason, price):
+async def _exit_position(db, deployment, broker, broker_code, position, order_context, now, reason, price):
     evaluate_exit()  # always approved; called for symmetry/auditability with paper trading
-    broker = await _get_authenticated_broker(db, broker_account)
-    live_order, error = await _submit_and_confirm(db, deployment, broker, "sell", position.quantity, product_id)
+    live_order, error = await _submit_and_confirm(db, deployment, broker, broker_code, "sell", position.quantity, order_context)
     if error:
         await create_alert(
             db, user_id=deployment.owner_id, alert_type=AlertType.BROKER_DISCONNECTED.value, severity=AlertSeverity.CRITICAL,
@@ -254,8 +274,8 @@ async def _exit_position(db, deployment, broker_account, position, product_id, n
         object_id=str(deployment.id), new_value={"side": "sell", "quantity": position.quantity, "exit_reason": reason, "broker_order_id": live_order.broker_order_id},
     )
 
-    # Fill price is approximated as the ticker/trigger price at signal
-    # time, not parsed from Delta's order-status response (that would need
+    # Fill price is approximated as the quote/trigger price at signal time,
+    # not parsed from the broker's order-status response (that would need
     # average_fill_price handling not built in this pass) -- close enough
     # for reporting on a market order, not exact to the cent.
     pnl = (price - position.avg_entry_price) * position.quantity

@@ -168,7 +168,7 @@ class DeltaExchangeBroker(BrokerInterface):
             "product_id": order["product_id"],
             "size": order["quantity"],
             "side": order["side"],
-            "order_type": order.get("order_type", "market_order"),
+            "order_type": {"market": "market_order", "limit": "limit_order"}.get(order.get("order_type", "market"), "market_order"),
         }
         if order.get("limit_price") is not None:
             body["limit_price"] = str(order["limit_price"])

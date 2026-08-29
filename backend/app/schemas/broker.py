@@ -29,3 +29,11 @@ class BrokerAccountCreate(BaseModel):
     account_label: str
     environment: str = "paper"
     credentials: dict[str, Any] = Field(default_factory=dict)
+
+
+class KiteLoginUrlOut(BaseModel):
+    login_url: str
+
+
+class KiteCallbackIn(BaseModel):
+    request_token: str

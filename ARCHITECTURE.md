@@ -313,8 +313,10 @@ directly against their live API before writing a line of adapter code
 (Rule 1: never invent broker APIs), including reproducing their own
 documented signing example byte-for-byte as a regression test
 (`test_delta_broker.py::test_signature_matches_delta_documented_example`).
-It replaces `MockBroker` in the registry for `delta_exchange` --
-`zerodha_kite` is still mocked, no real Zerodha adapter exists.
+`services/broker/zerodha_broker.py` is a second real adapter, for Zerodha
+Kite Connect v3 -- both replace `MockBroker` in the registry (see "Zerodha
+Kite adapter" below for what "real" means here given no live account was
+available to test against).
 
 **What actually gates a real order from being placed**, in order:
 
@@ -336,17 +338,24 @@ It replaces `MockBroker` in the registry for `delta_exchange` --
 
 **Order confirmation** (`services/live_trading/oms.py`, PRD Rule 5): after
 `place_order()` returns, the OMS immediately calls `get_order_status()` and
-only trusts *that* response for the order's recorded state -- Delta's
+only trusts *that* response for the order's recorded state -- a broker's
 initial placement response isn't assumed to be the final word. The order
 lifecycle (`services/live_trading/order_state_machine.py`, PRD section 23)
-models all 9 states with real transition rules, and Delta's 4 documented
-order states map onto it explicitly, not by guessing.
+models all 9 states with real transition rules; both Delta's 4 documented
+order states and Kite's 11 map onto it explicitly (`STATE_MAPS`, keyed by
+broker code), not by guessing.
 
-**Live price**, deliberately, is never the simulated tick engine --
-`DeltaExchangeDataSource.get_ticker()` calls Delta's real public `/v2/tickers/{symbol}`
-endpoint (verified live) for both the current price and the numeric
-`product_id` orders need. Using simulated prices to decide real orders
-would defeat the entire point of this being "live."
+**Live price**, deliberately, is never the simulated tick engine.
+`oms._get_live_price_and_context()` is the one place that knows either
+broker's pricing vocabulary: for Delta, `DeltaExchangeDataSource.get_ticker()`
+calls their real public `/v2/tickers/{symbol}` endpoint (verified live) for
+price plus the numeric `product_id` orders need; for Kite, the already-
+authenticated adapter's `get_ltp()` calls the real `/quote/ltp` endpoint
+(Kite's LTP requires auth, unlike Delta's public ticker) for price plus
+the `tradingsymbol`/`exchange`/`product` context Kite's order endpoint
+needs. Everything above that one function is broker-agnostic -- neither
+broker's field names leak into the risk engine, the signal evaluators, or
+`LiveOrder`/`LivePosition`.
 
 **Reconciliation** (`services/live_trading/reconciliation.py`, PRD section
 28) is detection-only: it diffs local `LivePosition` rows against the
@@ -364,6 +373,60 @@ safety margin given real money is at stake, not an oversight.
 entered through Settings -> Brokers -> Connect Delta Exchange (the exact
 mechanism built in Phase 1), Fernet-encrypted at rest, decrypted only in
 memory immediately before an authenticated call.
+
+## Zerodha Kite adapter (`services/broker/zerodha_broker.py`)
+
+Auth here is fundamentally different from Delta's per-request HMAC
+signing, which is why it gets its own section. Kite Connect uses an
+interactive, OAuth-like flow with no key/secret-only path:
+
+1. `POST /brokers/accounts` stores the api_key/api_secret (encrypted, as
+   always) but deliberately does *not* call `authenticate()` -- there's no
+   request_token yet, so it can't succeed. The connection is left
+   `disconnected` with an explanatory `last_error`, not `error` -- this
+   isn't a failure, it's mid-setup (`registry.requires_interactive_auth()`
+   is the generalization point `connect_broker_account` branches on).
+2. `GET /brokers/accounts/{id}/kite/login-url` returns
+   `ZerodhaKiteBroker.build_login_url(api_key)` -- Kite's real documented
+   login URL shape.
+3. The user logs in on Zerodha's own site (real 2FA, real account) and
+   Kite redirects to whatever URL is registered against that Kite Connect
+   app, appending a one-time `request_token`. Kite Connect v3 does **not**
+   support a `state` parameter to round-trip which account this was for
+   -- so the frontend remembers the pending `account_id` in `localStorage`
+   before opening the login tab and reads it back on
+   `/settings/brokers/kite/callback`, rather than inventing a capability
+   Kite doesn't have.
+4. `POST /brokers/accounts/{id}/kite/callback` exchanges the request_token
+   for a session `access_token` (`POST /session/token`, SHA-256 checksum
+   of `api_key + request_token + api_secret` -- Kite's documented
+   formula), then re-encrypts the credentials to include it. This
+   endpoint returns HTTP 200 even when the broker itself rejects the
+   exchange (`connection_status: "error"` in the body, same pattern as
+   the original connect endpoint) -- the frontend has to check that field
+   rather than treating any 200 as success (a real bug caught and fixed
+   during Playwright verification of this exact flow).
+
+**What "real" means here without a live account**: no Kite Connect
+developer subscription was available while building this, so a genuine
+authenticated session was never exercised end-to-end. What *was* verified
+live: every endpoint this adapter calls (`/session/token`, `/user/profile`,
+`/quote/ltp`) was hit with placeholder credentials and returned Kite's
+real, correctly-shaped error envelope (`{"status":"error","error_type":
+"TokenException","message":"..."}`) rather than a malformed-request
+rejection -- confirming the request format and `_request()`'s
+success/error parsing against Kite's actual servers, not just their docs.
+The remaining gap is a real login; that's the first thing to try once
+real credentials exist (`zerodha_broker.py`'s module docstring has the
+exact verification log).
+
+**Kite session expiry**: unlike Delta's API key (long-lived), a Kite
+`access_token` expires daily (~6am IST) and there is no refresh token in
+the public API. `oms.evaluate_live_deployment()` re-authenticates at the
+top of every evaluation (real cost: one extra call per broker per poll,
+accepted for correctness), so an expired session surfaces as a clean
+`action="error"` outcome with Kite's real message -- not a crash -- and
+the fix is the same "Login with Zerodha" button, not a code change.
 
 ## Broker credentials note
 
@@ -445,8 +508,10 @@ and skips.
 
 ## What's deliberately not here yet
 
-No real Zerodha Kite adapter (still `MockBroker`) -- only Delta Exchange
-got a real live-trading adapter. No options/derivatives data, no drawing
+A real Zerodha Kite session that's actually been logged into -- the
+adapter, endpoints, and UI flow are all real and built (see "Zerodha Kite
+adapter" above), but no Kite Connect developer subscription was available
+to complete one live end-to-end. No options/derivatives data, no drawing
 tools or multi-panel charting, no market-breadth indicators (no data source
 for OI/PCR yet), no strategy edit UI beyond create (the API supports
 versioning -- tested -- but the Strategy Builder page only wires up

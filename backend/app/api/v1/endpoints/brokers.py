@@ -8,13 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user, require_role
-from app.core.encryption import encrypt_payload
+from app.core.encryption import decrypt_payload, encrypt_payload
 from app.db.session import get_db
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.models.user import User
-from app.schemas.broker import BrokerAccountCreate, BrokerAccountOut, BrokerOut
+from app.schemas.broker import BrokerAccountCreate, BrokerAccountOut, BrokerOut, KiteCallbackIn, KiteLoginUrlOut
 from app.services.audit import write_audit_log
-from app.services.broker.registry import get_broker_adapter, is_real_adapter
+from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth
+from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 
 router = APIRouter()
 
@@ -81,20 +82,29 @@ async def connect_broker_account(
     db.add(connection)
     await db.flush()
 
-    adapter = get_broker_adapter(broker.code)
-    try:
-        authenticated = await adapter.authenticate(payload.credentials)
-        if authenticated:
-            await adapter.connect()
-            connection.status = ConnectionStatus.CONNECTED.value
-            connection.last_heartbeat_at = datetime.now(timezone.utc)
-            connection.last_error = None
-        else:
+    if requires_interactive_auth(broker.code):
+        # Can't finish authenticating yet -- api_key/api_secret are stored,
+        # but Kite Connect needs a real browser login before a
+        # request_token exists to exchange for an access_token. Left
+        # disconnected (not ERROR -- this isn't a failure) until the
+        # frontend completes /kite/login-url -> /kite/callback.
+        connection.status = ConnectionStatus.DISCONNECTED.value
+        connection.last_error = "Awaiting Zerodha login -- use 'Login with Zerodha' to finish connecting."
+    else:
+        adapter = get_broker_adapter(broker.code)
+        try:
+            authenticated = await adapter.authenticate(payload.credentials)
+            if authenticated:
+                await adapter.connect()
+                connection.status = ConnectionStatus.CONNECTED.value
+                connection.last_heartbeat_at = datetime.now(timezone.utc)
+                connection.last_error = None
+            else:
+                connection.status = ConnectionStatus.ERROR.value
+                connection.last_error = "Authentication rejected by broker"
+        except Exception as exc:  # adapter failures must surface as ERROR, never crash the request
             connection.status = ConnectionStatus.ERROR.value
-            connection.last_error = "Authentication rejected by broker"
-    except Exception as exc:  # adapter failures must surface as ERROR, never crash the request
-        connection.status = ConnectionStatus.ERROR.value
-        connection.last_error = str(exc)
+            connection.last_error = str(exc)
 
     await write_audit_log(
         db,
@@ -150,3 +160,79 @@ async def disconnect_broker_account(
     await db.commit()
     await db.refresh(account, attribute_names=["connection"])
     return _account_out(account)
+
+
+async def _get_owned_kite_account(db: AsyncSession, account_id: str, user: User) -> BrokerAccount:
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection), selectinload(BrokerAccount.credential))
+        .where(BrokerAccount.id == uuid.UUID(account_id), BrokerAccount.user_id == user.id)
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
+    if account.broker.code != "zerodha_kite":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This account is not a Zerodha Kite account")
+    if account.credential is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials stored for this account")
+    return account
+
+
+@router.get("/accounts/{account_id}/kite/login-url", response_model=KiteLoginUrlOut)
+async def kite_login_url(
+    account_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader"))
+) -> KiteLoginUrlOut:
+    account = await _get_owned_kite_account(db, account_id, user)
+    creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+    api_key = creds.get("api_key")
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No api_key stored for this account")
+    return KiteLoginUrlOut(login_url=ZerodhaKiteBroker.build_login_url(api_key))
+
+
+@router.post("/accounts/{account_id}/kite/callback", response_model=BrokerAccountOut)
+async def kite_callback(
+    account_id: str,
+    payload: KiteCallbackIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("administrator", "trader")),
+) -> BrokerAccountOut:
+    """Completes the interactive Zerodha login: exchanges the one-time
+    request_token Kite handed back after the user logged in for a session
+    access_token (a real POST /session/token call), then re-encrypts the
+    credentials to include it -- never stored as plaintext, same as every
+    other credential in this codebase."""
+    account = await _get_owned_kite_account(db, account_id, user)
+    creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+
+    adapter: ZerodhaKiteBroker = get_broker_adapter("zerodha_kite")  # type: ignore[assignment]
+    try:
+        await adapter.authenticate({**creds, "request_token": payload.request_token})
+        await adapter.connect()
+        creds["access_token"] = adapter.access_token
+        account.credential.encrypted_payload = encrypt_payload(json.dumps(creds))
+        if account.connection is None:
+            account.connection = BrokerConnection(broker_account_id=account.id)
+        account.connection.status = ConnectionStatus.CONNECTED.value
+        account.connection.last_heartbeat_at = datetime.now(timezone.utc)
+        account.connection.last_error = None
+    except Exception as exc:
+        if account.connection is None:
+            account.connection = BrokerConnection(broker_account_id=account.id)
+        account.connection.status = ConnectionStatus.ERROR.value
+        account.connection.last_error = str(exc)
+
+    await write_audit_log(
+        db, user_id=user.id, action="BROKER_CONNECTED", object_type="broker_account", object_id=str(account.id),
+        new_value={"broker_code": "zerodha_kite", "status": account.connection.status},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection))
+        .where(BrokerAccount.id == account.id)
+    )
+    return _account_out(result.scalar_one())

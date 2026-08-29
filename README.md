@@ -16,21 +16,23 @@ all verified-blocked, not just assumed), a real backtesting engine
 standard metric set, out-of-sample testing, Monte Carlo, grid-search
 optimization), a real risk engine + paper trading engine (every signal
 gated by cash/position/daily-loss checks, simulated execution on a live
-~10s loop), **real live trading**: a genuine Delta Exchange broker adapter
-(HMAC-SHA256 signing verified against their live API) that places real
-orders, gated by a server-enforced safety checklist, explicit confirmation,
-the same risk engine, order-placement confirmation via a follow-up status
-check (never trusting the initial response alone), and a global kill
-switch, and **monitoring, alerts, reports, and backups**: a real-time
-alert feed (order fills/rejections, stop/target triggers, kill-switch
-activation) with an unread-count bell in the topbar, a system monitor
-(live CPU/memory/disk via `psutil`, tick-engine and scheduler status, active
-deployment counts), a trade report (merged paper + live trade history,
-CSV export, summary stats) and database backup/restore (consistent
-SQLite snapshots via `sqlite3`'s own backup API; PostgreSQL points at
-`pg_dump`/`pg_restore` rather than faking a file-copy backup that isn't
-one). Zerodha Kite is still a mock — only Delta Exchange got a real
-adapter.
+~10s loop), **real live trading** on two real broker adapters: Delta
+Exchange (HMAC-SHA256 signing verified against their live API, including
+real order placement) and Zerodha Kite Connect (session-token auth via
+interactive login, form-encoded requests — every endpoint's request/error
+format confirmed live, full authenticated login not yet exercised for want
+of a developer subscription; see `ARCHITECTURE.md`) — both gated by a
+server-enforced safety checklist, explicit confirmation, the same risk
+engine, order-placement confirmation via a follow-up status check (never
+trusting the initial response alone), and a global kill switch. Also
+**monitoring, alerts, reports, and backups**: a real-time alert feed (order
+fills/rejections, stop/target triggers, kill-switch activation) with an
+unread-count bell in the topbar, a system monitor (live CPU/memory/disk via
+`psutil`, tick-engine and scheduler status, active deployment counts), a
+trade report (merged paper + live trade history, CSV export, summary
+stats) and database backup/restore (consistent SQLite snapshots via
+`sqlite3`'s own backup API; PostgreSQL points at `pg_dump`/`pg_restore`
+rather than faking a file-copy backup that isn't one).
 
 ## Prerequisites
 
@@ -48,6 +50,10 @@ adapter.
   IP to be whitelisted per API key (Delta Exchange > Account > API
   Management). Whitelist the IP the machine actually runs this backend
   from, or `authenticate()` fails with a clear "not whitelisted" error.
+- For live trading on Zerodha Kite: requires a paid Kite Connect developer
+  subscription (api_key/api_secret) and, unlike Delta, an interactive
+  browser login per session (Kite has no key/secret-only auth) — see
+  Settings > Brokers > "Login with Zerodha" once an account is connected.
 
 ## Backend
 

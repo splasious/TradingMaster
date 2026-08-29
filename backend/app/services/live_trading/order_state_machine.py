@@ -42,6 +42,29 @@ DELTA_STATE_MAP = {
     "cancelled": LiveOrderStatus.CANCELLED,
 }
 
+# Zerodha Kite Connect v3's documented order statuses (see
+# broker/zerodha_broker.py) -- written to their published API reference,
+# not verified against a live account (no Kite Connect subscription
+# available while building this).
+KITE_STATE_MAP = {
+    "PUT ORDER REQ RECEIVED": LiveOrderStatus.SUBMITTED,
+    "VALIDATION PENDING": LiveOrderStatus.SUBMITTED,
+    "OPEN PENDING": LiveOrderStatus.ACKNOWLEDGED,
+    "AMO REQ RECEIVED": LiveOrderStatus.ACKNOWLEDGED,
+    "MODIFY PENDING": LiveOrderStatus.OPEN,
+    "TRIGGER PENDING": LiveOrderStatus.OPEN,
+    "CANCEL PENDING": LiveOrderStatus.OPEN,
+    "OPEN": LiveOrderStatus.OPEN,
+    "COMPLETE": LiveOrderStatus.FILLED,
+    "CANCELLED": LiveOrderStatus.CANCELLED,
+    "REJECTED": LiveOrderStatus.REJECTED,
+}
+
+STATE_MAPS: dict[str, dict[str, LiveOrderStatus]] = {
+    "delta_exchange": DELTA_STATE_MAP,
+    "zerodha_kite": KITE_STATE_MAP,
+}
+
 TERMINAL_STATUSES = {LiveOrderStatus.FILLED, LiveOrderStatus.CANCELLED, LiveOrderStatus.REJECTED, LiveOrderStatus.EXPIRED}
 
 

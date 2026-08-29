@@ -480,3 +480,7 @@ export interface BackupOut {
   size_bytes: number;
   created_at: string;
 }
+
+export interface KiteLoginUrlOut {
+  login_url: string;
+}

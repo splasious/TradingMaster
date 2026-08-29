@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { LogIn } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -14,7 +15,9 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBrokerAccounts, useBrokers } from "@/lib/hooks";
-import type { BrokerAccountOut } from "@/lib/types";
+import type { BrokerAccountOut, KiteLoginUrlOut } from "@/lib/types";
+
+const PENDING_ACCOUNT_KEY = "tm_kite_pending_account_id";
 
 function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { data: brokers } = useBrokers();
@@ -83,7 +86,7 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">API key</label>
-          <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Mock broker: any value works" />
+          <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Kite Connect app api_key" />
         </div>
 
         <div className="space-y-1.5">
@@ -92,8 +95,9 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
         </div>
 
         <p className="text-xs text-text-muted">
-          Zerodha Kite uses a simulated adapter (no real orders, any credentials work). Delta Exchange uses a real adapter --
-          real API credentials are required and will be used for real authenticated calls.
+          Both brokers use real adapters -- real API credentials are required. Delta Exchange authenticates immediately.
+          Zerodha Kite needs one more step after this: an interactive browser login (Kite Connect doesn&apos;t support
+          key/secret-only auth) -- you&apos;ll get a &quot;Login with Zerodha&quot; button for the account once it&apos;s created.
         </p>
 
         {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
@@ -108,6 +112,22 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
         </div>
       </form>
     </Modal>
+  );
+}
+
+function LoginWithZerodhaButton({ accountId }: { accountId: string }) {
+  const loginMutation = useMutation({
+    mutationFn: () => apiFetch<KiteLoginUrlOut>(`/api/v1/brokers/accounts/${accountId}/kite/login-url`),
+    onSuccess: (data) => {
+      localStorage.setItem(PENDING_ACCOUNT_KEY, accountId);
+      window.open(data.login_url, "_blank", "noopener,noreferrer");
+    },
+  });
+
+  return (
+    <Button variant="secondary" size="sm" onClick={() => loginMutation.mutate()} disabled={loginMutation.isPending}>
+      <LogIn className="h-3.5 w-3.5" /> {loginMutation.isPending ? "Opening..." : "Login with Zerodha"}
+    </Button>
   );
 }
 
@@ -129,7 +149,10 @@ export default function BrokersSettingsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
-          <p className="text-sm text-text-muted">Zerodha Kite (simulated adapter) and Delta Exchange (real adapter, HMAC-signed against the live API).</p>
+          <p className="text-sm text-text-muted">
+            Zerodha Kite and Delta Exchange both use real adapters -- HMAC-signed for Delta, session-token auth via
+            interactive login for Kite.
+          </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
       </div>
@@ -167,14 +190,19 @@ export default function BrokersSettingsPage() {
                     </Td>
                     {canManage && (
                       <Td className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={account.connection_status === "disconnected" || disconnectMutation.isPending}
-                          onClick={() => disconnectMutation.mutate(account.id)}
-                        >
-                          Disconnect
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          {account.broker.code === "zerodha_kite" && account.connection_status !== "connected" && (
+                            <LoginWithZerodhaButton accountId={account.id} />
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={account.connection_status === "disconnected" || disconnectMutation.isPending}
+                            onClick={() => disconnectMutation.mutate(account.id)}
+                          >
+                            Disconnect
+                          </Button>
+                        </div>
                       </Td>
                     )}
                   </tr>
