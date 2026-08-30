@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +14,21 @@ class Settings(BaseSettings):
     #   postgresql+asyncpg://user:pass@localhost:5432/tradingmaster   (production/docker)
     #   sqlite+aiosqlite:///./tradingmaster.db                        (local dev without docker)
     database_url: str = "sqlite+aiosqlite:///./tradingmaster.db"
+
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_postgres_scheme(cls, value: str) -> str:
+        # Managed Postgres providers (Render, Heroku, etc.) hand back a plain
+        # postgres:// or postgresql:// connection string -- psycopg2's
+        # dialect, not SQLAlchemy's async one. create_async_engine() needs
+        # the +asyncpg driver explicitly or it fails outright, so this
+        # rewrites it once here rather than asking every deploy target to
+        # know that detail.
+        if value.startswith("postgres://"):
+            return "postgresql+asyncpg://" + value[len("postgres://") :]
+        if value.startswith("postgresql://") and "+asyncpg" not in value:
+            return "postgresql+asyncpg://" + value[len("postgresql://") :]
+        return value
 
     redis_url: str = "redis://localhost:6379/0"
 
