@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +12,56 @@ import { Table, Tbody, Td } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBackfillJob, useInstruments, useQuality } from "@/lib/hooks";
-import { TIMEFRAMES, type BackfillJobOut, type InstrumentOut } from "@/lib/types";
+import { TIMEFRAMES, type BackfillJobOut, type InstrumentOut, type InstrumentSyncResult } from "@/lib/types";
+
+function SyncSourceButton({ dataSource, label }: { dataSource: string; label: string }) {
+  const queryClient = useQueryClient();
+  const syncMutation = useMutation({
+    mutationFn: () => apiFetch<InstrumentSyncResult>(`/api/v1/instruments/sync/${dataSource}`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["instruments"] }),
+  });
+
+  return (
+    <div className="space-y-1.5">
+      <Button variant="secondary" size="sm" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
+        <RefreshCw className={`h-3.5 w-3.5 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+        {syncMutation.isPending ? "Syncing..." : label}
+      </Button>
+      {syncMutation.data && (
+        <p className="text-xs text-text-muted">
+          Found {syncMutation.data.found}, added <span className="font-financial text-positive">{syncMutation.data.created}</span> new,
+          skipped {syncMutation.data.skipped} (already tracked or inactive).
+        </p>
+      )}
+      {syncMutation.isError && (
+        <p className="text-xs text-negative">
+          {syncMutation.error instanceof ApiError ? syncMutation.error.message : "Sync failed"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SyncInstrumentCatalog() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Sync Instrument Catalog</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-text-muted">
+          Pulls the full tracked universe from each real data source into the instrument catalog above -- the
+          nse-yahoo-data service&apos;s ~750 NSE symbols, or Delta Exchange&apos;s live perpetual futures list. Safe to
+          run repeatedly -- already-tracked instruments are skipped, never duplicated.
+        </p>
+        <div className="flex flex-wrap gap-6">
+          <SyncSourceButton dataSource="yahoo_nse" label="Sync NSE Universe (Yahoo)" />
+          <SyncSourceButton dataSource="delta_exchange" label="Sync Delta Markets" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 function InstrumentPicker({
   selected,
@@ -159,6 +208,8 @@ export default function MarketDataPage() {
         <h1 className="text-xl font-semibold text-text-primary">Market Data Management</h1>
         <p className="text-sm text-text-muted">Backfill historical OHLCV and inspect data quality per instrument.</p>
       </div>
+
+      {hasRole("administrator") && <SyncInstrumentCatalog />}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <InstrumentPicker

@@ -16,6 +16,11 @@ frontend/out/
 frontend/.env.local
 frontend/tsconfig.tsbuildinfo
 
+# nse-yahoo-data: a separate standalone project (own repo), not part of
+# TradingMaster -- it just happens to live in this folder locally. Its
+# DB alone is ~250MB of real scraped data, never meant to be committed here.
+nse-yahoo-data/
+
 # OS
 .DS_Store
 Thumbs.db

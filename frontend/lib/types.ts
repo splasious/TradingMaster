@@ -484,3 +484,10 @@ export interface BackupOut {
 export interface KiteLoginUrlOut {
   login_url: string;
 }
+
+export interface InstrumentSyncResult {
+  data_source: string;
+  found: number;
+  created: number;
+  skipped: number;
+}
