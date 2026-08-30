@@ -13,7 +13,7 @@ import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { useChartCandles, useIndicator, useInstrument, useInstruments } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
-import type { InstrumentOut } from "@/lib/types";
+import { TIMEFRAMES, type InstrumentOut } from "@/lib/types";
 
 const OVERLAY_OPTIONS = [
   { code: "sma", field: "sma", label: "SMA 20", color: "#3b6bf5" },
@@ -139,7 +139,7 @@ export default function ChartsPage() {
           {resolvedSelected && (
             <div className="flex flex-wrap items-center gap-3">
               <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
-                {["1d", "1wk", "1mo"].map((tf) => (
+                {TIMEFRAMES.map((tf) => (
                   <option key={tf} value={tf}>
                     {tf}
                   </option>
