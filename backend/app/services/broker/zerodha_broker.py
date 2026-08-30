@@ -45,12 +45,25 @@ table, the same mechanism every broker in this codebase uses.
 import csv
 import hashlib
 import io
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
 from app.services.broker.base import BrokerInterface
+
+# Kite Connect v3's documented historical-candle interval vocabulary --
+# distinct from this codebase's internal "1m"/"5m"/... timeframe strings,
+# and missing a native 1wk/1mo the same way Delta's own resolution map is
+# missing them (see delta_source.py's _RESOLUTION_MAP).
+KITE_INTERVAL_MAP = {
+    "1m": "minute",
+    "5m": "5minute",
+    "15m": "15minute",
+    "30m": "30minute",
+    "60m": "60minute",
+    "1d": "day",
+}
 
 
 class KiteAPIError(Exception):
@@ -215,14 +228,38 @@ class ZerodhaKiteBroker(BrokerInterface):
         return list(csv.DictReader(io.StringIO(resp.text)))
 
     async def get_historical_data(
-        self, symbol: str, timeframe: str, start: datetime, end: datetime
+        self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None
     ) -> list[dict[str, Any]]:
-        # Historical candles are served through the nse-yahoo-data-backed
-        # source (services/market_data/, real EOD history), not through
-        # this adapter -- Kite's historical endpoint needs a numeric
-        # instrument_token looked up from get_instruments() first, and
-        # duplicating a second real NSE history source isn't worth it.
-        raise NotImplementedError("Use the nse_yahoo market data source for historical NSE data")
+        """Real Kite historical candles (GET /instruments/historical/{token}/{interval}),
+        for the Data Backfill Platform's Zerodha block -- kept separate from
+        the yahoo_nse source's own NSE history (that PRD's own non-goal:
+        no cross-source merging, each source's data is independent, not a
+        second copy of the same series). Needs a numeric instrument_token,
+        looked up from get_instruments()'s CSV dump since Kite's historical
+        endpoint doesn't accept a plain tradingsymbol."""
+        interval = KITE_INTERVAL_MAP.get(timeframe)
+        if interval is None:
+            raise KiteAPIError(f"Zerodha Kite does not support timeframe '{timeframe}' via this adapter (supported: {sorted(KITE_INTERVAL_MAP)})")
+
+        instruments = await self.get_instruments()
+        match = next((row for row in instruments if row.get("tradingsymbol") == symbol), None)
+        if match is None:
+            raise KiteAPIError(f"'{symbol}' not found in Kite's NSE instrument list")
+        token = match["instrument_token"]
+
+        end = end or datetime.now(timezone.utc)
+        start = start or (end - timedelta(days=60 if interval != "day" else 2000))
+        params = {"from": start.strftime("%Y-%m-%d %H:%M:%S"), "to": end.strftime("%Y-%m-%d %H:%M:%S")}
+        data = await self._request("GET", f"/instruments/historical/{token}/{interval}", params=params)
+        candles = data.get("candles", []) if data else []
+
+        bars: list[dict[str, Any]] = []
+        for row in candles:
+            ts = datetime.fromisoformat(row[0])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            bars.append({"ts": ts, "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5] if len(row) > 5 else None})
+        return bars
 
     async def subscribe_market_data(self, symbols: list[str]) -> None:
         # Kite has a real WebSocket ticker (kite.trade/docs/connect/v3/websocket/)

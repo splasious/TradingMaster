@@ -4,10 +4,14 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { JobHistoryPanel } from "@/components/backfill-platform/job-history";
+import { SourceBlock } from "@/components/backfill-platform/source-block";
+import { WatchlistsPanel } from "@/components/backfill-platform/watchlists-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, Tbody, Td } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -206,66 +210,97 @@ export default function MarketDataPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-text-primary">Market Data Management</h1>
-        <p className="text-sm text-text-muted">Backfill historical OHLCV and inspect data quality per instrument.</p>
+        <p className="text-sm text-text-muted">
+          Backfill historical data, build watchlists, and check data completeness -- isolated per source.
+        </p>
       </div>
 
-      {hasRole("administrator") && <SyncInstrumentCatalog />}
+      <Tabs defaultValue="backfill-platform">
+        <TabsList>
+          <TabsTrigger value="backfill-platform">Data Backfill Platform</TabsTrigger>
+          <TabsTrigger value="instrument-catalog">Instrument Catalog (Strategies)</TabsTrigger>
+        </TabsList>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <InstrumentPicker
-          selected={selected}
-          onSelect={(i) => {
-            setSelected(i);
-            setActiveJobId(null);
-          }}
-        />
+        <TabsContent value="backfill-platform">
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <SourceBlock source="yahoo" />
+              <SourceBlock source="delta" />
+              <SourceBlock source="zerodha" />
+            </div>
+            <WatchlistsPanel />
+            <JobHistoryPanel />
+          </div>
+        </TabsContent>
 
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>{selected ? `${selected.symbol} -- ${selected.name}` : "Select an instrument"}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {selected ? (
-              <>
-                <div className="flex items-end gap-3">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-medium text-text-secondary">Timeframe</label>
-                    <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-32">
-                      {TIMEFRAMES.map((tf) => (
-                        <option key={tf} value={tf}>
-                          {tf}
-                        </option>
-                      ))}
-                    </Select>
-                  </div>
-                  {canManage && (
-                    <Button
-                      onClick={() => backfillMutation.mutate()}
-                      disabled={backfillMutation.isPending || job?.status === "pending" || job?.status === "running"}
-                    >
-                      Run Backfill
-                    </Button>
+        <TabsContent value="instrument-catalog">
+          <div className="space-y-6">
+            <p className="text-sm text-text-muted">
+              This is the shared instrument catalog strategies, backtesting, and paper/live trading actually read
+              from -- separate from the Data Backfill Platform above, which tracks its own independent copy per
+              source (deliberately not merged, per that module&apos;s own spec).
+            </p>
+
+            {hasRole("administrator") && <SyncInstrumentCatalog />}
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <InstrumentPicker
+                selected={selected}
+                onSelect={(i) => {
+                  setSelected(i);
+                  setActiveJobId(null);
+                }}
+              />
+
+              <Card className="lg:col-span-2">
+                <CardHeader>
+                  <CardTitle>{selected ? `${selected.symbol} -- ${selected.name}` : "Select an instrument"}</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  {selected ? (
+                    <>
+                      <div className="flex items-end gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-medium text-text-secondary">Timeframe</label>
+                          <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-32">
+                            {TIMEFRAMES.map((tf) => (
+                              <option key={tf} value={tf}>
+                                {tf}
+                              </option>
+                            ))}
+                          </Select>
+                        </div>
+                        {canManage && (
+                          <Button
+                            onClick={() => backfillMutation.mutate()}
+                            disabled={backfillMutation.isPending || job?.status === "pending" || job?.status === "running"}
+                          >
+                            Run Backfill
+                          </Button>
+                        )}
+                      </div>
+
+                      {backfillMutation.error && (
+                        <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                          {backfillMutation.error instanceof ApiError ? backfillMutation.error.message : "Backfill failed to start"}
+                        </div>
+                      )}
+
+                      {job && <BackfillJobStatus job={job} />}
+
+                      <div className="border-t border-border pt-4">
+                        <QualityPanel instrumentId={selected.id} timeframe={timeframe} />
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-sm text-text-muted">Pick an instrument from the list to manage its historical data.</p>
                   )}
-                </div>
-
-                {backfillMutation.error && (
-                  <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-                    {backfillMutation.error instanceof ApiError ? backfillMutation.error.message : "Backfill failed to start"}
-                  </div>
-                )}
-
-                {job && <BackfillJobStatus job={job} />}
-
-                <div className="border-t border-border pt-4">
-                  <QualityPanel instrumentId={selected.id} timeframe={timeframe} />
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-text-muted">Pick an instrument from the list to manage its historical data.</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

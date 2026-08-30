@@ -491,3 +491,72 @@ export interface InstrumentSyncResult {
   created: number;
   skipped: number;
 }
+
+export type BfSource = "yahoo" | "delta" | "zerodha";
+
+export interface SourceStatusOut {
+  source: BfSource;
+  connected: boolean;
+  detail: string;
+  expires_at: string | null;
+}
+
+export interface SymbolSearchResultOut {
+  symbol: string;
+  display_name: string;
+}
+
+export interface BfBackfillJobOut {
+  id: string;
+  symbol_id: string;
+  symbol: string;
+  display_name: string;
+  source: BfSource;
+  timeframe: string;
+  start_date: string | null;
+  end_date: string | null;
+  status: "pending" | "running" | "completed" | "failed";
+  downloaded_count: number;
+  inserted_count: number;
+  duplicate_count: number;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface CompletenessSegmentOut {
+  start: string;
+  end: string;
+  status: "filled" | "gap";
+}
+
+export interface CompletenessOut {
+  segments: CompletenessSegmentOut[];
+}
+
+export interface BfWatchlistOut {
+  id: string;
+  name: string;
+  tags: string[];
+  symbol_count: number;
+  never_backfilled_count: number;
+  last_backfill_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BfWatchlistItemOut {
+  id: string;
+  symbol_id: string;
+  source: BfSource;
+  symbol: string;
+  display_name: string;
+  bar_count: number;
+  last_job_status: string | null;
+}
+
+export interface WatchlistImportResult {
+  added: number;
+  skipped: number;
+}

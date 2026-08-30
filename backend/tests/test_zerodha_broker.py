@@ -175,12 +175,55 @@ async def test_request_without_credentials_raises():
         await broker.get_positions()
 
 
-async def test_get_historical_data_not_implemented_directs_to_data_source():
-    broker = ZerodhaKiteBroker()
-    with pytest.raises(NotImplementedError):
-        from datetime import datetime, timezone
+async def test_get_historical_data_looks_up_token_and_parses_candles(monkeypatch):
+    csv_body = "instrument_token,tradingsymbol,name,exchange\n408065,INFY,INFOSYS,NSE\n"
 
-        await broker.get_historical_data("INFY", "1d", datetime.now(timezone.utc), datetime.now(timezone.utc))
+    async def fake_get(self, url, headers=None):
+        return httpx.Response(200, content=csv_body.encode(), request=httpx.Request("GET", url))
+
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        assert url == "https://api.kite.trade/instruments/historical/408065/day"
+        assert "from" in params and "to" in params
+        return _mock_response(200, {"status": "success", "data": {"candles": [
+            ["2024-01-01T00:00:00+0530", 100.0, 105.0, 99.0, 103.0, 10000],
+        ]}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    from datetime import datetime, timezone
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    bars = await broker.get_historical_data("INFY", "1d", datetime.now(timezone.utc), datetime.now(timezone.utc))
+    assert len(bars) == 1
+    assert bars[0]["open"] == 100.0
+    assert bars[0]["volume"] == 10000
+
+
+async def test_get_historical_data_rejects_unsupported_timeframe():
+    from datetime import datetime, timezone
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    with pytest.raises(KiteAPIError, match="does not support timeframe"):
+        await broker.get_historical_data("INFY", "1wk", datetime.now(timezone.utc), datetime.now(timezone.utc))
+
+
+async def test_get_historical_data_raises_for_unknown_symbol(monkeypatch):
+    csv_body = "instrument_token,tradingsymbol,name,exchange\n408065,INFY,INFOSYS,NSE\n"
+
+    async def fake_get(self, url, headers=None):
+        return httpx.Response(200, content=csv_body.encode(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    from datetime import datetime, timezone
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    with pytest.raises(KiteAPIError, match="not found"):
+        await broker.get_historical_data("NOTAREALSYMBOL", "1d", datetime.now(timezone.utc), datetime.now(timezone.utc))
 
 
 async def test_get_instruments_parses_csv_response(monkeypatch):

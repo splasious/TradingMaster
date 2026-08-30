@@ -506,6 +506,44 @@ Delta's actual error message) instead of defaulting to an untested
 CONNECTING. Idempotent -- running seed again detects the existing account
 and skips.
 
+## Data Backfill Platform (separate PRD: "TradingMaster - Data Backfill Platform")
+
+A second, deliberately isolated schema (`bf_symbols`, `bf_ohlcv_bars`,
+`bf_backfill_jobs`, `bf_watchlists`, `bf_watchlist_items`) living inside
+the same app but never joined to `instruments`/`ohlcv_candles` -- that
+PRD's own non-goal is explicit ("no cross-source data merging... each
+source's data stays in its own schema"). Reusing the shared instrument
+catalog would have meant two sources silently fighting over the same
+(instrument, timeframe, timestamp) row, since `ohlcv_candles`' uniqueness
+constraint isn't source-aware; two fully separate tables sidestep that
+instead of patching around it.
+
+Reachable from Market Data Management's "Data Backfill Platform" tab
+(the original per-instrument backfill+quality panel, which strategies and
+backtesting actually read from, moved to an adjacent "Instrument Catalog"
+tab, unchanged). Three source blocks (Yahoo, Delta, Zerodha), each with
+real connection status, symbol search scoped to that source, date-range
+backfill, and a real per-day completeness heatmap (weekend-aware for
+equities, not for crypto, not exchange-holiday-aware -- same documented
+heuristic as the main platform's quality panel). Watchlists support
+CSV import/export and bulk backfill. Excel export (single symbol, a full
+watchlist as one workbook with one sheet per symbol, or everything) via
+`openpyxl`, always with a summary sheet first.
+
+**Zerodha's historical backfill is newly real here** -- `zerodha_broker.py`'s
+`get_historical_data()` previously raised `NotImplementedError` (Phase 7
+deferred it, pointing at Yahoo instead); this PRD asked for a real,
+working Kite block, so it now does a live instrument-token lookup against
+Kite's CSV dump and calls their real historical-candles endpoint. Still
+subject to the same caveat as the rest of the Kite adapter: verified
+against Kite's live API with placeholder credentials (real request/error
+shapes confirmed), not with an actual authenticated session end-to-end.
+
+Delta's block shows "no API key required" honestly rather than the PRD's
+assumed auth requirement -- its historical-candle endpoint is genuinely
+public (verified live in Phase 7), so pretending otherwise would be
+worse than diverging from the spec.
+
 ## What's deliberately not here yet
 
 A real Zerodha Kite session that's actually been logged into -- the

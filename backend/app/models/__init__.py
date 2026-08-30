@@ -1,5 +1,6 @@
 from app.models.alert import Alert
 from app.models.audit import AuditLog
+from app.models.backfill_platform import BfBackfillJob, BfOhlcvBar, BfSymbol, BfWatchlist, BfWatchlistItem
 from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, OptimizationJob, OptimizationResult
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
@@ -14,6 +15,11 @@ from app.models.user import Role, User, UserRole
 __all__ = [
     "Alert",
     "AuditLog",
+    "BfBackfillJob",
+    "BfOhlcvBar",
+    "BfSymbol",
+    "BfWatchlist",
+    "BfWatchlistItem",
     "BackfillJob",
     "BacktestJob",
     "BacktestResult",

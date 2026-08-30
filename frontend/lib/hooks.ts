@@ -9,9 +9,14 @@ import type {
   BacktestJobOut,
   BacktestResultOut,
   BacktestTradeOut,
+  BfBackfillJobOut,
+  BfSource,
+  BfWatchlistItemOut,
+  BfWatchlistOut,
   BrokerAccountOut,
   BrokerOut,
   CandleOut,
+  CompletenessOut,
   IndicatorPoint,
   IndicatorSpecOut,
   InstrumentOut,
@@ -27,6 +32,7 @@ import type {
   QualityReportOut,
   ReportSummaryOut,
   SafetyCheckOut,
+  SourceStatusOut,
   StrategyOut,
   SystemHealth,
   SystemMonitorOut,
@@ -311,5 +317,48 @@ export function useBackups() {
   return useQuery({
     queryKey: ["backups"],
     queryFn: () => apiFetch<BackupOut[]>("/api/v1/backup"),
+  });
+}
+
+export function useBfSourceStatus(source: BfSource) {
+  return useQuery({
+    queryKey: ["bf-source-status", source],
+    queryFn: () => apiFetch<SourceStatusOut>(`/api/v1/backfill-platform/sources/${source}/status`),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useBfJobs(source?: BfSource) {
+  const params = source ? `?source=${source}` : "";
+  return useQuery({
+    queryKey: ["bf-jobs", source ?? "all"],
+    queryFn: () => apiFetch<BfBackfillJobOut[]>(`/api/v1/backfill-platform/jobs${params}`),
+    refetchInterval: (query) => (query.state.data?.some((j) => j.status === "pending" || j.status === "running") ? 2000 : 10_000),
+  });
+}
+
+export function useBfCompleteness(source: BfSource, symbol: string | null, timeframe: string, start: string, end: string) {
+  return useQuery({
+    queryKey: ["bf-completeness", source, symbol, timeframe, start, end],
+    queryFn: () =>
+      apiFetch<CompletenessOut>(
+        `/api/v1/backfill-platform/completeness?source=${source}&symbol=${encodeURIComponent(symbol!)}&timeframe=${timeframe}&start=${start}&end=${end}`,
+      ),
+    enabled: !!symbol,
+  });
+}
+
+export function useBfWatchlists() {
+  return useQuery({
+    queryKey: ["bf-watchlists"],
+    queryFn: () => apiFetch<BfWatchlistOut[]>("/api/v1/backfill-platform/watchlists"),
+  });
+}
+
+export function useBfWatchlistItems(watchlistId: string | null) {
+  return useQuery({
+    queryKey: ["bf-watchlist-items", watchlistId],
+    queryFn: () => apiFetch<BfWatchlistItemOut[]>(`/api/v1/backfill-platform/watchlists/${watchlistId}/items`),
+    enabled: !!watchlistId,
   });
 }
