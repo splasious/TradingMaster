@@ -33,7 +33,9 @@ from app.schemas.backfill_platform import (
     SourceStatusOut,
     SymbolSearchResultOut,
     TimeframeOptionOut,
+    CatalogSyncItemOut,
     WatchlistBulkAddResult,
+    WatchlistCatalogSyncResult,
     WatchlistImportResult,
     WatchlistItemAdd,
     WatchlistItemBulkAdd,
@@ -42,6 +44,7 @@ from app.services.audit import write_audit_log
 from app.services.backfill_platform import export as export_service
 from app.services.backfill_platform import status as status_service
 from app.services.backfill_platform import symbols as symbols_service
+from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_symbol_to_catalog
 from app.services.backfill_platform.completeness import compute_completeness
 from app.services.backfill_platform.jobs import run_bf_backfill_job
 from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
@@ -444,6 +447,44 @@ async def bulk_add_watchlist_items(
 
     await db.commit()
     return WatchlistBulkAddResult(added=added, skipped=skipped)
+
+
+@router.post("/watchlists/{watchlist_id}/sync-to-catalog", response_model=WatchlistCatalogSyncResult)
+async def sync_watchlist_to_catalog(
+    watchlist_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> WatchlistCatalogSyncResult:
+    """Copies this watchlist's real backfilled bars from the isolated bf_*
+    schema into the main Instrument/OhlcvCandle schema, so the symbols
+    become usable in Charts, Strategy Builder, Backtesting, and
+    Optimization -- an explicit, user-triggered action, never automatic."""
+    wl = await _load_owned_watchlist(db, watchlist_id, user)
+    items = (await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id))).scalars().all()
+
+    results: list[CatalogSyncItemOut] = []
+    for item in items:
+        symbol = await db.get(BfSymbol, item.symbol_id)
+        if symbol is None:
+            continue
+        try:
+            sync_result = await sync_symbol_to_catalog(db, symbol)
+        except CatalogSyncError as exc:
+            results.append(CatalogSyncItemOut(
+                symbol=symbol.symbol, instrument_id=None, instrument_created=False,
+                bars_synced=0, bars_skipped=0, error=str(exc),
+            ))
+            continue
+        results.append(CatalogSyncItemOut(
+            symbol=sync_result.symbol, instrument_id=sync_result.instrument_id,
+            instrument_created=sync_result.instrument_created,
+            bars_synced=sync_result.bars_synced, bars_skipped=sync_result.bars_skipped,
+        ))
+
+    await write_audit_log(
+        db, user_id=user.id, action="BF_WATCHLIST_SYNCED_TO_CATALOG", object_type="bf_watchlist", object_id=str(wl.id),
+        new_value={"synced_bars": sum(r.bars_synced for r in results), "instruments_created": sum(1 for r in results if r.instrument_created)},
+    )
+    await db.commit()
+    return WatchlistCatalogSyncResult(items=results)
 
 
 @router.delete("/watchlists/{watchlist_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

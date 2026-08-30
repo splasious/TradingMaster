@@ -105,6 +105,19 @@ class WatchlistImportResult(BaseModel):
     skipped: int
 
 
+class CatalogSyncItemOut(BaseModel):
+    symbol: str
+    instrument_id: str | None
+    instrument_created: bool
+    bars_synced: int
+    bars_skipped: int
+    error: str | None = None
+
+
+class WatchlistCatalogSyncResult(BaseModel):
+    items: list[CatalogSyncItemOut]
+
+
 class TimeframeOptionOut(BaseModel):
     value: str
     native: bool

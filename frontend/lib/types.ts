@@ -573,6 +573,19 @@ export interface WatchlistBulkAddResult {
   skipped: number;
 }
 
+export interface CatalogSyncItemOut {
+  symbol: string;
+  instrument_id: string | null;
+  instrument_created: boolean;
+  bars_synced: number;
+  bars_skipped: number;
+  error: string | null;
+}
+
+export interface WatchlistCatalogSyncResult {
+  items: CatalogSyncItemOut[];
+}
+
 export interface TimeframeOptionOut {
   value: string;
   native: boolean;

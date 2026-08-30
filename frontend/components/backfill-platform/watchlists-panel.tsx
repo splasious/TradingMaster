@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError, getAccessToken } from "@/lib/api";
 import { useBfWatchlistItems, useBfWatchlists } from "@/lib/hooks";
-import type { BfSource, BfWatchlistOut, InstrumentOut, WatchlistBulkAddResult } from "@/lib/types";
+import type { BfSource, BfWatchlistOut, InstrumentOut, WatchlistBulkAddResult, WatchlistCatalogSyncResult } from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
   yahoo_nse: "yahoo",
@@ -60,6 +60,14 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
     },
   });
 
+  const syncToCatalogMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<WatchlistCatalogSyncResult>(`/api/v1/backfill-platform/watchlists/${watchlist.id}/sync-to-catalog`, { method: "POST" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instruments"] });
+    },
+  });
+
   const importMutation = useMutation({
     mutationFn: async (file: File) => {
       const formData = new FormData();
@@ -94,6 +102,14 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
           <Button size="sm" variant="secondary" onClick={() => bulkBackfillMutation.mutate()} disabled={bulkBackfillMutation.isPending || !items?.length}>
             {bulkBackfillMutation.isPending ? "Starting..." : "Backfill All (1d)"}
           </Button>
+          <Button
+            size="sm" variant="secondary"
+            onClick={() => syncToCatalogMutation.mutate()}
+            disabled={syncToCatalogMutation.isPending || !items?.length}
+            title="Copies this watchlist's backfilled bars into the main catalog so they show up in Charts, Strategy Builder, Backtesting, and Optimization"
+          >
+            {syncToCatalogMutation.isPending ? "Syncing..." : "Sync to Charts / Strategies"}
+          </Button>
           <Button size="sm" variant="secondary" onClick={() => apiDownload(`/api/v1/backfill-platform/watchlists/${watchlist.id}/export.csv`, `${watchlist.name}.csv`)}>
             <Download className="h-3.5 w-3.5" /> Export CSV
           </Button>
@@ -107,6 +123,18 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
         </div>
         {importMutation.data && (
           <p className="text-xs text-text-muted">Imported: {importMutation.data.added} added, {importMutation.data.skipped} skipped.</p>
+        )}
+        {syncToCatalogMutation.data && (
+          <p className="text-xs text-positive">
+            Synced {syncToCatalogMutation.data.items.reduce((n, i) => n + i.bars_synced, 0)} bars across{" "}
+            {syncToCatalogMutation.data.items.filter((i) => i.bars_synced > 0 || i.instrument_created).length} symbol(s) into the main catalog
+            {syncToCatalogMutation.data.items.some((i) => i.error) && (
+              <span className="text-negative">
+                {" "}-- {syncToCatalogMutation.data.items.filter((i) => i.error).length} skipped (no catalog mapping for that source)
+              </span>
+            )}
+            .
+          </p>
         )}
 
         <div>
