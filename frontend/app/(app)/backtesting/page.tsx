@@ -1,18 +1,52 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
+import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
-import { Badge } from "@/components/ui/badge";
+import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
+import { WatchlistLoader } from "@/components/market-data/watchlist-loader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useBacktestJob, useBacktestResult, useBacktestTrades, useInstruments, useStrategies } from "@/lib/hooks";
+import { useBacktestJob, useBacktestResult, useBacktestTrades, useStrategies } from "@/lib/hooks";
 import type { BacktestJobOut, BacktestMetrics, InstrumentOut, StrategyOut } from "@/lib/types";
+
+interface QueuedBacktest {
+  instrument: InstrumentOut;
+  jobId: string | null;
+  error: string | null;
+}
+
+function BacktestJobRow({ queued, isFocused, onSelect }: { queued: QueuedBacktest; isFocused: boolean; onSelect: () => void }) {
+  const { data: job } = useBacktestJob(queued.jobId);
+  const status = queued.error ? "failed" : (job?.status ?? "pending");
+
+  return (
+    <button
+      onClick={onSelect}
+      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm ${
+        isFocused ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
+      }`}
+    >
+      <span className="font-medium">{queued.instrument.symbol}</span>
+      <span className="flex items-center gap-1.5 text-xs">
+        {status === "running" || status === "pending" ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-active" />
+        ) : status === "completed" ? (
+          <CheckCircle2 className="h-3.5 w-3.5 text-positive" />
+        ) : (
+          <XCircle className="h-3.5 w-3.5 text-negative" />
+        )}
+        <span className="capitalize">{status}</span>
+      </span>
+    </button>
+  );
+}
 
 function KpiTile({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "positive" | "negative" | "neutral" }) {
   const toneClass = tone === "positive" ? "text-positive" : tone === "negative" ? "text-negative" : "text-text-primary";
@@ -99,9 +133,7 @@ function MetricsGrid({ metrics, title }: { metrics: BacktestMetrics; title: stri
 export default function BacktestingPage() {
   const { data: strategies } = useStrategies();
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
-  const [instrumentQuery, setInstrumentQuery] = useState("");
-  const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
-  const { data: instrumentResults } = useInstruments(instrumentQuery);
+  const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
 
   const [initialCapital, setInitialCapital] = useState(100000);
   const [brokeragePct, setBrokeragePct] = useState(0.03);
@@ -111,29 +143,44 @@ export default function BacktestingPage() {
   const [oosSplit, setOosSplit] = useState(70);
   const [monteCarlo, setMonteCarlo] = useState(false);
 
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const { data: job } = useBacktestJob(activeJobId);
+  const [queuedJobs, setQueuedJobs] = useState<QueuedBacktest[]>([]);
+  const [focusedJobId, setFocusedJobId] = useState<string | null>(null);
+
+  const { data: job } = useBacktestJob(focusedJobId);
   const completed = job?.status === "completed";
-  const { data: result } = useBacktestResult(activeJobId, completed);
-  const { data: trades } = useBacktestTrades(activeJobId, completed);
+  const { data: result } = useBacktestResult(focusedJobId, completed);
+  const { data: trades } = useBacktestTrades(focusedJobId, completed);
 
   const runMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<BacktestJobOut>("/api/v1/backtests", {
-        method: "POST",
-        body: JSON.stringify({
-          strategy_id: strategy!.id,
-          instrument_id: instrument!.id,
-          timeframe: "1d",
-          initial_capital: initialCapital,
-          brokerage_pct: brokeragePct,
-          slippage_pct: slippagePct,
-          tax_pct: taxPct,
-          out_of_sample_split_pct: oosEnabled ? oosSplit : null,
-          run_monte_carlo: monteCarlo,
-        }),
-      }),
-    onSuccess: (data) => setActiveJobId(data.id),
+    mutationFn: async () => {
+      const settled = await Promise.allSettled(
+        instruments.map((instrument) =>
+          apiFetch<BacktestJobOut>("/api/v1/backtests", {
+            method: "POST",
+            body: JSON.stringify({
+              strategy_id: strategy!.id,
+              instrument_id: instrument.id,
+              timeframe: "1d",
+              initial_capital: initialCapital,
+              brokerage_pct: brokeragePct,
+              slippage_pct: slippagePct,
+              tax_pct: taxPct,
+              out_of_sample_split_pct: oosEnabled ? oosSplit : null,
+              run_monte_carlo: monteCarlo,
+            }),
+          }).then((job) => ({ instrument, job })),
+        ),
+      );
+      return settled.map((outcome, i): QueuedBacktest =>
+        outcome.status === "fulfilled"
+          ? { instrument: outcome.value.instrument, jobId: outcome.value.job.id, error: null }
+          : { instrument: instruments[i], jobId: null, error: outcome.reason instanceof ApiError ? outcome.reason.message : "Failed to start" },
+      );
+    },
+    onSuccess: (results) => {
+      setQueuedJobs(results);
+      setFocusedJobId(results.find((r) => r.jobId)?.jobId ?? null);
+    },
   });
 
   return (
@@ -168,25 +215,18 @@ export default function BacktestingPage() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-text-secondary">Instrument</label>
-              <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-              {instrumentQuery && instrumentResults && (
-                <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-                  {instrumentResults.map((i) => (
-                    <button
-                      key={i.id}
-                      onClick={() => {
-                        setInstrument(i);
-                        setInstrumentQuery("");
-                      }}
-                      className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                    >
-                      {i.symbol} ({i.exchange})
-                    </button>
-                  ))}
-                </div>
+              <label className="text-sm font-medium text-text-secondary">Instruments</label>
+              <WatchlistLoader onLoad={(loaded) => setInstruments((prev) => {
+                const merged = new Map(prev.map((i) => [i.id, i] as const));
+                for (const i of loaded) merged.set(i.id, i);
+                return [...merged.values()];
+              })} />
+              <InstrumentMultiSelect value={instruments} onChange={setInstruments} />
+              {instruments.length > 0 && (
+                <p className="text-xs text-text-muted">
+                  {instruments.length} instrument{instruments.length === 1 ? "" : "s"} selected -- one backtest job runs per instrument.
+                </p>
               )}
-              {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
             </div>
           </div>
 
@@ -223,22 +263,43 @@ export default function BacktestingPage() {
             </label>
           </div>
 
-          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instrument || runMutation.isPending}>
-            {runMutation.isPending ? "Starting..." : "Run Backtest"}
+          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
+            {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Backtests` : "Run Backtest"}
           </Button>
 
-          {runMutation.error && (
-            <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-              {runMutation.error instanceof ApiError ? runMutation.error.message : "Failed to start backtest"}
+          {queuedJobs.some((q) => q.error) && (
+            <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+              {queuedJobs.filter((q) => q.error).map((q) => (
+                <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
+              ))}
             </div>
           )}
         </CardContent>
       </Card>
 
+      {queuedJobs.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Queued Backtests ({queuedJobs.length})</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {queuedJobs.map((q) => (
+              <BacktestJobRow
+                key={q.instrument.id}
+                queued={q}
+                isFocused={q.jobId === focusedJobId}
+                onSelect={() => q.jobId && setFocusedJobId(q.jobId)}
+              />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {job && (
         <Card>
           <CardHeader>
             <CardTitle>
+              {queuedJobs.length > 1 && `${queuedJobs.find((q) => q.jobId === focusedJobId)?.instrument.symbol} -- `}
               Status: <span className="capitalize">{job.status}</span>
             </CardTitle>
           </CardHeader>

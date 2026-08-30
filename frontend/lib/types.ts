@@ -562,6 +562,17 @@ export interface WatchlistImportResult {
   skipped: number;
 }
 
+export interface WatchlistItemAdd {
+  source: BfSource;
+  symbol: string;
+  display_name: string;
+}
+
+export interface WatchlistBulkAddResult {
+  added: number;
+  skipped: number;
+}
+
 export interface TimeframeOptionOut {
   value: string;
   native: boolean;

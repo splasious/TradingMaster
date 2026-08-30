@@ -85,6 +85,15 @@ class WatchlistItemAdd(BaseModel):
     display_name: str
 
 
+class WatchlistItemBulkAdd(BaseModel):
+    items: list[WatchlistItemAdd]
+
+
+class WatchlistBulkAddResult(BaseModel):
+    added: int
+    skipped: int
+
+
 class WatchlistImportRow(BaseModel):
     source: str
     symbol: str

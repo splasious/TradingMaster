@@ -1,50 +1,95 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
-import { Plus, Trash2 } from "lucide-react";
+import { CheckCircle2, Loader2, Plus, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
+import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
+import { WatchlistLoader } from "@/components/market-data/watchlist-loader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useInstruments, useOptimizationJob, useOptimizationResult, useStrategies } from "@/lib/hooks";
+import { useOptimizationJob, useOptimizationResult, useStrategies } from "@/lib/hooks";
 import type { InstrumentOut, OptimizationJobOut, ParamRangeIn, StrategyOut } from "@/lib/types";
 
 const RANK_METRICS = ["net_profit", "sharpe_ratio", "profit_factor", "cagr_pct", "win_rate_pct"];
+
+interface QueuedOptimization {
+  instrument: InstrumentOut;
+  jobId: string | null;
+  error: string | null;
+}
+
+function OptimizationJobRow({ queued, isFocused, onSelect }: { queued: QueuedOptimization; isFocused: boolean; onSelect: () => void }) {
+  const { data: job } = useOptimizationJob(queued.jobId);
+  const status = queued.error ? "failed" : (job?.status ?? "pending");
+
+  return (
+    <button
+      onClick={onSelect}
+      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm ${
+        isFocused ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
+      }`}
+    >
+      <span className="font-medium">{queued.instrument.symbol}</span>
+      <span className="flex items-center gap-1.5 text-xs">
+        {status === "running" || status === "pending" ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-active" />
+        ) : status === "completed" ? (
+          <CheckCircle2 className="h-3.5 w-3.5 text-positive" />
+        ) : (
+          <XCircle className="h-3.5 w-3.5 text-negative" />
+        )}
+        <span className="capitalize">{status}</span>
+      </span>
+    </button>
+  );
+}
 
 export default function OptimizationPage() {
   const { data: strategies } = useStrategies();
   const pythonStrategies = strategies?.filter((s) => s.code_type === "python");
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
 
-  const [instrumentQuery, setInstrumentQuery] = useState("");
-  const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
-  const { data: instrumentResults } = useInstruments(instrumentQuery);
+  const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
 
   const [ranges, setRanges] = useState<ParamRangeIn[]>([{ name: "threshold", min: 0, max: 10, step: 5 }]);
   const [rankMetric, setRankMetric] = useState("sharpe_ratio");
 
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const { data: job } = useOptimizationJob(activeJobId);
-  const { data: result } = useOptimizationResult(activeJobId, job?.status === "completed");
+  const [queuedJobs, setQueuedJobs] = useState<QueuedOptimization[]>([]);
+  const [focusedJobId, setFocusedJobId] = useState<string | null>(null);
+  const { data: job } = useOptimizationJob(focusedJobId);
+  const { data: result } = useOptimizationResult(focusedJobId, job?.status === "completed");
 
   const runMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<OptimizationJobOut>("/api/v1/optimization", {
-        method: "POST",
-        body: JSON.stringify({
-          strategy_id: strategy!.id,
-          instrument_id: instrument!.id,
-          timeframe: "1d",
-          param_ranges: ranges,
-          rank_metric: rankMetric,
-        }),
-      }),
-    onSuccess: (data) => setActiveJobId(data.id),
+    mutationFn: async () => {
+      const settled = await Promise.allSettled(
+        instruments.map((instrument) =>
+          apiFetch<OptimizationJobOut>("/api/v1/optimization", {
+            method: "POST",
+            body: JSON.stringify({
+              strategy_id: strategy!.id,
+              instrument_id: instrument.id,
+              timeframe: "1d",
+              param_ranges: ranges,
+              rank_metric: rankMetric,
+            }),
+          }).then((job) => ({ instrument, job })),
+        ),
+      );
+      return settled.map((outcome, i): QueuedOptimization =>
+        outcome.status === "fulfilled"
+          ? { instrument: outcome.value.instrument, jobId: outcome.value.job.id, error: null }
+          : { instrument: instruments[i], jobId: null, error: outcome.reason instanceof ApiError ? outcome.reason.message : "Failed to start" },
+      );
+    },
+    onSuccess: (results) => {
+      setQueuedJobs(results);
+      setFocusedJobId(results.find((r) => r.jobId)?.jobId ?? null);
+    },
   });
 
   return (
@@ -77,25 +122,18 @@ export default function OptimizationPage() {
               {!pythonStrategies?.length && <p className="text-xs text-text-muted">No Python strategies yet -- optimization needs named params.</p>}
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm font-medium text-text-secondary">Instrument</label>
-              <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-              {instrumentQuery && instrumentResults && (
-                <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-                  {instrumentResults.map((i) => (
-                    <button
-                      key={i.id}
-                      onClick={() => {
-                        setInstrument(i);
-                        setInstrumentQuery("");
-                      }}
-                      className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                    >
-                      {i.symbol} ({i.exchange})
-                    </button>
-                  ))}
-                </div>
+              <label className="text-sm font-medium text-text-secondary">Instruments</label>
+              <WatchlistLoader onLoad={(loaded) => setInstruments((prev) => {
+                const merged = new Map(prev.map((i) => [i.id, i] as const));
+                for (const i of loaded) merged.set(i.id, i);
+                return [...merged.values()];
+              })} />
+              <InstrumentMultiSelect value={instruments} onChange={setInstruments} />
+              {instruments.length > 0 && (
+                <p className="text-xs text-text-muted">
+                  {instruments.length} instrument{instruments.length === 1 ? "" : "s"} selected -- one grid search runs per instrument.
+                </p>
               )}
-              {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
             </div>
           </div>
 
@@ -135,22 +173,43 @@ export default function OptimizationPage() {
             </Select>
           </div>
 
-          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instrument || runMutation.isPending}>
-            {runMutation.isPending ? "Starting..." : "Run Optimization"}
+          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
+            {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Optimizations` : "Run Optimization"}
           </Button>
 
-          {runMutation.error && (
-            <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-              {runMutation.error instanceof ApiError ? runMutation.error.message : "Failed to start optimization"}
+          {queuedJobs.some((q) => q.error) && (
+            <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+              {queuedJobs.filter((q) => q.error).map((q) => (
+                <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
+              ))}
             </div>
           )}
         </CardContent>
       </Card>
 
+      {queuedJobs.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Queued Optimizations ({queuedJobs.length})</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1">
+            {queuedJobs.map((q) => (
+              <OptimizationJobRow
+                key={q.instrument.id}
+                queued={q}
+                isFocused={q.jobId === focusedJobId}
+                onSelect={() => q.jobId && setFocusedJobId(q.jobId)}
+              />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
       {job && (
         <Card>
           <CardHeader>
             <CardTitle>
+              {queuedJobs.length > 1 && `${queuedJobs.find((q) => q.jobId === focusedJobId)?.instrument.symbol} -- `}
               Status: <span className="capitalize">{job.status}</span>
             </CardTitle>
           </CardHeader>

@@ -33,8 +33,10 @@ from app.schemas.backfill_platform import (
     SourceStatusOut,
     SymbolSearchResultOut,
     TimeframeOptionOut,
+    WatchlistBulkAddResult,
     WatchlistImportResult,
     WatchlistItemAdd,
+    WatchlistItemBulkAdd,
 )
 from app.services.audit import write_audit_log
 from app.services.backfill_platform import export as export_service
@@ -413,6 +415,35 @@ async def add_watchlist_item(
         id=str(item.id), symbol_id=str(symbol.id), source=symbol.source, symbol=symbol.symbol,
         display_name=symbol.display_name, bar_count=0, last_job_status=None,
     )
+
+
+@router.post("/watchlists/{watchlist_id}/items/bulk", response_model=WatchlistBulkAddResult)
+async def bulk_add_watchlist_items(
+    watchlist_id: str, payload: WatchlistItemBulkAdd, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> WatchlistBulkAddResult:
+    wl = await _load_owned_watchlist(db, watchlist_id, user)
+
+    existing_symbol_ids = {
+        row[0]
+        for row in (
+            await db.execute(select(BfWatchlistItem.symbol_id).where(BfWatchlistItem.watchlist_id == wl.id))
+        ).all()
+    }
+
+    added = 0
+    skipped = 0
+    for entry in payload.items:
+        _check_source(entry.source)
+        symbol = await symbols_service.get_or_create_symbol(db, entry.source, entry.symbol, entry.display_name)
+        if symbol.id in existing_symbol_ids:
+            skipped += 1
+            continue
+        db.add(BfWatchlistItem(watchlist_id=wl.id, symbol_id=symbol.id))
+        existing_symbol_ids.add(symbol.id)
+        added += 1
+
+    await db.commit()
+    return WatchlistBulkAddResult(added=added, skipped=skipped)
 
 
 @router.delete("/watchlists/{watchlist_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

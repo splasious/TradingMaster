@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -77,7 +78,16 @@ export default function MarketsPage() {
                           {category && <Badge tone="active">{category}</Badge>}
                         </div>
                       </Td>
-                      <Td className="font-medium">{instrument.symbol}</Td>
+                      <Td className="font-medium">
+                        <Link
+                          href={`/charts?instrument_id=${instrument.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-active underline underline-offset-2 hover:opacity-80"
+                        >
+                          {instrument.symbol}
+                        </Link>
+                      </Td>
                       <Td className="text-text-secondary">{instrument.name}</Td>
                       <Td className="capitalize text-text-secondary">{instrument.instrument_type.replace("_", " ")}</Td>
                       <Td className="text-right">

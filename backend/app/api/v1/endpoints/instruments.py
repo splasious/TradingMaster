@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,10 +28,23 @@ def _out(instrument: Instrument) -> InstrumentOut:
     )
 
 
+@router.get("/{instrument_id}", response_model=InstrumentOut)
+async def get_instrument(
+    instrument_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> InstrumentOut:
+    instrument = await db.get(Instrument, uuid.UUID(instrument_id))
+    if instrument is None or not instrument.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instrument not found")
+    return _out(instrument)
+
+
 @router.get("", response_model=list[InstrumentOut])
 async def list_instruments(
     q: str | None = Query(None, description="Search by symbol or name"),
     exchange: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=5000, description="Row cap -- raise for a full 'select all' over one exchange"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> list[InstrumentOut]:
@@ -39,7 +54,7 @@ async def list_instruments(
     if q:
         like = f"%{q.upper()}%"
         stmt = stmt.where(or_(Instrument.symbol.like(like), Instrument.name.ilike(f"%{q}%")))
-    stmt = stmt.order_by(Instrument.exchange, Instrument.symbol).limit(200)
+    stmt = stmt.order_by(Instrument.exchange, Instrument.symbol).limit(limit)
     result = await db.execute(stmt)
     return [_out(i) for i in result.scalars().all()]
 

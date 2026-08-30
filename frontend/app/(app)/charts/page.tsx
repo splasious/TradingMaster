@@ -1,5 +1,6 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
@@ -10,7 +11,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
-import { useChartCandles, useIndicator, useInstruments } from "@/lib/hooks";
+import { useChartCandles, useIndicator, useInstrument, useInstruments } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
 
@@ -28,6 +29,11 @@ function useOverlay(instrumentId: string | null, timeframe: string, code: string
 }
 
 export default function ChartsPage() {
+  const searchParams = useSearchParams();
+  const deepLinkInstrumentId = searchParams.get("instrument_id");
+  const deepLinkSymbol = searchParams.get("symbol");
+  const deepLinkExchange = searchParams.get("exchange");
+
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
@@ -44,16 +50,41 @@ export default function ChartsPage() {
   const indicatorsAvailable = timeframe === "1d";
 
   const { data: instruments } = useInstruments(q, exchange || undefined);
-  const { data: candles, isLoading: candlesLoading, isError: candlesError } = useChartCandles(selected?.id ?? null, timeframe);
-  const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (selected?.id ?? null) : null, timeframe, "rsi");
+
+  // Deep-link support (e.g. hyperlinked symbols elsewhere in the app):
+  // prefer ?instrument_id=, fall back to ?symbol=&exchange= for callers
+  // that only have a symbol string (like the Data Backfill Platform's
+  // isolated watchlists, which don't share ids with this main catalog).
+  const { data: deepLinkById } = useInstrument(deepLinkInstrumentId);
+  const { data: deepLinkBySymbolResults } = useInstruments(
+    deepLinkSymbol ?? "",
+    deepLinkExchange ?? undefined,
+    undefined,
+    !deepLinkInstrumentId && !!deepLinkSymbol,
+  );
+
+  // No explicit sync-into-state effect: the deep link is just a fallback
+  // source for "which instrument is selected" -- an explicit click always
+  // wins once it happens, so this is a plain derived value, not state.
+  const resolvedSelected = useMemo<InstrumentOut | null>(() => {
+    if (selected) return selected;
+    if (deepLinkById) return deepLinkById;
+    if (deepLinkSymbol && deepLinkBySymbolResults) {
+      return deepLinkBySymbolResults.find((i) => i.symbol === deepLinkSymbol) ?? null;
+    }
+    return null;
+  }, [selected, deepLinkById, deepLinkSymbol, deepLinkBySymbolResults]);
+
+  const { data: candles, isLoading: candlesLoading, isError: candlesError } = useChartCandles(resolvedSelected?.id ?? null, timeframe);
+  const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (resolvedSelected?.id ?? null) : null, timeframe, "rsi");
   const { data: bollinger } = useIndicator(
-    indicatorsAvailable && showBollinger ? (selected?.id ?? null) : null,
+    indicatorsAvailable && showBollinger ? (resolvedSelected?.id ?? null) : null,
     timeframe,
     "bollinger_bands",
   );
 
-  const smaLine = useOverlay(selected?.id ?? null, timeframe, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
-  const emaLine = useOverlay(selected?.id ?? null, timeframe, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
+  const smaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
+  const emaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
 
   const overlays = useMemo<OverlayLine[]>(() => {
     const lines: OverlayLine[] = [];
@@ -87,7 +118,7 @@ export default function ChartsPage() {
                   key={i.id}
                   onClick={() => setSelected(i)}
                   className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm ${
-                    selected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
+                    resolvedSelected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
                   }`}
                 >
                   <span>{i.symbol}</span>
@@ -104,8 +135,8 @@ export default function ChartsPage() {
 
       <Card className="lg:col-span-3">
         <CardHeader className="flex-wrap gap-3">
-          <CardTitle>{selected ? `${selected.symbol} -- ${selected.name}` : "Select an instrument"}</CardTitle>
-          {selected && (
+          <CardTitle>{resolvedSelected ? `${resolvedSelected.symbol} -- ${resolvedSelected.name}` : "Select an instrument"}</CardTitle>
+          {resolvedSelected && (
             <div className="flex flex-wrap items-center gap-3">
               <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
                 {["1d", "1wk", "1mo"].map((tf) => (
@@ -141,17 +172,17 @@ export default function ChartsPage() {
           )}
         </CardHeader>
         <CardContent className="space-y-4">
-          {selected && (
+          {resolvedSelected && (
             <MarketContextBar
-              broker={brokerForExchange(selected.exchange)}
-              market={marketLabel(selected.exchange)}
-              instrument={selected.symbol}
-              instrumentType={selected.instrument_type.replace("_", " ")}
+              broker={brokerForExchange(resolvedSelected.exchange)}
+              market={marketLabel(resolvedSelected.exchange)}
+              instrument={resolvedSelected.symbol}
+              instrumentType={resolvedSelected.instrument_type.replace("_", " ")}
               timeframe={timeframe}
               dataStatus={candlesError ? "disconnected" : candles?.length ? "live" : undefined}
             />
           )}
-          {!selected ? (
+          {!resolvedSelected ? (
             <EmptyState title="No instrument selected" description="Pick an instrument to view its chart." />
           ) : candlesLoading ? (
             <LoadingState title="Loading candles..." />

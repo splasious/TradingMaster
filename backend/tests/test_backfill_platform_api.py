@@ -166,6 +166,66 @@ async def test_watchlist_crud_and_items(client: AsyncClient, seeded_admin: dict,
     assert delete_resp.status_code == 204
 
 
+async def test_watchlist_bulk_add_items(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    create_resp = await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Bulk WL", "tags": []}, headers=headers)
+    wl_id = create_resp.json()["id"]
+
+    bulk_resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{wl_id}/items/bulk",
+        json={"items": [
+            {"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"},
+            {"source": "yahoo", "symbol": "TCS", "display_name": "Tata Consultancy"},
+        ]},
+        headers=headers,
+    )
+    assert bulk_resp.status_code == 200
+    body = bulk_resp.json()
+    assert body["added"] == 2
+    assert body["skipped"] == 0
+
+    items_resp = await client.get(f"/api/v1/backfill-platform/watchlists/{wl_id}/items", headers=headers)
+    assert len(items_resp.json()) == 2
+
+    # Re-adding the same two (plus one new) skips the duplicates
+    second_resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{wl_id}/items/bulk",
+        json={"items": [
+            {"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"},
+            {"source": "yahoo", "symbol": "INFY", "display_name": "Infosys"},
+        ]},
+        headers=headers,
+    )
+    assert second_resp.json() == {"added": 1, "skipped": 1}
+
+
+async def test_watchlist_bulk_add_requires_ownership(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    from sqlalchemy import select as sa_select
+
+    from app.core.security import hash_password
+    from app.models.user import Role, User, UserRole
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    wl_id = (await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Owner Only", "tags": []}, headers=headers)).json()["id"]
+
+    role = (await db_session.execute(sa_select(Role).where(Role.name == "trader"))).scalar_one()
+    other = User(email="other_bulk@tradingmaster.internal", hashed_password=hash_password("OtherPass123!"), full_name="Other")
+    other.user_roles = [UserRole(role=role)]
+    db_session.add(other)
+    await db_session.commit()
+    other_token = (await client.post("/api/v1/auth/login", json={"email": "other_bulk@tradingmaster.internal", "password": "OtherPass123!"})).json()["access_token"]
+
+    resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{wl_id}/items/bulk",
+        json={"items": [{"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"}]},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert resp.status_code == 404
+
+
 async def test_watchlist_isolated_per_owner(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     from sqlalchemy import select
 

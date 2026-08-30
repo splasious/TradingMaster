@@ -106,6 +106,55 @@ async def test_sync_delta_exchange_excludes_crypto(client: AsyncClient, seeded_a
     assert resp.json()["found"] == 1
 
 
+async def test_list_instruments_respects_higher_limit_for_select_all(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    for i in range(5):
+        db_session.add(Instrument(exchange="NSE", symbol=f"LIMTEST{i}", name=f"Lim Test {i}", instrument_type="equity", data_source="yahoo_nse", external_ref=f"LIMTEST{i}"))
+    await db_session.commit()
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    default_resp = await client.get("/api/v1/instruments", params={"exchange": "NSE", "q": "LIMTEST"}, headers=headers)
+    assert len(default_resp.json()) == 5
+
+    capped_resp = await client.get("/api/v1/instruments", params={"exchange": "NSE", "q": "LIMTEST", "limit": 2}, headers=headers)
+    assert len(capped_resp.json()) == 2
+
+    too_high_resp = await client.get("/api/v1/instruments", params={"limit": 10000}, headers=headers)
+    assert too_high_resp.status_code == 422
+
+
+async def test_get_instrument_by_id(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = Instrument(exchange="NSE", symbol="GETBYID", name="Get By Id Co", instrument_type="equity", data_source="yahoo_nse", external_ref="GETBYID")
+    db_session.add(instrument)
+    await db_session.commit()
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.get(f"/api/v1/instruments/{instrument.id}", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "GETBYID"
+    assert body["id"] == str(instrument.id)
+
+
+async def test_get_instrument_by_id_404_when_missing(client: AsyncClient, seeded_admin: dict):
+    import uuid
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.get(f"/api/v1/instruments/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 404
+
+
+async def test_get_instrument_by_id_404_when_inactive(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = Instrument(exchange="NSE", symbol="INACTIVEONE", name="Inactive Co", instrument_type="equity", data_source="yahoo_nse", external_ref="INACTIVEONE", is_active=False)
+    db_session.add(instrument)
+    await db_session.commit()
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.get(f"/api/v1/instruments/{instrument.id}", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 404
+
+
 async def test_sync_rejects_unknown_data_source(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.post("/api/v1/instruments/sync/not_a_real_source", headers={"Authorization": f"Bearer {token}"})

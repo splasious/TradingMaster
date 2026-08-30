@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
 
+import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
+import { WatchlistLoader } from "@/components/market-data/watchlist-loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useIndicatorList, useInstruments } from "@/lib/hooks";
+import { useIndicatorList } from "@/lib/hooks";
 import type { InstrumentOut, ScanCondition, ScanOperator, StrategyOut } from "@/lib/types";
 
 const RAW_FIELDS = ["open", "high", "low", "close", "volume"];
@@ -96,9 +98,15 @@ export default function StrategyBuilderPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [timeframe, setTimeframe] = useState("1d");
-  const [instrumentQuery, setInstrumentQuery] = useState("");
   const [selectedInstruments, setSelectedInstruments] = useState<InstrumentOut[]>([]);
-  const { data: instrumentResults } = useInstruments(instrumentQuery);
+
+  function mergeInstruments(loaded: InstrumentOut[]) {
+    setSelectedInstruments((prev) => {
+      const merged = new Map(prev.map((i) => [i.id, i] as const));
+      for (const i of loaded) merged.set(i.id, i);
+      return [...merged.values()];
+    });
+  }
 
   const [entryConditions, setEntryConditions] = useState<ScanCondition[]>([{ field: "rsi.rsi", operator: ">", value: 55 }]);
   const [exitConditions, setExitConditions] = useState<ScanCondition[]>([{ field: "rsi.rsi", operator: "<", value: 45 }]);
@@ -163,35 +171,20 @@ export default function StrategyBuilderPage() {
                 <option value="1d">1d</option>
               </Select>
             </div>
-            <div className="flex-1 space-y-1.5">
-              <label className="text-sm font-medium text-text-secondary">Instruments</label>
-              <Input placeholder="Search to add..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-              {instrumentQuery && instrumentResults && (
-                <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-                  {instrumentResults.map((i) => (
-                    <button
-                      key={i.id}
-                      onClick={() => {
-                        if (!selectedInstruments.some((s) => s.id === i.id)) setSelectedInstruments([...selectedInstruments, i]);
-                        setInstrumentQuery("");
-                      }}
-                      className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                    >
-                      {i.symbol} ({i.exchange})
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="flex flex-wrap gap-1.5">
-                {selectedInstruments.map((i) => (
-                  <Badge key={i.id} tone="active">
-                    {i.symbol}
-                    <button onClick={() => setSelectedInstruments(selectedInstruments.filter((s) => s.id !== i.id))}>
-                      <X className="h-3 w-3" />
-                    </button>
-                  </Badge>
-                ))}
-              </div>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Instruments</label>
+            <WatchlistLoader onLoad={mergeInstruments} />
+            <InstrumentMultiSelect value={selectedInstruments} onChange={setSelectedInstruments} />
+            <div className="flex flex-wrap gap-1.5">
+              {selectedInstruments.map((i) => (
+                <Badge key={i.id} tone="active">
+                  {i.symbol}
+                  <button onClick={() => setSelectedInstruments(selectedInstruments.filter((s) => s.id !== i.id))}>
+                    <X className="h-3 w-3" />
+                  </button>
+                </Badge>
+              ))}
             </div>
           </div>
         </CardContent>

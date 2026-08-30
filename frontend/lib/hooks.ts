@@ -71,13 +71,23 @@ export function useUsers() {
   });
 }
 
-export function useInstruments(q: string, exchange?: string) {
+export function useInstruments(q: string, exchange?: string, limit?: number, enabled = true) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (exchange) params.set("exchange", exchange);
+  if (limit) params.set("limit", String(limit));
   return useQuery({
-    queryKey: ["instruments", q, exchange],
+    queryKey: ["instruments", q, exchange, limit],
     queryFn: () => apiFetch<InstrumentOut[]>(`/api/v1/instruments?${params.toString()}`),
+    enabled,
+  });
+}
+
+export function useInstrument(instrumentId: string | null) {
+  return useQuery({
+    queryKey: ["instrument", instrumentId],
+    queryFn: () => apiFetch<InstrumentOut>(`/api/v1/instruments/${instrumentId}`),
+    enabled: !!instrumentId,
   });
 }
 

@@ -2,8 +2,10 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Download, Plus, Trash2, Upload } from "lucide-react";
+import Link from "next/link";
 import { useRef, useState } from "react";
 
+import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,12 +14,35 @@ import { Input } from "@/components/ui/input";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError, getAccessToken } from "@/lib/api";
 import { useBfWatchlistItems, useBfWatchlists } from "@/lib/hooks";
-import type { BfWatchlistOut } from "@/lib/types";
+import type { BfSource, BfWatchlistOut, InstrumentOut, WatchlistBulkAddResult } from "@/lib/types";
+
+const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
+  yahoo_nse: "yahoo",
+  delta_exchange: "delta",
+};
 
 function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { data: items, isLoading } = useBfWatchlistItems(watchlist.id);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [picked, setPicked] = useState<InstrumentOut[]>([]);
+
+  const bulkAddMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<WatchlistBulkAddResult>(`/api/v1/backfill-platform/watchlists/${watchlist.id}/items/bulk`, {
+        method: "POST",
+        body: JSON.stringify({
+          items: picked
+            .map((i) => ({ source: DATA_SOURCE_TO_BF_SOURCE[i.data_source], symbol: i.symbol, display_name: i.name }))
+            .filter((i) => !!i.source),
+        }),
+      }),
+    onSuccess: () => {
+      setPicked([]);
+      queryClient.invalidateQueries({ queryKey: ["bf-watchlist-items", watchlist.id] });
+      queryClient.invalidateQueries({ queryKey: ["bf-watchlists"] });
+    },
+  });
 
   const removeItemMutation = useMutation({
     mutationFn: (itemId: string) => apiFetch(`/api/v1/backfill-platform/watchlists/${watchlist.id}/items/${itemId}`, { method: "DELETE" }),
@@ -84,6 +109,28 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
           <p className="text-xs text-text-muted">Imported: {importMutation.data.added} added, {importMutation.data.skipped} skipped.</p>
         )}
 
+        <div>
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-text-muted">
+            Add symbols -- filter by exchange, tick to select
+          </p>
+          <InstrumentMultiSelect value={picked} onChange={setPicked} />
+          <div className="mt-2 flex items-center gap-2">
+            <Button size="sm" onClick={() => bulkAddMutation.mutate()} disabled={!picked.length || bulkAddMutation.isPending}>
+              <Plus className="h-3.5 w-3.5" /> {bulkAddMutation.isPending ? "Adding..." : `Add ${picked.length || ""} to Watchlist`}
+            </Button>
+            {bulkAddMutation.data && (
+              <span className="text-xs text-positive">
+                Added {bulkAddMutation.data.added}, skipped {bulkAddMutation.data.skipped} already present.
+              </span>
+            )}
+            {bulkAddMutation.isError && (
+              <span className="text-xs text-negative">
+                {bulkAddMutation.error instanceof ApiError ? bulkAddMutation.error.message : "Bulk add failed"}
+              </span>
+            )}
+          </div>
+        </div>
+
         {isLoading ? (
           <LoadingState />
         ) : !items?.length ? (
@@ -97,7 +144,20 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
               {items.map((item) => (
                 <tr key={item.id}>
                   <Td className="capitalize">{item.source}</Td>
-                  <Td className="font-medium">{item.symbol}</Td>
+                  <Td className="font-medium">
+                    {item.source === "yahoo" || item.source === "delta" ? (
+                      <Link
+                        href={`/charts?symbol=${encodeURIComponent(item.symbol)}&exchange=${item.source === "yahoo" ? "NSE" : "DELTA"}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-active underline underline-offset-2 hover:opacity-80"
+                      >
+                        {item.symbol}
+                      </Link>
+                    ) : (
+                      item.symbol
+                    )}
+                  </Td>
                   <Td className="text-text-secondary">{item.display_name}</Td>
                   <Td className="text-right font-financial">{item.bar_count}</Td>
                   <Td>
