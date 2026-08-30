@@ -92,6 +92,36 @@ async def test_sync_symbol_rejects_unmapped_source(db_session: AsyncSession):
         pass
 
 
+async def test_sync_single_symbol_endpoint(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    symbol = BfSymbol(source="delta", symbol="SINGLESYNC", display_name="Single Sync Co")
+    db_session.add(symbol)
+    await db_session.flush()
+    db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))
+    await db_session.commit()
+
+    resp = await client.post("/api/v1/backfill-platform/sources/delta/symbols/SINGLESYNC/sync-to-catalog", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "SINGLESYNC"
+    assert body["bars_synced"] == 1
+    assert body["instrument_created"] is True
+
+    instruments_resp = await client.get("/api/v1/instruments?q=SINGLESYNC", headers=headers)
+    assert len(instruments_resp.json()) == 1
+
+
+async def test_sync_single_symbol_404_when_no_backfilled_data(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.post(
+        "/api/v1/backfill-platform/sources/delta/symbols/NEVERBACKFILLED/sync-to-catalog",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 404
+
+
 async def test_sync_watchlist_to_catalog_endpoint(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

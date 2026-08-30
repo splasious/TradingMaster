@@ -233,11 +233,28 @@ export function WatchlistsPanel() {
       <Card>
         <CardHeader><CardTitle>Watchlists</CardTitle></CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <Input placeholder="New watchlist name..." value={newName} onChange={(e) => setNewName(e.target.value)} className="max-w-xs" />
-            <Button size="sm" onClick={() => createMutation.mutate()} disabled={!newName || createMutation.isPending}>
-              <Plus className="h-3.5 w-3.5" /> Create
+          <div className="flex items-center gap-2">
+            <Input
+              placeholder="New watchlist name..."
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && newName && createMutation.mutate()}
+              className="max-w-xs"
+            />
+            <Button
+              size="sm"
+              onClick={() => createMutation.mutate()}
+              disabled={!newName || createMutation.isPending}
+              title={!newName ? "Type a name first" : undefined}
+            >
+              <Plus className="h-3.5 w-3.5" /> {createMutation.isPending ? "Creating..." : "Create"}
             </Button>
+            {!newName && <span className="text-xs text-text-muted">Type a name to enable Create</span>}
+            {createMutation.isError && (
+              <span className="text-xs text-negative">
+                {createMutation.error instanceof ApiError ? createMutation.error.message : "Failed to create watchlist"}
+              </span>
+            )}
           </div>
 
           {isLoading ? (

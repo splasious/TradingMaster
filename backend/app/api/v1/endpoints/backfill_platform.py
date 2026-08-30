@@ -449,6 +449,36 @@ async def bulk_add_watchlist_items(
     return WatchlistBulkAddResult(added=added, skipped=skipped)
 
 
+@router.post("/sources/{source}/symbols/{symbol}/sync-to-catalog", response_model=CatalogSyncItemOut)
+async def sync_single_symbol_to_catalog(
+    source: str, symbol: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> CatalogSyncItemOut:
+    """Same bridge as the watchlist version, for a single symbol -- lets
+    any page showing a symbol (e.g. Charts' "no candles stored" state)
+    offer a direct one-click fix without a detour through a watchlist."""
+    _check_source(source)
+    bf_symbol = (
+        await db.execute(select(BfSymbol).where(BfSymbol.source == source, BfSymbol.symbol == symbol))
+    ).scalar_one_or_none()
+    if bf_symbol is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No backfilled data on file for {source}:{symbol}")
+
+    try:
+        result = await sync_symbol_to_catalog(db, bf_symbol)
+    except CatalogSyncError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await write_audit_log(
+        db, user_id=user.id, action="BF_SYMBOL_SYNCED_TO_CATALOG", object_type="bf_symbol", object_id=str(bf_symbol.id),
+        new_value={"source": source, "symbol": symbol, "bars_synced": result.bars_synced},
+    )
+    await db.commit()
+    return CatalogSyncItemOut(
+        symbol=result.symbol, instrument_id=result.instrument_id, instrument_created=result.instrument_created,
+        bars_synced=result.bars_synced, bars_skipped=result.bars_skipped,
+    )
+
+
 @router.post("/watchlists/{watchlist_id}/sync-to-catalog", response_model=WatchlistCatalogSyncResult)
 async def sync_watchlist_to_catalog(
     watchlist_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)

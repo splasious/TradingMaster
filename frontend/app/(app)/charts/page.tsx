@@ -1,19 +1,27 @@
 "use client";
 
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { PriceChart, type OverlayLine } from "@/components/charts/price-chart";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
+import { apiFetch, ApiError } from "@/lib/api";
 import { useChartCandles, useIndicator, useInstrument, useInstruments } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
-import { TIMEFRAMES, type InstrumentOut } from "@/lib/types";
+import { TIMEFRAMES, type CatalogSyncItemOut, type InstrumentOut } from "@/lib/types";
+
+const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
+  yahoo_nse: "yahoo",
+  delta_exchange: "delta",
+};
 
 const OVERLAY_OPTIONS = [
   { code: "sma", field: "sma", label: "SMA 20", color: "#3b6bf5" },
@@ -33,6 +41,7 @@ export default function ChartsPage() {
   const deepLinkInstrumentId = searchParams.get("instrument_id");
   const deepLinkSymbol = searchParams.get("symbol");
   const deepLinkExchange = searchParams.get("exchange");
+  const queryClient = useQueryClient();
 
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
@@ -85,6 +94,18 @@ export default function ChartsPage() {
 
   const smaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
   const emaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
+
+  const bfSource = resolvedSelected ? DATA_SOURCE_TO_BF_SOURCE[resolvedSelected.data_source] : undefined;
+  const syncMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<CatalogSyncItemOut>(
+        `/api/v1/backfill-platform/sources/${bfSource}/symbols/${encodeURIComponent(resolvedSelected!.symbol)}/sync-to-catalog`,
+        { method: "POST" },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["chart-candles", resolvedSelected?.id] });
+    },
+  });
 
   const overlays = useMemo<OverlayLine[]>(() => {
     const lines: OverlayLine[] = [];
@@ -189,7 +210,25 @@ export default function ChartsPage() {
           ) : candlesError ? (
             <ErrorState description="Could not load candle data for this instrument." />
           ) : !candles?.length ? (
-            <EmptyState title="No candles stored" description="No candles stored for this timeframe yet -- run a backfill from Market Data first." />
+            <EmptyState
+              title="No candles stored"
+              description={
+                syncMutation.isError
+                  ? syncMutation.error instanceof ApiError
+                    ? syncMutation.error.message
+                    : "Sync failed"
+                  : bfSource
+                    ? "Not yet in the main catalog. If it's been backfilled via the Data Backfill Platform, sync it in directly."
+                    : "No candles stored for this timeframe yet -- run a backfill from Market Data first."
+              }
+              action={
+                bfSource ? (
+                  <Button size="sm" onClick={() => syncMutation.mutate()} disabled={syncMutation.isPending}>
+                    {syncMutation.isPending ? "Syncing..." : "Sync from Backfill Platform"}
+                  </Button>
+                ) : undefined
+              }
+            />
           ) : (
             <div className="space-y-2">
               <PriceChart candles={candles} overlays={overlays} />
