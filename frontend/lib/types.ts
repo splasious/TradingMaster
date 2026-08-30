@@ -560,3 +560,20 @@ export interface WatchlistImportResult {
   added: number;
   skipped: number;
 }
+
+export interface TimeframeOptionOut {
+  value: string;
+  native: boolean;
+}
+
+export interface BulkBackfillResult {
+  source: BfSource;
+  queued: number;
+}
+
+export interface LiveSyncStatusOut {
+  running: boolean;
+  last_sync_at: string | null;
+  last_synced_count: number;
+  last_error: string | null;
+}

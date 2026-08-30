@@ -5,6 +5,7 @@ import { CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { JobHistoryPanel } from "@/components/backfill-platform/job-history";
+import { LiveSyncStatus } from "@/components/backfill-platform/live-sync-status";
 import { SourceBlock } from "@/components/backfill-platform/source-block";
 import { WatchlistsPanel } from "@/components/backfill-platform/watchlists-panel";
 import { Badge } from "@/components/ui/badge";
@@ -223,6 +224,7 @@ export default function MarketDataPage() {
 
         <TabsContent value="backfill-platform">
           <div className="space-y-6">
+            <LiveSyncStatus />
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
               <SourceBlock source="yahoo" />
               <SourceBlock source="delta" />

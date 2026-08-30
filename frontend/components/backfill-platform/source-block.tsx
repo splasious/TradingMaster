@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, Loader2, Plus, XCircle } from "lucide-react";
+import { CheckCircle2, Download, Layers, Loader2, Plus, XCircle } from "lucide-react";
 import { useState } from "react";
 
 import { CompletenessHeatmap } from "@/components/backfill-platform/completeness-heatmap";
@@ -11,11 +11,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { apiDownload, apiFetch, ApiError } from "@/lib/api";
-import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfWatchlists } from "@/lib/hooks";
-import type { BfBackfillJobOut, BfSource, SymbolSearchResultOut } from "@/lib/types";
+import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfTimeframes, useBfWatchlists } from "@/lib/hooks";
+import type { BfBackfillJobOut, BfSource, BulkBackfillResult, SymbolSearchResultOut } from "@/lib/types";
 
-const TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d"];
 const SOURCE_LABEL: Record<BfSource, string> = { yahoo: "Yahoo Finance", delta: "Delta Exchange", zerodha: "Zerodha Kite" };
+const BULK_LABEL: Record<BfSource, string> = {
+  yahoo: "Backfill All NSE Symbols",
+  delta: "Backfill All RWA Tokens",
+  zerodha: "Backfill All Tracked Symbols",
+};
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -24,10 +28,35 @@ function daysAgoIso(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
 
+function JobStatusBanner({ job }: { job: BfBackfillJobOut }) {
+  const isRunning = job.status === "running" || job.status === "pending";
+  const isDone = job.status === "completed";
+  const tone = isRunning ? "border-active bg-active-soft" : isDone ? "border-positive bg-positive-soft" : "border-negative bg-negative-soft";
+  return (
+    <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${tone}`}>
+      {isRunning ? (
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-active" />
+      ) : isDone ? (
+        <CheckCircle2 className="h-4 w-4 shrink-0 text-positive" />
+      ) : (
+        <XCircle className="h-4 w-4 shrink-0 text-negative" />
+      )}
+      <span className={isRunning ? "text-active" : isDone ? "text-positive" : "text-negative"}>
+        {isDone
+          ? `Backfill complete -- ${job.inserted_count} new bar${job.inserted_count === 1 ? "" : "s"}, ${job.duplicate_count} already had`
+          : isRunning
+            ? `${job.status === "pending" ? "Queued" : "Backfilling"}: ${job.symbol} (${job.timeframe})...`
+            : job.error_message}
+      </span>
+    </div>
+  );
+}
+
 export function SourceBlock({ source }: { source: BfSource }) {
   const queryClient = useQueryClient();
   const { data: status } = useBfSourceStatus(source);
   const { data: watchlists } = useBfWatchlists();
+  const { data: timeframeOptions } = useBfTimeframes(source);
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SymbolSearchResultOut | null>(null);
@@ -64,6 +93,12 @@ export function SourceBlock({ source }: { source: BfSource }) {
     },
   });
 
+  const bulkBackfillMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<BulkBackfillResult>(`/api/v1/backfill-platform/sources/${source}/backfill-all?timeframe=${timeframe}`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bf-jobs"] }),
+  });
+
   const addToWatchlistMutation = useMutation({
     mutationFn: () =>
       apiFetch(`/api/v1/backfill-platform/watchlists/${watchlistToAdd}/items`, {
@@ -75,6 +110,8 @@ export function SourceBlock({ source }: { source: BfSource }) {
       queryClient.invalidateQueries({ queryKey: ["bf-watchlist-items"] });
     },
   });
+
+  const canBackfill = !!selected && (status?.connected ?? false);
 
   return (
     <Card className="flex flex-col">
@@ -117,80 +154,89 @@ export function SourceBlock({ source }: { source: BfSource }) {
           {selected && <Badge tone="active">{selected.symbol}</Badge>}
         </div>
 
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-text-secondary">Timeframe</label>
+            <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+              {timeframeOptions?.map((tf) => (
+                <option key={tf.value} value={tf.value}>
+                  {tf.value}
+                  {!tf.native ? " (derived)" : ""}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div />
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-text-secondary">From</label>
+            <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-text-secondary">To</label>
+            <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            onClick={() => backfillMutation.mutate()}
+            disabled={!canBackfill || backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending"}
+            title={!selected ? "Search and pick a symbol first" : !status?.connected ? "Source is disconnected" : undefined}
+          >
+            {backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending" ? "Backfilling..." : "Backfill"}
+          </Button>
+          <Button
+            size="sm" variant="secondary"
+            onClick={() => bulkBackfillMutation.mutate()}
+            disabled={!status?.connected || bulkBackfillMutation.isPending}
+          >
+            <Layers className="h-3.5 w-3.5" /> {bulkBackfillMutation.isPending ? "Queuing..." : BULK_LABEL[source]}
+          </Button>
+        </div>
+
+        {bulkBackfillMutation.data && (
+          <p className="text-xs text-positive">Queued {bulkBackfillMutation.data.queued} background jobs -- see Job History below.</p>
+        )}
+        {bulkBackfillMutation.isError && (
+          <p className="text-xs text-negative">
+            {bulkBackfillMutation.error instanceof ApiError ? bulkBackfillMutation.error.message : "Bulk backfill failed to start"}
+          </p>
+        )}
+
+        {watchlists && watchlists.length > 0 && selected && (
+          <div className="flex items-center gap-1.5">
+            <Select className="flex-1" value={watchlistToAdd} onChange={(e) => setWatchlistToAdd(e.target.value)}>
+              <option value="" disabled>Add to watchlist...</option>
+              {watchlists.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </Select>
+            <Button size="sm" variant="secondary" onClick={() => addToWatchlistMutation.mutate()} disabled={!watchlistToAdd || addToWatchlistMutation.isPending}>
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
+        {addToWatchlistMutation.isSuccess && <p className="text-xs text-positive">Added to watchlist.</p>}
+
+        {backfillMutation.isError && (
+          <p className="text-xs text-negative">{backfillMutation.error instanceof ApiError ? backfillMutation.error.message : "Backfill failed to start"}</p>
+        )}
+
+        {activeJob && <JobStatusBanner job={activeJob} />}
+
+        {selected && completeness && (
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Data Completeness</p>
+            <CompletenessHeatmap segments={completeness.segments} rangeStart={startDate} rangeEnd={endDate} />
+          </div>
+        )}
+
         {selected && (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-text-secondary">Timeframe</label>
-                <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-                  {TIMEFRAMES.map((tf) => <option key={tf} value={tf}>{tf}</option>)}
-                </Select>
-              </div>
-              <div />
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-text-secondary">From</label>
-                <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs font-medium text-text-secondary">To</label>
-                <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-              </div>
-            </div>
-
-            <Button size="sm" onClick={() => backfillMutation.mutate()} disabled={backfillMutation.isPending || activeJob?.status === "running"}>
-              {activeJob?.status === "running" ? "Backfilling..." : "Backfill"}
-            </Button>
-
-            {watchlists && watchlists.length > 0 && (
-              <div className="flex items-center gap-1.5">
-                <Select className="flex-1" value={watchlistToAdd} onChange={(e) => setWatchlistToAdd(e.target.value)}>
-                  <option value="" disabled>Add to watchlist...</option>
-                  {watchlists.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </Select>
-                <Button size="sm" variant="secondary" onClick={() => addToWatchlistMutation.mutate()} disabled={!watchlistToAdd || addToWatchlistMutation.isPending}>
-                  <Plus className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            )}
-            {addToWatchlistMutation.isSuccess && <p className="text-xs text-positive">Added to watchlist.</p>}
-
-            {backfillMutation.isError && (
-              <p className="text-xs text-negative">{backfillMutation.error instanceof ApiError ? backfillMutation.error.message : "Backfill failed to start"}</p>
-            )}
-
-            {activeJob && (
-              <div className="flex items-center gap-2 text-xs">
-                {activeJob.status === "running" || activeJob.status === "pending" ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-active" />
-                ) : activeJob.status === "completed" ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 text-positive" />
-                ) : (
-                  <XCircle className="h-3.5 w-3.5 text-negative" />
-                )}
-                <span className="text-text-secondary">
-                  {activeJob.status === "completed"
-                    ? `Done -- ${activeJob.inserted_count} new, ${activeJob.duplicate_count} already had`
-                    : activeJob.status === "failed"
-                      ? activeJob.error_message
-                      : "Running..."}
-                </span>
-              </div>
-            )}
-
-            {completeness && (
-              <div>
-                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Data Completeness</p>
-                <CompletenessHeatmap segments={completeness.segments} rangeStart={startDate} rangeEnd={endDate} />
-              </div>
-            )}
-
-            <Button
-              variant="secondary" size="sm"
-              onClick={() => apiDownload(`/api/v1/backfill-platform/export/symbol.xlsx?source=${source}&symbol=${selected.symbol}&timeframe=${timeframe}`, `${source}_${selected.symbol}.xlsx`)}
-            >
-              <Download className="h-3.5 w-3.5" /> Export Excel
-            </Button>
-          </>
+          <Button
+            variant="secondary" size="sm"
+            onClick={() => apiDownload(`/api/v1/backfill-platform/export/symbol.xlsx?source=${source}&symbol=${selected.symbol}&timeframe=${timeframe}`, `${source}_${selected.symbol}.xlsx`)}
+          >
+            <Download className="h-3.5 w-3.5" /> Export Excel
+          </Button>
         )}
       </CardContent>
     </Card>

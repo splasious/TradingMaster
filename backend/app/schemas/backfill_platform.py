@@ -94,3 +94,29 @@ class WatchlistImportRow(BaseModel):
 class WatchlistImportResult(BaseModel):
     added: int
     skipped: int
+
+
+class TimeframeOptionOut(BaseModel):
+    value: str
+    native: bool
+
+
+class ResampledCandleOut(BaseModel):
+    ts: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None
+
+
+class BulkBackfillResult(BaseModel):
+    source: str
+    queued: int
+
+
+class LiveSyncStatusOut(BaseModel):
+    running: bool
+    last_sync_at: datetime | None
+    last_synced_count: int
+    last_error: str | None

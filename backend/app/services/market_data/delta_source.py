@@ -17,6 +17,7 @@ _RESOLUTION_MAP = {
     "15m": "15m",
     "30m": "30m",
     "60m": "1h",
+    "4h": "4h",
     "1d": "1d",
     "1wk": "1w",
 }
@@ -108,3 +109,16 @@ class DeltaExchangeDataSource(MarketDataSource):
         if not body.get("success"):
             raise MarketDataSourceError(f"Delta Exchange API error: {body.get('error')}")
         return body["result"]
+
+    async def list_rwa_token_products(self) -> list[dict]:
+        """Delta's tokenized-US-equity products only -- their "bStocks" and
+        "xStock" product lines (e.g. "NVIDIA xStock Token", "Palantir
+        Technologies bStocks Token"), confirmed live in the real product
+        list by that exact wording in `description`. Everything else
+        Delta lists under perpetual_futures is crypto-native (BTC, ETH,
+        hundreds of altcoins) and is deliberately excluded here -- this
+        method exists specifically so the Data Backfill Platform's Delta
+        block can offer RWA/tokenized-stock symbols without crypto mixed
+        in, per that PRD's request."""
+        products = await self.list_products()
+        return [p for p in products if "bStocks Token" in (p.get("description") or "") or "xStock Token" in (p.get("description") or "")]

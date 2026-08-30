@@ -23,6 +23,7 @@ import type {
   KillSwitchOut,
   LiveDeploymentOut,
   LiveOrderOut,
+  LiveSyncStatusOut,
   OptimizationJobOut,
   OptimizationResultOut,
   PaperDeploymentOut,
@@ -36,6 +37,7 @@ import type {
   StrategyOut,
   SystemHealth,
   SystemMonitorOut,
+  TimeframeOptionOut,
   UnreadCountOut,
   UserOut,
 } from "./types";
@@ -360,5 +362,20 @@ export function useBfWatchlistItems(watchlistId: string | null) {
     queryKey: ["bf-watchlist-items", watchlistId],
     queryFn: () => apiFetch<BfWatchlistItemOut[]>(`/api/v1/backfill-platform/watchlists/${watchlistId}/items`),
     enabled: !!watchlistId,
+  });
+}
+
+export function useBfTimeframes(source: BfSource) {
+  return useQuery({
+    queryKey: ["bf-timeframes", source],
+    queryFn: () => apiFetch<TimeframeOptionOut[]>(`/api/v1/backfill-platform/sources/${source}/timeframes`),
+  });
+}
+
+export function useBfLiveSyncStatus() {
+  return useQuery({
+    queryKey: ["bf-live-sync-status"],
+    queryFn: () => apiFetch<LiveSyncStatusOut>("/api/v1/backfill-platform/live-sync/status"),
+    refetchInterval: 30_000,
   });
 }

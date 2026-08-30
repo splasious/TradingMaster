@@ -25,10 +25,14 @@ from app.schemas.backfill_platform import (
     BfWatchlistCreate,
     BfWatchlistItemOut,
     BfWatchlistOut,
+    BulkBackfillResult,
     CompletenessOut,
     CompletenessSegmentOut,
+    LiveSyncStatusOut,
+    ResampledCandleOut,
     SourceStatusOut,
     SymbolSearchResultOut,
+    TimeframeOptionOut,
     WatchlistImportResult,
     WatchlistItemAdd,
 )
@@ -38,7 +42,10 @@ from app.services.backfill_platform import status as status_service
 from app.services.backfill_platform import symbols as symbols_service
 from app.services.backfill_platform.completeness import compute_completeness
 from app.services.backfill_platform.jobs import run_bf_backfill_job
+from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
+from app.services.backfill_platform.timeframes import timeframes_for_source
 from app.services.market_data.base import MarketDataSourceError
+from app.services.market_data.resample import resample_candles
 
 router = APIRouter()
 
@@ -65,6 +72,85 @@ async def get_source_status(
     else:
         result = await status_service.zerodha_status(db, user.id)
     return SourceStatusOut(source=result.source, connected=result.connected, detail=result.detail, expires_at=result.expires_at)
+
+
+@router.get("/live-sync/status", response_model=LiveSyncStatusOut)
+async def get_live_sync_status(_: User = Depends(get_current_user)) -> LiveSyncStatusOut:
+    return LiveSyncStatusOut(
+        running=bf_live_sync_scheduler.running, last_sync_at=bf_live_sync_scheduler.last_sync_at,
+        last_synced_count=bf_live_sync_scheduler.last_synced_count, last_error=bf_live_sync_scheduler.last_error,
+    )
+
+
+@router.get("/sources/{source}/timeframes", response_model=list[TimeframeOptionOut])
+async def get_source_timeframes(source: str, _: User = Depends(get_current_user)) -> list[TimeframeOptionOut]:
+    _check_source(source)
+    return [TimeframeOptionOut(value=o.value, native=o.native) for o in timeframes_for_source(source)]
+
+
+@router.post("/sources/{source}/backfill-all", response_model=BulkBackfillResult, status_code=status.HTTP_202_ACCEPTED)
+async def backfill_all_for_source(
+    source: str, background_tasks: BackgroundTasks, timeframe: str = Query("1d"),
+    start_date: date | None = Query(None), end_date: date | None = Query(None),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator")),
+) -> BulkBackfillResult:
+    """Pulls the entire tracked universe for a source -- all ~750
+    nse-yahoo-data NSE symbols, or all of Delta's RWA tokens -- queuing one
+    background job per symbol rather than blocking the request on however
+    long hundreds of real network calls take."""
+    _check_source(source)
+    try:
+        all_symbols = await symbols_service.list_all_symbols(db, source, user.id)
+    except MarketDataSourceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    queued = 0
+    for result in all_symbols:
+        symbol = await symbols_service.get_or_create_symbol(db, source, result.symbol, result.display_name)
+        job = BfBackfillJob(
+            symbol_id=symbol.id, source=source, timeframe=timeframe,
+            start_date=start_date, end_date=end_date, requested_by=user.id,
+        )
+        db.add(job)
+        await db.flush()
+        background_tasks.add_task(run_bf_backfill_job, job.id)
+        queued += 1
+
+    await write_audit_log(
+        db, user_id=user.id, action="BF_BULK_BACKFILL_STARTED", object_type="bf_source", object_id=source,
+        new_value={"source": source, "queued": queued, "timeframe": timeframe},
+    )
+    await db.commit()
+    return BulkBackfillResult(source=source, queued=queued)
+
+
+@router.get("/candles/resampled", response_model=list[ResampledCandleOut])
+async def get_resampled_candles(
+    source: str = Query(...), symbol: str = Query(...), target_timeframe: str = Query(...),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+) -> list[ResampledCandleOut]:
+    """Weekly/monthly views derived from stored daily bars (PRD's own
+    per-block timeframe selector, extended here to cover timeframes a
+    source doesn't natively provide) -- reuses the same resample engine
+    the main platform's multi-timeframe charts use, so "still-forming
+    period" look-ahead protection applies here too."""
+    _check_source(source)
+    symbol_row = (
+        await db.execute(select(BfSymbol).where(BfSymbol.source == source, BfSymbol.symbol == symbol))
+    ).scalar_one_or_none()
+    if symbol_row is None:
+        return []
+    daily_bars = (
+        await db.execute(
+            select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol_row.id, BfOhlcvBar.timeframe == "1d").order_by(BfOhlcvBar.ts)
+        )
+    ).scalars().all()
+    bars = [{"ts": b.ts, "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume} for b in daily_bars]
+    try:
+        resampled = resample_candles(bars, target_timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [ResampledCandleOut(**bar) for bar in resampled]
 
 
 # --------------------------------------------------------------- symbols --

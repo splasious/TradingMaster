@@ -34,7 +34,9 @@ async def search_symbols(db: AsyncSession, source: str, query: str, user_id) -> 
 
     if source == "delta":
         try:
-            products = await DeltaExchangeDataSource().list_products()
+            # RWA/tokenized-US-equity products only -- crypto is deliberately
+            # excluded from the Data Backfill Platform's Delta block.
+            products = await DeltaExchangeDataSource().list_rwa_token_products()
         except MarketDataSourceError as exc:
             raise MarketDataSourceError(str(exc)) from exc
         matches = [p for p in products if query_upper in p["symbol"].upper() or query_upper in (p.get("description") or "").upper()]
@@ -52,6 +54,27 @@ async def search_symbols(db: AsyncSession, source: str, query: str, user_id) -> 
         ]
         return [SymbolSearchResult(symbol=i["tradingsymbol"], display_name=i.get("name") or i["tradingsymbol"]) for i in matches[:50]]
 
+    raise MarketDataSourceError(f"Unknown source '{source}'")
+
+
+async def list_all_symbols(db: AsyncSession, source: str, user_id) -> list[SymbolSearchResult]:
+    """The full tracked universe for a source, unfiltered by a query --
+    used by "Backfill All" (PRD 4's watchlist bulk actions, extended to a
+    whole source): nse-yahoo-data's ~750 NSE symbols, or Delta's RWA
+    token list."""
+    if source == "yahoo":
+        symbols = await YahooNSEDataSource().list_symbols()
+        return [SymbolSearchResult(symbol=s["nse_code"], display_name=s.get("name") or s["nse_code"]) for s in symbols if s.get("is_active", True)]
+    if source == "delta":
+        products = await DeltaExchangeDataSource().list_rwa_token_products()
+        return [SymbolSearchResult(symbol=p["symbol"], display_name=p.get("description") or p["symbol"]) for p in products]
+    if source == "zerodha":
+        try:
+            broker = await get_authenticated_kite_broker(db, user_id)
+            instruments = await broker.get_instruments()
+        except KiteAPIError as exc:
+            raise MarketDataSourceError(str(exc)) from exc
+        return [SymbolSearchResult(symbol=i["tradingsymbol"], display_name=i.get("name") or i["tradingsymbol"]) for i in instruments]
     raise MarketDataSourceError(f"Unknown source '{source}'")
 
 
