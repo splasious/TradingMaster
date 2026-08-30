@@ -32,20 +32,11 @@ from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
+from app.services.market_data.hours import nse_market_open
 
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
-_IST_OFFSET = timedelta(hours=5, minutes=30)
-
-
-def nse_market_open(now: datetime) -> bool:
-    ist = now.astimezone(timezone.utc) + _IST_OFFSET
-    if ist.weekday() >= 5:
-        return False
-    open_t = ist.replace(hour=9, minute=15, second=0, microsecond=0)
-    close_t = ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    return open_t <= ist <= close_t
 
 
 class BfLiveSyncScheduler:

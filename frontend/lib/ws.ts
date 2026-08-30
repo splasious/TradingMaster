@@ -13,6 +13,7 @@ const RECONNECT_DELAY_MS = 2000;
 interface PriceState {
   price: number;
   ts: string;
+  source: MarketTick["source"];
 }
 
 interface MarketDataSocketState {
@@ -21,10 +22,12 @@ interface MarketDataSocketState {
   latencyMs: number | null;
 }
 
-/** Subscribes to simulated live ticks for a set of instrument ids over the
+/** Subscribes to live ticks for a set of instrument ids over the
  * market-data WebSocket (PRD section 9's connection lifecycle: connecting /
  * connected / reconnecting / disconnected / error, with heartbeat-derived
- * latency). Every price this returns is simulated -- see tick_engine.py. */
+ * latency). Each price carries a `source` -- "yahoo" or "delta" for a real
+ * poll, "simulated" as a random-walk fallback where no real source is
+ * mapped for that instrument yet -- see tick_engine.py. */
 export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketState {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [prices, setPrices] = useState<Record<string, PriceState>>({});
@@ -65,7 +68,7 @@ export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketSt
         const message = JSON.parse(event.data);
         if (message.type === "tick") {
           const tick = message as MarketTick;
-          setPrices((prev) => ({ ...prev, [tick.instrument_id]: { price: tick.price, ts: tick.ts } }));
+          setPrices((prev) => ({ ...prev, [tick.instrument_id]: { price: tick.price, ts: tick.ts, source: tick.source } }));
         } else if (message.type === "heartbeat") {
           setLatencyMs(Math.max(0, Date.now() - new Date(message.ts).getTime()));
         }

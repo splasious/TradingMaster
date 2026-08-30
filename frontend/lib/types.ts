@@ -99,7 +99,7 @@ export interface MarketTick {
   instrument_id: string;
   price: number;
   ts: string;
-  source: "simulated";
+  source: "yahoo" | "delta" | "simulated";
 }
 
 export interface IndicatorSpecOut {
@@ -454,6 +454,7 @@ export interface ApplicationMetricsOut {
   tick_engine_running: boolean;
   tick_engine_subscribed_instruments: number;
   paper_trading_scheduler_running: boolean;
+  real_price_feed_running: boolean;
 }
 
 export interface TradingMetricsOut {

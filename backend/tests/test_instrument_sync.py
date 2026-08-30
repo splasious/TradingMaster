@@ -20,11 +20,11 @@ def _patch_yahoo_symbols(monkeypatch, symbols):
     monkeypatch.setattr(yahoo_source_module.YahooNSEDataSource, "list_symbols", fake_list_symbols)
 
 
-def _patch_delta_products(monkeypatch, products):
-    async def fake_list_products(self):
+def _patch_delta_rwa_products(monkeypatch, products):
+    async def fake_list_rwa(self):
         return products
 
-    monkeypatch.setattr(delta_source_module.DeltaExchangeDataSource, "list_products", fake_list_products)
+    monkeypatch.setattr(delta_source_module.DeltaExchangeDataSource, "list_rwa_token_products", fake_list_rwa)
 
 
 async def test_sync_yahoo_nse_creates_new_instruments(client: AsyncClient, seeded_admin: dict, monkeypatch):
@@ -74,9 +74,9 @@ async def test_sync_is_idempotent(client: AsyncClient, seeded_admin: dict, monke
 
 
 async def test_sync_delta_exchange_creates_new_instruments(client: AsyncClient, seeded_admin: dict, monkeypatch):
-    _patch_delta_products(monkeypatch, [
-        {"symbol": "XRPUSD", "description": "XRP Perpetual"},
-        {"symbol": "DOGEUSD", "description": "Dogecoin Perpetual"},
+    _patch_delta_rwa_products(monkeypatch, [
+        {"symbol": "NVDAXUSD", "description": "NVIDIA xStock Token perpetual future quoted in USD"},
+        {"symbol": "PLTRBUSD", "description": "Palantir Technologies bStocks Token perpetual future quoted in USD"},
     ])
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.post("/api/v1/instruments/sync/delta_exchange", headers={"Authorization": f"Bearer {token}"})
@@ -87,7 +87,23 @@ async def test_sync_delta_exchange_creates_new_instruments(client: AsyncClient, 
     assert body["created"] == 2
 
     symbols = (await client.get("/api/v1/instruments?exchange=DELTA", headers={"Authorization": f"Bearer {token}"})).json()
-    assert any(i["symbol"] == "XRPUSD" for i in symbols)
+    assert any(i["symbol"] == "NVDAXUSD" for i in symbols)
+
+
+async def test_sync_delta_exchange_excludes_crypto(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    # list_products (the real unfiltered catalog) is deliberately not what the
+    # sync endpoint calls -- it must go through list_rwa_token_products so
+    # crypto never lands in the main instrument catalog.
+    async def fake_list_products(self):
+        raise AssertionError("sync must call list_rwa_token_products, not list_products, for delta_exchange")
+
+    monkeypatch.setattr(delta_source_module.DeltaExchangeDataSource, "list_products", fake_list_products)
+    _patch_delta_rwa_products(monkeypatch, [{"symbol": "AAPLXUSD", "description": "Apple xStock Token perpetual future quoted in USD"}])
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.post("/api/v1/instruments/sync/delta_exchange", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    assert resp.json()["found"] == 1
 
 
 async def test_sync_rejects_unknown_data_source(client: AsyncClient, seeded_admin: dict):

@@ -84,7 +84,13 @@ export default function MarketsPage() {
                         {tick ? (
                           <span className="font-financial">
                             {tick.price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                            <span className="ml-1.5 text-[10px] font-normal uppercase text-text-muted">simulated</span>
+                            <span
+                              className={`ml-1.5 text-[10px] font-normal uppercase ${
+                                tick.source === "simulated" ? "text-text-muted" : "text-positive"
+                              }`}
+                            >
+                              {tick.source}
+                            </span>
                           </span>
                         ) : (
                           <span className="text-text-muted">--</span>

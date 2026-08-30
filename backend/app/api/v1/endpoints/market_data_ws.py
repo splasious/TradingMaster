@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.core.security import decode_token
 from app.db.session import AsyncSessionLocal
 from app.models.market_data import OhlcvCandle
+from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
 
 router = APIRouter()
@@ -47,6 +48,7 @@ async def market_data_ws(websocket: WebSocket) -> None:
                 for instrument_id in ids - subscribed:
                     tick_engine.subscribe(instrument_id, await _seed_price(instrument_id))
                     subscribed.add(instrument_id)
+                    asyncio.create_task(real_price_feed.refresh_instrument_now(instrument_id))
             elif msg_type == "unsubscribe":
                 for instrument_id in ids & subscribed:
                     tick_engine.unsubscribe(instrument_id)

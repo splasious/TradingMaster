@@ -70,6 +70,7 @@ export default function SystemMonitorPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <RunningBadge running={data.application.tick_engine_running} label="Tick engine" />
+                <RunningBadge running={data.application.real_price_feed_running} label="Real price feed" />
                 <RunningBadge running={data.application.paper_trading_scheduler_running} label="Paper trading scheduler" />
               </div>
               <div className="text-sm text-text-secondary">

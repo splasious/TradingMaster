@@ -116,9 +116,13 @@ class DeltaExchangeDataSource(MarketDataSource):
         Technologies bStocks Token"), confirmed live in the real product
         list by that exact wording in `description`. Everything else
         Delta lists under perpetual_futures is crypto-native (BTC, ETH,
-        hundreds of altcoins) and is deliberately excluded here -- this
-        method exists specifically so the Data Backfill Platform's Delta
-        block can offer RWA/tokenized-stock symbols without crypto mixed
-        in, per that PRD's request."""
+        hundreds of altcoins) and is deliberately excluded here -- used by
+        both the Data Backfill Platform's Delta block and the main
+        instrument catalog sync, per the explicit "no crypto" instruction
+        that scoped Delta everywhere in this app to RWA tokens only."""
         products = await self.list_products()
-        return [p for p in products if "bStocks Token" in (p.get("description") or "") or "xStock Token" in (p.get("description") or "")]
+        return [p for p in products if is_rwa_token_description(p.get("description"))]
+
+
+def is_rwa_token_description(description: str | None) -> bool:
+    return "bStocks Token" in (description or "") or "xStock Token" in (description or "")

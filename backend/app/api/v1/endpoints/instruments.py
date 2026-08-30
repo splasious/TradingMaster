@@ -78,7 +78,7 @@ async def sync_instruments(
         found = len(symbols)
     elif data_source == "delta_exchange":
         try:
-            products = await DeltaExchangeDataSource().list_products()
+            products = await DeltaExchangeDataSource().list_rwa_token_products()
         except MarketDataSourceError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         for p in products:
