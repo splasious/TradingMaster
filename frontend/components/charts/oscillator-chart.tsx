@@ -8,13 +8,14 @@ interface OscillatorChartProps {
   color?: string;
   bands?: number[]; // horizontal reference lines, e.g. [30, 70] for RSI
   height?: number;
+  onChartReady?: (chart: IChartApi | null) => void;
 }
 
 function toUnixSeconds(ts: string): UTCTimestamp {
   return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
 }
 
-export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height = 140 }: OscillatorChartProps) {
+export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height = 140, onChartReady }: OscillatorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -28,6 +29,7 @@ export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height 
       timeScale: { timeVisible: true, secondsVisible: false },
     });
     chartRef.current = chart;
+    onChartReady?.(chart);
 
     const series = chart.addSeries(LineSeries, { color, lineWidth: 1 });
     series.setData(points.filter((p) => p.value !== null).map((p) => ({ time: toUnixSeconds(p.ts), value: p.value as number })));
@@ -47,6 +49,7 @@ export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height 
       resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
+      onChartReady?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [points, color, height]);

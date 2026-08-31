@@ -1,12 +1,10 @@
 import uuid
-from datetime import datetime, time, timezone
-
-from sqlalchemy import select
+from datetime import datetime, timezone
 
 from app.db.session import AsyncSessionLocal
 from app.models.backtest import BacktestJob, BacktestResult, BacktestStatus, BacktestTrade
-from app.models.market_data import OhlcvCandle
 from app.models.strategy import Strategy, StrategyVersion
+from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, simulate_trades
 from app.services.backtest.metrics import compute_metrics
 from app.services.backtest.monte_carlo import run_monte_carlo
@@ -28,22 +26,13 @@ async def run_backtest_job(job_id: uuid.UUID) -> None:
 
         try:
             version = await db.get(StrategyVersion, job.strategy_version_id)
-            candle_stmt = (
-                select(OhlcvCandle)
-                .where(OhlcvCandle.instrument_id == job.instrument_id, OhlcvCandle.timeframe == job.timeframe)
-                .order_by(OhlcvCandle.ts)
-            )
-            if job.start_date:
-                candle_stmt = candle_stmt.where(OhlcvCandle.ts >= datetime.combine(job.start_date, time.min, tzinfo=timezone.utc))
-            if job.end_date:
-                candle_stmt = candle_stmt.where(OhlcvCandle.ts <= datetime.combine(job.end_date, time.max, tzinfo=timezone.utc))
-            candles_result = await db.execute(candle_stmt)
-            candles = list(candles_result.scalars().all())[-MAX_CANDLES:]
+            candles = (await load_candles(db, job.instrument_id, job.timeframe, job.start_date, job.end_date))[-MAX_CANDLES:]
 
             if len(candles) < 30:
                 raise SignalComputationError(
                     "Not enough backfilled candles to run a backtest (need at least 30)"
                     + (" in the selected date range" if job.start_date or job.end_date else "")
+                    + f" at timeframe '{job.timeframe}' -- try a different timeframe or backfill this one first"
                 )
 
             if version.python_code:

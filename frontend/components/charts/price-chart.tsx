@@ -24,13 +24,14 @@ interface PriceChartProps {
   candles: CandleOut[];
   overlays?: OverlayLine[];
   height?: number;
+  onChartReady?: (chart: IChartApi | null) => void;
 }
 
 function toUnixSeconds(ts: string): UTCTimestamp {
   return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
 }
 
-export function PriceChart({ candles, overlays = [], height = 420 }: PriceChartProps) {
+export function PriceChart({ candles, overlays = [], height = 420, onChartReady }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -54,6 +55,7 @@ export function PriceChart({ candles, overlays = [], height = 420 }: PriceChartP
       timeScale: { timeVisible: true, secondsVisible: false },
     });
     chartRef.current = chart;
+    onChartReady?.(chart);
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: "#15803d",
@@ -85,7 +87,9 @@ export function PriceChart({ candles, overlays = [], height = 420 }: PriceChartP
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       overlaySeries.clear();
+      onChartReady?.(null);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [height]);
 
   useEffect(() => {

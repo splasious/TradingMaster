@@ -1,8 +1,9 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { IChartApi } from "lightweight-charts";
 import { useSearchParams } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { PriceChart, type OverlayLine } from "@/components/charts/price-chart";
@@ -14,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
+import { syncChartTimeScales } from "@/lib/chart-sync";
 import { useChartCandles, useIndicator, useInstrument, useInstruments, useResampleBase } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
 import { TIMEFRAMES, type CatalogSyncItemOut, type InstrumentOut } from "@/lib/types";
@@ -50,6 +52,16 @@ export default function ChartsPage() {
   const deepLinkSymbol = searchParams.get("symbol");
   const deepLinkExchange = searchParams.get("exchange");
   const queryClient = useQueryClient();
+
+  // The price chart and the RSI panel below it are two independent
+  // lightweight-charts instances (own createChart(), own time scale) --
+  // without this they don't move together when panning/zooming either one.
+  const [priceChartApi, setPriceChartApi] = useState<IChartApi | null>(null);
+  const [rsiChartApi, setRsiChartApi] = useState<IChartApi | null>(null);
+  useEffect(() => {
+    if (!priceChartApi || !rsiChartApi) return;
+    return syncChartTimeScales([priceChartApi, rsiChartApi]);
+  }, [priceChartApi, rsiChartApi]);
 
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
@@ -242,11 +254,15 @@ export default function ChartsPage() {
             />
           ) : (
             <div className="space-y-2">
-              <PriceChart candles={candles} overlays={overlays} />
+              <PriceChart candles={candles} overlays={overlays} onChartReady={setPriceChartApi} />
               {showRsi && rsi && (
                 <div>
                   <div className="mb-1 text-xs font-medium text-text-muted">RSI (14)</div>
-                  <OscillatorChart points={rsi.map((p) => ({ ts: p.ts, value: p.values.rsi }))} bands={[30, 70]} />
+                  <OscillatorChart
+                    points={rsi.map((p) => ({ ts: p.ts, value: p.values.rsi }))}
+                    bands={[30, 70]}
+                    onChartReady={setRsiChartApi}
+                  />
                 </div>
               )}
             </div>

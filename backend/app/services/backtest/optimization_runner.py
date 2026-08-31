@@ -1,12 +1,10 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-
 from app.db.session import AsyncSessionLocal
 from app.models.backtest import BacktestStatus, OptimizationJob, OptimizationResult
-from app.models.market_data import OhlcvCandle
 from app.models.strategy import StrategyVersion
+from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, simulate_trades
 from app.services.backtest.metrics import compute_metrics
 from app.services.backtest.optimization import GridTooLargeError, ParamRange, build_param_grid
@@ -29,14 +27,12 @@ async def run_optimization_job(job_id: uuid.UUID) -> None:
             if not version.python_code:
                 raise SignalComputationError("Optimization is only supported for Python strategies")
 
-            candles_result = await db.execute(
-                select(OhlcvCandle)
-                .where(OhlcvCandle.instrument_id == job.instrument_id, OhlcvCandle.timeframe == job.timeframe)
-                .order_by(OhlcvCandle.ts)
-            )
-            candles = list(candles_result.scalars().all())
+            candles = await load_candles(db, job.instrument_id, job.timeframe)
             if len(candles) < 30:
-                raise SignalComputationError("Not enough backfilled candles to run an optimization (need at least 30)")
+                raise SignalComputationError(
+                    f"Not enough backfilled candles to run an optimization (need at least 30) at timeframe '{job.timeframe}'"
+                    " -- try a different timeframe or backfill this one first"
+                )
 
             try:
                 grid = build_param_grid([ParamRange(**r) for r in job.param_ranges])
