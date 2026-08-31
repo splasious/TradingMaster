@@ -3,8 +3,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { IChartApi } from "lightweight-charts";
 import { useSearchParams } from "next/navigation";
-import { X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Plus, Settings2, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { PriceChart, type OverlayLine } from "@/components/charts/price-chart";
@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
+import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
@@ -26,7 +27,14 @@ const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
   delta_exchange: "delta",
 };
 
-const DEFAULT_ACTIVE_INDICATORS = ["sma", "rsi"];
+interface ActiveIndicator {
+  code: string;
+  color: string;
+  bands: number[];
+  params: Record<string, number>;
+}
+
+const DEFAULT_ACTIVE_CODES = ["sma", "rsi"];
 
 // Stable fallback references -- a fresh `[]` literal on every render would
 // give OscillatorChart/PriceChart a "changed" prop even when nothing
@@ -39,9 +47,10 @@ const EMPTY_BANDS: number[] = [];
 
 const INDICATOR_COLORS = ["#3b6bf5", "#f59e0b", "#9333ea", "#16a34a", "#dc2626", "#0891b2", "#c026d3", "#65a30d", "#ea580c", "#4338ca"];
 
-// Natural reference bands for the oscillators that have a conventional
-// overbought/oversold pair -- purely a display aid, not used elsewhere.
-const OSCILLATOR_BANDS: Record<string, number[]> = {
+// Starting reference bands for the oscillators that have a conventional
+// overbought/oversold pair -- just the initial value when an indicator is
+// added; each active indicator keeps its own editable copy from there.
+const DEFAULT_BANDS: Record<string, number[]> = {
   rsi: [30, 70],
   stochastic: [20, 80],
   mfi: [20, 80],
@@ -60,17 +69,17 @@ function IndicatorSeries({
   timeframe,
   baseTimeframe,
   spec,
-  color,
+  indicator,
   onLines,
 }: {
   instrumentId: string | null;
   timeframe: string;
   baseTimeframe: string | null;
   spec: IndicatorSpecOut;
-  color: string;
+  indicator: ActiveIndicator;
   onLines: (code: string, lines: OverlayLine[] | null) => void;
 }) {
-  const { data } = useIndicator(instrumentId, timeframe, spec.code, baseTimeframe);
+  const { data } = useIndicator(instrumentId, timeframe, spec.code, baseTimeframe, indicator.params);
   useEffect(() => {
     if (!data) {
       onLines(spec.code, null);
@@ -78,12 +87,92 @@ function IndicatorSeries({
     }
     const lines = spec.output_fields.map((field) => ({
       id: spec.output_fields.length > 1 ? `${spec.name} (${field})` : spec.name,
-      color,
+      color: indicator.color,
       points: data.map((p) => ({ ts: p.ts, value: p.values[field] })),
     }));
     onLines(spec.code, lines);
-  }, [data, spec, color, onLines]);
+  }, [data, spec, indicator.color, onLines]);
   return null;
+}
+
+function IndicatorSettingsModal({
+  spec,
+  indicator,
+  onChange,
+  onClose,
+}: {
+  spec: IndicatorSpecOut;
+  indicator: ActiveIndicator;
+  onChange: (patch: Partial<ActiveIndicator>) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal open onClose={onClose} title={`${spec.name} settings`}>
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-text-secondary">Line color</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={indicator.color}
+              onChange={(e) => onChange({ color: e.target.value })}
+              className="h-8 w-12 cursor-pointer rounded border border-border bg-transparent"
+            />
+            <span className="font-financial text-xs text-text-muted">{indicator.color}</span>
+          </div>
+        </div>
+
+        {Object.keys(spec.default_params).length > 0 && (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-text-secondary">Parameters</label>
+            <div className="grid grid-cols-2 gap-2">
+              {Object.keys(spec.default_params).map((key) => (
+                <div key={key} className="space-y-1">
+                  <label className="text-[11px] capitalize text-text-muted">{key.replace(/_/g, " ")}</label>
+                  <Input
+                    type="number"
+                    value={indicator.params[key] ?? spec.default_params[key]}
+                    onChange={(e) => onChange({ params: { ...indicator.params, [key]: Number(e.target.value) } })}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!spec.overlay && (
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-text-secondary">Reference bands</label>
+            <p className="text-[11px] text-text-muted">Horizontal dashed lines drawn on this indicator&apos;s panel (e.g. RSI&apos;s 30/70 overbought-oversold levels).</p>
+            <div className="space-y-1.5">
+              {indicator.bands.map((band, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    value={band}
+                    onChange={(e) =>
+                      onChange({ bands: indicator.bands.map((b, idx) => (idx === i ? Number(e.target.value) : b)) })
+                    }
+                    className="flex-1"
+                  />
+                  <Button variant="ghost" size="sm" onClick={() => onChange({ bands: indicator.bands.filter((_, idx) => idx !== i) })}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
+              <Button variant="secondary" size="sm" onClick={() => onChange({ bands: [...indicator.bands, 0] })}>
+                <Plus className="h-3.5 w-3.5" /> Add band
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <Button onClick={onClose}>Done</Button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 export default function ChartsPage() {
@@ -108,11 +197,27 @@ export default function ChartsPage() {
   const [exchange, setExchange] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
   const [timeframe, setTimeframe] = useState("1d");
-  const [activeIndicators, setActiveIndicators] = useState<string[]>(DEFAULT_ACTIVE_INDICATORS);
   const [indicatorLines, setIndicatorLines] = useState<Map<string, OverlayLine[]>>(new Map());
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
 
   const { data: indicatorList } = useIndicatorList();
   const specByCode = useMemo(() => new Map((indicatorList ?? []).map((s) => [s.code, s] as const)), [indicatorList]);
+
+  const [activeIndicators, setActiveIndicators] = useState<ActiveIndicator[]>([]);
+  const hasSeededDefaults = useRef(false);
+  useEffect(() => {
+    if (hasSeededDefaults.current || !indicatorList) return;
+    hasSeededDefaults.current = true;
+    setActiveIndicators(
+      DEFAULT_ACTIVE_CODES.filter((code) => specByCode.has(code)).map((code, i) => ({
+        code,
+        color: INDICATOR_COLORS[i % INDICATOR_COLORS.length],
+        bands: DEFAULT_BANDS[code] ?? [],
+        params: { ...(specByCode.get(code)?.default_params ?? {}) },
+      })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot default seeding once the registry loads, guarded by the ref above
+  }, [indicatorList]);
 
   const { data: instruments } = useInstruments(q, exchange || undefined);
 
@@ -159,12 +264,21 @@ export default function ChartsPage() {
   }, []);
 
   function addIndicator(code: string) {
-    if (!code || activeIndicators.includes(code)) return;
-    setActiveIndicators((prev) => [...prev, code]);
+    if (!code || activeIndicators.some((a) => a.code === code)) return;
+    const spec = specByCode.get(code);
+    setActiveIndicators((prev) => [
+      ...prev,
+      {
+        code,
+        color: INDICATOR_COLORS[prev.length % INDICATOR_COLORS.length],
+        bands: DEFAULT_BANDS[code] ?? [],
+        params: { ...(spec?.default_params ?? {}) },
+      },
+    ]);
   }
 
   function removeIndicator(code: string) {
-    setActiveIndicators((prev) => prev.filter((c) => c !== code));
+    setActiveIndicators((prev) => prev.filter((a) => a.code !== code));
     setIndicatorLines((prev) => {
       const next = new Map(prev);
       next.delete(code);
@@ -173,9 +287,16 @@ export default function ChartsPage() {
     setOscillatorChartApis((prev) => Object.fromEntries(Object.entries(prev).filter(([c]) => c !== code)));
   }
 
-  const activeSpecs = activeIndicators.map((code) => specByCode.get(code)).filter((s): s is IndicatorSpecOut => !!s);
-  const overlaySpecs = activeSpecs.filter((s) => s.overlay);
-  const oscillatorSpecs = activeSpecs.filter((s) => !s.overlay);
+  function updateIndicator(code: string, patch: Partial<ActiveIndicator>) {
+    setActiveIndicators((prev) => prev.map((a) => (a.code === code ? { ...a, ...patch } : a)));
+  }
+
+  const activeWithSpecs = activeIndicators
+    .map((indicator) => ({ indicator, spec: specByCode.get(indicator.code) }))
+    .filter((x): x is { indicator: ActiveIndicator; spec: IndicatorSpecOut } => !!x.spec);
+  const overlayEntries = activeWithSpecs.filter((x) => x.spec.overlay);
+  const oscillatorEntries = activeWithSpecs.filter((x) => !x.spec.overlay);
+  const editing = settingsFor ? activeWithSpecs.find((x) => x.indicator.code === settingsFor) : undefined;
 
   const bfSource = resolvedSelected ? DATA_SOURCE_TO_BF_SOURCE[resolvedSelected.data_source] : undefined;
   const syncMutation = useMutation({
@@ -189,20 +310,20 @@ export default function ChartsPage() {
     },
   });
 
-  const overlays: OverlayLine[] = overlaySpecs.flatMap((s) => indicatorLines.get(s.code) ?? EMPTY_LINES);
+  const overlays: OverlayLine[] = overlayEntries.flatMap((x) => indicatorLines.get(x.indicator.code) ?? EMPTY_LINES);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
       {resolvedSelected &&
         indicatorsAvailable &&
-        activeSpecs.map((spec, i) => (
+        activeWithSpecs.map(({ indicator, spec }) => (
           <IndicatorSeries
-            key={spec.code}
+            key={indicator.code}
             instrumentId={resolvedSelected.id}
             timeframe={timeframe}
             baseTimeframe={effectiveBase}
             spec={spec}
-            color={INDICATOR_COLORS[i % INDICATOR_COLORS.length]}
+            indicator={indicator}
             onLines={handleLines}
           />
         ))}
@@ -261,7 +382,9 @@ export default function ChartsPage() {
               >
                 <option value="">+ Add indicator...</option>
                 {["trend", "momentum", "volatility", "volume", "structure"].map((category) => {
-                  const options = (indicatorList ?? []).filter((s) => s.category === category && !activeIndicators.includes(s.code));
+                  const options = (indicatorList ?? []).filter(
+                    (s) => s.category === category && !activeIndicators.some((a) => a.code === s.code),
+                  );
                   if (!options.length) return null;
                   return (
                     <optgroup key={category} label={category[0].toUpperCase() + category.slice(1)}>
@@ -279,12 +402,15 @@ export default function ChartsPage() {
           )}
         </CardHeader>
         <CardContent className="space-y-4">
-          {resolvedSelected && activeIndicators.length > 0 && (
+          {resolvedSelected && activeWithSpecs.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {activeIndicators.map((code, i) => (
-                <Badge key={code} style={{ backgroundColor: `${INDICATOR_COLORS[i % INDICATOR_COLORS.length]}22`, color: INDICATOR_COLORS[i % INDICATOR_COLORS.length] }}>
-                  {specByCode.get(code)?.name ?? code}
-                  <button onClick={() => removeIndicator(code)}>
+              {activeWithSpecs.map(({ indicator, spec }) => (
+                <Badge key={indicator.code} style={{ backgroundColor: `${indicator.color}22`, color: indicator.color }}>
+                  {spec.name}
+                  <button onClick={() => setSettingsFor(indicator.code)} title="Settings">
+                    <Settings2 className="h-3 w-3" />
+                  </button>
+                  <button onClick={() => removeIndicator(indicator.code)} title="Remove">
                     <X className="h-3 w-3" />
                   </button>
                 </Badge>
@@ -330,13 +456,13 @@ export default function ChartsPage() {
           ) : (
             <div className="space-y-2">
               <PriceChart candles={candles} overlays={overlays} onChartReady={setPriceChartApi} />
-              {oscillatorSpecs.map((spec) => (
-                <div key={spec.code}>
+              {oscillatorEntries.map(({ indicator, spec }) => (
+                <div key={indicator.code}>
                   <div className="mb-1 text-xs font-medium text-text-muted">{spec.name}</div>
                   <OscillatorChart
-                    lines={indicatorLines.get(spec.code) ?? EMPTY_LINES}
-                    bands={OSCILLATOR_BANDS[spec.code] ?? EMPTY_BANDS}
-                    onChartReady={(chart) => setOscillatorChartApis((prev) => ({ ...prev, [spec.code]: chart }))}
+                    lines={indicatorLines.get(indicator.code) ?? EMPTY_LINES}
+                    bands={indicator.bands.length ? indicator.bands : EMPTY_BANDS}
+                    onChartReady={(chart) => setOscillatorChartApis((prev) => ({ ...prev, [indicator.code]: chart }))}
                   />
                 </div>
               ))}
@@ -344,6 +470,15 @@ export default function ChartsPage() {
           )}
         </CardContent>
       </Card>
+
+      {editing && (
+        <IndicatorSettingsModal
+          spec={editing.spec}
+          indicator={editing.indicator}
+          onChange={(patch) => updateIndicator(editing.indicator.code, patch)}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   );
 }

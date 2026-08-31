@@ -344,11 +344,13 @@ export function useIndicator(
   timeframe: string,
   indicator: string | null,
   baseTimeframe?: string | null,
+  paramOverrides?: Record<string, number>,
 ) {
   const params = new URLSearchParams({ instrument_id: instrumentId ?? "", timeframe, indicator: indicator ?? "" });
   if (baseTimeframe && baseTimeframe !== timeframe) params.set("base_timeframe", baseTimeframe);
+  if (paramOverrides && Object.keys(paramOverrides).length) params.set("params", JSON.stringify(paramOverrides));
   return useQuery({
-    queryKey: ["indicator", instrumentId, timeframe, indicator, baseTimeframe],
+    queryKey: ["indicator", instrumentId, timeframe, indicator, baseTimeframe, paramOverrides],
     queryFn: () => apiFetch<IndicatorPoint[]>(`/api/v1/indicators/calculate?${params.toString()}`),
     enabled: !!instrumentId && !!indicator,
   });
