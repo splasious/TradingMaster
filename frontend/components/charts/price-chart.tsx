@@ -20,6 +20,24 @@ export interface OverlayLine {
   points: { ts: string; value: number | null }[];
 }
 
+/** Converts to lightweight-charts' own point shape, preserving every point
+ * -- including an indicator's leading warmup-period nulls -- as
+ * "whitespace" (a time slot with no plotted value) rather than dropping
+ * them. Multiple independent chart instances (price + each oscillator
+ * panel) are kept in sync via setVisibleLogicalRange, which aligns them by
+ * bar *index*, not calendar time -- so if one series silently drops its
+ * first N points (e.g. RSI's 14-bar warmup, MACD's ~34), its index 0 no
+ * longer means the same date as every other panel's index 0, and panning
+ * one desyncs the rest by exactly that many bars. Keeping the index
+ * mapping identical to the price chart's own candle series is what makes
+ * the sync correct, not just the subscription plumbing in chart-sync.ts. */
+export function toSeriesPoints(points: { ts: string; value: number | null }[]): ({ time: UTCTimestamp; value: number } | { time: UTCTimestamp })[] {
+  return points.map((p) => {
+    const time = Math.floor(new Date(p.ts).getTime() / 1000) as UTCTimestamp;
+    return p.value === null ? { time } : { time, value: p.value };
+  });
+}
+
 interface PriceChartProps {
   candles: CandleOut[];
   overlays?: OverlayLine[];
@@ -132,11 +150,7 @@ export function PriceChart({ candles, overlays = [], height = 420, onChartReady 
         series = chart.addSeries(LineSeries, { color: overlay.color, lineWidth: 1 });
         overlaySeriesRef.current.set(overlay.id, series);
       }
-      series.setData(
-        overlay.points
-          .filter((p) => p.value !== null)
-          .map((p) => ({ time: toUnixSeconds(p.ts), value: p.value as number })),
-      );
+      series.setData(toSeriesPoints(overlay.points));
     }
   }, [overlays]);
 

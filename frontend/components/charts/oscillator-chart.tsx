@@ -1,19 +1,15 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { ColorType, LineSeries, createChart, type IChartApi, type IPriceLine, type ISeriesApi, type UTCTimestamp } from "lightweight-charts";
+import { ColorType, LineSeries, createChart, type IChartApi, type IPriceLine, type ISeriesApi } from "lightweight-charts";
 
-import type { OverlayLine } from "./price-chart";
+import { toSeriesPoints, type OverlayLine } from "./price-chart";
 
 interface OscillatorChartProps {
   lines: OverlayLine[];
   bands?: number[]; // horizontal reference lines, e.g. [30, 70] for RSI
   height?: number;
   onChartReady?: (chart: IChartApi | null) => void;
-}
-
-function toUnixSeconds(ts: string): UTCTimestamp {
-  return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
 }
 
 export function OscillatorChart({ lines, bands = [], height = 140, onChartReady }: OscillatorChartProps) {
@@ -76,7 +72,7 @@ export function OscillatorChart({ lines, bands = [], height = 140, onChartReady 
         series = chart.addSeries(LineSeries, { color: line.color, lineWidth: 1, title: line.id });
         seriesRef.current.set(line.id, series);
       }
-      series.setData(line.points.filter((p) => p.value !== null).map((p) => ({ time: toUnixSeconds(p.ts), value: p.value as number })));
+      series.setData(toSeriesPoints(line.points));
     }
 
     const anchorSeries = seriesRef.current.values().next().value;
