@@ -24,6 +24,7 @@ from app.schemas.paper_trading import (
     EvaluationOut,
     OrderOut,
     PortfolioOut,
+    PortfolioUpdate,
     PositionOut,
     TradeOut,
 )
@@ -184,6 +185,26 @@ async def evaluate_deployment_now(deployment_id: str, db: AsyncSession = Depends
 
     outcome = await evaluate_deployment(db, deployment)
     return EvaluationOut(action=outcome.action, signal=outcome.signal, price=outcome.price, reason=outcome.reason)
+
+
+@router.patch("/portfolio", response_model=PortfolioOut)
+async def update_portfolio_capital(
+    payload: PortfolioUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> PortfolioOut:
+    """Resets both cash and initial_capital to the given amount -- a real
+    reset, not just relabeling the starting baseline, since paper trading's
+    whole point is a clean simulation the user can size however they want
+    before (or between) runs. Doesn't touch existing deployments/positions/
+    trade history; equity just recomputes from the new cash on next read."""
+    portfolio = await _get_or_create_portfolio(db, user)
+    portfolio.cash = payload.initial_capital
+    portfolio.initial_capital = payload.initial_capital
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_PORTFOLIO_CAPITAL_RESET", object_type="paper_portfolio", object_id=str(portfolio.id),
+        new_value={"initial_capital": payload.initial_capital},
+    )
+    await db.commit()
+    return await get_portfolio(db, user)
 
 
 @router.get("/portfolio", response_model=PortfolioOut)

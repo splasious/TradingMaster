@@ -74,6 +74,31 @@ async def test_full_paper_trading_flow_via_api(client: AsyncClient, seeded_admin
     assert any(d["id"] == deployment_id and d["status"] == "stopped" for d in list_resp.json())
 
 
+async def test_update_portfolio_capital_resets_cash_and_initial_capital(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Creates the lazy portfolio at its 100000 default.
+    initial = await client.get("/api/v1/paper-trading/portfolio", headers=headers)
+    assert initial.json()["cash"] == 100000.0
+
+    resp = await client.patch("/api/v1/paper-trading/portfolio", json={"initial_capital": 500000}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["cash"] == 500000.0
+    assert resp.json()["initial_capital"] == 500000.0
+
+    # Persists.
+    again = await client.get("/api/v1/paper-trading/portfolio", headers=headers)
+    assert again.json()["cash"] == 500000.0
+
+
+async def test_update_portfolio_capital_rejects_non_positive(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.patch("/api/v1/paper-trading/portfolio", json={"initial_capital": 0}, headers=headers)
+    assert resp.status_code == 422
+
+
 async def test_cannot_delete_active_deployment(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = await _seed_instrument(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])

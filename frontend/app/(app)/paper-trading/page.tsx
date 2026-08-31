@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Square, Trash2, Zap } from "lucide-react";
+import { Pencil, Play, Square, Trash2, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -24,7 +24,7 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
-import type { InstrumentOut, PaperDeploymentOut, PaperEvaluationOut, StrategyOut } from "@/lib/types";
+import type { InstrumentOut, PaperDeploymentOut, PaperEvaluationOut, PaperPortfolioOut, StrategyOut } from "@/lib/types";
 
 function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
   if (!lastEvaluatedAt) return undefined;
@@ -401,7 +401,20 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
             <span className="text-text-muted">flat</span>
           )}
         </Td>
-        <Td className="text-xs text-text-muted">{lastEval ? `${lastEval.action} (${lastEval.signal ?? "-"})` : "--"}</Td>
+        <Td className="max-w-xs text-xs text-text-muted">
+          {lastEval ? (
+            <span
+              className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`}
+              title={lastEval.reason ?? undefined}
+            >
+              {lastEval.action}
+              {lastEval.signal ? ` (${lastEval.signal})` : ""}
+              {lastEval.reason ? `: ${lastEval.reason}` : ""}
+            </span>
+          ) : (
+            "--"
+          )}
+        </Td>
         <Td className="text-right" onClick={(e) => e.stopPropagation()}>
           <div className="flex justify-end gap-1">
             {deployment.status === "active" ? (
@@ -432,11 +445,62 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
   );
 }
 
+function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [amount, setAmount] = useState(String(portfolio.initial_capital));
+
+  const updateMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<PaperPortfolioOut>("/api/v1/paper-trading/portfolio", {
+        method: "PATCH",
+        body: JSON.stringify({ initial_capital: Number(amount) }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolio"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title="Set Paper Trading Capital">
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          Resets both cash and starting capital to this amount. Doesn&apos;t affect existing deployments or trade
+          history -- equity just recalculates from the new cash balance.
+        </p>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Amount</label>
+          <Input type="number" min="0.01" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </div>
+
+        {updateMutation.error && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {updateMutation.error instanceof ApiError ? updateMutation.error.message : "Failed to update capital"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => updateMutation.mutate()}
+            disabled={!amount || Number(amount) <= 0 || updateMutation.isPending}
+          >
+            {updateMutation.isPending ? "Saving..." : "Save"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolio } = usePaperPortfolio();
   const [modalOpen, setModalOpen] = useState(false);
   const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
+  const [editingCapital, setEditingCapital] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -464,7 +528,12 @@ export default function PaperTradingPage() {
           </Card>
           <Card>
             <CardContent className="pt-4">
-              <div className="text-xs text-text-muted">Cash</div>
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-text-muted">Cash</div>
+                <button onClick={() => setEditingCapital(true)} className="text-text-muted hover:text-text-primary" title="Edit starting capital">
+                  <Pencil className="h-3 w-3" />
+                </button>
+              </div>
               <div className="font-financial text-xl font-semibold text-text-primary">{portfolio.cash.toFixed(2)}</div>
             </CardContent>
           </Card>
@@ -520,6 +589,7 @@ export default function PaperTradingPage() {
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} />
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
+      {editingCapital && portfolio && <EditCapitalModal portfolio={portfolio} onClose={() => setEditingCapital(false)} />}
     </div>
   );
 }

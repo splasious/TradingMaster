@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DeploymentCreate(BaseModel):
@@ -30,6 +30,10 @@ class PositionOut(BaseModel):
     current_price: float | None
     unrealized_pnl: float | None
     opened_at: datetime
+
+
+class PortfolioUpdate(BaseModel):
+    initial_capital: float = Field(gt=0)
 
 
 class PortfolioOut(BaseModel):
