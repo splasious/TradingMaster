@@ -29,7 +29,9 @@ Thumbs.db
 backend/*.log
 frontend/*.log
 
-# Packaging: PyInstaller/build output -- regenerated from packaging/*.spec
-# and packaging/*.py, never meant to be committed (the exe alone is 50MB+).
+# Packaging: PyInstaller/build and Inno Setup output -- regenerated from
+# packaging/*.spec, packaging/*.py, and packaging/installer.iss, never
+# meant to be committed (the installer alone is 80MB+).
 packaging/build/
 packaging/dist/
+packaging/installer_output/
