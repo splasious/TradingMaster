@@ -9,6 +9,7 @@ class IndicatorSpecOut(BaseModel):
     category: str
     output_fields: list[str]
     default_params: dict[str, float]
+    overlay: bool
 
 
 class IndicatorPoint(BaseModel):

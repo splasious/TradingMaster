@@ -108,6 +108,7 @@ export interface IndicatorSpecOut {
   category: string;
   output_fields: string[];
   default_params: Record<string, number>;
+  overlay: boolean;
 }
 
 export interface IndicatorPoint {

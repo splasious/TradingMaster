@@ -3,7 +3,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { IChartApi } from "lightweight-charts";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { PriceChart, type OverlayLine } from "@/components/charts/price-chart";
@@ -16,36 +17,64 @@ import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { syncChartTimeScales } from "@/lib/chart-sync";
-import { useChartCandles, useIndicator, useInstrument, useInstruments, useResampleBase } from "@/lib/hooks";
+import { useChartCandles, useIndicator, useIndicatorList, useInstrument, useInstruments, useResampleBase } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
-import { TIMEFRAMES, type CatalogSyncItemOut, type InstrumentOut } from "@/lib/types";
+import { TIMEFRAMES, type CatalogSyncItemOut, type IndicatorSpecOut, type InstrumentOut } from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
   yahoo_nse: "yahoo",
   delta_exchange: "delta",
 };
 
-const OVERLAY_OPTIONS = [
-  { code: "sma", field: "sma", label: "SMA 20", color: "#3b6bf5" },
-  { code: "ema", field: "ema", label: "EMA 50", color: "#f59e0b" },
-] as const;
+const DEFAULT_ACTIVE_INDICATORS = ["sma", "rsi"];
 
-const RSI_BANDS = [30, 70];
+const INDICATOR_COLORS = ["#3b6bf5", "#f59e0b", "#9333ea", "#16a34a", "#dc2626", "#0891b2", "#c026d3", "#65a30d", "#ea580c", "#4338ca"];
 
-function useOverlay(
-  instrumentId: string | null,
-  timeframe: string,
-  baseTimeframe: string | null,
-  code: string,
-  field: string,
-  color: string,
-  enabled: boolean,
-): OverlayLine | null {
-  const { data } = useIndicator(enabled ? instrumentId : null, timeframe, code, baseTimeframe);
-  return useMemo(() => {
-    if (!enabled || !data) return null;
-    return { id: code, color, points: data.map((p) => ({ ts: p.ts, value: p.values[field] })) };
-  }, [enabled, data, code, field, color]);
+// Natural reference bands for the oscillators that have a conventional
+// overbought/oversold pair -- purely a display aid, not used elsewhere.
+const OSCILLATOR_BANDS: Record<string, number[]> = {
+  rsi: [30, 70],
+  stochastic: [20, 80],
+  mfi: [20, 80],
+  cci: [-100, 100],
+  williams_r: [-80, -20],
+  cmo: [-50, 50],
+  ultimate_oscillator: [30, 70],
+};
+
+/** Renders nothing -- exists to call useIndicator once per active indicator
+ * (a fixed hook call per mounted instance, keyed by code) and report the
+ * resulting chart lines up to the parent, since the parent can't call a
+ * variable-length list of hooks directly. */
+function IndicatorSeries({
+  instrumentId,
+  timeframe,
+  baseTimeframe,
+  spec,
+  color,
+  onLines,
+}: {
+  instrumentId: string | null;
+  timeframe: string;
+  baseTimeframe: string | null;
+  spec: IndicatorSpecOut;
+  color: string;
+  onLines: (code: string, lines: OverlayLine[] | null) => void;
+}) {
+  const { data } = useIndicator(instrumentId, timeframe, spec.code, baseTimeframe);
+  useEffect(() => {
+    if (!data) {
+      onLines(spec.code, null);
+      return;
+    }
+    const lines = spec.output_fields.map((field) => ({
+      id: spec.output_fields.length > 1 ? `${spec.name} (${field})` : spec.name,
+      color,
+      points: data.map((p) => ({ ts: p.ts, value: p.values[field] })),
+    }));
+    onLines(spec.code, lines);
+  }, [data, spec, color, onLines]);
+  return null;
 }
 
 export default function ChartsPage() {
@@ -55,24 +84,26 @@ export default function ChartsPage() {
   const deepLinkExchange = searchParams.get("exchange");
   const queryClient = useQueryClient();
 
-  // The price chart and the RSI panel below it are two independent
+  // The price chart and each oscillator panel below it are independent
   // lightweight-charts instances (own createChart(), own time scale) --
-  // without this they don't move together when panning/zooming either one.
+  // without this they don't move together when panning/zooming any one.
   const [priceChartApi, setPriceChartApi] = useState<IChartApi | null>(null);
-  const [rsiChartApi, setRsiChartApi] = useState<IChartApi | null>(null);
+  const [oscillatorChartApis, setOscillatorChartApis] = useState<Record<string, IChartApi | null>>({});
   useEffect(() => {
-    if (!priceChartApi || !rsiChartApi) return;
-    return syncChartTimeScales([priceChartApi, rsiChartApi]);
-  }, [priceChartApi, rsiChartApi]);
+    const charts = [priceChartApi, ...Object.values(oscillatorChartApis)].filter((c): c is IChartApi => c !== null);
+    if (charts.length < 2) return;
+    return syncChartTimeScales(charts);
+  }, [priceChartApi, oscillatorChartApis]);
 
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
   const [timeframe, setTimeframe] = useState("1d");
-  const [showSma, setShowSma] = useState(true);
-  const [showEma, setShowEma] = useState(false);
-  const [showBollinger, setShowBollinger] = useState(false);
-  const [showRsi, setShowRsi] = useState(true);
+  const [activeIndicators, setActiveIndicators] = useState<string[]>(DEFAULT_ACTIVE_INDICATORS);
+  const [indicatorLines, setIndicatorLines] = useState<Map<string, OverlayLine[]>>(new Map());
+
+  const { data: indicatorList } = useIndicatorList();
+  const specByCode = useMemo(() => new Map((indicatorList ?? []).map((s) => [s.code, s] as const)), [indicatorList]);
 
   const { data: instruments } = useInstruments(q, exchange || undefined);
 
@@ -109,17 +140,33 @@ export default function ChartsPage() {
   const indicatorsAvailable = directlyAvailable || !!indicatorBase;
   const effectiveBase = directlyAvailable ? null : indicatorBase;
 
-  const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (resolvedSelected?.id ?? null) : null, timeframe, "rsi", effectiveBase);
-  const rsiPoints = useMemo(() => rsi?.map((p) => ({ ts: p.ts, value: p.values.rsi })) ?? [], [rsi]);
-  const { data: bollinger } = useIndicator(
-    indicatorsAvailable && showBollinger ? (resolvedSelected?.id ?? null) : null,
-    timeframe,
-    "bollinger_bands",
-    effectiveBase,
-  );
+  const handleLines = useCallback((code: string, lines: OverlayLine[] | null) => {
+    setIndicatorLines((prev) => {
+      const next = new Map(prev);
+      if (lines) next.set(code, lines);
+      else next.delete(code);
+      return next;
+    });
+  }, []);
 
-  const smaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, effectiveBase, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
-  const emaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, effectiveBase, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
+  function addIndicator(code: string) {
+    if (!code || activeIndicators.includes(code)) return;
+    setActiveIndicators((prev) => [...prev, code]);
+  }
+
+  function removeIndicator(code: string) {
+    setActiveIndicators((prev) => prev.filter((c) => c !== code));
+    setIndicatorLines((prev) => {
+      const next = new Map(prev);
+      next.delete(code);
+      return next;
+    });
+    setOscillatorChartApis((prev) => Object.fromEntries(Object.entries(prev).filter(([c]) => c !== code)));
+  }
+
+  const activeSpecs = activeIndicators.map((code) => specByCode.get(code)).filter((s): s is IndicatorSpecOut => !!s);
+  const overlaySpecs = activeSpecs.filter((s) => s.overlay);
+  const oscillatorSpecs = activeSpecs.filter((s) => !s.overlay);
 
   const bfSource = resolvedSelected ? DATA_SOURCE_TO_BF_SOURCE[resolvedSelected.data_source] : undefined;
   const syncMutation = useMutation({
@@ -133,19 +180,24 @@ export default function ChartsPage() {
     },
   });
 
-  const overlays = useMemo<OverlayLine[]>(() => {
-    const lines: OverlayLine[] = [];
-    if (smaLine) lines.push(smaLine);
-    if (emaLine) lines.push(emaLine);
-    if (showBollinger && bollinger) {
-      lines.push({ id: "bb-upper", color: "#9333ea", points: bollinger.map((p) => ({ ts: p.ts, value: p.values.upper })) });
-      lines.push({ id: "bb-lower", color: "#9333ea", points: bollinger.map((p) => ({ ts: p.ts, value: p.values.lower })) });
-    }
-    return lines;
-  }, [smaLine, emaLine, showBollinger, bollinger]);
+  const overlays: OverlayLine[] = overlaySpecs.flatMap((s) => indicatorLines.get(s.code) ?? []);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
+      {resolvedSelected &&
+        indicatorsAvailable &&
+        activeSpecs.map((spec, i) => (
+          <IndicatorSeries
+            key={spec.code}
+            instrumentId={resolvedSelected.id}
+            timeframe={timeframe}
+            baseTimeframe={effectiveBase}
+            spec={spec}
+            color={INDICATOR_COLORS[i % INDICATOR_COLORS.length]}
+            onLines={handleLines}
+          />
+        ))}
+
       <Card className="lg:col-span-1">
         <CardHeader>
           <CardTitle>Instruments</CardTitle>
@@ -184,7 +236,7 @@ export default function ChartsPage() {
         <CardHeader className="flex-wrap gap-3">
           <CardTitle>{resolvedSelected ? `${resolvedSelected.symbol} -- ${resolvedSelected.name}` : "Select an instrument"}</CardTitle>
           {resolvedSelected && (
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-1 flex-wrap items-center gap-3">
               <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
                 {TIMEFRAMES.map((tf) => (
                   <option key={tf} value={tf}>
@@ -192,33 +244,44 @@ export default function ChartsPage() {
                   </option>
                 ))}
               </Select>
-              {OVERLAY_OPTIONS.map((opt) => (
-                <label
-                  key={opt.code}
-                  className={`flex items-center gap-1.5 text-xs ${indicatorsAvailable ? "text-text-secondary" : "text-text-muted"}`}
-                >
-                  <input
-                    type="checkbox"
-                    disabled={!indicatorsAvailable}
-                    checked={opt.code === "sma" ? showSma : showEma}
-                    onChange={(e) => (opt.code === "sma" ? setShowSma(e.target.checked) : setShowEma(e.target.checked))}
-                  />
-                  {opt.label}
-                </label>
-              ))}
-              <label className={`flex items-center gap-1.5 text-xs ${indicatorsAvailable ? "text-text-secondary" : "text-text-muted"}`}>
-                <input type="checkbox" disabled={!indicatorsAvailable} checked={showBollinger} onChange={(e) => setShowBollinger(e.target.checked)} />
-                Bollinger Bands
-              </label>
-              <label className={`flex items-center gap-1.5 text-xs ${indicatorsAvailable ? "text-text-secondary" : "text-text-muted"}`}>
-                <input type="checkbox" disabled={!indicatorsAvailable} checked={showRsi} onChange={(e) => setShowRsi(e.target.checked)} />
-                RSI
-              </label>
+              <Select
+                value=""
+                onChange={(e) => addIndicator(e.target.value)}
+                disabled={!indicatorsAvailable}
+                className="w-44"
+              >
+                <option value="">+ Add indicator...</option>
+                {["trend", "momentum", "volatility", "volume", "structure"].map((category) => {
+                  const options = (indicatorList ?? []).filter((s) => s.category === category && !activeIndicators.includes(s.code));
+                  if (!options.length) return null;
+                  return (
+                    <optgroup key={category} label={category[0].toUpperCase() + category.slice(1)}>
+                      {options.map((s) => (
+                        <option key={s.code} value={s.code}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  );
+                })}
+              </Select>
               {!indicatorsAvailable && <span className="text-xs text-text-muted">(no candles stored yet to compute indicators from)</span>}
             </div>
           )}
         </CardHeader>
         <CardContent className="space-y-4">
+          {resolvedSelected && activeIndicators.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {activeIndicators.map((code, i) => (
+                <Badge key={code} style={{ backgroundColor: `${INDICATOR_COLORS[i % INDICATOR_COLORS.length]}22`, color: INDICATOR_COLORS[i % INDICATOR_COLORS.length] }}>
+                  {specByCode.get(code)?.name ?? code}
+                  <button onClick={() => removeIndicator(code)}>
+                    <X className="h-3 w-3" />
+                  </button>
+                </Badge>
+              ))}
+            </div>
+          )}
           {resolvedSelected && (
             <MarketContextBar
               broker={brokerForExchange(resolvedSelected.exchange)}
@@ -258,12 +321,16 @@ export default function ChartsPage() {
           ) : (
             <div className="space-y-2">
               <PriceChart candles={candles} overlays={overlays} onChartReady={setPriceChartApi} />
-              {showRsi && rsi && (
-                <div>
-                  <div className="mb-1 text-xs font-medium text-text-muted">RSI (14)</div>
-                  <OscillatorChart points={rsiPoints} bands={RSI_BANDS} onChartReady={setRsiChartApi} />
+              {oscillatorSpecs.map((spec) => (
+                <div key={spec.code}>
+                  <div className="mb-1 text-xs font-medium text-text-muted">{spec.name}</div>
+                  <OscillatorChart
+                    lines={indicatorLines.get(spec.code) ?? []}
+                    bands={OSCILLATOR_BANDS[spec.code] ?? []}
+                    onChartReady={(chart) => setOscillatorChartApis((prev) => ({ ...prev, [spec.code]: chart }))}
+                  />
                 </div>
-              )}
+              ))}
             </div>
           )}
         </CardContent>

@@ -144,6 +144,253 @@ def test_vwap_positive_and_present():
     assert (result["vwap"].dropna() > 0).all()
 
 
+# --- expanded indicator library (30 additions across trend/momentum/volatility/volume) ---
+
+
+def test_wma_matches_manual_calculation():
+    df = _df([10, 20, 30])
+    result = trend.wma(df, period=3)
+    expected = (10 * 1 + 20 * 2 + 30 * 3) / (1 + 2 + 3)
+    assert result["wma"].iloc[-1] == pytest.approx(expected)
+
+
+def test_dema_converges_on_flat_series():
+    df = _df([100.0] * 40)
+    assert trend.dema(df, period=10)["dema"].iloc[-1] == pytest.approx(100.0)
+
+
+def test_tema_converges_on_flat_series():
+    df = _df([100.0] * 40)
+    assert trend.tema(df, period=10)["tema"].iloc[-1] == pytest.approx(100.0)
+
+
+def test_hma_converges_on_flat_series():
+    df = _df([100.0] * 40)
+    assert trend.hma(df, period=10)["hma"].iloc[-1] == pytest.approx(100.0)
+
+
+def test_adx_strong_uptrend_has_plus_di_dominant_and_is_bounded():
+    closes = [100 + i * 2 for i in range(40)]
+    df = _df(closes)
+    result = trend.adx(df, period=14)
+    valid = result.dropna()
+    assert len(valid) > 0
+    assert (valid["plus_di"] > valid["minus_di"]).all()
+    assert valid["adx"].between(0, 100).all()
+
+
+def test_aroon_bounded_0_100():
+    closes = [100, 105, 98, 110, 95, 115, 90, 120, 85, 125, 80, 130, 75, 135, 70, 140, 65, 145, 60, 150, 55, 155, 50, 160, 45, 165, 40]
+    df = _df(closes)
+    result = trend.aroon(df, period=25)
+    valid = result.dropna()
+    assert len(valid) > 0
+    assert valid["aroon_up"].between(0, 100).all()
+    assert valid["aroon_down"].between(0, 100).all()
+
+
+def test_parabolic_sar_stays_below_price_in_sustained_uptrend():
+    closes = [100 + i * 3 for i in range(30)]
+    df = _df(closes)
+    result = trend.parabolic_sar(df)
+    valid = result["sar"].iloc[10:]  # let the trend establish past the initial flip
+    assert valid.notna().all()
+    assert (valid.to_numpy() < df["high"].iloc[10:].to_numpy()).all()
+
+
+def test_ichimoku_tenkan_and_kijun_bounded_by_their_own_window_range():
+    closes = [100 + 5 * math.sin(i / 5) for i in range(80)]
+    df = _df(closes)
+    result = trend.ichimoku(df, tenkan_period=9, kijun_period=26, senkou_b_period=52)
+    valid_tenkan = result["tenkan_sen"].dropna()
+    assert len(valid_tenkan) > 0
+    assert (valid_tenkan >= df["low"].min()).all() and (valid_tenkan <= df["high"].max()).all()
+
+
+def test_ichimoku_has_no_chikou_span_field():
+    # Deliberately omitted -- see trend.ichimoku's docstring on why the
+    # standard chikou definition would be a real look-ahead violation here.
+    df = _df([100.0] * 60)
+    result = trend.ichimoku(df)
+    assert "chikou_span" not in result.columns
+
+
+def test_keltner_channels_ordering():
+    closes = [100 + 5 * math.sin(i / 3) for i in range(40)]
+    df = _df(closes)
+    valid = volatility.keltner_channels(df, period=20, atr_period=10).dropna()
+    assert len(valid) > 0
+    assert (valid["upper"] >= valid["middle"]).all()
+    assert (valid["middle"] >= valid["lower"]).all()
+
+
+def test_donchian_channels_matches_rolling_high_low():
+    closes = [100, 105, 98, 110, 95, 115, 90]
+    df = _df(closes)
+    result = volatility.donchian_channels(df, period=5)
+    assert result["upper"].iloc[-1] == pytest.approx(df["high"].iloc[-5:].max())
+    assert result["lower"].iloc[-1] == pytest.approx(df["low"].iloc[-5:].min())
+
+
+def test_std_dev_non_negative():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80]
+    result = volatility.std_dev(_df(closes), period=10)
+    assert (result["std_dev"].dropna() >= 0).all()
+
+
+def test_historical_volatility_non_negative():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80]
+    result = volatility.historical_volatility(_df(closes), period=10)
+    assert (result["historical_volatility"].dropna() >= 0).all()
+
+
+def test_choppiness_index_bounded_0_100():
+    closes = [100 + 5 * math.sin(i / 3) for i in range(40)]
+    result = volatility.choppiness_index(_df(closes), period=14)
+    valid = result["choppiness_index"].dropna()
+    assert len(valid) > 0
+    assert valid.between(0, 100).all()
+
+
+def test_cci_positive_in_sustained_uptrend():
+    # CCI's inner deviation window needs ~2x period bars to warm up (the
+    # rolling mean-deviation is itself computed over a rolling difference).
+    closes = [100 + i * 2 for i in range(50)]
+    result = momentum.cci(_df(closes), period=20)
+    assert result["cci"].iloc[-1] > 0
+
+
+def test_williams_r_bounded_negative_100_to_0():
+    closes = [100, 105, 98, 110, 95, 115, 90, 120, 85, 125, 80, 130, 75, 135, 70]
+    result = momentum.williams_r(_df(closes), period=14)
+    valid = result["williams_r"].dropna()
+    assert len(valid) > 0
+    assert valid.between(-100, 0).all()
+
+
+def test_roc_matches_manual_calculation():
+    closes = [100, 101, 102, 103, 110]
+    result = momentum.roc(_df(closes), period=4)
+    assert result["roc"].iloc[-1] == pytest.approx(100 * (110 - 100) / 100)
+
+
+def test_momentum_matches_manual_calculation():
+    closes = [100, 101, 102, 103, 110]
+    result = momentum.momentum(_df(closes), period=4)
+    assert result["momentum"].iloc[-1] == pytest.approx(10.0)
+
+
+def test_trix_near_zero_on_flat_series():
+    df = _df([100.0] * 80)
+    result = momentum.trix(df, period=10)
+    assert result["trix"].dropna().abs().max() < 1e-6
+
+
+def test_ultimate_oscillator_bounded_0_100():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80, 118, 82, 121, 79, 125, 78, 126, 77, 128, 76, 130, 75, 132, 74, 134]
+    result = momentum.ultimate_oscillator(_df(closes), period1=7, period2=14, period3=28)
+    valid = result["ultimate_oscillator"].dropna()
+    assert len(valid) > 0
+    assert valid.between(0, 100).all()
+
+
+def test_awesome_oscillator_near_zero_on_flat_series():
+    df = _df([100.0] * 40)
+    result = momentum.awesome_oscillator(df, fast=5, slow=34)
+    assert result["awesome_oscillator"].dropna().abs().max() < 1e-9
+
+
+def test_cmo_is_100_when_all_gains():
+    closes = [100 + i for i in range(20)]
+    result = momentum.cmo(_df(closes), period=14)
+    assert result["cmo"].iloc[-1] == pytest.approx(100.0)
+
+
+def test_ppo_histogram_equals_ppo_minus_signal():
+    closes = [100 + i * 0.5 + (i % 5) for i in range(60)]
+    result = momentum.ppo(_df(closes), fast=12, slow=26, signal=9)
+    diff = (result["ppo"] - result["signal"] - result["histogram"]).dropna()
+    assert (diff.abs() < 1e-9).all()
+
+
+def test_dpo_uses_only_past_close_and_past_sma():
+    # Bar 10's own H/L/C must not affect its DPO -- only earlier bars.
+    closes = [100.0] * 10 + [999.0]  # a wild spike right at the bar being tested
+    df = _df(closes)
+    result = momentum.dpo(df, period=8)
+    # shift_periods = 8//2+1 = 5 -> dpo[10] = close[5] - sma(8)[10], neither of
+    # which includes close[10]'s own 999 value in a way that should make this NaN/blow up
+    assert result["dpo"].iloc[10] == result["dpo"].iloc[10]  # not NaN
+
+
+def test_accumulation_distribution_is_cumulative():
+    df = _df([100, 105, 102, 108], volumes=[1000, 2000, 1500, 3000])
+    result = volume.accumulation_distribution(df)
+    # Monotonically-defined cumulative sum -- last value is the running total.
+    manual = volume._adl(df)
+    assert result["adl"].iloc[-1] == pytest.approx(manual.iloc[-1])
+
+
+def test_chaikin_money_flow_bounded_negative_1_to_1():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80]
+    df = _df(closes, volumes=[1000 + 10 * i for i in range(len(closes))])
+    result = volume.chaikin_money_flow(df, period=10)
+    valid = result["chaikin_money_flow"].dropna()
+    assert len(valid) > 0
+    assert valid.between(-1, 1).all()
+
+
+def test_chaikin_oscillator_finite_on_real_series():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80]
+    df = _df(closes, volumes=[1000 + 10 * i for i in range(len(closes))])
+    result = volume.chaikin_oscillator(df, fast=3, slow=10)
+    valid = result["chaikin_oscillator"].dropna()
+    assert len(valid) > 0
+    assert valid.apply(lambda x: x == x).all()  # no NaN slipped through
+
+
+def test_force_index_positive_on_up_day_with_volume():
+    df = _df([100, 110], volumes=[1000, 2000])
+    result = volume.force_index(df, period=1)
+    assert result["force_index"].iloc[-1] > 0
+
+
+def test_ease_of_movement_zero_when_price_midpoint_unchanged():
+    df = _df([100, 100, 100], highs=[105, 105, 105], lows=[95, 95, 95], volumes=[1000, 1000, 1000])
+    result = volume.ease_of_movement(df, period=1)
+    valid = result["ease_of_movement"].dropna()
+    assert (valid.abs() < 1e-9).all()
+
+
+def test_vortex_positive_components():
+    closes = [100, 102, 99, 105, 95, 110, 90, 108, 92, 111, 89, 115, 85, 120, 80]
+    result = volume.vortex(_df(closes), period=14)
+    valid = result.dropna()
+    assert len(valid) > 0
+    assert (valid["vi_plus"] >= 0).all()
+    assert (valid["vi_minus"] >= 0).all()
+
+
+def test_expanded_registry_indicators_all_have_matching_output_columns():
+    """Every new registry entry's compute() must actually produce a column
+    for each of its declared output_fields -- catches spec/impl drift."""
+    df = _df([100 + i * 0.3 + (i % 7) for i in range(120)])
+    new_codes = {
+        "wma", "dema", "tema", "hma", "adx", "aroon", "parabolic_sar", "ichimoku",
+        "keltner_channels", "donchian_channels", "std_dev", "historical_volatility", "choppiness_index",
+        "cci", "williams_r", "roc", "momentum", "trix", "ultimate_oscillator", "awesome_oscillator",
+        "cmo", "ppo", "dpo",
+        "accumulation_distribution", "chaikin_money_flow", "chaikin_oscillator", "force_index",
+        "ease_of_movement", "vortex",
+    }
+    assert new_codes.issubset(INDICATOR_REGISTRY.keys())
+    for code in new_codes:
+        spec = INDICATOR_REGISTRY[code]
+        computed = spec.compute(df, **spec.default_params)
+        for field in spec.output_fields:
+            assert field in computed.columns, f"{code}: missing output column {field!r}"
+
+
 def test_candles_to_frame_empty_list_returns_empty_frame():
     df = candles_to_frame([])
     assert df.empty

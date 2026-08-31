@@ -24,7 +24,7 @@ async def list_indicators(_: User = Depends(get_current_user)) -> list[Indicator
     return [
         IndicatorSpecOut(
             code=spec.code, name=spec.name, category=spec.category,
-            output_fields=spec.output_fields, default_params=spec.default_params,
+            output_fields=spec.output_fields, default_params=spec.default_params, overlay=spec.overlay,
         )
         for spec in INDICATOR_REGISTRY.values()
     ]

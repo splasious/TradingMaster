@@ -3,9 +3,10 @@
 import { useEffect, useRef } from "react";
 import { ColorType, LineSeries, createChart, type IChartApi, type UTCTimestamp } from "lightweight-charts";
 
+import type { OverlayLine } from "./price-chart";
+
 interface OscillatorChartProps {
-  points: { ts: string; value: number | null }[];
-  color?: string;
+  lines: OverlayLine[];
   bands?: number[]; // horizontal reference lines, e.g. [30, 70] for RSI
   height?: number;
   onChartReady?: (chart: IChartApi | null) => void;
@@ -15,7 +16,7 @@ function toUnixSeconds(ts: string): UTCTimestamp {
   return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
 }
 
-export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height = 140, onChartReady }: OscillatorChartProps) {
+export function OscillatorChart({ lines, bands = [], height = 140, onChartReady }: OscillatorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -31,11 +32,16 @@ export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height 
     chartRef.current = chart;
     onChartReady?.(chart);
 
-    const series = chart.addSeries(LineSeries, { color, lineWidth: 1 });
-    series.setData(points.filter((p) => p.value !== null).map((p) => ({ time: toUnixSeconds(p.ts), value: p.value as number })));
-
-    for (const band of bands) {
-      series.createPriceLine({ price: band, color: "#88909c", lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+    let bandsDrawn = false;
+    for (const line of lines) {
+      const series = chart.addSeries(LineSeries, { color: line.color, lineWidth: 1, title: line.id });
+      series.setData(line.points.filter((p) => p.value !== null).map((p) => ({ time: toUnixSeconds(p.ts), value: p.value as number })));
+      if (!bandsDrawn) {
+        for (const band of bands) {
+          series.createPriceLine({ price: band, color: "#88909c", lineWidth: 1, lineStyle: 2, axisLabelVisible: true });
+        }
+        bandsDrawn = true;
+      }
     }
 
     chart.timeScale().fitContent();
@@ -52,7 +58,7 @@ export function OscillatorChart({ points, color = "#3b6bf5", bands = [], height 
       onChartReady?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [points, color, height]);
+  }, [lines, bands, height]);
 
   return <div ref={containerRef} className="w-full" />;
 }

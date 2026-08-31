@@ -63,3 +63,10 @@ class IndicatorSpec:
     output_fields: list[str]
     default_params: dict[str, float] = field(default_factory=dict)
     compute: Callable[[pd.DataFrame], pd.DataFrame] = None  # type: ignore[assignment]
+    # True: values share the instrument's own price scale, so a chart draws
+    # them directly on the price panel (moving averages, bands, SAR dots).
+    # False: a different scale (0-100 oscillators, volume-derived, %, raw
+    # spread) that needs its own panel underneath. Lets any UI that lists
+    # indicators (Charts' overlay picker) place each one correctly without
+    # hardcoding a second classification list that could drift from this one.
+    overlay: bool = True

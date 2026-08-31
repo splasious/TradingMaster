@@ -540,9 +540,8 @@ export default function BacktestingPage() {
                 <div>
                   <h3 className="mb-2 text-sm font-semibold text-text-primary">Equity Curve</h3>
                   <OscillatorChart
-                    points={result.equity_curve.map(([ts, equity]) => ({ ts, value: equity }))}
+                    lines={[{ id: "equity", color: "#15803d", points: result.equity_curve.map(([ts, equity]) => ({ ts, value: equity })) }]}
                     bands={[initialCapital]}
-                    color="#15803d"
                     height={220}
                   />
                 </div>
