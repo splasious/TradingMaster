@@ -48,7 +48,10 @@ def compute_visual_signals(candles: list[OhlcvCandle], entry_rules: dict, exit_r
 
 
 async def compute_python_signals(candles: list[OhlcvCandle], python_code: str, params: dict) -> BarSignals:
-    bars = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume} for c in candles]
+    bars = [
+        {"ts": c.ts.isoformat(), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+        for c in candles
+    ]
     result = await run_python_backtest_signals(python_code, bars, params, warmup=WARMUP_BARS)
     if result.error:
         raise SignalComputationError(result.error)

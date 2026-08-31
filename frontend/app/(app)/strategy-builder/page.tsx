@@ -15,14 +15,15 @@ import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useIndicatorList } from "@/lib/hooks";
+import { TIMEFRAMES } from "@/lib/types";
 import type { InstrumentOut, ScanCondition, ScanOperator, StrategyOut } from "@/lib/types";
 
 const RAW_FIELDS = ["open", "high", "low", "close", "volume"];
 const OPERATORS: ScanOperator[] = [">", "<", ">=", "<=", "=="];
 
 const DEFAULT_PYTHON_CODE = `def generate_signal(candles, params):
-    """candles: list of {open, high, low, close, volume} oldest-first.
-    Must return "BUY", "SELL", or "HOLD"."""
+    """candles: list of {ts, open, high, low, close, volume} oldest-first,
+    ts is an ISO8601 UTC timestamp string. Must return "BUY", "SELL", or "HOLD"."""
     if candles[-1]["close"] > candles[0]["close"]:
         return "BUY"
     return "HOLD"
@@ -168,7 +169,11 @@ export default function StrategyBuilderPage() {
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-text-secondary">Timeframe</label>
               <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-32">
-                <option value="1d">1d</option>
+                {TIMEFRAMES.map((tf) => (
+                  <option key={tf} value={tf}>
+                    {tf}
+                  </option>
+                ))}
               </Select>
             </div>
           </div>
@@ -215,8 +220,12 @@ export default function StrategyBuilderPage() {
             <TabsContent value="python">
               <div className="space-y-3">
                 <p className="text-xs text-text-muted">
-                  Runs in a sandbox (RestrictedPython + a separate process, no filesystem/network/import access) --
-                  must define <code>generate_signal(candles, params)</code> returning &quot;BUY&quot;, &quot;SELL&quot;, or &quot;HOLD&quot;.
+                  Runs in a sandbox (RestrictedPython + a separate process, no filesystem/network/import access, no{" "}
+                  <code>import</code> statements at all) -- must define <code>generate_signal(candles, params)</code>{" "}
+                  returning &quot;BUY&quot;, &quot;SELL&quot;, or &quot;HOLD&quot;. Called once per bar with{" "}
+                  <code>candles</code> as everything up to and including that bar (oldest-first list of{" "}
+                  <code>{"{ts, open, high, low, close, volume}"}</code>); position sizing and stop-loss/take-profit
+                  above are applied by the backtest engine itself, not by your code.
                 </p>
                 <textarea
                   value={pythonCode}

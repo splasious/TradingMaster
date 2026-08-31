@@ -22,9 +22,28 @@ from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
 
-_SAMPLE_CANDLES = [
-    {"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100.5 + i, "volume": 1000.0} for i in range(30)
-]
+def _sample_candles() -> list[dict]:
+    """Two fake NSE sessions of 15-min bars (09:15-15:15 IST, stored as its
+    UTC equivalent -- 03:45-09:45 UTC -- matching how real intraday candles
+    are timestamped) so a Python strategy that reads bar-of-day timing (e.g.
+    an opening-range breakout) has something realistic to validate against,
+    not just a flat single-day-shaped list."""
+    from datetime import datetime, timedelta, timezone
+
+    candles = []
+    price = 100.0
+    for day in range(2):
+        session_start = datetime(2026, 1, 5 + day, 3, 45, tzinfo=timezone.utc)
+        for bar in range(25):  # 09:15 to 15:15 IST in 15-min steps
+            ts = session_start + timedelta(minutes=15 * bar)
+            price += 0.5
+            candles.append(
+                {"ts": ts.isoformat(), "open": price, "high": price + 1, "low": price - 1, "close": price + 0.5, "volume": 1000.0}
+            )
+    return candles
+
+
+_SAMPLE_CANDLES = _sample_candles()
 
 
 def _version_out(version: StrategyVersion) -> StrategyVersionOut:
@@ -217,7 +236,10 @@ async def validate_strategy(
         )
         candles = list(reversed(result.scalars().all()))
         if candles:
-            sample = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume} for c in candles]
+            sample = [
+                {"ts": c.ts.isoformat(), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+                for c in candles
+            ]
 
     if version.python_code:
         sandbox_result = await run_python_strategy(version.python_code, sample, version.parameters)
