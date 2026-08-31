@@ -64,6 +64,7 @@ export default function MarketsPage() {
                   <Th>Name</Th>
                   <Th>Type</Th>
                   <Th className="text-right">Live Price</Th>
+                  <Th className="text-right">Last Update</Th>
                 </tr>
               </Thead>
               <Tbody>
@@ -101,6 +102,15 @@ export default function MarketsPage() {
                             >
                               {tick.source}
                             </span>
+                          </span>
+                        ) : (
+                          <span className="text-text-muted">--</span>
+                        )}
+                      </Td>
+                      <Td className="text-right text-text-secondary">
+                        {tick ? (
+                          <span className="font-financial text-xs" title={new Date(tick.ts).toISOString()}>
+                            {new Date(tick.ts).toLocaleDateString()} {new Date(tick.ts).toLocaleTimeString()}
                           </span>
                         ) : (
                           <span className="text-text-muted">--</span>
