@@ -30,6 +30,8 @@ const OVERLAY_OPTIONS = [
   { code: "ema", field: "ema", label: "EMA 50", color: "#f59e0b" },
 ] as const;
 
+const RSI_BANDS = [30, 70];
+
 function useOverlay(
   instrumentId: string | null,
   timeframe: string,
@@ -108,6 +110,7 @@ export default function ChartsPage() {
   const effectiveBase = directlyAvailable ? null : indicatorBase;
 
   const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (resolvedSelected?.id ?? null) : null, timeframe, "rsi", effectiveBase);
+  const rsiPoints = useMemo(() => rsi?.map((p) => ({ ts: p.ts, value: p.values.rsi })) ?? [], [rsi]);
   const { data: bollinger } = useIndicator(
     indicatorsAvailable && showBollinger ? (resolvedSelected?.id ?? null) : null,
     timeframe,
@@ -258,11 +261,7 @@ export default function ChartsPage() {
               {showRsi && rsi && (
                 <div>
                   <div className="mb-1 text-xs font-medium text-text-muted">RSI (14)</div>
-                  <OscillatorChart
-                    points={rsi.map((p) => ({ ts: p.ts, value: p.values.rsi }))}
-                    bands={[30, 70]}
-                    onChartReady={setRsiChartApi}
-                  />
+                  <OscillatorChart points={rsiPoints} bands={RSI_BANDS} onChartReady={setRsiChartApi} />
                 </div>
               )}
             </div>
