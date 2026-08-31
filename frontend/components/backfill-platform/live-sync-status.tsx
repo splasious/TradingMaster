@@ -51,7 +51,7 @@ export function LiveSyncStatus() {
             )}
             {catalogStatus.last_error && <span className="text-negative"> -- last error: {catalogStatus.last_error}</span>}
           </span>
-          <span className="ml-auto text-text-muted">Every 2 min, copies any newly-backfilled bars into the main catalog automatically.</span>
+          <span className="ml-auto text-text-muted">Every 30s, copies any newly-backfilled bars into the main catalog automatically.</span>
         </div>
       )}
     </div>

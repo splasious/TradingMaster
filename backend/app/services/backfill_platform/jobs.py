@@ -20,6 +20,26 @@ from app.services.market_data.delta_source import DeltaExchangeDataSource
 from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 
+async def fail_orphaned_jobs_on_startup() -> int:
+    """Backfill jobs run as in-process BackgroundTasks, so a "pending" or
+    "running" row can only mean the process that was supposed to run it is
+    gone (a restart, a crash) -- nothing resumes them, and they'd otherwise
+    sit forever looking like a stuck backfill. Called once from the
+    lifespan startup hook, before this process could possibly have queued
+    any job of its own, so every row found here is unambiguously orphaned."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(BfBackfillJob).where(BfBackfillJob.status.in_([BfBackfillStatus.PENDING.value, BfBackfillStatus.RUNNING.value]))
+        )
+        orphaned = list(result.scalars().all())
+        for job in orphaned:
+            job.status = BfBackfillStatus.FAILED.value
+            job.error_message = "Interrupted by a server restart -- re-run this backfill if still needed."
+            job.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        return len(orphaned)
+
+
 def _to_datetime(d: date | None, end_of_day: bool = False) -> datetime | None:
     if d is None:
         return None

@@ -27,8 +27,8 @@ from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_s
 
 logger = logging.getLogger(__name__)
 
-SYNC_INTERVAL_SECONDS = 120
-MAX_SYMBOLS_PER_TICK = 25
+SYNC_INTERVAL_SECONDS = 30
+MAX_SYMBOLS_PER_TICK = 100
 
 
 class CatalogSyncScheduler:
