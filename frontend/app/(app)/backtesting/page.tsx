@@ -291,7 +291,10 @@ export default function BacktestingPage() {
     },
     onSuccess: (results) => {
       setQueuedJobs(results);
-      setFocusedJobId(results.find((r) => r.jobId)?.jobId ?? null);
+      // Auto-focus only for a single-instrument run -- with multiple
+      // instruments, Combined Results is the default view; a per-instrument
+      // drill-down only appears once the user clicks a row in Queued Backtests.
+      setFocusedJobId(results.length === 1 ? (results[0].jobId ?? null) : null);
       setPerInstrumentResults(new Map());
     },
   });
