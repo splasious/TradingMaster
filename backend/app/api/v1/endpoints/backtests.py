@@ -20,7 +20,8 @@ router = APIRouter()
 def _job_out(job: BacktestJob) -> BacktestJobOut:
     return BacktestJobOut(
         id=str(job.id), strategy_id=str(job.strategy_id), instrument_id=str(job.instrument_id),
-        timeframe=job.timeframe, initial_capital=job.initial_capital, status=job.status,
+        timeframe=job.timeframe, start_date=job.start_date, end_date=job.end_date,
+        initial_capital=job.initial_capital, status=job.status,
         error_message=job.error_message, created_at=job.created_at, started_at=job.started_at,
         completed_at=job.completed_at,
     )
@@ -52,7 +53,10 @@ async def create_backtest(
 
     job = BacktestJob(
         strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
-        timeframe=payload.timeframe, initial_capital=payload.initial_capital, brokerage_pct=payload.brokerage_pct,
+        timeframe=payload.timeframe, start_date=payload.start_date, end_date=payload.end_date,
+        initial_capital=payload.initial_capital,
+        position_sizing_type=payload.position_sizing_type, position_sizing_value=payload.position_sizing_value,
+        brokerage_pct=payload.brokerage_pct,
         slippage_pct=payload.slippage_pct, tax_pct=payload.tax_pct,
         out_of_sample_split_pct=payload.out_of_sample_split_pct, run_monte_carlo=payload.run_monte_carlo,
         requested_by=user.id,

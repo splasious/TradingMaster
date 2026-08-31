@@ -114,6 +114,110 @@ async def test_backtest_with_out_of_sample_split(client: AsyncClient, seeded_adm
     assert result["out_of_sample_metrics"] is not None
 
 
+async def test_backtest_date_range_filters_candles(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session, n=100)  # 2026-01-05 .. 2026-04-14
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Date Range Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    # Only the first 40 of the 100 seeded days fall in this window.
+    backtest_resp = await client.post(
+        "/api/v1/backtests",
+        json={
+            "strategy_id": strategy_id, "instrument_id": str(instrument.id), "timeframe": "1d",
+            "start_date": "2026-01-05", "end_date": "2026-02-13",
+        },
+        headers=headers,
+    )
+    job_id = backtest_resp.json()["id"]
+    assert backtest_resp.json()["start_date"] == "2026-01-05"
+    assert backtest_resp.json()["end_date"] == "2026-02-13"
+
+    result = (await client.get(f"/api/v1/backtests/{job_id}/result", headers=headers)).json()
+    assert len(result["equity_curve"]) == 40
+
+
+async def test_backtest_rejects_start_after_end_date(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Bad Range", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/backtests",
+        json={
+            "strategy_id": strategy_id, "instrument_id": str(instrument.id),
+            "start_date": "2026-06-01", "end_date": "2026-01-01",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+async def test_backtest_position_sizing_override(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Sizing Override Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+                "position_sizing": {"type": "fixed_quantity", "value": 1},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    # Override to 10 units per trade instead of the strategy's baked-in 1.
+    backtest_resp = await client.post(
+        "/api/v1/backtests",
+        json={
+            "strategy_id": strategy_id, "instrument_id": str(instrument.id),
+            "position_sizing_type": "fixed_quantity", "position_sizing_value": 10,
+        },
+        headers=headers,
+    )
+    job_id = backtest_resp.json()["id"]
+    trades = (await client.get(f"/api/v1/backtests/{job_id}/trades", headers=headers)).json()
+    assert len(trades) > 0
+    assert all(t["quantity"] == 10 for t in trades)
+
+
+async def test_backtest_sizing_override_requires_both_fields(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Partial Sizing", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/backtests",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "position_sizing_value": 5},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
 async def test_non_owner_cannot_start_backtest(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = await _seed_instrument_with_candles(db_session)
     trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()

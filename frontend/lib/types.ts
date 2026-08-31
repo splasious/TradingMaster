@@ -215,6 +215,8 @@ export interface BacktestJobOut {
   strategy_id: string;
   instrument_id: string;
   timeframe: string;
+  start_date: string | null;
+  end_date: string | null;
   initial_capital: number;
   status: BacktestStatus;
   error_message: string | null;

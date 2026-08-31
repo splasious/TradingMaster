@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 from sqlalchemy import select
 
@@ -28,22 +28,36 @@ async def run_backtest_job(job_id: uuid.UUID) -> None:
 
         try:
             version = await db.get(StrategyVersion, job.strategy_version_id)
-            candles_result = await db.execute(
+            candle_stmt = (
                 select(OhlcvCandle)
                 .where(OhlcvCandle.instrument_id == job.instrument_id, OhlcvCandle.timeframe == job.timeframe)
                 .order_by(OhlcvCandle.ts)
             )
+            if job.start_date:
+                candle_stmt = candle_stmt.where(OhlcvCandle.ts >= datetime.combine(job.start_date, time.min, tzinfo=timezone.utc))
+            if job.end_date:
+                candle_stmt = candle_stmt.where(OhlcvCandle.ts <= datetime.combine(job.end_date, time.max, tzinfo=timezone.utc))
+            candles_result = await db.execute(candle_stmt)
             candles = list(candles_result.scalars().all())[-MAX_CANDLES:]
 
             if len(candles) < 30:
-                raise SignalComputationError("Not enough backfilled candles to run a backtest (need at least 30)")
+                raise SignalComputationError(
+                    "Not enough backfilled candles to run a backtest (need at least 30)"
+                    + (" in the selected date range" if job.start_date or job.end_date else "")
+                )
 
             if version.python_code:
                 signals = await compute_python_signals(candles, version.python_code, version.parameters)
             else:
                 signals = compute_visual_signals(candles, version.entry_rules, version.exit_rules)
 
-            sizing = PositionSizing(**version.position_sizing)
+            # A per-run sizing override (set from the Backtesting page) wins
+            # over the strategy version's own baked-in sizing; otherwise
+            # behavior is unchanged from before this override existed.
+            if job.position_sizing_type is not None:
+                sizing = PositionSizing(type=job.position_sizing_type, value=job.position_sizing_value)
+            else:
+                sizing = PositionSizing(**version.position_sizing)
             risk = RiskRules(
                 stop_loss_pct=version.risk_rules.get("stop_loss_pct"),
                 take_profit_pct=version.risk_rules.get("take_profit_pct"),

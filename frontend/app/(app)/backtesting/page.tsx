@@ -14,7 +14,7 @@ import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useBacktestJob, useBacktestResult, useBacktestTrades, useStrategies } from "@/lib/hooks";
-import type { BacktestJobOut, BacktestMetrics, InstrumentOut, StrategyOut } from "@/lib/types";
+import { TIMEFRAMES, type BacktestJobOut, type BacktestMetrics, type InstrumentOut, type StrategyOut } from "@/lib/types";
 
 interface QueuedBacktest {
   instrument: InstrumentOut;
@@ -135,7 +135,13 @@ export default function BacktestingPage() {
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
   const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
 
+  const [timeframe, setTimeframe] = useState("1d");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [initialCapital, setInitialCapital] = useState(100000);
+  const [sizingOverride, setSizingOverride] = useState(false);
+  const [sizingType, setSizingType] = useState<"fixed_quantity" | "percent_capital">("fixed_quantity");
+  const [sizingValue, setSizingValue] = useState(1);
   const [brokeragePct, setBrokeragePct] = useState(0.03);
   const [slippagePct, setSlippagePct] = useState(0.05);
   const [taxPct, setTaxPct] = useState(0);
@@ -160,8 +166,12 @@ export default function BacktestingPage() {
             body: JSON.stringify({
               strategy_id: strategy!.id,
               instrument_id: instrument.id,
-              timeframe: "1d",
+              timeframe,
+              start_date: startDate || null,
+              end_date: endDate || null,
               initial_capital: initialCapital,
+              position_sizing_type: sizingOverride ? sizingType : null,
+              position_sizing_value: sizingOverride ? sizingValue : null,
               brokerage_pct: brokeragePct,
               slippage_pct: slippagePct,
               tax_pct: taxPct,
@@ -232,6 +242,28 @@ export default function BacktestingPage() {
 
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <div className="space-y-1.5">
+              <label className="text-xs font-medium text-text-secondary">Timeframe</label>
+              <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+                {TIMEFRAMES.map((tf) => (
+                  <option key={tf} value={tf}>{tf}</option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-text-secondary">Start Date</label>
+              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-text-secondary">End Date</label>
+              <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+            </div>
+            <div className="flex items-end">
+              <p className="text-xs text-text-muted">Leave dates blank to use all available history.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="space-y-1.5">
               <label className="text-xs font-medium text-text-secondary">Initial Capital</label>
               <Input type="number" value={initialCapital} onChange={(e) => setInitialCapital(Number(e.target.value))} />
             </div>
@@ -247,6 +279,30 @@ export default function BacktestingPage() {
               <label className="text-xs font-medium text-text-secondary">Tax % (on profit)</label>
               <Input type="number" step="0.01" value={taxPct} onChange={(e) => setTaxPct(Number(e.target.value))} />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-text-secondary">
+              <input type="checkbox" checked={sizingOverride} onChange={(e) => setSizingOverride(e.target.checked)} />
+              Override position sizing for this run (default: use the strategy&apos;s own sizing)
+            </label>
+            {sizingOverride && (
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-text-secondary">Sizing Basis</label>
+                  <Select value={sizingType} onChange={(e) => setSizingType(e.target.value as typeof sizingType)}>
+                    <option value="fixed_quantity">Capital per Share (fixed qty)</option>
+                    <option value="percent_capital">% of Capital</option>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-text-secondary">
+                    {sizingType === "fixed_quantity" ? "Shares per Trade" : "% of Capital"}
+                  </label>
+                  <Input type="number" value={sizingValue} onChange={(e) => setSizingValue(Number(e.target.value))} />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-6">

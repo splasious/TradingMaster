@@ -1,8 +1,8 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, String, Uuid, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,7 +25,15 @@ class BacktestJob(Base):
     )
     instrument_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
     initial_capital: Mapped[float] = mapped_column(Float, nullable=False, default=100000.0)
+    # Overrides the strategy version's own position_sizing for this run only,
+    # when both are set (e.g. try the same strategy at a different capital
+    # allocation without editing it in Strategy Builder). Null means "use
+    # whatever the strategy version already has" -- the original behavior.
+    position_sizing_type: Mapped[str | None] = mapped_column(String(20))
+    position_sizing_value: Mapped[float | None] = mapped_column(Float)
     brokerage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.03)
     slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.05)
     tax_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
