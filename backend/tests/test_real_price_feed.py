@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -127,6 +128,56 @@ async def test_refresh_active_instruments_updates_only_subscribed(db_session: As
     assert updated == 1
     assert engine.get_current_price(subscribed.id) == 77.0
     assert engine.get_current_price(not_subscribed.id) is None
+
+
+async def test_refresh_active_instruments_runs_fetches_concurrently(db_session: AsyncSession, monkeypatch):
+    # Regression test for the real bug: hundreds of subscribed instruments
+    # each doing a real HTTP round-trip, sequentially, could take far
+    # longer than one refresh interval to get all the way through --
+    # starving newly-subscribed instruments of any real update for a long
+    # time (verified live: RELIANCE's fetch worked instantly on its own,
+    # but never got a turn amid 231 other subscribed instruments). This
+    # asserts a batch of slow fetches completes in roughly one fetch's
+    # duration, not duration * count.
+    import time
+
+    FETCH_DELAY = 0.2
+    N = 20
+
+    async def fake_get(client_self, url, **kwargs):
+        await asyncio.sleep(FETCH_DELAY)
+        payload = {"success": True, "result": {"close": "42.0", "product_id": 1, "mark_price": "42.0"}}
+        return httpx.Response(200, content=json.dumps(payload).encode(), request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    engine = TickEngine()
+    instruments = []
+    for i in range(N):
+        instrument = Instrument(
+            exchange="DELTA", symbol=f"CONC{i}USD", name=f"Concurrency Test {i}",
+            instrument_type="perpetual_future", data_source="delta_exchange", external_ref=f"CONC{i}USD",
+        )
+        db_session.add(instrument)
+        instruments.append(instrument)
+    await db_session.commit()
+    for instrument in instruments:
+        engine.subscribe(instrument.id, seed_price=1.0)
+
+    import app.services.market_data.real_price_feed as feed_module
+
+    monkeypatch.setattr(feed_module, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+
+    feed = RealPriceFeed(engine)
+    start = time.monotonic()
+    updated = await feed.refresh_active_instruments()
+    elapsed = time.monotonic() - start
+
+    assert updated == N
+    # Sequential would take N * FETCH_DELAY = 4.0s; concurrent should be
+    # close to one FETCH_DELAY plus overhead -- well under half the
+    # sequential time either way.
+    assert elapsed < (N * FETCH_DELAY) / 2
 
 
 class db_session_cm:

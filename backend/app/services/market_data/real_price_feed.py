@@ -31,6 +31,14 @@ from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 logger = logging.getLogger(__name__)
 REFRESH_INTERVAL_SECONDS = 15
+# Real HTTP round-trips, one per instrument -- with hundreds of instruments
+# subscribed (the Markets page with no exchange filter subscribes to
+# everything visible at once), a plain sequential loop can take far longer
+# than REFRESH_INTERVAL_SECONDS to get all the way through, starving
+# instruments near the end of the list (or newly subscribed ones) of any
+# real update for a long time. Bounded concurrency keeps one slow/stalled
+# source from serializing the whole batch behind it.
+MAX_CONCURRENT_FETCHES = 20
 
 
 async def fetch_real_price(instrument: Instrument, *, market_open: bool | None = None) -> tuple[float, str] | None:
@@ -93,20 +101,25 @@ class RealPriceFeed:
             result = await db.execute(select(Instrument).where(Instrument.id.in_(active_ids)))
             instruments = result.scalars().all()
 
-        updated = 0
-        for instrument in instruments:
-            try:
-                real = await fetch_real_price(instrument, market_open=market_open)
-            except MarketDataSourceError:
-                continue
-            except Exception:
-                logger.exception("Real price refresh failed for %s", instrument.symbol)
-                continue
-            if real is not None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
+
+        async def _refresh_one(instrument: Instrument) -> bool:
+            async with semaphore:
+                try:
+                    real = await fetch_real_price(instrument, market_open=market_open)
+                except MarketDataSourceError:
+                    return False
+                except Exception:
+                    logger.exception("Real price refresh failed for %s", instrument.symbol)
+                    return False
+                if real is None:
+                    return False
                 price, source = real
                 self._engine.set_real_price(instrument.id, price, source)
-                updated += 1
-        return updated
+                return True
+
+        results = await asyncio.gather(*(_refresh_one(instrument) for instrument in instruments))
+        return sum(results)
 
     async def refresh_instrument_now(self, instrument_id: uuid.UUID) -> None:
         """Fire-and-forget: called right after a subscribe so the UI does

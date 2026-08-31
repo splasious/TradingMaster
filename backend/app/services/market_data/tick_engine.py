@@ -23,6 +23,19 @@ import uuid
 from datetime import datetime, timezone
 
 TICK_INTERVAL_SECONDS = 1.5
+# Every tick cycle broadcasts one message per GLOBALLY active instrument to
+# EVERY connection's queue, regardless of what that connection actually
+# subscribed to -- filtering happens later, per connection, when consuming.
+# With a small maxsize, a connection subscribed to only a couple of
+# instruments could still have its queue fill up with messages for
+# everyone else's instruments before its own ever gets enqueued (dict
+# iteration order = subscribe order, so a just-subscribed instrument is
+# always last in line) -- those messages just get silently dropped once
+# full, permanently starving that instrument's real price from ever
+# reaching the client. Sized well above any realistic instrument count
+# so a full cycle always fits; the queue drains every TICK_INTERVAL_SECONDS
+# regardless, so this is a ceiling, not a real backlog.
+QUEUE_MAXSIZE = 5000
 
 
 class TickEngine:
@@ -44,7 +57,7 @@ class TickEngine:
             self._task = None
 
     def register(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=100)
+        q: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
         self._queues.add(q)
         return q
 
