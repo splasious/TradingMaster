@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Play, Square, Trash2, Zap } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
@@ -32,6 +32,78 @@ function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | u
   return ageSeconds < 60 ? "live" : "stale";
 }
 
+/** A strategy built in Strategy Builder already names the instrument(s) it
+ * was designed and validated against (StrategyVersion.instrument_ids) --
+ * re-asking for one via a blind global search here, unrelated to what the
+ * strategy was actually built for, was the friction being reported. When
+ * the strategy has its own list, offer that list directly (checkboxes,
+ * defaulting to all selected) and fire one deployment per checked
+ * instrument; only fall back to the free-text global search for a
+ * strategy that was built with no instruments attached at all. */
+function StrategyInstrumentPicker({
+  strategyVersionInstrumentIds,
+  selectedIds,
+  onChange,
+}: {
+  strategyVersionInstrumentIds: string[];
+  selectedIds: Set<string>;
+  onChange: (ids: Set<string>) => void;
+}) {
+  const [instruments, setInstruments] = useState<InstrumentOut[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(strategyVersionInstrumentIds.map((id) => apiFetch<InstrumentOut>(`/api/v1/instruments/${id}`).catch(() => null))).then(
+      (results) => {
+        if (cancelled) return;
+        const loaded = results.filter((r): r is InstrumentOut => r !== null);
+        setInstruments(loaded);
+        onChange(new Set(loaded.map((i) => i.id)));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per mount; the parent remounts this (fresh state) via a key when the strategy changes
+  }, []);
+
+  function toggle(id: string) {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  }
+
+  if (!instruments) {
+    return <p className="text-sm text-text-muted">Loading this strategy&apos;s instruments...</p>;
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-text-secondary">
+          Instruments ({selectedIds.size}/{instruments.length} selected)
+        </label>
+        <button
+          type="button"
+          className="text-xs text-active hover:underline"
+          onClick={() => onChange(selectedIds.size === instruments.length ? new Set() : new Set(instruments.map((i) => i.id)))}
+        >
+          {selectedIds.size === instruments.length ? "Deselect all" : "Select all"}
+        </button>
+      </div>
+      <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-border p-1.5">
+        {instruments.map((i) => (
+          <label key={i.id} className="flex items-center gap-2 rounded px-1.5 py-1 text-sm text-text-secondary hover:bg-surface-elevated">
+            <input type="checkbox" checked={selectedIds.has(i.id)} onChange={() => toggle(i.id)} />
+            {i.symbol} <span className="text-text-muted">({marketLabel(i.exchange)})</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
@@ -39,25 +111,63 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
   const { data: instrumentResults } = useInstruments(instrumentQuery);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  const strategyInstrumentIds = strategy?.latest_version?.instrument_ids ?? [];
+  const usesStrategyInstruments = strategyInstrumentIds.length > 0;
+
+  function reset() {
+    setStrategy(null);
+    setInstrument(null);
+    setInstrumentQuery("");
+    setSelectedIds(new Set());
+  }
 
   const startMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<PaperDeploymentOut>("/api/v1/paper-trading/deployments", {
-        method: "POST",
-        body: JSON.stringify({ strategy_id: strategy!.id, instrument_id: instrument!.id, timeframe: "1d" }),
-      }),
+    mutationFn: async () => {
+      const targetIds = usesStrategyInstruments ? [...selectedIds] : instrument ? [instrument.id] : [];
+      const results = await Promise.allSettled(
+        targetIds.map((instrument_id) =>
+          apiFetch<PaperDeploymentOut>("/api/v1/paper-trading/deployments", {
+            method: "POST",
+            body: JSON.stringify({ strategy_id: strategy!.id, instrument_id, timeframe: strategy!.latest_version?.timeframe ?? "1d" }),
+          }),
+        ),
+      );
+      const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (failed.length) {
+        const first = failed[0].reason;
+        throw first instanceof ApiError ? first : new Error(`${failed.length} of ${targetIds.length} deployments failed to start`);
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      reset();
       onClose();
     },
   });
 
+  const canStart = usesStrategyInstruments ? selectedIds.size > 0 : !!instrument;
+
   return (
-    <Modal open={open} onClose={onClose} title="Start Paper Trading">
+    <Modal
+      open={open}
+      onClose={() => {
+        reset();
+        onClose();
+      }}
+      title="Start Paper Trading"
+    >
       <div className="space-y-4">
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Strategy</label>
-          <Select value={strategy?.id ?? ""} onChange={(e) => setStrategy(strategies?.find((s) => s.id === e.target.value) ?? null)}>
+          <Select
+            value={strategy?.id ?? ""}
+            onChange={(e) => {
+              setStrategy(strategies?.find((s) => s.id === e.target.value) ?? null);
+              setInstrument(null);
+            }}
+          >
             <option value="" disabled>
               Select a strategy
             </option>
@@ -68,27 +178,40 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
             ))}
           </Select>
         </div>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Instrument</label>
-          <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-          {instrumentQuery && instrumentResults && (
-            <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-              {instrumentResults.map((i) => (
-                <button
-                  key={i.id}
-                  onClick={() => {
-                    setInstrument(i);
-                    setInstrumentQuery("");
-                  }}
-                  className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                >
-                  {i.symbol} ({marketLabel(i.exchange)})
-                </button>
-              ))}
-            </div>
-          )}
-          {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
-        </div>
+
+        {strategy && usesStrategyInstruments && (
+          <StrategyInstrumentPicker
+            key={strategy.id}
+            strategyVersionInstrumentIds={strategyInstrumentIds}
+            selectedIds={selectedIds}
+            onChange={setSelectedIds}
+          />
+        )}
+
+        {strategy && !usesStrategyInstruments && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Instrument</label>
+            <p className="text-xs text-text-muted">This strategy wasn&apos;t built with any instruments attached -- pick one to deploy it against.</p>
+            <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
+            {instrumentQuery && instrumentResults && (
+              <div className="max-h-32 overflow-y-auto rounded-md border border-border">
+                {instrumentResults.map((i) => (
+                  <button
+                    key={i.id}
+                    onClick={() => {
+                      setInstrument(i);
+                      setInstrumentQuery("");
+                    }}
+                    className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
+                  >
+                    {i.symbol} ({marketLabel(i.exchange)})
+                  </button>
+                ))}
+              </div>
+            )}
+            {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
+          </div>
+        )}
 
         {startMutation.error && (
           <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
@@ -97,11 +220,21 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
         )}
 
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+          >
             Cancel
           </Button>
-          <Button onClick={() => startMutation.mutate()} disabled={!strategy || !instrument || startMutation.isPending}>
-            {startMutation.isPending ? "Starting..." : "Start"}
+          <Button onClick={() => startMutation.mutate()} disabled={!canStart || startMutation.isPending}>
+            {startMutation.isPending
+              ? "Starting..."
+              : usesStrategyInstruments && selectedIds.size > 1
+                ? `Start (${selectedIds.size} instruments)`
+                : "Start"}
           </Button>
         </div>
       </div>
