@@ -24,3 +24,12 @@ nse-yahoo-data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dev server logs (redirected stdout/stderr from local runs)
+backend/*.log
+frontend/*.log
+
+# Packaging: PyInstaller/build output -- regenerated from packaging/*.spec
+# and packaging/*.py, never meant to be committed (the exe alone is 50MB+).
+packaging/build/
+packaging/dist/

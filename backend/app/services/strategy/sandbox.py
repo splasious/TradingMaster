@@ -21,9 +21,19 @@ class SandboxBacktestResult:
     timed_out: bool = False
 
 
+def _worker_command() -> list[str]:
+    """Dev mode: a fresh `python -m sandbox_worker` process. Frozen (packaged
+    desktop build): sys.executable is the app's own onefile exe, not a
+    python.exe that understands `-m` -- re-invoke that same exe with a flag
+    it recognizes instead (see packaging/backend_entry.py)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--sandbox-worker"]
+    return [sys.executable, "-m", "app.services.strategy.sandbox_worker"]
+
+
 async def _run_worker(payload: dict, timeout: float) -> tuple[dict | None, str | None, bool]:
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "app.services.strategy.sandbox_worker",
+        *_worker_command(),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     data = json.dumps(payload).encode()
