@@ -74,6 +74,68 @@ async def test_full_paper_trading_flow_via_api(client: AsyncClient, seeded_admin
     assert any(d["id"] == deployment_id and d["status"] == "stopped" for d in list_resp.json())
 
 
+async def test_cannot_delete_active_deployment(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Delete Guard Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "timeframe": "1d"},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/deployments/{deployment_id}", headers=headers)
+    assert delete_resp.status_code == 409
+
+    # Still there and still active -- the guard didn't half-delete anything.
+    list_resp = await client.get("/api/v1/paper-trading/deployments", headers=headers)
+    assert any(d["id"] == deployment_id and d["status"] == "active" for d in list_resp.json())
+
+
+async def test_delete_stopped_deployment_removes_it_and_its_history(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Delete Flow Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "timeframe": "1d"},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    # Generate real order/position history before stopping, so deletion has
+    # actual child rows to clean up, not just an empty deployment.
+    await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/evaluate", headers=headers)
+    await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/stop", headers=headers)
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/deployments/{deployment_id}", headers=headers)
+    assert delete_resp.status_code == 204
+
+    list_resp = await client.get("/api/v1/paper-trading/deployments", headers=headers)
+    assert not any(d["id"] == deployment_id for d in list_resp.json())
+
+
 async def test_non_owner_cannot_start_or_stop_deployment(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = await _seed_instrument(db_session)
     trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
@@ -140,6 +140,34 @@ async def stop_deployment(deployment_id: str, db: AsyncSession = Depends(get_db)
     await db.commit()
     await db.refresh(deployment)
     return await _deployment_out(db, deployment)
+
+
+@router.delete("/deployments/{deployment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_deployment(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> None:
+    """Stopped deployments only -- deleting an active one would silently
+    drop its tick-engine subscription and any open position. Explicitly
+    deletes child orders/trades/position first: ON DELETE CASCADE is
+    declared on all three FKs, but SQLite (local dev) doesn't enforce it
+    without a per-connection PRAGMA, so this behaves identically on
+    SQLite and Postgres rather than depending on which DB is behind it."""
+    deployment = await db.get(PaperDeployment, uuid.UUID(deployment_id))
+    if deployment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
+    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
+    if deployment.status == DeploymentStatus.ACTIVE.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stop this deployment before deleting it.")
+
+    await db.execute(delete(PaperTrade).where(PaperTrade.deployment_id == deployment.id))
+    await db.execute(delete(PaperOrder).where(PaperOrder.deployment_id == deployment.id))
+    await db.execute(delete(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
+
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_DEPLOYMENT_DELETED", object_type="paper_deployment", object_id=str(deployment.id),
+    )
+    await db.delete(deployment)
+    await db.commit()
 
 
 @router.post("/deployments/{deployment_id}/evaluate", response_model=EvaluationOut)

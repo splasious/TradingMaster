@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Play, Square, Zap } from "lucide-react";
+import { Play, Square, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -109,6 +109,42 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
   );
 }
 
+function DeleteDeploymentModal({ deployment, onClose }: { deployment: PaperDeploymentOut; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/deployments/${deployment.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Delete: ${deployment.strategy_name} on ${deployment.instrument_symbol}`}>
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          This permanently deletes the deployment and its simulated order/trade history. This cannot be undone.
+        </p>
+
+        {deleteMutation.isError && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {deleteMutation.error instanceof ApiError ? deleteMutation.error.message : "Failed to delete deployment"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={deleteMutation.isPending}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
+            {deleteMutation.isPending ? "Deleting..." : "Delete Deployment"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
   const { data: orders } = usePaperOrders(deployment.id);
   const { data: trades } = usePaperTrades(deployment.id);
@@ -187,7 +223,7 @@ function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
   );
 }
 
-function DeploymentRow({ deployment }: { deployment: PaperDeploymentOut }) {
+function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOut; onDelete: () => void }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<PaperEvaluationOut | null>(null);
@@ -235,7 +271,7 @@ function DeploymentRow({ deployment }: { deployment: PaperDeploymentOut }) {
         <Td className="text-xs text-text-muted">{lastEval ? `${lastEval.action} (${lastEval.signal ?? "-"})` : "--"}</Td>
         <Td className="text-right" onClick={(e) => e.stopPropagation()}>
           <div className="flex justify-end gap-1">
-            {deployment.status === "active" && (
+            {deployment.status === "active" ? (
               <>
                 <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
                   <Zap className="h-3.5 w-3.5" /> Evaluate Now
@@ -244,6 +280,10 @@ function DeploymentRow({ deployment }: { deployment: PaperDeploymentOut }) {
                   <Square className="h-3.5 w-3.5" /> Stop
                 </Button>
               </>
+            ) : (
+              <Button variant="ghost" size="sm" onClick={onDelete} className="text-text-muted hover:text-negative" title="Delete deployment">
+                <Trash2 className="h-3.5 w-3.5" /> Delete
+              </Button>
             )}
           </div>
         </Td>
@@ -263,6 +303,7 @@ export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolio } = usePaperPortfolio();
   const [modalOpen, setModalOpen] = useState(false);
+  const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
 
   return (
     <div className="space-y-6">
@@ -336,7 +377,7 @@ export default function PaperTradingPage() {
               </Thead>
               <Tbody>
                 {deployments.map((d) => (
-                  <DeploymentRow key={d.id} deployment={d} />
+                  <DeploymentRow key={d.id} deployment={d} onDelete={() => setToDelete(d)} />
                 ))}
               </Tbody>
             </Table>
@@ -345,6 +386,7 @@ export default function PaperTradingPage() {
       </Card>
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
     </div>
   );
 }
