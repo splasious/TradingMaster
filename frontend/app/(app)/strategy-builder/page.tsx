@@ -1,9 +1,9 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
-import { Plus, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CheckCircle2, Plus, Trash2, X, XCircle } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
 import { WatchlistLoader } from "@/components/market-data/watchlist-loader";
@@ -14,9 +14,9 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useIndicatorList } from "@/lib/hooks";
+import { useIndicatorList, useStrategy } from "@/lib/hooks";
 import { TIMEFRAMES } from "@/lib/types";
-import type { InstrumentOut, ScanCondition, ScanOperator, StrategyOut } from "@/lib/types";
+import type { InstrumentOut, RuleNode, ScanCondition, ScanOperator, StrategyOut, ValidateResult } from "@/lib/types";
 
 const RAW_FIELDS = ["open", "high", "low", "close", "volume"];
 const OPERATORS: ScanOperator[] = [">", "<", ">=", "<=", "=="];
@@ -92,14 +92,37 @@ function ConditionEditor({
   );
 }
 
-export default function StrategyBuilderPage() {
-  const router = useRouter();
-  const fieldOptions = useFieldOptions();
+function ruleConditions(rule: RuleNode | null | undefined): ScanCondition[] | null {
+  if (rule && "all" in rule) return rule.all as ScanCondition[];
+  return null;
+}
 
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [timeframe, setTimeframe] = useState("1d");
+/** Mounted fresh (keyed by strategy id in the parent) once the strategy to
+ * edit -- if any -- has loaded, so every field's initial state can be
+ * computed directly from `existing` instead of a useEffect full of
+ * setState calls firing after first render. */
+function StrategyForm({ editId, existing }: { editId: string | null; existing: StrategyOut | null }) {
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  const fieldOptions = useFieldOptions();
+  const v = existing?.latest_version ?? null;
+
+  const [name, setName] = useState(existing?.name ?? "");
+  const [description, setDescription] = useState(existing?.description ?? "");
+  const [timeframe, setTimeframe] = useState(v?.timeframe ?? "1d");
   const [selectedInstruments, setSelectedInstruments] = useState<InstrumentOut[]>([]);
+
+  useEffect(() => {
+    if (!v?.instrument_ids.length) return;
+    let cancelled = false;
+    Promise.all(v.instrument_ids.map((id) => apiFetch<InstrumentOut>(`/api/v1/instruments/${id}`).catch(() => null))).then((results) => {
+      if (!cancelled) setSelectedInstruments(results.filter((r): r is InstrumentOut => r !== null));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-fetch if the strategy version identity actually changes
+  }, [v?.id]);
 
   function mergeInstruments(loaded: InstrumentOut[]) {
     setSelectedInstruments((prev) => {
@@ -109,47 +132,68 @@ export default function StrategyBuilderPage() {
     });
   }
 
-  const [entryConditions, setEntryConditions] = useState<ScanCondition[]>([{ field: "rsi.rsi", operator: ">", value: 55 }]);
-  const [exitConditions, setExitConditions] = useState<ScanCondition[]>([{ field: "rsi.rsi", operator: "<", value: 45 }]);
-  const [pythonCode, setPythonCode] = useState(DEFAULT_PYTHON_CODE);
+  const [entryConditions, setEntryConditions] = useState<ScanCondition[]>(
+    ruleConditions(v?.entry_rules ?? null) ?? [{ field: "rsi.rsi", operator: ">", value: 55 }],
+  );
+  const [exitConditions, setExitConditions] = useState<ScanCondition[]>(
+    ruleConditions(v?.exit_rules ?? null) ?? [{ field: "rsi.rsi", operator: "<", value: 45 }],
+  );
+  const [pythonCode, setPythonCode] = useState(v?.python_code ?? DEFAULT_PYTHON_CODE);
 
-  const [sizingType, setSizingType] = useState<"fixed_quantity" | "percent_capital">("fixed_quantity");
-  const [sizingValue, setSizingValue] = useState(1);
-  const [stopLossPct, setStopLossPct] = useState<string>("");
-  const [takeProfitPct, setTakeProfitPct] = useState<string>("");
-  const [maxPositions, setMaxPositions] = useState<string>("");
+  const [sizingType, setSizingType] = useState<"fixed_quantity" | "percent_capital">(v?.position_sizing.type ?? "fixed_quantity");
+  const [sizingValue, setSizingValue] = useState(v?.position_sizing.value ?? 1);
+  const [stopLossPct, setStopLossPct] = useState<string>(v?.risk_rules.stop_loss_pct?.toString() ?? "");
+  const [takeProfitPct, setTakeProfitPct] = useState<string>(v?.risk_rules.take_profit_pct?.toString() ?? "");
+  const [maxPositions, setMaxPositions] = useState<string>(v?.risk_rules.max_positions?.toString() ?? "");
+
+  const [validateResult, setValidateResult] = useState<ValidateResult | null>(null);
+
+  const versionBody = (codeType: "visual" | "python") => ({
+    timeframe,
+    instrument_ids: selectedInstruments.map((i) => i.id),
+    parameters: {},
+    entry_rules: codeType === "visual" ? { all: entryConditions } : null,
+    exit_rules: codeType === "visual" ? { all: exitConditions } : null,
+    python_code: codeType === "python" ? pythonCode : null,
+    position_sizing: { type: sizingType, value: sizingValue },
+    risk_rules: {
+      stop_loss_pct: stopLossPct ? Number(stopLossPct) : null,
+      take_profit_pct: takeProfitPct ? Number(takeProfitPct) : null,
+      max_positions: maxPositions ? Number(maxPositions) : null,
+    },
+  });
 
   const createMutation = useMutation({
     mutationFn: (codeType: "visual" | "python") =>
-      apiFetch<StrategyOut>("/api/v1/strategies", {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          description: description || null,
-          version: {
-            timeframe,
-            instrument_ids: selectedInstruments.map((i) => i.id),
-            parameters: {},
-            entry_rules: codeType === "visual" ? { all: entryConditions } : null,
-            exit_rules: codeType === "visual" ? { all: exitConditions } : null,
-            python_code: codeType === "python" ? pythonCode : null,
-            position_sizing: { type: sizingType, value: sizingValue },
-            risk_rules: {
-              stop_loss_pct: stopLossPct ? Number(stopLossPct) : null,
-              take_profit_pct: takeProfitPct ? Number(takeProfitPct) : null,
-              max_positions: maxPositions ? Number(maxPositions) : null,
-            },
-          },
-        }),
-      }),
-    onSuccess: () => router.push("/strategies"),
+      editId
+        ? apiFetch<StrategyOut>(`/api/v1/strategies/${editId}/versions`, {
+            method: "POST",
+            body: JSON.stringify(versionBody(codeType)),
+          })
+        : apiFetch<StrategyOut>("/api/v1/strategies", {
+            method: "POST",
+            body: JSON.stringify({ name, description: description || null, version: versionBody(codeType) }),
+          }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategies"] });
+      router.push("/strategies");
+    },
+  });
+
+  const validateMutation = useMutation({
+    mutationFn: () => apiFetch<ValidateResult>(`/api/v1/strategies/${editId}/validate`, { method: "POST" }),
+    onSuccess: setValidateResult,
   });
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-text-primary">Strategy Builder</h1>
-        <p className="text-sm text-text-muted">Define rules visually, or import Python code that runs in a sandbox.</p>
+        <h1 className="text-xl font-semibold text-text-primary">{editId ? `Edit: ${existing?.name ?? "Strategy"}` : "Strategy Builder"}</h1>
+        <p className="text-sm text-text-muted">
+          {editId
+            ? "Saving creates a new version -- prior backtests and deployments stay attached to the version they ran on."
+            : "Define rules visually, or import Python code that runs in a sandbox."}
+        </p>
       </div>
 
       <Card>
@@ -159,11 +203,17 @@ export default function StrategyBuilderPage() {
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-text-secondary">Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Momentum Breakout" />
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Momentum Breakout"
+              disabled={!!editId}
+              title={editId ? "Renaming isn't supported yet -- edit rules/parameters here instead." : undefined}
+            />
           </div>
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-text-secondary">Description</label>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} />
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} disabled={!!editId} />
           </div>
           <div className="flex gap-4">
             <div className="space-y-1.5">
@@ -200,7 +250,7 @@ export default function StrategyBuilderPage() {
           <CardTitle>Rules</CardTitle>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="visual">
+          <Tabs defaultValue={existing?.code_type ?? "visual"}>
             <TabsList>
               <TabsTrigger value="visual">Visual Mode</TabsTrigger>
               <TabsTrigger value="python">Python Code Mode</TabsTrigger>
@@ -209,12 +259,16 @@ export default function StrategyBuilderPage() {
               <div className="space-y-5">
                 <ConditionEditor title="Entry rules" conditions={entryConditions} onChange={setEntryConditions} fieldOptions={fieldOptions} />
                 <ConditionEditor title="Exit rules" conditions={exitConditions} onChange={setExitConditions} fieldOptions={fieldOptions} />
-                <Button
-                  onClick={() => createMutation.mutate("visual")}
-                  disabled={!name || createMutation.isPending}
-                >
-                  {createMutation.isPending ? "Creating..." : "Create Visual Strategy"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => createMutation.mutate("visual")} disabled={!name || createMutation.isPending}>
+                    {createMutation.isPending ? "Saving..." : editId ? "Save Changes" : "Create Visual Strategy"}
+                  </Button>
+                  {editId && (
+                    <Button variant="secondary" onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>
+                      {validateMutation.isPending ? "Validating..." : "Validate"}
+                    </Button>
+                  )}
+                </div>
               </div>
             </TabsContent>
             <TabsContent value="python">
@@ -234,12 +288,16 @@ export default function StrategyBuilderPage() {
                   className="w-full rounded-md border border-border bg-surface p-3 font-mono text-xs text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                   spellCheck={false}
                 />
-                <Button
-                  onClick={() => createMutation.mutate("python")}
-                  disabled={!name || createMutation.isPending}
-                >
-                  {createMutation.isPending ? "Creating..." : "Create Python Strategy"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => createMutation.mutate("python")} disabled={!name || createMutation.isPending}>
+                    {createMutation.isPending ? "Saving..." : editId ? "Save Changes" : "Create Python Strategy"}
+                  </Button>
+                  {editId && (
+                    <Button variant="secondary" onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>
+                      {validateMutation.isPending ? "Validating..." : "Validate"}
+                    </Button>
+                  )}
+                </div>
               </div>
             </TabsContent>
           </Tabs>
@@ -277,11 +335,40 @@ export default function StrategyBuilderPage() {
         </CardContent>
       </Card>
 
+      {editId && validateResult && (
+        <div
+          className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
+            validateResult.valid ? "bg-positive-soft text-positive" : "bg-negative-soft text-negative"
+          }`}
+        >
+          {validateResult.valid ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <XCircle className="mt-0.5 h-4 w-4 shrink-0" />}
+          <div>
+            {validateResult.valid ? (
+              <span>Valid (last saved version). Sample signal: {validateResult.sample_signal}</span>
+            ) : (
+              <span>{validateResult.error}</span>
+            )}
+          </div>
+        </div>
+      )}
+
       {createMutation.error && (
         <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-          {createMutation.error instanceof ApiError ? createMutation.error.message : "Failed to create strategy"}
+          {createMutation.error instanceof ApiError ? createMutation.error.message : "Failed to save strategy"}
         </div>
       )}
     </div>
   );
+}
+
+export default function StrategyBuilderPage() {
+  const searchParams = useSearchParams();
+  const editId = searchParams.get("id");
+  const { data: existing, isLoading: isLoadingExisting } = useStrategy(editId);
+
+  if (editId && isLoadingExisting) {
+    return <p className="text-sm text-text-muted">Loading strategy...</p>;
+  }
+
+  return <StrategyForm key={editId ?? "new"} editId={editId} existing={existing ?? null} />;
 }

@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
-import { CheckCircle2, Trash2, XCircle } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { Badge, type Tone } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import { Modal } from "@/components/ui/modal";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBacktestResult, useBacktestsForStrategy, useStrategies } from "@/lib/hooks";
-import type { StrategyOut, StrategyStatus, ValidateResult } from "@/lib/types";
+import type { StrategyOut, StrategyStatus } from "@/lib/types";
 
 const STATUS_TONE: Record<StrategyStatus, Tone> = {
   draft: "neutral",
@@ -25,56 +25,6 @@ const STATUS_TONE: Record<StrategyStatus, Tone> = {
   approved: "positive",
   live: "positive",
 };
-
-function ValidateModal({ strategy, onClose }: { strategy: StrategyOut; onClose: () => void }) {
-  const [result, setResult] = useState<ValidateResult | null>(null);
-  const validateMutation = useMutation({
-    mutationFn: () => apiFetch<ValidateResult>(`/api/v1/strategies/${strategy.id}/validate`, { method: "POST" }),
-    onSuccess: setResult,
-  });
-
-  return (
-    <Modal open onClose={onClose} title={`Validate: ${strategy.name}`}>
-      <div className="space-y-4">
-        <div className="text-sm text-text-secondary">
-          <p>
-            Mode: <span className="font-medium text-text-primary capitalize">{strategy.code_type}</span>
-          </p>
-          <p>
-            Timeframe: <span className="font-medium text-text-primary">{strategy.latest_version?.timeframe}</span>
-          </p>
-        </div>
-
-        {strategy.code_type === "python" && (
-          <pre className="max-h-48 overflow-auto rounded-md bg-surface-elevated p-3 text-xs text-text-secondary">
-            {strategy.latest_version?.python_code}
-          </pre>
-        )}
-
-        <Button onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>
-          {validateMutation.isPending ? "Validating..." : "Run Validation"}
-        </Button>
-
-        {result && (
-          <div
-            className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${
-              result.valid ? "bg-positive-soft text-positive" : "bg-negative-soft text-negative"
-            }`}
-          >
-            {result.valid ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <XCircle className="mt-0.5 h-4 w-4 shrink-0" />}
-            <div>
-              {result.valid ? (
-                <span>Valid. Sample signal: {result.sample_signal}</span>
-              ) : (
-                <span>{result.error}</span>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    </Modal>
-  );
-}
 
 function DeleteStrategyModal({ strategy, onClose }: { strategy: StrategyOut; onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -140,13 +90,11 @@ function StrategyPerformance({ strategyId }: { strategyId: string }) {
 
 function StrategyCard({
   strategy,
-  canDelete,
-  onValidate,
+  canEdit,
   onDelete,
 }: {
   strategy: StrategyOut;
-  canDelete: boolean;
-  onValidate: () => void;
+  canEdit: boolean;
   onDelete: () => void;
 }) {
   return (
@@ -172,10 +120,16 @@ function StrategyCard({
       <div className="mt-auto flex items-center justify-between border-t border-border pt-3 text-xs text-text-muted">
         <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={onValidate}>
-            Validate
-          </Button>
-          {canDelete && (
+          {canEdit ? (
+            <Link href={`/strategy-builder?id=${strategy.id}`}>
+              <Button variant="ghost" size="sm">
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </Button>
+            </Link>
+          ) : (
+            <span className="px-2 text-text-muted">View only</span>
+          )}
+          {canEdit && (
             <Button variant="ghost" size="sm" onClick={onDelete} className="text-text-muted hover:text-negative" title="Delete strategy">
               <Trash2 className="h-3.5 w-3.5" />
             </Button>
@@ -186,12 +140,50 @@ function StrategyCard({
   );
 }
 
+function StrategyGrid({
+  title,
+  description,
+  strategies,
+  hasRole,
+  user,
+  onDelete,
+}: {
+  title: string;
+  description: string;
+  strategies: StrategyOut[];
+  hasRole: (...roles: string[]) => boolean;
+  user: { id: string } | null | undefined;
+  onDelete: (s: StrategyOut) => void;
+}) {
+  if (!strategies.length) return null;
+  return (
+    <div className="space-y-3">
+      <div>
+        <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
+        <p className="text-xs text-text-muted">{description}</p>
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {strategies.map((s) => (
+          <StrategyCard
+            key={s.id}
+            strategy={s}
+            canEdit={s.owner_id === user?.id || hasRole("administrator")}
+            onDelete={() => onDelete(s)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function StrategiesPage() {
   const { hasRole, user } = useAuth();
   const { data: strategies, isLoading, isError } = useStrategies();
-  const [selected, setSelected] = useState<StrategyOut | null>(null);
   const [toDelete, setToDelete] = useState<StrategyOut | null>(null);
   const queryClient = useQueryClient();
+
+  const pythonStrategies = strategies?.filter((s) => s.code_type === "python") ?? [];
+  const visualStrategies = strategies?.filter((s) => s.code_type === "visual") ?? [];
 
   return (
     <div className="space-y-6">
@@ -221,20 +213,26 @@ export default function StrategiesPage() {
           }
         />
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {strategies.map((s) => (
-            <StrategyCard
-              key={s.id}
-              strategy={s}
-              canDelete={s.owner_id === user?.id || hasRole("administrator")}
-              onValidate={() => setSelected(s)}
-              onDelete={() => setToDelete(s)}
-            />
-          ))}
+        <div className="space-y-8">
+          <StrategyGrid
+            title="Python Strategies"
+            description="Sandboxed generate_signal(candles, params) code."
+            strategies={pythonStrategies}
+            hasRole={hasRole}
+            user={user}
+            onDelete={setToDelete}
+          />
+          <StrategyGrid
+            title="Indicator-Based (Visual) Strategies"
+            description="Built from field/operator/value entry and exit conditions."
+            strategies={visualStrategies}
+            hasRole={hasRole}
+            user={user}
+            onDelete={setToDelete}
+          />
         </div>
       )}
 
-      {selected && <ValidateModal strategy={selected} onClose={() => setSelected(null)} />}
       {toDelete && <DeleteStrategyModal strategy={toDelete} onClose={() => setToDelete(null)} />}
     </div>
   );

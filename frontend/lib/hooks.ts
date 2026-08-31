@@ -191,6 +191,14 @@ export function useStrategies() {
   });
 }
 
+export function useStrategy(strategyId: string | null) {
+  return useQuery({
+    queryKey: ["strategy", strategyId],
+    queryFn: () => apiFetch<StrategyOut>(`/api/v1/strategies/${strategyId}`),
+    enabled: !!strategyId,
+  });
+}
+
 export function useBacktestsForStrategy(strategyId: string) {
   return useQuery({
     queryKey: ["backtests-for-strategy", strategyId],
