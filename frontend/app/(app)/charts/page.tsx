@@ -28,6 +28,15 @@ const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
 
 const DEFAULT_ACTIVE_INDICATORS = ["sma", "rsi"];
 
+// Stable fallback references -- a fresh `[]` literal on every render would
+// give OscillatorChart/PriceChart a "changed" prop even when nothing
+// actually changed, which used to cause unnecessary re-renders. Kept even
+// after OscillatorChart itself stopped remounting on that (see its own
+// comment) since it's free and avoids the churn entirely rather than just
+// tolerating it.
+const EMPTY_LINES: OverlayLine[] = [];
+const EMPTY_BANDS: number[] = [];
+
 const INDICATOR_COLORS = ["#3b6bf5", "#f59e0b", "#9333ea", "#16a34a", "#dc2626", "#0891b2", "#c026d3", "#65a30d", "#ea580c", "#4338ca"];
 
 // Natural reference bands for the oscillators that have a conventional
@@ -180,7 +189,7 @@ export default function ChartsPage() {
     },
   });
 
-  const overlays: OverlayLine[] = overlaySpecs.flatMap((s) => indicatorLines.get(s.code) ?? []);
+  const overlays: OverlayLine[] = overlaySpecs.flatMap((s) => indicatorLines.get(s.code) ?? EMPTY_LINES);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
@@ -325,8 +334,8 @@ export default function ChartsPage() {
                 <div key={spec.code}>
                   <div className="mb-1 text-xs font-medium text-text-muted">{spec.name}</div>
                   <OscillatorChart
-                    lines={indicatorLines.get(spec.code) ?? []}
-                    bands={OSCILLATOR_BANDS[spec.code] ?? []}
+                    lines={indicatorLines.get(spec.code) ?? EMPTY_LINES}
+                    bands={OSCILLATOR_BANDS[spec.code] ?? EMPTY_BANDS}
                     onChartReady={(chart) => setOscillatorChartApis((prev) => ({ ...prev, [spec.code]: chart }))}
                   />
                 </div>
