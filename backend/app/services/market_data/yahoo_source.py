@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 import httpx
 
@@ -6,6 +6,25 @@ from app.core.config import get_settings
 from app.services.market_data.base import Bar, MarketDataSource, MarketDataSourceError
 
 settings = get_settings()
+
+# The nse-yahoo-data service's own storage doesn't always return the same
+# time-of-day for a given trading day's daily bar across different fetches
+# (depends on whether the underlying yfinance/pandas call produced a
+# tz-aware or tz-naive index at ingest time -- e.g. 2026-08-13 04:00 UTC one
+# run, 2026-08-13 00:00 UTC another). Two TradingMaster ingestion paths
+# (the main-catalog backfill and the Data Backfill Platform) hit this same
+# service independently, so without normalizing here both timestamps land
+# as distinct rows for the same calendar day -- two candles for one day.
+# Daily-and-coarser bars only ever need calendar-day resolution, so collapse
+# to a canonical midnight UTC per day; that makes the (instrument, timeframe,
+# ts) uniqueness check in both ingestion paths actually dedupe by day.
+_DAY_GRANULAR_TIMEFRAMES = {"1d", "1wk", "1mo"}
+
+
+def _normalize_ts(ts: datetime, timeframe: str) -> datetime:
+    if timeframe in _DAY_GRANULAR_TIMEFRAMES:
+        return datetime.combine(ts.date(), time.min, tzinfo=timezone.utc)
+    return ts
 
 
 class YahooNSEDataSource(MarketDataSource):
@@ -49,6 +68,7 @@ class YahooNSEDataSource(MarketDataSource):
             ts = datetime.fromisoformat(row["ts"])
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
+            ts = _normalize_ts(ts, timeframe)
             bars.append(
                 Bar(
                     ts=ts,
