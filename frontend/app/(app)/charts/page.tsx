@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useChartCandles, useIndicator, useInstrument, useInstruments } from "@/lib/hooks";
+import { useChartCandles, useIndicator, useInstrument, useInstruments, useResampleBase } from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
 import { TIMEFRAMES, type CatalogSyncItemOut, type InstrumentOut } from "@/lib/types";
 
@@ -28,8 +28,16 @@ const OVERLAY_OPTIONS = [
   { code: "ema", field: "ema", label: "EMA 50", color: "#f59e0b" },
 ] as const;
 
-function useOverlay(instrumentId: string | null, timeframe: string, code: string, field: string, color: string, enabled: boolean): OverlayLine | null {
-  const { data } = useIndicator(enabled ? instrumentId : null, timeframe, code);
+function useOverlay(
+  instrumentId: string | null,
+  timeframe: string,
+  baseTimeframe: string | null,
+  code: string,
+  field: string,
+  color: string,
+  enabled: boolean,
+): OverlayLine | null {
+  const { data } = useIndicator(enabled ? instrumentId : null, timeframe, code, baseTimeframe);
   return useMemo(() => {
     if (!enabled || !data) return null;
     return { id: code, color, points: data.map((p) => ({ ts: p.ts, value: p.values[field] })) };
@@ -51,12 +59,6 @@ export default function ChartsPage() {
   const [showEma, setShowEma] = useState(false);
   const [showBollinger, setShowBollinger] = useState(false);
   const [showRsi, setShowRsi] = useState(true);
-
-  // Indicators are computed server-side against stored candles, so they're
-  // only available at the base timeframe we actually backfill ("1d"). The
-  // "1wk"/"1mo" views use the multi-timeframe resample endpoint for price
-  // data but don't (yet) support indicator overlays on top of that.
-  const indicatorsAvailable = timeframe === "1d";
 
   const { data: instruments } = useInstruments(q, exchange || undefined);
 
@@ -85,15 +87,24 @@ export default function ChartsPage() {
   }, [selected, deepLinkById, deepLinkSymbol, deepLinkBySymbolResults]);
 
   const { data: candles, isLoading: candlesLoading, isError: candlesError } = useChartCandles(resolvedSelected?.id ?? null, timeframe);
-  const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (resolvedSelected?.id ?? null) : null, timeframe, "rsi");
+
+  // Indicators derive from the same base timeframe the chart itself does
+  // (real data directly, or resampled up from the finest real data on
+  // file) -- available at whatever timeframe is selected, not just "1d".
+  const { directlyAvailable, baseTimeframe: indicatorBase } = useResampleBase(resolvedSelected?.id ?? null, timeframe);
+  const indicatorsAvailable = directlyAvailable || !!indicatorBase;
+  const effectiveBase = directlyAvailable ? null : indicatorBase;
+
+  const { data: rsi } = useIndicator(indicatorsAvailable && showRsi ? (resolvedSelected?.id ?? null) : null, timeframe, "rsi", effectiveBase);
   const { data: bollinger } = useIndicator(
     indicatorsAvailable && showBollinger ? (resolvedSelected?.id ?? null) : null,
     timeframe,
     "bollinger_bands",
+    effectiveBase,
   );
 
-  const smaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
-  const emaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
+  const smaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, effectiveBase, "sma", "sma", "#3b6bf5", indicatorsAvailable && showSma);
+  const emaLine = useOverlay(resolvedSelected?.id ?? null, timeframe, effectiveBase, "ema", "ema", "#f59e0b", indicatorsAvailable && showEma);
 
   const bfSource = resolvedSelected ? DATA_SOURCE_TO_BF_SOURCE[resolvedSelected.data_source] : undefined;
   const syncMutation = useMutation({
@@ -188,7 +199,7 @@ export default function ChartsPage() {
                 <input type="checkbox" disabled={!indicatorsAvailable} checked={showRsi} onChange={(e) => setShowRsi(e.target.checked)} />
                 RSI
               </label>
-              {!indicatorsAvailable && <span className="text-xs text-text-muted">(indicators available on 1d only)</span>}
+              {!indicatorsAvailable && <span className="text-xs text-text-muted">(no candles stored yet to compute indicators from)</span>}
             </div>
           )}
         </CardHeader>

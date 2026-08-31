@@ -140,12 +140,12 @@ export function useAvailableTimeframes(instrumentId: string | null) {
   });
 }
 
-/** Fetches the requested timeframe directly if it's actually stored;
- * otherwise picks the finest stored timeframe finer than (or equal to)
- * the request and resamples it server-side -- so as soon as any base
- * granularity is backfilled (e.g. 1m), every coarser timeframe on the
- * chart's dropdown just works, no separate backfill per timeframe. */
-export function useChartCandles(instrumentId: string | null, timeframe: string) {
+/** Picks, from what's actually stored for this instrument, the timeframe
+ * to fetch candles/indicators from: the request itself if it's directly
+ * stored, else the finest stored timeframe finer than (or equal to) the
+ * request, to be resampled server-side. Shared by candles and indicators
+ * so both derive from the same base and stay visually consistent. */
+export function useResampleBase(instrumentId: string | null, timeframe: string) {
   const { data: available } = useAvailableTimeframes(instrumentId);
 
   const directlyAvailable = !!available?.includes(timeframe);
@@ -161,6 +161,17 @@ export function useChartCandles(instrumentId: string | null, timeframe: string) 
     return best;
   })();
 
+  return { available, loaded: available !== undefined, directlyAvailable, baseTimeframe };
+}
+
+/** Fetches the requested timeframe directly if it's actually stored;
+ * otherwise picks the finest stored timeframe finer than (or equal to)
+ * the request and resamples it server-side -- so as soon as any base
+ * granularity is backfilled (e.g. 1m), every coarser timeframe on the
+ * chart's dropdown just works, no separate backfill per timeframe. */
+export function useChartCandles(instrumentId: string | null, timeframe: string) {
+  const { loaded, directlyAvailable, baseTimeframe } = useResampleBase(instrumentId, timeframe);
+
   return useQuery({
     queryKey: ["chart-candles", instrumentId, timeframe, directlyAvailable, baseTimeframe],
     queryFn: () =>
@@ -169,7 +180,7 @@ export function useChartCandles(instrumentId: string | null, timeframe: string) 
         : apiFetch<CandleOut[]>(
             `/api/v1/market-data/candles/resampled?instrument_id=${instrumentId}&base_timeframe=${baseTimeframe}&target_timeframe=${timeframe}`,
           ),
-    enabled: !!instrumentId && available !== undefined && (directlyAvailable || !!baseTimeframe),
+    enabled: !!instrumentId && loaded && (directlyAvailable || !!baseTimeframe),
   });
 }
 
@@ -306,13 +317,17 @@ export function useIndicatorList() {
   });
 }
 
-export function useIndicator(instrumentId: string | null, timeframe: string, indicator: string | null) {
+export function useIndicator(
+  instrumentId: string | null,
+  timeframe: string,
+  indicator: string | null,
+  baseTimeframe?: string | null,
+) {
+  const params = new URLSearchParams({ instrument_id: instrumentId ?? "", timeframe, indicator: indicator ?? "" });
+  if (baseTimeframe && baseTimeframe !== timeframe) params.set("base_timeframe", baseTimeframe);
   return useQuery({
-    queryKey: ["indicator", instrumentId, timeframe, indicator],
-    queryFn: () =>
-      apiFetch<IndicatorPoint[]>(
-        `/api/v1/indicators/calculate?instrument_id=${instrumentId}&timeframe=${timeframe}&indicator=${indicator}`,
-      ),
+    queryKey: ["indicator", instrumentId, timeframe, indicator, baseTimeframe],
+    queryFn: () => apiFetch<IndicatorPoint[]>(`/api/v1/indicators/calculate?${params.toString()}`),
     enabled: !!instrumentId && !!indicator,
   });
 }
