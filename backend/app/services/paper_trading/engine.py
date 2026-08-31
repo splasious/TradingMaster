@@ -8,6 +8,7 @@ can call it directly and deterministically, the same pattern already used
 for backfill/backtest jobs.
 """
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -23,6 +24,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.market_data.tick_engine import tick_engine
+from app.services.paper_trading.ranking import get_universe_ranks
 from app.services.risk.engine import evaluate_entry, evaluate_exit
 from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
@@ -97,7 +99,21 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
         bars_dicts = [
             {"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in bars_for_eval
         ]
-        sandbox_result = await run_python_strategy(version.python_code, bars_dicts, version.parameters)
+        sandbox_params = dict(version.parameters)
+        if len(version.instrument_ids) > 1:
+            top_n = int(version.parameters.get("top_n", 10))
+            ranks = await get_universe_ranks(
+                db, version.id, [uuid.UUID(i) for i in version.instrument_ids], deployment.timeframe, top_n,
+            )
+            my_rank = ranks.get(instrument.id)
+            if my_rank:
+                sandbox_params.update(
+                    {
+                        "rank": float(my_rank["rank"]), "universe_size": float(my_rank["total"]),
+                        "in_top_n": my_rank["in_top_n"], "in_bottom_n": my_rank["in_bottom_n"],
+                    }
+                )
+        sandbox_result = await run_python_strategy(version.python_code, bars_dicts, sandbox_params)
         if sandbox_result.error:
             return EvaluationOutcome(action="error", reason=sandbox_result.error)
         signal = sandbox_result.signal

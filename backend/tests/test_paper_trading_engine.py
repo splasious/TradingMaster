@@ -161,6 +161,82 @@ async def test_indicator_based_rule_does_not_crash_on_mixed_tz_datetimes(db_sess
     assert outcome.action in ("entered", "hold")  # must not raise
 
 
+async def test_basket_strategy_injects_rank_params_into_sandbox(db_session: AsyncSession):
+    """A strategy attached to more than one instrument gets its rank within
+    that basket (trailing momentum) injected as extra numeric params --
+    the actual mechanism that makes a "top-N rotation" strategy possible
+    despite the sandbox only ever seeing one instrument's own candles."""
+    from app.services.paper_trading import ranking as ranking_module
+
+    ranking_module._cache.clear()
+
+    role = Role(name="trader_basket", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"basket_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="Basket User")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+
+    n = 25
+    base = datetime.now(timezone.utc) - timedelta(days=n)
+
+    async def make_instrument(symbol: str, step: float) -> Instrument:
+        instrument = Instrument(
+            exchange="DELTA", symbol=symbol, name=symbol, instrument_type="perpetual_future",
+            data_source="delta_exchange", external_ref=symbol,
+        )
+        db_session.add(instrument)
+        await db_session.flush()
+        for i in range(n):
+            close = 100 + i * step
+            db_session.add(
+                OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base + timedelta(days=i), open=close, high=close + 1, low=close - 1, close=close, volume=1000, source="test")
+            )
+        return instrument
+
+    strong = await make_instrument("BASKETSTRONGUSD", step=3.0)
+    weak = await make_instrument("BASKETWEAKUSD", step=-1.0)
+    await db_session.commit()
+
+    code = 'def generate_signal(candles, params):\n    return "BUY" if params.get("in_top_n", 0.0) >= 1.0 else "HOLD"'
+    strategy = Strategy(name="Basket Strategy", owner_id=user.id, code_type="python")
+    db_session.add(strategy)
+    await db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe="1d",
+        instrument_ids=[str(strong.id), str(weak.id)], parameters={"top_n": 1},
+        entry_rules=None, exit_rules=None, python_code=code,
+        position_sizing={"type": "fixed_quantity", "value": 1}, risk_rules={},
+    )
+    db_session.add(version)
+    await db_session.flush()
+
+    portfolio = PaperPortfolio(user_id=user.id, cash=100000.0, initial_capital=100000.0)
+    db_session.add(portfolio)
+    await db_session.flush()
+
+    strong_deployment = PaperDeployment(
+        portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=strong.id,
+        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+    )
+    weak_deployment = PaperDeployment(
+        portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=weak.id,
+        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+    )
+    db_session.add_all([strong_deployment, weak_deployment])
+    await db_session.commit()
+
+    tick_engine._last_price.pop(strong.id, None)
+    tick_engine._last_price.pop(weak.id, None)
+
+    strong_outcome = await evaluate_deployment(db_session, strong_deployment)
+    weak_outcome = await evaluate_deployment(db_session, weak_deployment)
+
+    assert strong_outcome.action == "entered"  # top_n=1 -> only the strongest-momentum instrument is in_top_n
+    assert weak_outcome.action == "hold"
+
+
 async def test_no_price_data_skips_evaluation(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
     tick_engine._last_price.pop(ctx["instrument"].id, None)
