@@ -116,6 +116,17 @@ def test_percent_capital_sizing_uses_available_cash():
     assert output.trades[0].quantity == 100  # (100000 * 10%) / 100 price = 100 units
 
 
+def test_percent_capital_sizing_floors_to_whole_shares():
+    # (100000 * 10%) / 137 = 72.99 -- must floor to 72 whole shares, never
+    # a fraction, and never round up past what the allocation actually covers.
+    candles = [_candle(0, 137, 138, 136, 137), _candle(1, 137, 138, 136, 137), _candle(2, 137, 138, 136, 137)]
+    signals = BarSignals(entry=[True, False, False], exit=[False, False, False])
+    sizing = PositionSizing(type="percent_capital", value=10.0)
+    output = simulate_trades(candles, signals, 100000, sizing, NO_RISK, NO_COSTS)
+    assert output.trades[0].quantity == 72
+    assert output.trades[0].quantity == int(output.trades[0].quantity)
+
+
 def test_no_signals_produces_no_trades():
     candles = [_candle(i, 100, 101, 99, 100) for i in range(5)]
     signals = BarSignals(entry=[False] * 5, exit=[False] * 5)

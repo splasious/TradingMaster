@@ -9,6 +9,7 @@ trigger intrabar against the *current* bar's high/low, including the same
 bar the signal fires on.
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -56,8 +57,13 @@ class BacktestOutput:
 
 def quantity_for(cash: float, price: float, sizing: PositionSizing) -> float:
     if sizing.type == "percent_capital":
+        if price <= 0:
+            return 0.0
         allocation = cash * (sizing.value / 100)
-        return max(0.0, allocation / price) if price > 0 else 0.0
+        # Whole shares only -- real equity/futures trading doesn't fill
+        # fractional units, and flooring (never rounding up) guarantees
+        # this never allocates more than the requested percentage of cash.
+        return float(math.floor(max(0.0, allocation / price)))
     return max(0.0, sizing.value)
 
 

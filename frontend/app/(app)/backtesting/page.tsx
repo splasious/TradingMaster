@@ -2,7 +2,7 @@
 
 import { useMutation } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
@@ -14,12 +14,53 @@ import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useBacktestJob, useBacktestResult, useBacktestTrades, useStrategies } from "@/lib/hooks";
-import { TIMEFRAMES, type BacktestJobOut, type BacktestMetrics, type InstrumentOut, type StrategyOut } from "@/lib/types";
+import {
+  TIMEFRAMES,
+  type BacktestJobOut,
+  type BacktestMetrics,
+  type BacktestTradeOut,
+  type InstrumentOut,
+  type StrategyOut,
+} from "@/lib/types";
 
 interface QueuedBacktest {
   instrument: InstrumentOut;
   jobId: string | null;
   error: string | null;
+}
+
+interface TaggedTrade extends BacktestTradeOut {
+  symbol: string;
+}
+
+interface PerInstrumentResult {
+  symbol: string;
+  metrics: BacktestMetrics;
+  trades: TaggedTrade[];
+}
+
+/** Fetches one queued job's result+trades and reports them up once
+ * complete -- renders nothing; exists purely so each job in the list can
+ * use its own hooks (React forbids calling hooks in a variable-length
+ * loop directly) while still feeding one combined-results accumulator. */
+function ResultCollector({ queued, onLoaded }: { queued: QueuedBacktest; onLoaded: (r: PerInstrumentResult) => void }) {
+  const { data: job } = useBacktestJob(queued.jobId);
+  const completed = job?.status === "completed";
+  const { data: result } = useBacktestResult(queued.jobId, completed);
+  const { data: trades } = useBacktestTrades(queued.jobId, completed);
+
+  useEffect(() => {
+    if (completed && result && trades) {
+      onLoaded({
+        symbol: queued.instrument.symbol,
+        metrics: result.metrics,
+        trades: trades.map((t) => ({ ...t, symbol: queued.instrument.symbol })),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completed, result, trades]);
+
+  return null;
 }
 
 function BacktestJobRow({ queued, isFocused, onSelect }: { queued: QueuedBacktest; isFocused: boolean; onSelect: () => void }) {
@@ -130,6 +171,41 @@ function MetricsGrid({ metrics, title }: { metrics: BacktestMetrics; title: stri
   );
 }
 
+function TradesTable({ trades, showSymbol }: { trades: TaggedTrade[]; showSymbol: boolean }) {
+  return (
+    <div className="max-h-96 overflow-y-auto">
+      <Table>
+        <Thead>
+          <tr>
+            {showSymbol && <Th>Symbol</Th>}
+            <Th>Entry</Th>
+            <Th>Exit</Th>
+            <Th className="text-right">Qty</Th>
+            <Th className="text-right">Allocated</Th>
+            <Th className="text-right">PnL</Th>
+            <Th className="text-right">PnL %</Th>
+            <Th>Reason</Th>
+          </tr>
+        </Thead>
+        <Tbody>
+          {trades.map((t, i) => (
+            <tr key={i}>
+              {showSymbol && <Td className="font-medium">{t.symbol}</Td>}
+              <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
+              <Td className="font-financial">{new Date(t.exit_ts).toLocaleDateString()} @ {t.exit_price.toFixed(2)}</Td>
+              <Td className="text-right font-financial">{Math.round(t.quantity)}</Td>
+              <Td className="text-right font-financial">{(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 0 })}</Td>
+              <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
+              <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl_pct.toFixed(2)}%</Td>
+              <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+            </tr>
+          ))}
+        </Tbody>
+      </Table>
+    </div>
+  );
+}
+
 export default function BacktestingPage() {
   const { data: strategies } = useStrategies();
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
@@ -151,11 +227,37 @@ export default function BacktestingPage() {
 
   const [queuedJobs, setQueuedJobs] = useState<QueuedBacktest[]>([]);
   const [focusedJobId, setFocusedJobId] = useState<string | null>(null);
+  const [perInstrumentResults, setPerInstrumentResults] = useState<Map<string, PerInstrumentResult>>(new Map());
 
   const { data: job } = useBacktestJob(focusedJobId);
   const completed = job?.status === "completed";
   const { data: result } = useBacktestResult(focusedJobId, completed);
   const { data: trades } = useBacktestTrades(focusedJobId, completed);
+  const focusedSymbol = queuedJobs.find((q) => q.jobId === focusedJobId)?.instrument.symbol;
+  const taggedTrades = useMemo<TaggedTrade[]>(
+    () => (trades ?? []).map((t) => ({ ...t, symbol: focusedSymbol ?? "" })),
+    [trades, focusedSymbol],
+  );
+
+  const combined = useMemo(() => {
+    const results = [...perInstrumentResults.values()];
+    if (results.length < 2) return null;
+    const allTrades = results.flatMap((r) => r.trades).sort((a, b) => new Date(a.entry_ts).getTime() - new Date(b.entry_ts).getTime());
+    const wins = allTrades.filter((t) => t.pnl > 0);
+    const losses = allTrades.filter((t) => t.pnl <= 0);
+    const netProfit = allTrades.reduce((sum, t) => sum + t.pnl, 0);
+    const grossProfit = wins.reduce((sum, t) => sum + t.pnl, 0);
+    const grossLoss = Math.abs(losses.reduce((sum, t) => sum + t.pnl, 0));
+    return {
+      instrumentCount: results.length,
+      netProfit,
+      totalTrades: allTrades.length,
+      winRatePct: allTrades.length ? (wins.length / allTrades.length) * 100 : 0,
+      profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
+      totalAllocated: allTrades.reduce((sum, t) => sum + t.quantity * t.entry_price, 0),
+      trades: allTrades,
+    };
+  }, [perInstrumentResults]);
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -190,6 +292,7 @@ export default function BacktestingPage() {
     onSuccess: (results) => {
       setQueuedJobs(results);
       setFocusedJobId(results.find((r) => r.jobId)?.jobId ?? null);
+      setPerInstrumentResults(new Map());
     },
   });
 
@@ -333,6 +436,24 @@ export default function BacktestingPage() {
         </CardContent>
       </Card>
 
+      {queuedJobs.length > 1 &&
+        queuedJobs.map(
+          (q) =>
+            q.jobId && (
+              <ResultCollector
+                key={q.instrument.id}
+                queued={q}
+                onLoaded={(r) =>
+                  setPerInstrumentResults((prev) => {
+                    const next = new Map(prev);
+                    next.set(q.instrument.id, r);
+                    return next;
+                  })
+                }
+              />
+            ),
+        )}
+
       {queuedJobs.length > 1 && (
         <Card>
           <CardHeader>
@@ -347,6 +468,48 @@ export default function BacktestingPage() {
                 onSelect={() => q.jobId && setFocusedJobId(q.jobId)}
               />
             ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {queuedJobs.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              Combined Results {combined ? `(${combined.instrumentCount} of ${queuedJobs.length} instruments completed)` : ""}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!combined ? (
+              <p className="text-sm text-text-muted">Waiting for at least 2 instruments to complete...</p>
+            ) : (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <KpiTile
+                    label="Combined Net Profit"
+                    value={combined.netProfit.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })}
+                    tone={combined.netProfit >= 0 ? "positive" : "negative"}
+                  />
+                  <KpiTile label="Combined Win Rate" value={`${combined.winRatePct.toFixed(1)}%`} />
+                  <KpiTile
+                    label="Combined Profit Factor"
+                    value={Number.isFinite(combined.profitFactor) ? combined.profitFactor.toFixed(2) : "∞"}
+                    tone={combined.profitFactor >= 1 ? "positive" : "negative"}
+                  />
+                  <KpiTile label="Total Trades" value={`${combined.totalTrades}`} />
+                </div>
+                <p className="text-xs text-text-muted">
+                  Total capital allocated across all trades:{" "}
+                  <span className="font-financial font-medium text-text-primary">
+                    {combined.totalAllocated.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </span>
+                </p>
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-text-primary">All Trades ({combined.trades.length})</h3>
+                  <TradesTable trades={combined.trades} showSymbol />
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -409,35 +572,10 @@ export default function BacktestingPage() {
                   </div>
                 )}
 
-                {trades && trades.length > 0 && (
+                {taggedTrades.length > 0 && (
                   <div>
-                    <h3 className="mb-2 text-sm font-semibold text-text-primary">Trades ({trades.length})</h3>
-                    <div className="max-h-96 overflow-y-auto">
-                      <Table>
-                        <Thead>
-                          <tr>
-                            <Th>Entry</Th>
-                            <Th>Exit</Th>
-                            <Th className="text-right">Qty</Th>
-                            <Th className="text-right">PnL</Th>
-                            <Th className="text-right">PnL %</Th>
-                            <Th>Reason</Th>
-                          </tr>
-                        </Thead>
-                        <Tbody>
-                          {trades.map((t, i) => (
-                            <tr key={i}>
-                              <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
-                              <Td className="font-financial">{new Date(t.exit_ts).toLocaleDateString()} @ {t.exit_price.toFixed(2)}</Td>
-                              <Td className="text-right font-financial">{t.quantity}</Td>
-                              <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
-                              <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl_pct.toFixed(2)}%</Td>
-                              <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
-                            </tr>
-                          ))}
-                        </Tbody>
-                      </Table>
-                    </div>
+                    <h3 className="mb-2 text-sm font-semibold text-text-primary">Trades ({taggedTrades.length})</h3>
+                    <TradesTable trades={taggedTrades} showSymbol={queuedJobs.length > 1} />
                   </div>
                 )}
               </div>
