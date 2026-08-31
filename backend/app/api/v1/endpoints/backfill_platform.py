@@ -34,6 +34,7 @@ from app.schemas.backfill_platform import (
     SymbolSearchResultOut,
     TimeframeOptionOut,
     CatalogSyncItemOut,
+    CatalogSyncSchedulerStatusOut,
     WatchlistBulkAddResult,
     WatchlistCatalogSyncResult,
     WatchlistImportResult,
@@ -45,6 +46,7 @@ from app.services.backfill_platform import export as export_service
 from app.services.backfill_platform import status as status_service
 from app.services.backfill_platform import symbols as symbols_service
 from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_symbol_to_catalog
+from app.services.backfill_platform.catalog_sync_scheduler import catalog_sync_scheduler
 from app.services.backfill_platform.completeness import compute_completeness
 from app.services.backfill_platform.jobs import run_bf_backfill_job
 from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
@@ -84,6 +86,15 @@ async def get_live_sync_status(_: User = Depends(get_current_user)) -> LiveSyncS
     return LiveSyncStatusOut(
         running=bf_live_sync_scheduler.running, last_sync_at=bf_live_sync_scheduler.last_sync_at,
         last_synced_count=bf_live_sync_scheduler.last_synced_count, last_error=bf_live_sync_scheduler.last_error,
+    )
+
+
+@router.get("/catalog-sync/status", response_model=CatalogSyncSchedulerStatusOut)
+async def get_catalog_sync_status(_: User = Depends(get_current_user)) -> CatalogSyncSchedulerStatusOut:
+    return CatalogSyncSchedulerStatusOut(
+        running=catalog_sync_scheduler.running, last_run_at=catalog_sync_scheduler.last_run_at,
+        last_synced_symbols=catalog_sync_scheduler.last_synced_symbols,
+        last_synced_bars=catalog_sync_scheduler.last_synced_bars, last_error=catalog_sync_scheduler.last_error,
     )
 
 

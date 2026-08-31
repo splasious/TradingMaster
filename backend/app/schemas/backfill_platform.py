@@ -118,6 +118,14 @@ class WatchlistCatalogSyncResult(BaseModel):
     items: list[CatalogSyncItemOut]
 
 
+class CatalogSyncSchedulerStatusOut(BaseModel):
+    running: bool
+    last_run_at: datetime | None
+    last_synced_symbols: int
+    last_synced_bars: int
+    last_error: str | None
+
+
 class TimeframeOptionOut(BaseModel):
     value: str
     native: bool

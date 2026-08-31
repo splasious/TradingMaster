@@ -207,8 +207,68 @@ def test_resample_drops_still_forming_period_by_default():
 
 def test_resample_rejects_unsupported_timeframe():
     with pytest.raises(ValueError):
-        resample_candles(_weekday_bars(5, datetime(2026, 1, 5, tzinfo=timezone.utc)), "5m")
+        resample_candles(_weekday_bars(5, datetime(2026, 1, 5, tzinfo=timezone.utc)), "3m")
 
 
 def test_resample_empty_input_returns_empty():
     assert resample_candles([], "1wk") == []
+
+
+def _minute_bars(n_minutes: int, start: datetime):
+    bars = []
+    for i in range(n_minutes):
+        ts = start + timedelta(minutes=i)
+        bars.append({"ts": ts, "open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100.5 + i, "volume": 10.0})
+    return bars
+
+
+def test_resample_5m_from_1m_aggregates_ohlc_correctly():
+    # Two full, closed 5-minute buckets safely in the past.
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+    bars = _minute_bars(10, start)
+    resampled = resample_candles(bars, "5m", only_closed=True, now=start + timedelta(hours=2))
+
+    assert len(resampled) == 2
+    bucket1 = bars[:5]
+    assert resampled[0]["open"] == bucket1[0]["open"]
+    assert resampled[0]["close"] == bucket1[-1]["close"]
+    assert resampled[0]["high"] == max(b["high"] for b in bucket1)
+    assert resampled[0]["low"] == min(b["low"] for b in bucket1)
+    assert resampled[0]["volume"] == sum(b["volume"] for b in bucket1)
+
+
+def test_resample_5m_drops_still_forming_bucket():
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+    bars = _minute_bars(3, start)  # only 3 of 5 minutes in this bucket exist yet
+    now = start + timedelta(minutes=3)
+
+    closed = resample_candles(bars, "5m", only_closed=True, now=now)
+    unclosed = resample_candles(bars, "5m", only_closed=False, now=now)
+
+    assert closed == []
+    assert len(unclosed) == 1
+
+
+def test_resample_1d_from_1m_derives_daily_bar():
+    start = datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc)
+    bars = _minute_bars(60, start)  # one full closed hour of a day well in the past
+    resampled = resample_candles(bars, "1d", only_closed=True, now=start + timedelta(days=2))
+
+    assert len(resampled) == 1
+    assert resampled[0]["open"] == bars[0]["open"]
+    assert resampled[0]["close"] == bars[-1]["close"]
+    assert resampled[0]["high"] == max(b["high"] for b in bars)
+    assert resampled[0]["low"] == min(b["low"] for b in bars)
+
+
+def test_resample_60m_from_5m_chains_correctly():
+    # Derive 5m from 1m, then feed that into a 60m resample -- the chained
+    # base-timeframe picking the frontend does (finest available -> target).
+    start = datetime(2026, 1, 5, 9, 0, tzinfo=timezone.utc)
+    minute_bars = _minute_bars(120, start)
+    five_min = resample_candles(minute_bars, "5m", only_closed=False)
+    hourly = resample_candles(five_min, "60m", only_closed=True, now=start + timedelta(hours=3))
+
+    assert len(hourly) == 2
+    assert hourly[0]["open"] == minute_bars[0]["open"]
+    assert hourly[0]["close"] == minute_bars[59]["close"]

@@ -586,6 +586,14 @@ export interface WatchlistCatalogSyncResult {
   items: CatalogSyncItemOut[];
 }
 
+export interface CatalogSyncSchedulerStatusOut {
+  running: boolean;
+  last_run_at: string | null;
+  last_synced_symbols: number;
+  last_synced_bars: number;
+  last_error: string | null;
+}
+
 export interface TimeframeOptionOut {
   value: string;
   native: boolean;

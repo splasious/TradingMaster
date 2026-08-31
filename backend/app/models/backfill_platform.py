@@ -56,6 +56,9 @@ class BfSymbol(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)  # source-native format
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Set by CatalogSyncScheduler after it last copied this symbol's bars
+    # into the main Instrument/OhlcvCandle schema. NULL means never synced.
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     bars: Mapped[list["BfOhlcvBar"]] = relationship(back_populates="symbol", cascade="all, delete-orphan")
 

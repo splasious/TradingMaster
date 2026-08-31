@@ -118,6 +118,21 @@ async def get_candles(
     return [CandleOut.model_validate(c, from_attributes=True) for c in candles]
 
 
+@router.get("/candles/available-timeframes", response_model=list[str])
+async def get_available_timeframes(
+    instrument_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[str]:
+    """Which timeframes actually have stored candles for this instrument --
+    lets the frontend pick the finest one available and resample the rest
+    on the fly, rather than requiring a separate backfill per timeframe."""
+    result = await db.execute(
+        select(OhlcvCandle.timeframe).distinct().where(OhlcvCandle.instrument_id == uuid.UUID(instrument_id))
+    )
+    return list(result.scalars().all())
+
+
 @router.get("/candles/resampled", response_model=list[CandleOut])
 async def get_resampled_candles(
     instrument_id: str = Query(...),

@@ -2,12 +2,13 @@
 Instrument/OhlcvCandle schema that Charts, Strategy Builder, Backtesting,
 and Optimization actually read from. The two schemas are deliberately kept
 separate while backfilling (per that module's own "no cross-source
-merging" rule) -- this is the one explicit, user-triggered bridge between
-them. Nothing here runs automatically or overwrites a candle the main
-catalog already has; a bar already present for (instrument, timeframe, ts)
-is left alone."""
+merging" rule) -- this is the bridge between them, run either on demand
+(the "Sync" buttons) or continuously by CatalogSyncScheduler. Never
+overwrites a candle the main catalog already has; a bar already present
+for (instrument, timeframe, ts) is left alone."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +66,7 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
 
     bars = (await db.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id))).scalars().all()
     if not bars:
+        bf_symbol.last_synced_at = datetime.now(timezone.utc)
         return CatalogSyncResult(
             symbol=bf_symbol.symbol, instrument_id=str(instrument.id),
             instrument_created=instrument_created, bars_synced=0, bars_skipped=0,
@@ -94,6 +96,7 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
         existing.add(key)
         synced += 1
 
+    bf_symbol.last_synced_at = datetime.now(timezone.utc)
     return CatalogSyncResult(
         symbol=bf_symbol.symbol, instrument_id=str(instrument.id),
         instrument_created=instrument_created, bars_synced=synced, bars_skipped=skipped,

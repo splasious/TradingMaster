@@ -16,6 +16,7 @@ import type {
   BrokerAccountOut,
   BrokerOut,
   CandleOut,
+  CatalogSyncSchedulerStatusOut,
   CompletenessOut,
   IndicatorPoint,
   IndicatorSpecOut,
@@ -129,17 +130,46 @@ export function useCandles(instrumentId: string | null, timeframe: string) {
   });
 }
 
-export function useChartCandles(instrumentId: string | null, timeframe: string) {
-  const resampled = timeframe === "1wk" || timeframe === "1mo";
+const TIMEFRAME_ORDER = ["1m", "5m", "15m", "30m", "60m", "4h", "1d", "1wk", "1mo"];
+
+export function useAvailableTimeframes(instrumentId: string | null) {
   return useQuery({
-    queryKey: ["chart-candles", instrumentId, timeframe],
-    queryFn: () =>
-      resampled
-        ? apiFetch<CandleOut[]>(
-            `/api/v1/market-data/candles/resampled?instrument_id=${instrumentId}&base_timeframe=1d&target_timeframe=${timeframe}`,
-          )
-        : apiFetch<CandleOut[]>(`/api/v1/market-data/candles?instrument_id=${instrumentId}&timeframe=${timeframe}`),
+    queryKey: ["available-timeframes", instrumentId],
+    queryFn: () => apiFetch<string[]>(`/api/v1/market-data/candles/available-timeframes?instrument_id=${instrumentId}`),
     enabled: !!instrumentId,
+  });
+}
+
+/** Fetches the requested timeframe directly if it's actually stored;
+ * otherwise picks the finest stored timeframe finer than (or equal to)
+ * the request and resamples it server-side -- so as soon as any base
+ * granularity is backfilled (e.g. 1m), every coarser timeframe on the
+ * chart's dropdown just works, no separate backfill per timeframe. */
+export function useChartCandles(instrumentId: string | null, timeframe: string) {
+  const { data: available } = useAvailableTimeframes(instrumentId);
+
+  const directlyAvailable = !!available?.includes(timeframe);
+  const baseTimeframe = (() => {
+    if (directlyAvailable || !available?.length) return null;
+    const targetIdx = TIMEFRAME_ORDER.indexOf(timeframe);
+    if (targetIdx === -1) return null;
+    let best: string | null = null;
+    for (const tf of available) {
+      const idx = TIMEFRAME_ORDER.indexOf(tf);
+      if (idx !== -1 && idx <= targetIdx && (best === null || idx > TIMEFRAME_ORDER.indexOf(best))) best = tf;
+    }
+    return best;
+  })();
+
+  return useQuery({
+    queryKey: ["chart-candles", instrumentId, timeframe, directlyAvailable, baseTimeframe],
+    queryFn: () =>
+      directlyAvailable
+        ? apiFetch<CandleOut[]>(`/api/v1/market-data/candles?instrument_id=${instrumentId}&timeframe=${timeframe}`)
+        : apiFetch<CandleOut[]>(
+            `/api/v1/market-data/candles/resampled?instrument_id=${instrumentId}&base_timeframe=${baseTimeframe}&target_timeframe=${timeframe}`,
+          ),
+    enabled: !!instrumentId && available !== undefined && (directlyAvailable || !!baseTimeframe),
   });
 }
 
@@ -386,6 +416,14 @@ export function useBfLiveSyncStatus() {
   return useQuery({
     queryKey: ["bf-live-sync-status"],
     queryFn: () => apiFetch<LiveSyncStatusOut>("/api/v1/backfill-platform/live-sync/status"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useCatalogSyncStatus() {
+  return useQuery({
+    queryKey: ["catalog-sync-status"],
+    queryFn: () => apiFetch<CatalogSyncSchedulerStatusOut>("/api/v1/backfill-platform/catalog-sync/status"),
     refetchInterval: 30_000,
   });
 }
