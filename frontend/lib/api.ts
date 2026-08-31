@@ -22,6 +22,26 @@ export class ApiError extends Error {
   }
 }
 
+/** FastAPI's `detail` field is a plain string for application-raised
+ * HTTPExceptions, but for a 422 request-validation failure (including a
+ * Pydantic model_validator raising ValueError, e.g. "provide exactly one
+ * of X or Y") it's always a list of {loc, msg, type} objects instead --
+ * assigning that straight to an Error's message coerces it to the useless
+ * "[object Object]" every caller that renders error.message then shows. */
+function formatErrorDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" && typeof (item as { msg?: unknown }).msg === "string" ? (item as { msg: string }).msg : null))
+      .filter((msg): msg is string => msg !== null);
+    if (messages.length) return messages.join("; ");
+  }
+  if (detail && typeof detail === "object" && typeof (detail as { msg?: unknown }).msg === "string") {
+    return (detail as { msg: string }).msg;
+  }
+  return fallback;
+}
+
 async function refreshAccessToken(): Promise<string | null> {
   if (!refreshInFlight) {
     refreshInFlight = fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
@@ -77,7 +97,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail ?? detail;
+      detail = formatErrorDetail(body.detail, detail);
     } catch {
       // response had no JSON body
     }
