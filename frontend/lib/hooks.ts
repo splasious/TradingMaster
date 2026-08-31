@@ -32,6 +32,7 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   QualityReportOut,
+  QuoteOut,
   ReportSummaryOut,
   SafetyCheckOut,
   SourceStatusOut,
@@ -118,6 +119,19 @@ export function useQuality(instrumentId: string | null, timeframe: string) {
     queryFn: () =>
       apiFetch<QualityReportOut>(`/api/v1/market-data/quality?instrument_id=${instrumentId}&timeframe=${timeframe}`),
     enabled: !!instrumentId,
+  });
+}
+
+export function useQuotes(instrumentIds: string[]) {
+  const sortedIds = [...instrumentIds].sort();
+  return useQuery({
+    queryKey: ["quotes", sortedIds],
+    queryFn: () =>
+      apiFetch<QuoteOut[]>("/api/v1/market-data/quotes", {
+        method: "POST",
+        body: JSON.stringify({ instrument_ids: sortedIds }),
+      }),
+    enabled: sortedIds.length > 0,
   });
 }
 

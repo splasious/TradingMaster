@@ -35,6 +35,23 @@ class CandleOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class QuoteRequest(BaseModel):
+    instrument_ids: list[str]
+
+
+class QuoteOut(BaseModel):
+    """The most recent stored daily bar's close/volume for an instrument --
+    real data, not fabricated: no source in this system tracks a live,
+    continuously-accumulating intraday volume, so "volume" here is the
+    latest completed trading day's total, same as prev_close is used for
+    day-over-day % change against the live tick price."""
+
+    instrument_id: str
+    prev_close: float
+    volume: float | None
+    ts: datetime
+
+
 class QualityReportOut(BaseModel):
     instrument_id: str
     timeframe: str

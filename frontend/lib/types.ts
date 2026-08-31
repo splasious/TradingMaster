@@ -84,6 +84,13 @@ export interface CandleOut {
   volume: number | null;
 }
 
+export interface QuoteOut {
+  instrument_id: string;
+  prev_close: number;
+  volume: number | null;
+  ts: string;
+}
+
 export interface QualityReportOut {
   instrument_id: string;
   timeframe: string;

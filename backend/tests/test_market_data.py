@@ -175,6 +175,51 @@ async def test_instruments_endpoint_requires_auth(client: AsyncClient):
     assert resp.status_code == 401
 
 
+async def test_quotes_returns_latest_daily_bar_per_instrument(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = Instrument(
+        exchange="NSE", symbol="QUOTETEST", name="Quote Test Co", instrument_type="equity",
+        data_source="yahoo_nse", external_ref="QUOTETEST",
+    )
+    db_session.add(instrument)
+    await db_session.flush()
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    db_session.add_all(
+        [
+            OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base, open=100, high=101, low=99, close=100.5, volume=1000, source="yahoo_nse"),
+            OhlcvCandle(
+                instrument_id=instrument.id, timeframe="1d", ts=base + timedelta(days=1),
+                open=101, high=105, low=100, close=104.0, volume=2500, source="yahoo_nse",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    login = await client.post("/api/v1/auth/login", json=seeded_admin)
+    token = login.json()["access_token"]
+
+    resp = await client.post(
+        "/api/v1/market-data/quotes",
+        json={"instrument_ids": [str(instrument.id)]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["instrument_id"] == str(instrument.id)
+    assert body[0]["prev_close"] == 104.0  # the later of the two bars, not the earlier
+    assert body[0]["volume"] == 2500
+
+
+async def test_quotes_empty_ids_returns_empty_list(client: AsyncClient, seeded_admin: dict):
+    login = await client.post("/api/v1/auth/login", json=seeded_admin)
+    token = login.json()["access_token"]
+    resp = await client.post(
+        "/api/v1/market-data/quotes", json={"instrument_ids": []}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
 async def test_backfill_requires_trader_or_admin_role(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = Instrument(
         exchange="NSE", symbol="TESTCO2", name="Test Co 2", instrument_type="equity",

@@ -21,9 +21,11 @@ export function brokerForExchange(exchange: string): string {
 // instrument model has no dedicated category/base-asset field yet --
 // deliberately not inventing new backend data for a UI-only pass.
 const DELTA_CATEGORY_PREFIXES = ["BTC", "ETH", "SOL"] as const;
-export type DeltaCategory = (typeof DELTA_CATEGORY_PREFIXES)[number] | "Other";
+export type DeltaCategory = (typeof DELTA_CATEGORY_PREFIXES)[number];
 
-export function getDeltaCategory(symbol: string): DeltaCategory {
-  const match = DELTA_CATEGORY_PREFIXES.find((prefix) => symbol.toUpperCase().startsWith(prefix));
-  return match ?? "Other";
+// null (not an "Other" catch-all) for anything that doesn't match one of
+// the above -- most Delta instruments are xStock/bStock tokens, not
+// crypto, so a badge that read "Other" on nearly every row was just noise.
+export function getDeltaCategory(symbol: string): DeltaCategory | null {
+  return DELTA_CATEGORY_PREFIXES.find((prefix) => symbol.toUpperCase().startsWith(prefix)) ?? null;
 }

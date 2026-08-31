@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.market_data import TIMEFRAMES, BackfillJob, OhlcvCandle
 from app.models.user import User
-from app.schemas.market_data import BackfillJobOut, BackfillRequest, CandleOut, QualityReportOut
+from app.schemas.market_data import BackfillJobOut, BackfillRequest, CandleOut, QualityReportOut, QuoteOut, QuoteRequest
 from app.services.audit import write_audit_log
 from app.services.market_data.backfill import run_backfill_job
 from app.services.market_data.resample import resample_candles
@@ -99,6 +99,33 @@ async def _load_candles(db: AsyncSession, instrument_id: str, timeframe: str) ->
         .order_by(OhlcvCandle.ts)
     )
     return list(result.scalars().all())
+
+
+@router.post("/quotes", response_model=list[QuoteOut])
+async def get_quotes(
+    payload: QuoteRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[QuoteOut]:
+    """Latest stored daily bar per instrument -- the Markets page's source
+    for day-over-day % change (vs. the live tick price) and volume. One
+    query for the whole watchlist rather than one round trip per row.
+    POST (not GET) because a full watchlist's worth of instrument ids can
+    run well past comfortable URL query-string length."""
+    ids = [uuid.UUID(x) for x in payload.instrument_ids if x.strip()]
+    if not ids:
+        return []
+    result = await db.execute(
+        select(OhlcvCandle.instrument_id, OhlcvCandle.ts, OhlcvCandle.close, OhlcvCandle.volume)
+        .where(OhlcvCandle.instrument_id.in_(ids), OhlcvCandle.timeframe == "1d")
+        .order_by(OhlcvCandle.instrument_id, OhlcvCandle.ts.desc())
+    )
+    latest_by_instrument: dict[uuid.UUID, QuoteOut] = {}
+    for instrument_id, ts, close, volume in result.all():
+        if instrument_id in latest_by_instrument:
+            continue
+        latest_by_instrument[instrument_id] = QuoteOut(instrument_id=str(instrument_id), prev_close=close, volume=volume, ts=ts)
+    return list(latest_by_instrument.values())
 
 
 @router.get("/candles", response_model=list[CandleOut])
