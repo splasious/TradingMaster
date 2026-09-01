@@ -135,6 +135,85 @@ async def test_list_portfolios_keeps_pools_isolated(client: AsyncClient, seeded_
     assert by_id[usd_id]["currency"] == "USD"
 
 
+async def test_delete_empty_portfolio_removes_it(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    create_resp = await client.post(
+        "/api/v1/paper-trading/portfolios", json={"name": "Throwaway Pool", "currency": "USD", "initial_capital": 1000}, headers=headers
+    )
+    pool_id = create_resp.json()["id"]
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/portfolios/{pool_id}", headers=headers)
+    assert delete_resp.status_code == 204
+
+    listed = (await client.get("/api/v1/paper-trading/portfolios", headers=headers)).json()
+    assert not any(p["id"] == pool_id for p in listed)
+
+
+async def test_delete_portfolio_cleans_up_stopped_deployments(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    pool_id = (
+        await client.post(
+            "/api/v1/paper-trading/portfolios", json={"name": "Cleanup Pool", "currency": "INR", "initial_capital": 100000}, headers=headers
+        )
+    ).json()["id"]
+    strategy_id = (
+        await client.post(
+            "/api/v1/strategies",
+            json={"name": "Cleanup Pool Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+            headers=headers,
+        )
+    ).json()["id"]
+    deployment_id = (
+        await client.post(
+            "/api/v1/paper-trading/deployments",
+            json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": pool_id, "timeframe": "1d"},
+            headers=headers,
+        )
+    ).json()["id"]
+    await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/stop", headers=headers)
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/portfolios/{pool_id}", headers=headers)
+    assert delete_resp.status_code == 204
+
+    list_resp = await client.get("/api/v1/paper-trading/deployments", headers=headers)
+    assert not any(d["id"] == deployment_id for d in list_resp.json())
+
+
+async def test_cannot_delete_portfolio_with_active_deployment(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    pool_id = (
+        await client.post(
+            "/api/v1/paper-trading/portfolios", json={"name": "Active Pool", "currency": "INR", "initial_capital": 100000}, headers=headers
+        )
+    ).json()["id"]
+    strategy_id = (
+        await client.post(
+            "/api/v1/strategies",
+            json={"name": "Active Pool Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+            headers=headers,
+        )
+    ).json()["id"]
+    await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": pool_id, "timeframe": "1d"},
+        headers=headers,
+    )
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/portfolios/{pool_id}", headers=headers)
+    assert delete_resp.status_code == 409
+
+    listed = (await client.get("/api/v1/paper-trading/portfolios", headers=headers)).json()
+    assert any(p["id"] == pool_id for p in listed)
+
+
 async def test_update_portfolio_capital_rejects_non_positive(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

@@ -171,6 +171,35 @@ async def update_portfolio(
     return await _portfolio_out(db, portfolio)
 
 
+@router.delete("/portfolios/{portfolio_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_portfolio(portfolio_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> None:
+    """Refuses if any deployment in this pool is still active -- stop them
+    first, same guard as deleting a single deployment. Any already-stopped
+    deployments (and their orders/trades/positions) are cleaned up along
+    with the pool, so decluttering doesn't require deleting each one by
+    hand first. A brand-new default pool is created lazily on next visit
+    if this was the user's only one, same as before any pool existed."""
+    portfolio = await _get_owned_portfolio(db, user, portfolio_id)
+
+    deployments_result = await db.execute(select(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id))
+    deployments = list(deployments_result.scalars().all())
+    if any(d.status == DeploymentStatus.ACTIVE.value for d in deployments):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stop all deployments in this pool before deleting it.")
+
+    for deployment in deployments:
+        await db.execute(delete(PaperTrade).where(PaperTrade.deployment_id == deployment.id))
+        await db.execute(delete(PaperOrder).where(PaperOrder.deployment_id == deployment.id))
+        await db.execute(delete(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
+        await db.delete(deployment)
+
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_PORTFOLIO_DELETED", object_type="paper_portfolio", object_id=str(portfolio.id),
+        new_value={"name": portfolio.name, "deployments_removed": len(deployments)},
+    )
+    await db.delete(portfolio)
+    await db.commit()
+
+
 @router.post("/deployments", response_model=DeploymentOut, status_code=status.HTTP_201_CREATED)
 async def start_deployment(
     payload: DeploymentCreate, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader", "analyst"))

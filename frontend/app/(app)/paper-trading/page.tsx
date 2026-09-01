@@ -532,13 +532,62 @@ function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut
   );
 }
 
-function PortfolioCard({ portfolio, onEdit }: { portfolio: PaperPortfolioOut; onEdit: () => void }) {
+function DeletePortfolioModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/portfolios/${portfolio.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Delete Pool: ${portfolio.name}`}>
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          Permanently deletes this capital pool along with any stopped deployments in it (and their simulated
+          order/trade history). This cannot be undone. Active deployments must be stopped first.
+        </p>
+
+        {deleteMutation.isError && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {deleteMutation.error instanceof ApiError ? deleteMutation.error.message : "Failed to delete pool"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={deleteMutation.isPending}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
+            {deleteMutation.isPending ? "Deleting..." : "Delete Pool"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function PortfolioCard({
+  portfolio,
+  onEdit,
+  onDelete,
+}: {
+  portfolio: PaperPortfolioOut;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm">
           {portfolio.name} <Badge tone="neutral">{portfolio.currency}</Badge>
         </CardTitle>
+        <button onClick={onDelete} className="text-text-muted hover:text-negative" title="Delete this capital pool">
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       </CardHeader>
       <CardContent className="grid grid-cols-2 gap-4 pt-0 md:grid-cols-4">
         <div>
@@ -578,6 +627,7 @@ export default function PaperTradingPage() {
   const [creatingPool, setCreatingPool] = useState(false);
   const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
   const [editingPortfolio, setEditingPortfolio] = useState<PaperPortfolioOut | null>(null);
+  const [deletingPortfolio, setDeletingPortfolio] = useState<PaperPortfolioOut | null>(null);
 
   return (
     <div className="space-y-6">
@@ -603,7 +653,7 @@ export default function PaperTradingPage() {
       {portfolios && portfolios.length > 0 && (
         <div className="space-y-3">
           {portfolios.map((p) => (
-            <PortfolioCard key={p.id} portfolio={p} onEdit={() => setEditingPortfolio(p)} />
+            <PortfolioCard key={p.id} portfolio={p} onEdit={() => setEditingPortfolio(p)} onDelete={() => setDeletingPortfolio(p)} />
           ))}
         </div>
       )}
@@ -644,6 +694,7 @@ export default function PaperTradingPage() {
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
       {editingPortfolio && <EditCapitalModal portfolio={editingPortfolio} onClose={() => setEditingPortfolio(null)} />}
+      {deletingPortfolio && <DeletePortfolioModal portfolio={deletingPortfolio} onClose={() => setDeletingPortfolio(null)} />}
     </div>
   );
 }
