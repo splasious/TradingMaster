@@ -616,7 +616,17 @@ function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut
   );
 }
 
-function DeletePortfolioModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut; onClose: () => void }) {
+function DeletePortfolioModal({
+  portfolio,
+  activeCount,
+  inTradeCount,
+  onClose,
+}: {
+  portfolio: PaperPortfolioOut;
+  activeCount: number;
+  inTradeCount: number;
+  onClose: () => void;
+}) {
   const queryClient = useQueryClient();
   const deleteMutation = useMutation({
     mutationFn: () => apiFetch(`/api/v1/paper-trading/portfolios/${portfolio.id}`, { method: "DELETE" }),
@@ -631,9 +641,16 @@ function DeletePortfolioModal({ portfolio, onClose }: { portfolio: PaperPortfoli
     <Modal open onClose={onClose} title={`Delete Pool: ${portfolio.name}`}>
       <div className="space-y-4">
         <p className="text-sm text-text-secondary">
-          Permanently deletes this capital pool along with any stopped deployments in it (and their simulated
-          order/trade history). This cannot be undone. Active deployments must be stopped first.
+          Permanently deletes this capital pool along with every deployment in it (and their simulated order/trade
+          history) -- including active ones and any open positions, since there&apos;s no real position to unwind in
+          paper trading. This cannot be undone.
         </p>
+        {activeCount > 0 && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {activeCount} active deployment{activeCount === 1 ? "" : "s"} will be force-stopped and deleted
+            {inTradeCount > 0 && `, including ${inTradeCount} currently holding an open position`}.
+          </div>
+        )}
 
         {deleteMutation.isError && (
           <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
@@ -778,7 +795,14 @@ export default function PaperTradingPage() {
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
       {editingPortfolio && <EditCapitalModal portfolio={editingPortfolio} onClose={() => setEditingPortfolio(null)} />}
-      {deletingPortfolio && <DeletePortfolioModal portfolio={deletingPortfolio} onClose={() => setDeletingPortfolio(null)} />}
+      {deletingPortfolio && (
+        <DeletePortfolioModal
+          portfolio={deletingPortfolio}
+          activeCount={deployments?.filter((d) => d.portfolio_id === deletingPortfolio.id && d.status === "active").length ?? 0}
+          inTradeCount={deployments?.filter((d) => d.portfolio_id === deletingPortfolio.id && d.status === "active" && d.open_position).length ?? 0}
+          onClose={() => setDeletingPortfolio(null)}
+        />
+      )}
     </div>
   );
 }
