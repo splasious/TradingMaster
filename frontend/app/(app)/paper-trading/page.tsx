@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -482,6 +482,67 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
   );
 }
 
+const DEPLOYMENT_TABLE_HEADERS = (
+  <tr>
+    <Th>Strategy</Th>
+    <Th>Instrument</Th>
+    <Th>Pool</Th>
+    <Th>Status</Th>
+    <Th>Position</Th>
+    <Th>Last Signal</Th>
+    <Th />
+  </tr>
+);
+
+function DeploymentsTable({ deployments, onDelete }: { deployments: PaperDeploymentOut[]; onDelete: (d: PaperDeploymentOut) => void }) {
+  return (
+    <Table>
+      <Thead>{DEPLOYMENT_TABLE_HEADERS}</Thead>
+      <Tbody>
+        {deployments.map((d) => (
+          <DeploymentRow key={d.id} deployment={d} onDelete={() => onDelete(d)} />
+        ))}
+      </Tbody>
+    </Table>
+  );
+}
+
+/** A stock only counts as "running" while it's actually holding a
+ * position -- for a rotation basket like RS Scalper, most of the 30
+ * attached instruments sit flat waiting to rank in at any given moment,
+ * so filtering by deployment status alone ("active") wouldn't declutter
+ * anything. Once a position exits, the deployment naturally falls out of
+ * this list (back to flat) and its closed trade becomes a record in the
+ * expanded row's Closed Trades table / Reports -- nothing to delete or
+ * manage, it just steps down on its own. */
+function CollapsibleSection({
+  title,
+  count,
+  children,
+}: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  if (count === 0) return null;
+  return (
+    <Card>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between border-b border-border px-5 py-4 text-left"
+      >
+        <span className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {title} ({count})
+        </span>
+      </button>
+      {open && <CardContent className="p-0">{children}</CardContent>}
+    </Card>
+  );
+}
+
 function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [amount, setAmount] = useState(String(portfolio.initial_capital));
@@ -629,6 +690,10 @@ export default function PaperTradingPage() {
   const [editingPortfolio, setEditingPortfolio] = useState<PaperPortfolioOut | null>(null);
   const [deletingPortfolio, setDeletingPortfolio] = useState<PaperPortfolioOut | null>(null);
 
+  const inTrade = deployments?.filter((d) => d.status === "active" && d.open_position) ?? [];
+  const watching = deployments?.filter((d) => d.status === "active" && !d.open_position) ?? [];
+  const stopped = deployments?.filter((d) => d.status === "stopped") ?? [];
+
   return (
     <div className="space-y-6">
       <PaperTradingBanner />
@@ -660,35 +725,31 @@ export default function PaperTradingPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Deployments</CardTitle>
+          <CardTitle>Running (in a trade)</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           {isLoading ? (
             <LoadingState />
           ) : !deployments?.length ? (
             <EmptyState title="No paper trading deployments yet" description="Start a deployment to begin simulated execution." />
+          ) : !inTrade.length ? (
+            <EmptyState
+              title="Nothing currently in a trade"
+              description="Active deployments are still evaluating in the background -- see Watching below."
+            />
           ) : (
-            <Table>
-              <Thead>
-                <tr>
-                  <Th>Strategy</Th>
-                  <Th>Instrument</Th>
-                  <Th>Pool</Th>
-                  <Th>Status</Th>
-                  <Th>Position</Th>
-                  <Th>Last Signal</Th>
-                  <Th />
-                </tr>
-              </Thead>
-              <Tbody>
-                {deployments.map((d) => (
-                  <DeploymentRow key={d.id} deployment={d} onDelete={() => setToDelete(d)} />
-                ))}
-              </Tbody>
-            </Table>
+            <DeploymentsTable deployments={inTrade} onDelete={setToDelete} />
           )}
         </CardContent>
       </Card>
+
+      <CollapsibleSection title="Watching (active, not currently in a trade)" count={watching.length}>
+        <DeploymentsTable deployments={watching} onDelete={setToDelete} />
+      </CollapsibleSection>
+
+      <CollapsibleSection title="Stopped" count={stopped.length}>
+        <DeploymentsTable deployments={stopped} onDelete={setToDelete} />
+      </CollapsibleSection>
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} portfolios={portfolios ?? []} />
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
