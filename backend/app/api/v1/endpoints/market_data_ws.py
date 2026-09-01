@@ -2,12 +2,11 @@ import asyncio
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
 
 from app.core.security import decode_token
 from app.db.session import AsyncSessionLocal
-from app.models.market_data import OhlcvCandle
 from app.services.market_data.real_price_feed import real_price_feed
+from app.services.market_data.seed_price import get_seed_price
 from app.services.market_data.tick_engine import tick_engine
 
 router = APIRouter()
@@ -15,14 +14,7 @@ router = APIRouter()
 
 async def _seed_price(instrument_id: uuid.UUID) -> float:
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(OhlcvCandle.close)
-            .where(OhlcvCandle.instrument_id == instrument_id)
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
-        )
-        row = result.first()
-        return float(row[0]) if row else 100.0
+        return await get_seed_price(db, instrument_id)
 
 
 @router.websocket("/market-data")

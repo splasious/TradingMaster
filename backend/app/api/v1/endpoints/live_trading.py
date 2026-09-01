@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
 from app.models.alert import AlertSeverity, AlertType
-from app.models.broker import BrokerAccount
+from app.models.broker import Broker, BrokerAccount
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition
 from app.models.strategy import Strategy, StrategyVersion
@@ -34,6 +34,12 @@ from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
 
+# A broker deals in exactly one settlement currency, so this is a display
+# label derived from the chosen broker account -- not a user choice, and
+# not a real FX conversion. New broker codes without an entry here simply
+# get no currency label.
+_BROKER_CURRENCY = {"delta_exchange": "USD", "zerodha_kite": "INR"}
+
 
 async def _latest_version(db: AsyncSession, strategy_id: uuid.UUID) -> StrategyVersion | None:
     result = await db.execute(
@@ -52,6 +58,7 @@ async def _deployment_out(db: AsyncSession, deployment: LiveDeployment) -> LiveD
         id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
         instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
         broker_account_id=str(deployment.broker_account_id), timeframe=deployment.timeframe, status=deployment.status,
+        allocated_capital=deployment.allocated_capital, currency=deployment.currency,
         last_evaluated_at=deployment.last_evaluated_at, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
         open_position=(
             LivePositionOut(
@@ -119,9 +126,11 @@ async def start_live_deployment(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Cannot go live from status '{strategy.status}'")
     strategy.status = StrategyStatus.LIVE.value
 
+    broker_row = await db.get(Broker, broker_account.broker_id)
     deployment = LiveDeployment(
         owner_id=user.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
         broker_account_id=broker_account.id, timeframe=payload.timeframe, status="active",
+        allocated_capital=payload.allocated_capital, currency=_BROKER_CURRENCY.get(broker_row.code),
     )
     db.add(deployment)
     await db.flush()

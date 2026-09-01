@@ -4,13 +4,15 @@ import { useMutation } from "@tanstack/react-query";
 import { Download } from "lucide-react";
 import { useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ErrorState, LoadingState } from "@/components/ui/data-state";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload } from "@/lib/api";
-import { useReportSummary } from "@/lib/hooks";
+import { useReportSummary, useTrades } from "@/lib/hooks";
 
 export default function ReportsPage() {
   const [environment, setEnvironment] = useState<"" | "paper" | "live">("");
@@ -18,6 +20,7 @@ export default function ReportsPage() {
   const [end, setEnd] = useState("");
 
   const { data: summary, isLoading, isError } = useReportSummary(environment || null, start || null, end || null);
+  const { data: trades, isLoading: tradesLoading } = useTrades(environment || null, start || null, end || null);
 
   const downloadMutation = useMutation({
     mutationFn: () => {
@@ -98,6 +101,54 @@ export default function ReportsPage() {
                 <div className="font-financial text-xl font-semibold text-negative">{summary.worst_trade.toFixed(2)}</div>
               </div>
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Trades (worst first)</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-4">
+          {tradesLoading ? (
+            <LoadingState />
+          ) : !trades?.length ? (
+            <EmptyState title="No closed trades yet" />
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <Thead>
+                  <tr>
+                    <Th>Strategy</Th>
+                    <Th>Instrument</Th>
+                    <Th>Env</Th>
+                    <Th>Entry</Th>
+                    <Th>Exit</Th>
+                    <Th className="text-right">Qty</Th>
+                    <Th className="text-right">P&amp;L</Th>
+                    <Th className="text-right">P&amp;L %</Th>
+                    <Th>Reason</Th>
+                  </tr>
+                </Thead>
+                <Tbody>
+                  {trades.map((t, i) => (
+                    <tr key={i}>
+                      <Td>{t.strategy_name}</Td>
+                      <Td className="font-medium text-text-primary">{t.instrument_symbol}</Td>
+                      <Td>
+                        <Badge tone={t.environment === "live" ? "critical" : "neutral"}>{t.environment}</Badge>
+                      </Td>
+                      <Td className="font-financial text-xs">{t.entry_price.toFixed(2)}</Td>
+                      <Td className="font-financial text-xs">{t.exit_price.toFixed(2)}</Td>
+                      <Td className="text-right font-financial">{t.quantity}</Td>
+                      <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
+                      <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl_pct.toFixed(2)}%</Td>
+                      <Td className="text-xs text-text-muted">{t.exit_reason}</Td>
+                    </tr>
+                  ))}
+                </Tbody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>

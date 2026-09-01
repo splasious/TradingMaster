@@ -24,12 +24,18 @@ class OrderStatus(str, enum.Enum):
 
 
 class PaperPortfolio(Base):
-    """One per user, created lazily on first deployment (PRD section 21)."""
+    """A named, currency-scoped capital pool (PRD section 21). A user can
+    have several -- e.g. one INR pool for NSE strategies, one USD pool for
+    Delta Exchange strategies -- each tracked independently with no FX
+    conversion between them. A default pool is created lazily the first
+    time a user with none calls GET /portfolios."""
 
     __tablename__ = "paper_portfolios"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(150), nullable=False, default="Default")
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR")
     cash: Mapped[float] = mapped_column(Float, nullable=False, default=100000.0)
     initial_capital: Mapped[float] = mapped_column(Float, nullable=False, default=100000.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

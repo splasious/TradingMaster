@@ -314,6 +314,9 @@ export interface PaperDeploymentOut {
   strategy_name: string;
   instrument_id: string;
   instrument_symbol: string;
+  portfolio_id: string;
+  portfolio_name: string;
+  currency: string;
   timeframe: string;
   status: "active" | "stopped";
   last_evaluated_at: string | null;
@@ -323,12 +326,21 @@ export interface PaperDeploymentOut {
 }
 
 export interface PaperPortfolioOut {
+  id: string;
+  name: string;
+  currency: string;
   cash: number;
   initial_capital: number;
   equity: number;
   unrealized_pnl: number;
   realized_pnl_total: number;
   positions: PaperPositionOut[];
+}
+
+export interface PaperPortfolioCreate {
+  name: string;
+  currency: "USD" | "INR";
+  initial_capital: number;
 }
 
 export interface PaperOrderOut {
@@ -374,6 +386,8 @@ export interface LiveDeploymentOut {
   broker_account_id: string;
   timeframe: string;
   status: "active" | "stopped";
+  allocated_capital: number | null;
+  currency: string | null;
   last_evaluated_at: string | null;
   created_at: string;
   stopped_at: string | null;
@@ -484,6 +498,20 @@ export interface ReportSummaryOut {
   win_rate_pct: number;
   best_trade: number;
   worst_trade: number;
+}
+
+export interface TradeRowOut {
+  environment: "paper" | "live";
+  strategy_name: string;
+  instrument_symbol: string;
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+  exit_reason: string;
 }
 
 export interface BackupOut {

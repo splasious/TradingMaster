@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DeploymentCreate(BaseModel):
@@ -9,6 +9,10 @@ class DeploymentCreate(BaseModel):
     broker_account_id: str
     timeframe: str = "1d"
     confirmed: bool = False  # explicit user confirmation, PRD section 25/49 -- not just a UI checkbox
+    # Optional cap on how much of the broker's real available balance this
+    # deployment may use for sizing -- never a locally-tracked wallet. None
+    # sizes off the full broker balance, exactly as before this field existed.
+    allocated_capital: float | None = Field(default=None, gt=0)
 
 
 class SafetyCheckOut(BaseModel):
@@ -33,6 +37,8 @@ class LiveDeploymentOut(BaseModel):
     broker_account_id: str
     timeframe: str
     status: str
+    allocated_capital: float | None
+    currency: str | None
     last_evaluated_at: datetime | None
     created_at: datetime
     stopped_at: datetime | None

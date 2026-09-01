@@ -1,11 +1,12 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Play, Square, Trash2, Zap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
+import { StrategyInstrumentPicker } from "@/components/trading/strategy-instrument-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,7 +20,7 @@ import {
   useInstruments,
   usePaperDeployments,
   usePaperOrders,
-  usePaperPortfolio,
+  usePaperPortfolios,
   usePaperTrades,
   useStrategies,
 } from "@/lib/hooks";
@@ -32,79 +33,72 @@ function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | u
   return ageSeconds < 60 ? "live" : "stale";
 }
 
-/** A strategy built in Strategy Builder already names the instrument(s) it
- * was designed and validated against (StrategyVersion.instrument_ids) --
- * re-asking for one via a blind global search here, unrelated to what the
- * strategy was actually built for, was the friction being reported. When
- * the strategy has its own list, offer that list directly (checkboxes,
- * defaulting to all selected) and fire one deployment per checked
- * instrument; only fall back to the free-text global search for a
- * strategy that was built with no instruments attached at all. */
-function StrategyInstrumentPicker({
-  strategyVersionInstrumentIds,
-  selectedIds,
-  onChange,
-}: {
-  strategyVersionInstrumentIds: string[];
-  selectedIds: Set<string>;
-  onChange: (ids: Set<string>) => void;
-}) {
-  const [instruments, setInstruments] = useState<InstrumentOut[] | null>(null);
+function CreatePoolModal({ onClose, onCreated }: { onClose: () => void; onCreated: (portfolioId: string) => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [currency, setCurrency] = useState<"INR" | "USD">("INR");
+  const [amount, setAmount] = useState("100000");
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all(strategyVersionInstrumentIds.map((id) => apiFetch<InstrumentOut>(`/api/v1/instruments/${id}`).catch(() => null))).then(
-      (results) => {
-        if (cancelled) return;
-        const loaded = results.filter((r): r is InstrumentOut => r !== null);
-        setInstruments(loaded);
-        onChange(new Set(loaded.map((i) => i.id)));
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once per mount; the parent remounts this (fresh state) via a key when the strategy changes
-  }, []);
-
-  function toggle(id: string) {
-    const next = new Set(selectedIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    onChange(next);
-  }
-
-  if (!instruments) {
-    return <p className="text-sm text-text-muted">Loading this strategy&apos;s instruments...</p>;
-  }
+  const createMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<PaperPortfolioOut>("/api/v1/paper-trading/portfolios", {
+        method: "POST",
+        body: JSON.stringify({ name, currency, initial_capital: Number(amount) }),
+      }),
+    onSuccess: (pool) => {
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      onCreated(pool.id);
+    },
+  });
 
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <label className="text-sm font-medium text-text-secondary">
-          Instruments ({selectedIds.size}/{instruments.length} selected)
-        </label>
-        <button
-          type="button"
-          className="text-xs text-active hover:underline"
-          onClick={() => onChange(selectedIds.size === instruments.length ? new Set() : new Set(instruments.map((i) => i.id)))}
-        >
-          {selectedIds.size === instruments.length ? "Deselect all" : "Select all"}
-        </button>
+    <Modal open onClose={onClose} title="New Capital Pool">
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          A named, currency-scoped pool of capital -- e.g. one INR pool for NSE strategies, one USD pool for Delta
+          Exchange strategies. Pools are tracked independently with no currency conversion between them.
+        </p>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Name</label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Delta USD Pool" />
+        </div>
+        <div className="flex gap-4">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Currency</label>
+            <Select value={currency} onChange={(e) => setCurrency(e.target.value as "INR" | "USD")} className="w-28">
+              <option value="INR">INR</option>
+              <option value="USD">USD</option>
+            </Select>
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Starting Capital</label>
+            <Input type="number" min="0.01" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </div>
+        </div>
+
+        {createMutation.error && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {createMutation.error instanceof ApiError ? createMutation.error.message : "Failed to create pool"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={createMutation.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => createMutation.mutate()}
+            disabled={!name || !amount || Number(amount) <= 0 || createMutation.isPending}
+          >
+            {createMutation.isPending ? "Creating..." : "Create Pool"}
+          </Button>
+        </div>
       </div>
-      <div className="max-h-48 space-y-0.5 overflow-y-auto rounded-md border border-border p-1.5">
-        {instruments.map((i) => (
-          <label key={i.id} className="flex items-center gap-2 rounded px-1.5 py-1 text-sm text-text-secondary hover:bg-surface-elevated">
-            <input type="checkbox" checked={selectedIds.has(i.id)} onChange={() => toggle(i.id)} />
-            {i.symbol} <span className="text-text-muted">({marketLabel(i.exchange)})</span>
-          </label>
-        ))}
-      </div>
-    </div>
+    </Modal>
   );
 }
 
-function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
   const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
@@ -112,6 +106,8 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
   const { data: instrumentResults } = useInstruments(instrumentQuery);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [portfolioId, setPortfolioId] = useState("");
+  const [creatingPool, setCreatingPool] = useState(false);
 
   const strategyInstrumentIds = strategy?.latest_version?.instrument_ids ?? [];
   const usesStrategyInstruments = strategyInstrumentIds.length > 0;
@@ -121,6 +117,7 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
     setInstrument(null);
     setInstrumentQuery("");
     setSelectedIds(new Set());
+    setPortfolioId("");
   }
 
   const startMutation = useMutation({
@@ -130,7 +127,12 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
         targetIds.map((instrument_id) =>
           apiFetch<PaperDeploymentOut>("/api/v1/paper-trading/deployments", {
             method: "POST",
-            body: JSON.stringify({ strategy_id: strategy!.id, instrument_id, timeframe: strategy!.latest_version?.timeframe ?? "1d" }),
+            body: JSON.stringify({
+              strategy_id: strategy!.id,
+              instrument_id,
+              portfolio_id: portfolioId,
+              timeframe: strategy!.latest_version?.timeframe ?? "1d",
+            }),
           }),
         ),
       );
@@ -142,103 +144,134 @@ function StartDeploymentModal({ open, onClose }: { open: boolean; onClose: () =>
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
       reset();
       onClose();
     },
   });
 
-  const canStart = usesStrategyInstruments ? selectedIds.size > 0 : !!instrument;
+  const canStart = (usesStrategyInstruments ? selectedIds.size > 0 : !!instrument) && !!portfolioId;
 
   return (
-    <Modal
-      open={open}
-      onClose={() => {
-        reset();
-        onClose();
-      }}
-      title="Start Paper Trading"
-    >
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Strategy</label>
-          <Select
-            value={strategy?.id ?? ""}
-            onChange={(e) => {
-              setStrategy(strategies?.find((s) => s.id === e.target.value) ?? null);
-              setInstrument(null);
-            }}
-          >
-            <option value="" disabled>
-              Select a strategy
-            </option>
-            {strategies?.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} ({s.code_type})
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        {strategy && usesStrategyInstruments && (
-          <StrategyInstrumentPicker
-            key={strategy.id}
-            strategyVersionInstrumentIds={strategyInstrumentIds}
-            selectedIds={selectedIds}
-            onChange={setSelectedIds}
-          />
-        )}
-
-        {strategy && !usesStrategyInstruments && (
+    <>
+      <Modal
+        open={open}
+        onClose={() => {
+          reset();
+          onClose();
+        }}
+        title="Start Paper Trading"
+      >
+        <div className="space-y-4">
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-text-secondary">Instrument</label>
-            <p className="text-xs text-text-muted">This strategy wasn&apos;t built with any instruments attached -- pick one to deploy it against.</p>
-            <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-            {instrumentQuery && instrumentResults && (
-              <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-                {instrumentResults.map((i) => (
-                  <button
-                    key={i.id}
-                    onClick={() => {
-                      setInstrument(i);
-                      setInstrumentQuery("");
-                    }}
-                    className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                  >
-                    {i.symbol} ({marketLabel(i.exchange)})
-                  </button>
-                ))}
-              </div>
-            )}
-            {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
+            <label className="text-sm font-medium text-text-secondary">Strategy</label>
+            <Select
+              value={strategy?.id ?? ""}
+              onChange={(e) => {
+                setStrategy(strategies?.find((s) => s.id === e.target.value) ?? null);
+                setInstrument(null);
+              }}
+            >
+              <option value="" disabled>
+                Select a strategy
+              </option>
+              {strategies?.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.code_type})
+                </option>
+              ))}
+            </Select>
           </div>
-        )}
 
-        {startMutation.error && (
-          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-            {startMutation.error instanceof ApiError ? startMutation.error.message : "Failed to start"}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-text-secondary">Capital Pool</label>
+              <button type="button" className="flex items-center gap-1 text-xs text-active hover:underline" onClick={() => setCreatingPool(true)}>
+                <Plus className="h-3 w-3" /> New pool
+              </button>
+            </div>
+            <Select value={portfolioId} onChange={(e) => setPortfolioId(e.target.value)}>
+              <option value="" disabled>
+                Select a capital pool
+              </option>
+              {portfolios.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.currency} {p.cash.toFixed(0)} available)
+                </option>
+              ))}
+            </Select>
           </div>
-        )}
 
-        <div className="flex justify-end gap-2">
-          <Button
-            variant="secondary"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-          >
-            Cancel
-          </Button>
-          <Button onClick={() => startMutation.mutate()} disabled={!canStart || startMutation.isPending}>
-            {startMutation.isPending
-              ? "Starting..."
-              : usesStrategyInstruments && selectedIds.size > 1
-                ? `Start (${selectedIds.size} instruments)`
-                : "Start"}
-          </Button>
+          {strategy && usesStrategyInstruments && (
+            <StrategyInstrumentPicker
+              key={strategy.id}
+              strategyVersionInstrumentIds={strategyInstrumentIds}
+              selectedIds={selectedIds}
+              onChange={setSelectedIds}
+            />
+          )}
+
+          {strategy && !usesStrategyInstruments && (
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Instrument</label>
+              <p className="text-xs text-text-muted">This strategy wasn&apos;t built with any instruments attached -- pick one to deploy it against.</p>
+              <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
+              {instrumentQuery && instrumentResults && (
+                <div className="max-h-32 overflow-y-auto rounded-md border border-border">
+                  {instrumentResults.map((i) => (
+                    <button
+                      key={i.id}
+                      onClick={() => {
+                        setInstrument(i);
+                        setInstrumentQuery("");
+                      }}
+                      className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
+                    >
+                      {i.symbol} ({marketLabel(i.exchange)})
+                    </button>
+                  ))}
+                </div>
+              )}
+              {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
+            </div>
+          )}
+
+          {startMutation.error && (
+            <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+              {startMutation.error instanceof ApiError ? startMutation.error.message : "Failed to start"}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                reset();
+                onClose();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={() => startMutation.mutate()} disabled={!canStart || startMutation.isPending}>
+              {startMutation.isPending
+                ? "Starting..."
+                : usesStrategyInstruments && selectedIds.size > 1
+                  ? `Start (${selectedIds.size} instruments)`
+                  : "Start"}
+            </Button>
+          </div>
         </div>
-      </div>
-    </Modal>
+      </Modal>
+      {creatingPool && (
+        <CreatePoolModal
+          onClose={() => setCreatingPool(false)}
+          onCreated={(id) => {
+            setPortfolioId(id);
+            setCreatingPool(false);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -366,7 +399,7 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
     onSuccess: (data) => {
       setLastEval(data);
       queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
-      queryClient.invalidateQueries({ queryKey: ["paper-portfolio"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
       queryClient.invalidateQueries({ queryKey: ["paper-orders", deployment.id] });
       queryClient.invalidateQueries({ queryKey: ["paper-trades", deployment.id] });
     },
@@ -382,6 +415,10 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
         <Td className="font-medium">{deployment.strategy_name}</Td>
         <Td>{deployment.instrument_symbol}</Td>
+        <Td>
+          <span className="text-text-secondary">{deployment.portfolio_name}</span>{" "}
+          <Badge tone="neutral">{deployment.currency}</Badge>
+        </Td>
         <Td>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
         </Td>
@@ -436,7 +473,7 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} className="p-0">
+          <td colSpan={7} className="p-0">
             <DeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -451,25 +488,25 @@ function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut
 
   const updateMutation = useMutation({
     mutationFn: () =>
-      apiFetch<PaperPortfolioOut>("/api/v1/paper-trading/portfolio", {
+      apiFetch<PaperPortfolioOut>(`/api/v1/paper-trading/portfolios/${portfolio.id}`, {
         method: "PATCH",
         body: JSON.stringify({ initial_capital: Number(amount) }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["paper-portfolio"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
       onClose();
     },
   });
 
   return (
-    <Modal open onClose={onClose} title="Set Paper Trading Capital">
+    <Modal open onClose={onClose} title={`Set Capital -- ${portfolio.name}`}>
       <div className="space-y-4">
         <p className="text-sm text-text-secondary">
           Resets both cash and starting capital to this amount. Doesn&apos;t affect existing deployments or trade
           history -- equity just recalculates from the new cash balance.
         </p>
         <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Amount</label>
+          <label className="text-sm font-medium text-text-secondary">Amount ({portfolio.currency})</label>
           <Input type="number" min="0.01" step="1" value={amount} onChange={(e) => setAmount(e.target.value)} />
         </div>
 
@@ -495,12 +532,52 @@ function EditCapitalModal({ portfolio, onClose }: { portfolio: PaperPortfolioOut
   );
 }
 
+function PortfolioCard({ portfolio, onEdit }: { portfolio: PaperPortfolioOut; onEdit: () => void }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-sm">
+          {portfolio.name} <Badge tone="neutral">{portfolio.currency}</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-4 pt-0 md:grid-cols-4">
+        <div>
+          <div className="text-xs text-text-muted">Equity</div>
+          <div className="font-financial text-lg font-semibold text-text-primary">{portfolio.equity.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-text-muted">Cash</div>
+            <button onClick={onEdit} className="text-text-muted hover:text-text-primary" title="Edit starting capital">
+              <Pencil className="h-3 w-3" />
+            </button>
+          </div>
+          <div className="font-financial text-lg font-semibold text-text-primary">{portfolio.cash.toFixed(2)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
+          <div className={`font-financial text-lg font-semibold ${portfolio.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}`}>
+            {portfolio.unrealized_pnl.toFixed(2)}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-text-muted">Realized P&amp;L</div>
+          <div className={`font-financial text-lg font-semibold ${portfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
+            {portfolio.realized_pnl_total.toFixed(2)}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
-  const { data: portfolio } = usePaperPortfolio();
+  const { data: portfolios } = usePaperPortfolios();
   const [modalOpen, setModalOpen] = useState(false);
+  const [creatingPool, setCreatingPool] = useState(false);
   const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
-  const [editingCapital, setEditingCapital] = useState(false);
+  const [editingPortfolio, setEditingPortfolio] = useState<PaperPortfolioOut | null>(null);
 
   return (
     <div className="space-y-6">
@@ -513,46 +590,21 @@ export default function PaperTradingPage() {
             Live Market Data &rarr; Strategy &rarr; Signal &rarr; Risk Engine &rarr; Paper Execution &rarr; Portfolio. Re-evaluated automatically every ~10s, or trigger manually.
           </p>
         </div>
-        <Button onClick={() => setModalOpen(true)}>
-          <Play className="h-3.5 w-3.5" /> Start Deployment
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => setCreatingPool(true)}>
+            <Plus className="h-3.5 w-3.5" /> New Capital Pool
+          </Button>
+          <Button onClick={() => setModalOpen(true)}>
+            <Play className="h-3.5 w-3.5" /> Start Deployment
+          </Button>
+        </div>
       </div>
 
-      {portfolio && (
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xs text-text-muted">Equity</div>
-              <div className="font-financial text-xl font-semibold text-text-primary">{portfolio.equity.toFixed(2)}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="flex items-center justify-between">
-                <div className="text-xs text-text-muted">Cash</div>
-                <button onClick={() => setEditingCapital(true)} className="text-text-muted hover:text-text-primary" title="Edit starting capital">
-                  <Pencil className="h-3 w-3" />
-                </button>
-              </div>
-              <div className="font-financial text-xl font-semibold text-text-primary">{portfolio.cash.toFixed(2)}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
-              <div className={`font-financial text-xl font-semibold ${portfolio.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                {portfolio.unrealized_pnl.toFixed(2)}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xs text-text-muted">Realized P&amp;L</div>
-              <div className={`font-financial text-xl font-semibold ${portfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
-                {portfolio.realized_pnl_total.toFixed(2)}
-              </div>
-            </CardContent>
-          </Card>
+      {portfolios && portfolios.length > 0 && (
+        <div className="space-y-3">
+          {portfolios.map((p) => (
+            <PortfolioCard key={p.id} portfolio={p} onEdit={() => setEditingPortfolio(p)} />
+          ))}
         </div>
       )}
 
@@ -571,6 +623,7 @@ export default function PaperTradingPage() {
                 <tr>
                   <Th>Strategy</Th>
                   <Th>Instrument</Th>
+                  <Th>Pool</Th>
                   <Th>Status</Th>
                   <Th>Position</Th>
                   <Th>Last Signal</Th>
@@ -587,9 +640,10 @@ export default function PaperTradingPage() {
         </CardContent>
       </Card>
 
-      <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} portfolios={portfolios ?? []} />
+      {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
-      {editingCapital && portfolio && <EditCapitalModal portfolio={portfolio} onClose={() => setEditingCapital(false)} />}
+      {editingPortfolio && <EditCapitalModal portfolio={editingPortfolio} onClose={() => setEditingPortfolio(null)} />}
     </div>
   );
 }

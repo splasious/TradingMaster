@@ -202,6 +202,8 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
     except Exception as exc:
         return LiveOutcome(action="error", reason=f"Could not fetch broker balance: {exc}")
     available_cash = balance.get("available_margin", 0.0)
+    if deployment.allocated_capital is not None:
+        available_cash = min(available_cash, deployment.allocated_capital)
 
     sizing = PositionSizing(**version.position_sizing)
     quantity = quantity_for(available_cash, price, sizing)

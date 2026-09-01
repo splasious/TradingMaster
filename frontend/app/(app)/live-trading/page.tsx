@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { LiveTradingBanner } from "@/components/layout/live-trading-banner";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
+import { StrategyInstrumentPicker } from "@/components/trading/strategy-instrument-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,7 +27,13 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
+import { TIMEFRAMES } from "@/lib/types";
 import type { InstrumentOut, LiveDeploymentOut, LiveEvaluationOut, StrategyOut } from "@/lib/types";
+
+// A broker deals in exactly one settlement currency -- this mirrors the
+// backend's broker-code -> currency map (app/api/v1/endpoints/live_trading.py)
+// purely for display before a deployment exists to read `currency` back from.
+const BROKER_CURRENCY: Record<string, string> = { delta_exchange: "USD", zerodha_kite: "INR" };
 
 function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
   if (!lastEvaluatedAt) return undefined;
@@ -97,22 +104,51 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
   const { data: instrumentResults } = useInstruments(instrumentQuery);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [timeframe, setTimeframe] = useState("1d");
+  const [allocatedCapital, setAllocatedCapital] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+
+  const strategyInstrumentIds = strategy?.latest_version?.instrument_ids ?? [];
+  const usesStrategyInstruments = strategyInstrumentIds.length > 0;
+  const selectedBroker = brokerAccounts?.find((a) => a.id === brokerAccountId);
+  const currency = selectedBroker ? BROKER_CURRENCY[selectedBroker.broker.code] : undefined;
 
   const { data: safety } = useSafetyCheck(strategy?.id ?? null, brokerAccountId || null);
 
   const startMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<LiveDeploymentOut>("/api/v1/live-trading/deployments", {
-        method: "POST",
-        body: JSON.stringify({ strategy_id: strategy!.id, instrument_id: instrument!.id, broker_account_id: brokerAccountId, confirmed: true }),
-      }),
+    mutationFn: async () => {
+      const targetIds = usesStrategyInstruments ? [...selectedIds] : instrument ? [instrument.id] : [];
+      const perInstrumentCapital = allocatedCapital ? Number(allocatedCapital) / targetIds.length : undefined;
+      const results = await Promise.allSettled(
+        targetIds.map((instrument_id) =>
+          apiFetch<LiveDeploymentOut>("/api/v1/live-trading/deployments", {
+            method: "POST",
+            body: JSON.stringify({
+              strategy_id: strategy!.id,
+              instrument_id,
+              broker_account_id: brokerAccountId,
+              timeframe,
+              confirmed: true,
+              allocated_capital: perInstrumentCapital,
+            }),
+          }),
+        ),
+      );
+      const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (failed.length) {
+        const first = failed[0].reason;
+        throw first instanceof ApiError ? first : new Error(`${failed.length} of ${targetIds.length} deployments failed to start`);
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["live-deployments"] });
       queryClient.invalidateQueries({ queryKey: ["strategies"] });
       onClose();
     },
   });
+
+  const canStart = (usesStrategyInstruments ? selectedIds.size > 0 : !!instrument) && !!brokerAccountId && confirmed && !!safety?.passed;
 
   return (
     <Modal open={open} onClose={onClose} title="Start Live Trading">
@@ -123,7 +159,16 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Strategy (must be Approved)</label>
-          <Select value={strategy?.id ?? ""} onChange={(e) => setStrategy(approvedStrategies?.find((s) => s.id === e.target.value) ?? null)}>
+          <Select
+            value={strategy?.id ?? ""}
+            onChange={(e) => {
+              const next = approvedStrategies?.find((s) => s.id === e.target.value) ?? null;
+              setStrategy(next);
+              setInstrument(null);
+              setSelectedIds(new Set());
+              setTimeframe(next?.latest_version?.timeframe ?? "1d");
+            }}
+          >
             <option value="" disabled>
               Select an approved strategy
             </option>
@@ -152,26 +197,69 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
           </Select>
         </div>
 
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Instrument</label>
-          <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
-          {instrumentQuery && instrumentResults && (
-            <div className="max-h-32 overflow-y-auto rounded-md border border-border">
-              {instrumentResults.map((i) => (
-                <button
-                  key={i.id}
-                  onClick={() => {
-                    setInstrument(i);
-                    setInstrumentQuery("");
-                  }}
-                  className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
-                >
-                  {i.symbol} ({marketLabel(i.exchange)})
-                </button>
+        {strategy && usesStrategyInstruments && (
+          <StrategyInstrumentPicker
+            key={strategy.id}
+            strategyVersionInstrumentIds={strategyInstrumentIds}
+            selectedIds={selectedIds}
+            onChange={setSelectedIds}
+          />
+        )}
+
+        {strategy && !usesStrategyInstruments && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Instrument</label>
+            <p className="text-xs text-text-muted">This strategy wasn&apos;t built with any instruments attached -- pick one to deploy it against.</p>
+            <Input placeholder="Search..." value={instrumentQuery} onChange={(e) => setInstrumentQuery(e.target.value)} />
+            {instrumentQuery && instrumentResults && (
+              <div className="max-h-32 overflow-y-auto rounded-md border border-border">
+                {instrumentResults.map((i) => (
+                  <button
+                    key={i.id}
+                    onClick={() => {
+                      setInstrument(i);
+                      setInstrumentQuery("");
+                    }}
+                    className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
+                  >
+                    {i.symbol} ({marketLabel(i.exchange)})
+                  </button>
+                ))}
+              </div>
+            )}
+            {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
+          </div>
+        )}
+
+        <div className="flex gap-4">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">Timeframe</label>
+            <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-32">
+              {TIMEFRAMES.map((tf) => (
+                <option key={tf} value={tf}>
+                  {tf}
+                </option>
               ))}
-            </div>
-          )}
-          {instrument && <Badge tone="active">{instrument.symbol}</Badge>}
+            </Select>
+          </div>
+          <div className="flex-1 space-y-1.5">
+            <label className="text-sm font-medium text-text-secondary">
+              Allocated Capital {currency && <Badge tone="neutral">{currency}</Badge>}
+              <span className="ml-1 font-normal text-text-muted">(optional)</span>
+            </label>
+            <Input
+              type="number"
+              min="0"
+              placeholder="Full broker balance if left blank"
+              value={allocatedCapital}
+              onChange={(e) => setAllocatedCapital(e.target.value)}
+            />
+            <p className="text-xs text-text-muted">
+              A cap on how much of your real broker balance this deployment may use -- never a separate wallet, the
+              broker always holds the real money. Leave blank to size off your full available balance.
+              {usesStrategyInstruments && selectedIds.size > 1 && " Split evenly across the selected instruments."}
+            </p>
+          </div>
         </div>
 
         {safety && (
@@ -201,12 +289,12 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            variant="destructive"
-            onClick={() => startMutation.mutate()}
-            disabled={!strategy || !instrument || !brokerAccountId || !confirmed || !safety?.passed || startMutation.isPending}
-          >
-            {startMutation.isPending ? "Starting..." : "Go Live"}
+          <Button variant="destructive" onClick={() => startMutation.mutate()} disabled={!canStart || startMutation.isPending}>
+            {startMutation.isPending
+              ? "Starting..."
+              : usesStrategyInstruments && selectedIds.size > 1
+                ? `Go Live (${selectedIds.size} instruments)`
+                : "Go Live"}
           </Button>
         </div>
       </div>
@@ -296,6 +384,15 @@ function DeploymentRow({ deployment }: { deployment: LiveDeploymentOut }) {
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
         <Td className="font-medium">{deployment.strategy_name}</Td>
         <Td>{deployment.instrument_symbol}</Td>
+        <Td className="font-financial text-xs">
+          {deployment.allocated_capital != null ? (
+            <>
+              {deployment.allocated_capital.toFixed(2)} <Badge tone="neutral">{deployment.currency}</Badge>
+            </>
+          ) : (
+            <span className="text-text-muted">full balance</span>
+          )}
+        </Td>
         <Td>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
         </Td>
@@ -324,7 +421,7 @@ function DeploymentRow({ deployment }: { deployment: LiveDeploymentOut }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} className="p-0">
+          <td colSpan={7} className="p-0">
             <DeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -368,6 +465,7 @@ export default function LiveTradingPage() {
                 <tr>
                   <Th>Strategy</Th>
                   <Th>Instrument</Th>
+                  <Th>Capital</Th>
                   <Th>Status</Th>
                   <Th>Position</Th>
                   <Th>Last Signal</Th>

@@ -39,9 +39,10 @@ async def test_reports_endpoints_reflect_a_completed_paper_trade(client: AsyncCl
     )
     strategy_id = strategy_resp.json()["id"]
 
+    portfolio_id = (await client.get("/api/v1/paper-trading/portfolios", headers=headers)).json()[0]["id"]
     deploy_resp = await client.post(
         "/api/v1/paper-trading/deployments",
-        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "timeframe": "1d"},
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id, "timeframe": "1d"},
         headers=headers,
     )
     deployment_id = deploy_resp.json()["id"]
@@ -55,7 +56,7 @@ async def test_reports_endpoints_reflect_a_completed_paper_trade(client: AsyncCl
     csv_resp = await client.get("/api/v1/reports/trades.csv", headers=headers)
     assert csv_resp.status_code == 200
     assert csv_resp.headers["content-type"].startswith("text/csv")
-    assert "environment,strategy,entry_ts" in csv_resp.text
+    assert "environment,strategy,instrument,entry_ts" in csv_resp.text
 
 
 async def test_reports_requires_auth(client: AsyncClient):

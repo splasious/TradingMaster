@@ -40,6 +40,7 @@ import type {
   SystemHealth,
   SystemMonitorOut,
   TimeframeOptionOut,
+  TradeRowOut,
   UnreadCountOut,
   UserOut,
 } from "./types";
@@ -276,10 +277,10 @@ export function usePaperDeployments() {
   });
 }
 
-export function usePaperPortfolio() {
+export function usePaperPortfolios() {
   return useQuery({
-    queryKey: ["paper-portfolio"],
-    queryFn: () => apiFetch<PaperPortfolioOut>("/api/v1/paper-trading/portfolio"),
+    queryKey: ["paper-portfolios"],
+    queryFn: () => apiFetch<PaperPortfolioOut[]>("/api/v1/paper-trading/portfolios"),
     refetchInterval: 5000,
   });
 }
@@ -391,6 +392,17 @@ export function useReportSummary(environment: "paper" | "live" | null, start: st
   return useQuery({
     queryKey: ["report-summary", environment, start, end],
     queryFn: () => apiFetch<ReportSummaryOut>(`/api/v1/reports/summary?${params.toString()}`),
+  });
+}
+
+export function useTrades(environment: "paper" | "live" | null, start: string | null, end: string | null) {
+  const params = new URLSearchParams();
+  if (environment) params.set("environment", environment);
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  return useQuery({
+    queryKey: ["report-trades", environment, start, end],
+    queryFn: () => apiFetch<TradeRowOut[]>(`/api/v1/reports/trades?${params.toString()}`),
   });
 }
 

@@ -23,12 +23,14 @@ from app.schemas.paper_trading import (
     DeploymentOut,
     EvaluationOut,
     OrderOut,
+    PortfolioCreate,
     PortfolioOut,
     PortfolioUpdate,
     PositionOut,
     TradeOut,
 )
 from app.services.audit import write_audit_log
+from app.services.market_data.seed_price import get_seed_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.engine import evaluate_deployment
 from app.services.strategy.state_machine import StrategyStatus, can_transition
@@ -36,19 +38,68 @@ from app.services.strategy.state_machine import StrategyStatus, can_transition
 router = APIRouter()
 
 
-async def _get_or_create_portfolio(db: AsyncSession, user: User) -> PaperPortfolio:
-    result = await db.execute(select(PaperPortfolio).where(PaperPortfolio.user_id == user.id))
-    portfolio = result.scalar_one_or_none()
-    if portfolio is None:
-        portfolio = PaperPortfolio(user_id=user.id, cash=100000.0, initial_capital=100000.0)
-        db.add(portfolio)
+async def _list_portfolios(db: AsyncSession, user: User) -> list[PaperPortfolio]:
+    result = await db.execute(select(PaperPortfolio).where(PaperPortfolio.user_id == user.id).order_by(PaperPortfolio.created_at))
+    portfolios = list(result.scalars().all())
+    if not portfolios:
+        # First-time UX is unchanged: a brand-new user gets one ready-to-use
+        # pool instead of an empty screen and a mandatory create-pool step.
+        default = PaperPortfolio(user_id=user.id, name="Default", currency="INR", cash=100000.0, initial_capital=100000.0)
+        db.add(default)
         await db.flush()
+        portfolios = [default]
+    return portfolios
+
+
+async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) -> PaperPortfolio:
+    portfolio = await db.get(PaperPortfolio, uuid.UUID(portfolio_id))
+    if portfolio is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capital pool not found")
+    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your capital pool")
     return portfolio
+
+
+async def _portfolio_out(db: AsyncSession, portfolio: PaperPortfolio) -> PortfolioOut:
+    deployments_result = await db.execute(select(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id))
+    deployments = list(deployments_result.scalars().all())
+
+    positions: list[PositionOut] = []
+    unrealized_total = 0.0
+    for deployment in deployments:
+        position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
+        position = position_result.scalar_one_or_none()
+        if position is None:
+            continue
+        instrument = await db.get(Instrument, deployment.instrument_id)
+        current_price = tick_engine.get_current_price(instrument.id)
+        unrealized = (current_price - position.avg_entry_price) * position.quantity if current_price else 0.0
+        unrealized_total += unrealized
+        positions.append(
+            PositionOut(
+                instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
+                current_price=current_price, unrealized_pnl=unrealized, opened_at=position.opened_at,
+            )
+        )
+
+    trades_result = await db.execute(
+        select(PaperTrade).join(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id)
+    )
+    realized_total = sum(t.pnl for t in trades_result.scalars().all())
+
+    equity = portfolio.cash + sum(p.quantity * (p.current_price or p.avg_entry_price) for p in positions)
+
+    return PortfolioOut(
+        id=str(portfolio.id), name=portfolio.name, currency=portfolio.currency,
+        cash=portfolio.cash, initial_capital=portfolio.initial_capital, equity=equity, unrealized_pnl=unrealized_total,
+        realized_pnl_total=realized_total, positions=positions,
+    )
 
 
 async def _deployment_out(db: AsyncSession, deployment: PaperDeployment) -> DeploymentOut:
     strategy = await db.get(Strategy, deployment.strategy_id)
     instrument = await db.get(Instrument, deployment.instrument_id)
+    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
     position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
 
@@ -63,10 +114,61 @@ async def _deployment_out(db: AsyncSession, deployment: PaperDeployment) -> Depl
 
     return DeploymentOut(
         id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
-        instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol, timeframe=deployment.timeframe,
-        status=deployment.status, last_evaluated_at=deployment.last_evaluated_at, created_at=deployment.created_at,
-        stopped_at=deployment.stopped_at, open_position=position_out,
+        instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
+        portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
+        timeframe=deployment.timeframe, status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
+        created_at=deployment.created_at, stopped_at=deployment.stopped_at, open_position=position_out,
     )
+
+
+@router.post("/portfolios", response_model=PortfolioOut, status_code=status.HTTP_201_CREATED)
+async def create_portfolio(
+    payload: PortfolioCreate, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader", "analyst"))
+) -> PortfolioOut:
+    """A named, currency-scoped capital pool -- e.g. one INR pool for NSE
+    strategies, one USD pool for Delta Exchange strategies, tracked
+    independently with no FX conversion between them (PRD section 21)."""
+    portfolio = PaperPortfolio(
+        user_id=user.id, name=payload.name, currency=payload.currency,
+        cash=payload.initial_capital, initial_capital=payload.initial_capital,
+    )
+    db.add(portfolio)
+    await db.flush()
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_PORTFOLIO_CREATED", object_type="paper_portfolio", object_id=str(portfolio.id),
+        new_value={"name": payload.name, "currency": payload.currency, "initial_capital": payload.initial_capital},
+    )
+    await db.commit()
+    return await _portfolio_out(db, portfolio)
+
+
+@router.get("/portfolios", response_model=list[PortfolioOut])
+async def list_portfolios(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[PortfolioOut]:
+    portfolios = await _list_portfolios(db, user)
+    await db.commit()
+    return [await _portfolio_out(db, p) for p in portfolios]
+
+
+@router.patch("/portfolios/{portfolio_id}", response_model=PortfolioOut)
+async def update_portfolio(
+    portfolio_id: str, payload: PortfolioUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> PortfolioOut:
+    """Resets both cash and initial_capital to the given amount -- a real
+    reset, not just relabeling the starting baseline, since paper trading's
+    whole point is a clean simulation the user can size however they want
+    before (or between) runs. Doesn't touch existing deployments/positions/
+    trade history; equity just recomputes from the new cash on next read."""
+    portfolio = await _get_owned_portfolio(db, user, portfolio_id)
+    portfolio.cash = payload.initial_capital
+    portfolio.initial_capital = payload.initial_capital
+    if payload.name:
+        portfolio.name = payload.name
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_PORTFOLIO_CAPITAL_RESET", object_type="paper_portfolio", object_id=str(portfolio.id),
+        new_value={"initial_capital": payload.initial_capital, "name": payload.name},
+    )
+    await db.commit()
+    return await _portfolio_out(db, portfolio)
 
 
 @router.post("/deployments", response_model=DeploymentOut, status_code=status.HTTP_201_CREATED)
@@ -90,7 +192,7 @@ async def start_deployment(
     if version is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Strategy has no versions")
 
-    portfolio = await _get_or_create_portfolio(db, user)
+    portfolio = await _get_owned_portfolio(db, user, payload.portfolio_id)
 
     # Starting paper trading is the real, earned trigger for the
     # BACKTESTED/OPTIMIZED -> PAPER_TRADING transition (PRD section 25).
@@ -104,11 +206,11 @@ async def start_deployment(
     )
     db.add(deployment)
     await db.flush()
-    tick_engine.subscribe(instrument.id, seed_price=100.0)
+    tick_engine.subscribe(instrument.id, seed_price=await get_seed_price(db, instrument.id))
 
     await write_audit_log(
         db, user_id=user.id, action="PAPER_TRADING_STARTED", object_type="strategy", object_id=str(strategy.id),
-        new_value={"instrument": instrument.symbol, "timeframe": payload.timeframe},
+        new_value={"instrument": instrument.symbol, "timeframe": payload.timeframe, "portfolio_id": str(portfolio.id)},
     )
     await db.commit()
     await db.refresh(deployment)
@@ -117,10 +219,13 @@ async def start_deployment(
 
 @router.get("/deployments", response_model=list[DeploymentOut])
 async def list_deployments(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[DeploymentOut]:
-    portfolio = await _get_or_create_portfolio(db, user)
+    await _list_portfolios(db, user)  # ensures a default pool exists for a brand-new user
     await db.commit()
     result = await db.execute(
-        select(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id).order_by(PaperDeployment.created_at.desc())
+        select(PaperDeployment)
+        .join(PaperPortfolio, PaperDeployment.portfolio_id == PaperPortfolio.id)
+        .where(PaperPortfolio.user_id == user.id)
+        .order_by(PaperDeployment.created_at.desc())
     )
     return [await _deployment_out(db, d) for d in result.scalars().all()]
 
@@ -185,65 +290,6 @@ async def evaluate_deployment_now(deployment_id: str, db: AsyncSession = Depends
 
     outcome = await evaluate_deployment(db, deployment)
     return EvaluationOut(action=outcome.action, signal=outcome.signal, price=outcome.price, reason=outcome.reason)
-
-
-@router.patch("/portfolio", response_model=PortfolioOut)
-async def update_portfolio_capital(
-    payload: PortfolioUpdate, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
-) -> PortfolioOut:
-    """Resets both cash and initial_capital to the given amount -- a real
-    reset, not just relabeling the starting baseline, since paper trading's
-    whole point is a clean simulation the user can size however they want
-    before (or between) runs. Doesn't touch existing deployments/positions/
-    trade history; equity just recomputes from the new cash on next read."""
-    portfolio = await _get_or_create_portfolio(db, user)
-    portfolio.cash = payload.initial_capital
-    portfolio.initial_capital = payload.initial_capital
-    await write_audit_log(
-        db, user_id=user.id, action="PAPER_PORTFOLIO_CAPITAL_RESET", object_type="paper_portfolio", object_id=str(portfolio.id),
-        new_value={"initial_capital": payload.initial_capital},
-    )
-    await db.commit()
-    return await get_portfolio(db, user)
-
-
-@router.get("/portfolio", response_model=PortfolioOut)
-async def get_portfolio(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> PortfolioOut:
-    portfolio = await _get_or_create_portfolio(db, user)
-    await db.commit()
-
-    deployments_result = await db.execute(select(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id))
-    deployments = list(deployments_result.scalars().all())
-
-    positions: list[PositionOut] = []
-    unrealized_total = 0.0
-    for deployment in deployments:
-        position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
-        position = position_result.scalar_one_or_none()
-        if position is None:
-            continue
-        instrument = await db.get(Instrument, deployment.instrument_id)
-        current_price = tick_engine.get_current_price(instrument.id)
-        unrealized = (current_price - position.avg_entry_price) * position.quantity if current_price else 0.0
-        unrealized_total += unrealized
-        positions.append(
-            PositionOut(
-                instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
-                current_price=current_price, unrealized_pnl=unrealized, opened_at=position.opened_at,
-            )
-        )
-
-    trades_result = await db.execute(
-        select(PaperTrade).join(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id)
-    )
-    realized_total = sum(t.pnl for t in trades_result.scalars().all())
-
-    equity = portfolio.cash + sum(p.quantity * (p.current_price or p.avg_entry_price) for p in positions)
-
-    return PortfolioOut(
-        cash=portfolio.cash, initial_capital=portfolio.initial_capital, equity=equity, unrealized_pnl=unrealized_total,
-        realized_pnl_total=realized_total, positions=positions,
-    )
 
 
 @router.get("/orders", response_model=list[OrderOut])

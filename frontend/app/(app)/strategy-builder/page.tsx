@@ -140,13 +140,25 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
   );
   const [pythonCode, setPythonCode] = useState(v?.python_code ?? DEFAULT_PYTHON_CODE);
 
-  const [sizingType, setSizingType] = useState<"fixed_quantity" | "percent_capital">(v?.position_sizing.type ?? "fixed_quantity");
+  // "By Number of Stocks" is a UI convenience, not a distinct backend
+  // sizing type -- it just computes an equal-weight percent_capital value
+  // (100 / N) so the strategy always deploys with 100% of the pool spread
+  // evenly across however many stocks you say to hold.
+  const [sizingMode, setSizingMode] = useState<"fixed_quantity" | "percent_capital" | "stock_count">(
+    v?.position_sizing.type ?? "fixed_quantity",
+  );
   const [sizingValue, setSizingValue] = useState(v?.position_sizing.value ?? 1);
+  const [stockCount, setStockCount] = useState(Math.max(1, v?.instrument_ids.length ?? 1));
   const [stopLossPct, setStopLossPct] = useState<string>(v?.risk_rules.stop_loss_pct?.toString() ?? "");
   const [takeProfitPct, setTakeProfitPct] = useState<string>(v?.risk_rules.take_profit_pct?.toString() ?? "");
   const [maxPositions, setMaxPositions] = useState<string>(v?.risk_rules.max_positions?.toString() ?? "");
 
   const [validateResult, setValidateResult] = useState<ValidateResult | null>(null);
+
+  const positionSizing =
+    sizingMode === "stock_count"
+      ? { type: "percent_capital" as const, value: 100 / Math.max(1, stockCount) }
+      : { type: sizingMode, value: sizingValue };
 
   const versionBody = (codeType: "visual" | "python") => ({
     timeframe,
@@ -155,7 +167,7 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
     entry_rules: codeType === "visual" ? { all: entryConditions } : null,
     exit_rules: codeType === "visual" ? { all: exitConditions } : null,
     python_code: codeType === "python" ? pythonCode : null,
-    position_sizing: { type: sizingType, value: sizingValue },
+    position_sizing: positionSizing,
     risk_rules: {
       stop_loss_pct: stopLossPct ? Number(stopLossPct) : null,
       take_profit_pct: takeProfitPct ? Number(takeProfitPct) : null,
@@ -311,15 +323,24 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
         <CardContent className="grid grid-cols-2 gap-4 md:grid-cols-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-text-secondary">Sizing</label>
-            <Select value={sizingType} onChange={(e) => setSizingType(e.target.value as typeof sizingType)}>
+            <Select value={sizingMode} onChange={(e) => setSizingMode(e.target.value as typeof sizingMode)}>
               <option value="fixed_quantity">Fixed Qty</option>
               <option value="percent_capital">% Capital</option>
+              <option value="stock_count">By Number of Stocks</option>
             </Select>
           </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-text-secondary">Value</label>
-            <Input type="number" value={sizingValue} onChange={(e) => setSizingValue(Number(e.target.value))} />
-          </div>
+          {sizingMode === "stock_count" ? (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-text-secondary">Hold this many stocks</label>
+              <Input type="number" min="1" value={stockCount} onChange={(e) => setStockCount(Number(e.target.value))} />
+              <p className="text-xs text-text-muted">{(100 / Math.max(1, stockCount)).toFixed(2)}% of capital per position</p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-text-secondary">Value</label>
+              <Input type="number" value={sizingValue} onChange={(e) => setSizingValue(Number(e.target.value))} />
+            </div>
+          )}
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-text-secondary">Stop Loss %</label>
             <Input type="number" value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} />

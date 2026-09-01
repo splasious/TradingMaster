@@ -22,6 +22,12 @@ class LiveDeployment(Base):
     )
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="1d")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")  # active | stopped
+    # Optional cap on how much of the broker's real available balance this
+    # deployment may use for sizing -- never a locally-tracked wallet (real
+    # settlement happens at the broker). None preserves the original
+    # behavior of sizing off the full broker balance.
+    allocated_capital: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(3))
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

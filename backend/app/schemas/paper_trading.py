@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel, Field
 class DeploymentCreate(BaseModel):
     strategy_id: str
     instrument_id: str
+    portfolio_id: str
     timeframe: str = "1d"
 
 
@@ -15,6 +17,9 @@ class DeploymentOut(BaseModel):
     strategy_name: str
     instrument_id: str
     instrument_symbol: str
+    portfolio_id: str
+    portfolio_name: str
+    currency: str
     timeframe: str
     status: str
     last_evaluated_at: datetime | None
@@ -32,11 +37,21 @@ class PositionOut(BaseModel):
     opened_at: datetime
 
 
+class PortfolioCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    currency: Literal["USD", "INR"] = "INR"
+    initial_capital: float = Field(gt=0, default=100000.0)
+
+
 class PortfolioUpdate(BaseModel):
+    name: str | None = None
     initial_capital: float = Field(gt=0)
 
 
 class PortfolioOut(BaseModel):
+    id: str
+    name: str
+    currency: str
     cash: float
     initial_capital: float
     equity: float

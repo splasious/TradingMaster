@@ -110,7 +110,7 @@ async def test_rows_to_csv_includes_header_and_data(db_session: AsyncSession):
     csv_text = rows_to_csv(rows)
 
     lines = csv_text.strip().splitlines()
-    assert lines[0].startswith("environment,strategy,entry_ts")
+    assert lines[0].startswith("environment,strategy,instrument,entry_ts")
     assert len(lines) == 3
 
 
