@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -410,6 +410,17 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["paper-deployments"] }),
   });
 
+  const exitMutation = useMutation({
+    mutationFn: () => apiFetch<PaperEvaluationOut>(`/api/v1/paper-trading/deployments/${deployment.id}/exit`, { method: "POST" }),
+    onSuccess: (data) => {
+      setLastEval(data);
+      queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-orders", deployment.id] });
+      queryClient.invalidateQueries({ queryKey: ["paper-trades", deployment.id] });
+    },
+  });
+
   return (
     <>
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
@@ -459,6 +470,18 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
                 <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
                   <Zap className="h-3.5 w-3.5" /> Evaluate Now
                 </Button>
+                {deployment.open_position && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => exitMutation.mutate()}
+                    disabled={exitMutation.isPending}
+                    className="text-negative hover:text-negative"
+                    title="Close this position now, at the best available price -- regardless of the strategy's signal"
+                  >
+                    <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
+                  </Button>
+                )}
                 <Button variant="ghost" size="sm" onClick={() => stopMutation.mutate()} disabled={stopMutation.isPending}>
                   <Square className="h-3.5 w-3.5" /> Stop
                 </Button>

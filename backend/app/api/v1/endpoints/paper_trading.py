@@ -33,6 +33,7 @@ from app.services.audit import write_audit_log
 from app.services.market_data.seed_price import get_seed_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.engine import evaluate_deployment
+from app.services.paper_trading.engine import exit_deployment_now as exit_deployment_now_engine
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
@@ -318,6 +319,23 @@ async def evaluate_deployment_now(deployment_id: str, db: AsyncSession = Depends
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     outcome = await evaluate_deployment(db, deployment)
+    return EvaluationOut(action=outcome.action, signal=outcome.signal, price=outcome.price, reason=outcome.reason)
+
+
+@router.post("/deployments/{deployment_id}/exit", response_model=EvaluationOut)
+async def exit_deployment_now(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> EvaluationOut:
+    """Manually close whatever position this deployment currently holds, at
+    the best available price, regardless of the strategy's own signal --
+    for when you want out of a trade right now rather than waiting for the
+    strategy's SELL condition (or a configured stop-loss/take-profit)."""
+    deployment = await db.get(PaperDeployment, uuid.UUID(deployment_id))
+    if deployment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
+    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
+
+    outcome = await exit_deployment_now_engine(db, deployment)
     return EvaluationOut(action=outcome.action, signal=outcome.signal, price=outcome.price, reason=outcome.reason)
 
 

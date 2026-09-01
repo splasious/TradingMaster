@@ -133,6 +133,37 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
     return EvaluationOutcome(action="hold", signal=signal, price=current_price)
 
 
+async def exit_deployment_now(db: AsyncSession, deployment: PaperDeployment) -> EvaluationOutcome:
+    """Manual exit -- close whatever position this deployment currently
+    holds at the best available price, regardless of what the strategy's
+    own signal says. Same price-resolution fallback as evaluate_deployment
+    (real tick, else last stored candle close)."""
+    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
+    instrument = await db.get(Instrument, deployment.instrument_id)
+    if portfolio is None or instrument is None:
+        return EvaluationOutcome(action="error", reason="deployment references missing data")
+
+    position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
+    position = position_result.scalar_one_or_none()
+    if position is None:
+        return EvaluationOutcome(action="error", reason="no open position to exit")
+
+    current_price = tick_engine.get_current_price(instrument.id)
+    if current_price is None:
+        candles_result = await db.execute(
+            select(OhlcvCandle)
+            .where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == deployment.timeframe)
+            .order_by(OhlcvCandle.ts.desc())
+            .limit(1)
+        )
+        latest = candles_result.scalar_one_or_none()
+        current_price = latest.close if latest else None
+    if current_price is None:
+        return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
+
+    return await _exit_position(db, deployment, portfolio, position, current_price, datetime.now(timezone.utc), "manual")
+
+
 async def _try_enter(
     db: AsyncSession, deployment: PaperDeployment, portfolio: PaperPortfolio, version: StrategyVersion,
     price: float, now: datetime,

@@ -83,6 +83,71 @@ async def test_full_paper_trading_flow_via_api(client: AsyncClient, seeded_admin
     assert any(d["id"] == deployment_id and d["status"] == "stopped" for d in list_resp.json())
 
 
+async def test_manual_exit_closes_open_position(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Manual Exit Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id, "timeframe": "1d"},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    # Entry rule is always-true, exit rule always-false -- the position
+    # would never close on its own, so only a manual exit can end it.
+    enter_resp = await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/evaluate", headers=headers)
+    assert enter_resp.json()["action"] == "entered"
+
+    exit_resp = await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/exit", headers=headers)
+    assert exit_resp.status_code == 200
+    assert exit_resp.json()["action"] == "exited"
+
+    list_resp = await client.get("/api/v1/paper-trading/deployments", headers=headers)
+    deployment = next(d for d in list_resp.json() if d["id"] == deployment_id)
+    assert deployment["open_position"] is None
+    assert deployment["status"] == "active"  # exiting a position doesn't stop the deployment
+
+
+async def test_manual_exit_rejects_when_flat(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Flat Exit Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id, "timeframe": "1d"},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    exit_resp = await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/exit", headers=headers)
+    assert exit_resp.status_code == 200
+    assert exit_resp.json()["action"] == "error"
+    assert "no open position" in exit_resp.json()["reason"]
+
+
 async def test_create_portfolio_with_currency_and_deploy_against_it(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = await _seed_instrument(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
