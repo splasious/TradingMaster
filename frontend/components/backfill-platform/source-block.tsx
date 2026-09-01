@@ -5,6 +5,7 @@ import { CheckCircle2, Download, Layers, Loader2, Plus, XCircle } from "lucide-r
 import { useState } from "react";
 
 import { CompletenessHeatmap } from "@/components/backfill-platform/completeness-heatmap";
+import { TimeframeMultiSelect } from "@/components/backfill-platform/timeframe-multiselect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -60,11 +61,16 @@ export function SourceBlock({ source }: { source: BfSource }) {
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SymbolSearchResultOut | null>(null);
-  const [timeframe, setTimeframe] = useState("1d");
+  const [timeframes, setTimeframes] = useState<string[]>(["1d"]);
   const [startDate, setStartDate] = useState(daysAgoIso(90));
   const [endDate, setEndDate] = useState(todayIso());
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [queuedCount, setQueuedCount] = useState<number | null>(null);
   const [watchlistToAdd, setWatchlistToAdd] = useState("");
+
+  // Completeness/export show one timeframe's view at a time -- the first
+  // checked one -- rather than redesigning those into multi-timeframe views.
+  const primaryTimeframe = timeframes[0] ?? "1d";
 
   const { data: searchResults } = useQuery({
     queryKey: ["bf-symbol-search", source, query],
@@ -75,27 +81,51 @@ export function SourceBlock({ source }: { source: BfSource }) {
   const { data: jobs } = useBfJobs(source);
   const activeJob = jobs?.find((j) => j.id === activeJobId) ?? null;
 
-  const { data: completeness } = useBfCompleteness(source, selected?.symbol ?? null, timeframe, startDate, endDate);
+  const { data: completeness } = useBfCompleteness(source, selected?.symbol ?? null, primaryTimeframe, startDate, endDate);
 
   const backfillMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<BfBackfillJobOut>("/api/v1/backfill-platform/jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          source, symbol: selected!.symbol, display_name: selected!.display_name, timeframe,
-          start_date: startDate, end_date: endDate,
-        }),
-      }),
-    onSuccess: (job) => {
-      setActiveJobId(job.id);
+    mutationFn: async () => {
+      const results = await Promise.allSettled(
+        timeframes.map((tf) =>
+          apiFetch<BfBackfillJobOut>("/api/v1/backfill-platform/jobs", {
+            method: "POST",
+            body: JSON.stringify({
+              source, symbol: selected!.symbol, display_name: selected!.display_name, timeframe: tf,
+              start_date: startDate, end_date: endDate,
+            }),
+          }),
+        ),
+      );
+      const succeeded = results.filter((r): r is PromiseFulfilledResult<BfBackfillJobOut> => r.status === "fulfilled");
+      const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      if (!succeeded.length && failed.length) {
+        const first = failed[0].reason;
+        throw first instanceof ApiError ? first : new Error("Backfill failed to start");
+      }
+      return succeeded.map((r) => r.value);
+    },
+    onSuccess: (jobs) => {
+      if (jobs.length === 1) {
+        setActiveJobId(jobs[0].id);
+        setQueuedCount(null);
+      } else {
+        setActiveJobId(null);
+        setQueuedCount(jobs.length);
+      }
       queryClient.invalidateQueries({ queryKey: ["bf-jobs"] });
       queryClient.invalidateQueries({ queryKey: ["bf-completeness"] });
     },
   });
 
   const bulkBackfillMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<BulkBackfillResult>(`/api/v1/backfill-platform/sources/${source}/backfill-all?timeframe=${timeframe}`, { method: "POST" }),
+    mutationFn: async () => {
+      const results = await Promise.all(
+        timeframes.map((tf) =>
+          apiFetch<BulkBackfillResult>(`/api/v1/backfill-platform/sources/${source}/backfill-all?timeframe=${tf}`, { method: "POST" }),
+        ),
+      );
+      return results.reduce((sum, r) => sum + r.queued, 0);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["bf-jobs"] }),
   });
 
@@ -156,15 +186,8 @@ export function SourceBlock({ source }: { source: BfSource }) {
 
         <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-text-secondary">Timeframe</label>
-            <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-              {timeframeOptions?.map((tf) => (
-                <option key={tf.value} value={tf.value}>
-                  {tf.value}
-                  {!tf.native ? " (derived)" : ""}
-                </option>
-              ))}
-            </Select>
+            <label className="text-xs font-medium text-text-secondary">Timeframe(s)</label>
+            <TimeframeMultiSelect options={timeframeOptions} value={timeframes} onChange={setTimeframes} />
           </div>
           <div />
           <div className="space-y-1.5">
@@ -184,7 +207,11 @@ export function SourceBlock({ source }: { source: BfSource }) {
             disabled={!canBackfill || backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending"}
             title={!selected ? "Search and pick a symbol first" : !status?.connected ? "Source is disconnected" : undefined}
           >
-            {backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending" ? "Backfilling..." : "Backfill"}
+            {backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending"
+              ? "Backfilling..."
+              : timeframes.length > 1
+                ? `Backfill (${timeframes.length} timeframes)`
+                : "Backfill"}
           </Button>
           <Button
             size="sm" variant="secondary"
@@ -195,13 +222,16 @@ export function SourceBlock({ source }: { source: BfSource }) {
           </Button>
         </div>
 
-        {bulkBackfillMutation.data && (
-          <p className="text-xs text-positive">Queued {bulkBackfillMutation.data.queued} background jobs -- see Job History below.</p>
+        {bulkBackfillMutation.data != null && (
+          <p className="text-xs text-positive">Queued {bulkBackfillMutation.data} background jobs -- see Job History below.</p>
         )}
         {bulkBackfillMutation.isError && (
           <p className="text-xs text-negative">
             {bulkBackfillMutation.error instanceof ApiError ? bulkBackfillMutation.error.message : "Bulk backfill failed to start"}
           </p>
+        )}
+        {queuedCount != null && (
+          <p className="text-xs text-positive">Queued {queuedCount} backfill jobs ({timeframes.join(", ")}) -- see Job History below.</p>
         )}
 
         {watchlists && watchlists.length > 0 && selected && (
@@ -233,7 +263,7 @@ export function SourceBlock({ source }: { source: BfSource }) {
         {selected && (
           <Button
             variant="secondary" size="sm"
-            onClick={() => apiDownload(`/api/v1/backfill-platform/export/symbol.xlsx?source=${source}&symbol=${selected.symbol}&timeframe=${timeframe}`, `${source}_${selected.symbol}.xlsx`)}
+            onClick={() => apiDownload(`/api/v1/backfill-platform/export/symbol.xlsx?source=${source}&symbol=${selected.symbol}&timeframe=${primaryTimeframe}`, `${source}_${selected.symbol}.xlsx`)}
           >
             <Download className="h-3.5 w-3.5" /> Export Excel
           </Button>
