@@ -141,22 +141,38 @@ export function SourceBlock({ source }: { source: BfSource }) {
     },
   });
 
-  const canBackfill = !!selected && (status?.connected ?? false);
+  // Yahoo's live-price lag makes it unsuitable as a live source (see
+  // Settings.yahoo_live_polling_enabled) -- the card stays visible with its
+  // data intact as a template for the future Zerodha integration, but new
+  // backfills against it are turned off here rather than deleting the code.
+  const isDisabledSource = source === "yahoo";
+  const canBackfill = !!selected && (status?.connected ?? false) && !isDisabledSource;
 
   return (
-    <Card className="flex flex-col">
+    <Card className={`flex flex-col ${isDisabledSource ? "opacity-60" : ""}`}>
       <CardHeader className="flex-col items-start gap-1.5">
         <div className="flex w-full items-center justify-between">
           <CardTitle>{SOURCE_LABEL[source]}</CardTitle>
-          {status && (
-            <Badge tone={status.connected ? "positive" : "critical"}>
-              {status.connected ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
-              {status.connected ? "Connected" : "Disconnected"}
-            </Badge>
+          {isDisabledSource ? (
+            <Badge tone="warning">Disabled -- pending Zerodha integration</Badge>
+          ) : (
+            status && (
+              <Badge tone={status.connected ? "positive" : "critical"}>
+                {status.connected ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                {status.connected ? "Connected" : "Disconnected"}
+              </Badge>
+            )
           )}
         </div>
-        {status && <p className="text-xs text-text-muted">{status.detail}</p>}
-        {status?.expires_at && (
+        {isDisabledSource ? (
+          <p className="text-xs text-text-muted">
+            Live price updates lag too much for trading -- disabled. Existing NSE instruments and historical data
+            are untouched.
+          </p>
+        ) : (
+          status && <p className="text-xs text-text-muted">{status.detail}</p>
+        )}
+        {status?.expires_at && !isDisabledSource && (
           <p className="text-xs text-warning">Session expires (est.) {new Date(status.expires_at).toLocaleString()}</p>
         )}
       </CardHeader>
@@ -205,7 +221,15 @@ export function SourceBlock({ source }: { source: BfSource }) {
             size="sm"
             onClick={() => backfillMutation.mutate()}
             disabled={!canBackfill || backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending"}
-            title={!selected ? "Search and pick a symbol first" : !status?.connected ? "Source is disconnected" : undefined}
+            title={
+              isDisabledSource
+                ? "Disabled -- pending Zerodha integration"
+                : !selected
+                  ? "Search and pick a symbol first"
+                  : !status?.connected
+                    ? "Source is disconnected"
+                    : undefined
+            }
           >
             {backfillMutation.isPending || activeJob?.status === "running" || activeJob?.status === "pending"
               ? "Backfilling..."
@@ -216,7 +240,8 @@ export function SourceBlock({ source }: { source: BfSource }) {
           <Button
             size="sm" variant="secondary"
             onClick={() => bulkBackfillMutation.mutate()}
-            disabled={!status?.connected || bulkBackfillMutation.isPending}
+            disabled={!status?.connected || bulkBackfillMutation.isPending || isDisabledSource}
+            title={isDisabledSource ? "Disabled -- pending Zerodha integration" : undefined}
           >
             <Layers className="h-3.5 w-3.5" /> {bulkBackfillMutation.isPending ? "Queuing..." : BULK_LABEL[source]}
           </Button>

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
@@ -75,6 +76,7 @@ class BfLiveSyncScheduler:
     async def _sync_once(self) -> int:
         now = datetime.now(timezone.utc)
         market_open = nse_market_open(now)
+        yahoo_enabled = get_settings().yahoo_live_polling_enabled
         synced = 0
         async with AsyncSessionLocal() as db:
             symbols = (await db.execute(select(BfSymbol))).scalars().all()
@@ -83,7 +85,7 @@ class BfLiveSyncScheduler:
                     if symbol.source == "delta":
                         await self._sync_symbol(db, symbol, DeltaExchangeDataSource(), "1m", now)
                         synced += 1
-                    elif symbol.source == "yahoo" and market_open:
+                    elif symbol.source == "yahoo" and market_open and yahoo_enabled:
                         from app.services.market_data.yahoo_source import YahooNSEDataSource
 
                         await self._sync_symbol(db, symbol, YahooNSEDataSource(), "1d", now)

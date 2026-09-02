@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.market_data.base import MarketDataSourceError
@@ -49,6 +50,8 @@ async def fetch_real_price(instrument: Instrument, *, market_open: bool | None =
         ticker = await DeltaExchangeDataSource().get_ticker(instrument.external_ref)
         return ticker["price"], "delta"
     if instrument.data_source == "yahoo_nse":
+        if not get_settings().yahoo_live_polling_enabled:
+            return None
         if market_open is None:
             market_open = nse_market_open(datetime.now(timezone.utc))
         if not market_open:

@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     # running, backfills against "yahoo_nse" instruments fail gracefully.
     yahoo_data_service_url: str = "http://127.0.0.1:8800"
 
+    # Yahoo's inherent lag (a polling/delayed source, not true real-time)
+    # makes it unsuitable as a live price source -- disabled by default.
+    # Manual backfill via the API/UI still works (a one-time historical
+    # fetch has no "lag" problem); this only gates the automatic background
+    # pollers (RealPriceFeed, BfLiveSyncScheduler) that repeatedly present
+    # Yahoo data as if it were live. The integration itself is left intact,
+    # not removed -- both it and the planned Zerodha source implement the
+    # same MarketDataSource interface, so this stays a working template.
+    yahoo_live_polling_enabled: bool = False
+
     # Optional: if set, app/seed.py provisions a Delta Exchange broker
     # account for the seed admin using these, encrypted at rest via
     # credential_encryption_key before ever touching the database -- the
