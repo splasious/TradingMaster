@@ -64,24 +64,35 @@ async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) 
 async def _portfolio_out(db: AsyncSession, portfolio: PaperPortfolio) -> PortfolioOut:
     deployments_result = await db.execute(select(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id))
     deployments = list(deployments_result.scalars().all())
+    instrument_id_by_deployment = {d.id: d.instrument_id for d in deployments}
 
+    # Batched instead of one SELECT per deployment (and one more per
+    # position found) -- with dozens of deployments in a pool, that N+1
+    # pattern turned a single portfolio fetch into 1-2 round trips per
+    # deployment, which is brutal once the DB isn't on localhost anymore.
     positions: list[PositionOut] = []
     unrealized_total = 0.0
-    for deployment in deployments:
-        position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
-        position = position_result.scalar_one_or_none()
-        if position is None:
-            continue
-        instrument = await db.get(Instrument, deployment.instrument_id)
-        current_price = tick_engine.get_current_price(instrument.id)
-        unrealized = (current_price - position.avg_entry_price) * position.quantity if current_price else 0.0
-        unrealized_total += unrealized
-        positions.append(
-            PositionOut(
-                instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
-                current_price=current_price, unrealized_pnl=unrealized, opened_at=position.opened_at,
-            )
+    if deployments:
+        position_rows = (
+            await db.execute(select(PaperPosition).where(PaperPosition.deployment_id.in_(instrument_id_by_deployment)))
+        ).scalars().all()
+        needed_instrument_ids = {instrument_id_by_deployment[p.deployment_id] for p in position_rows}
+        instruments = (
+            {i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(needed_instrument_ids)))).scalars()}
+            if needed_instrument_ids
+            else {}
         )
+        for position in position_rows:
+            instrument = instruments[instrument_id_by_deployment[position.deployment_id]]
+            current_price = tick_engine.get_current_price(instrument.id)
+            unrealized = (current_price - position.avg_entry_price) * position.quantity if current_price else 0.0
+            unrealized_total += unrealized
+            positions.append(
+                PositionOut(
+                    instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
+                    current_price=current_price, unrealized_pnl=unrealized, opened_at=position.opened_at,
+                )
+            )
 
     trades_result = await db.execute(
         select(PaperTrade).join(PaperDeployment).where(PaperDeployment.portfolio_id == portfolio.id)
@@ -120,6 +131,54 @@ async def _deployment_out(db: AsyncSession, deployment: PaperDeployment) -> Depl
         timeframe=deployment.timeframe, status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
         created_at=deployment.created_at, stopped_at=deployment.stopped_at, open_position=position_out,
     )
+
+
+async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperDeployment]) -> list[DeploymentOut]:
+    """Same shape as _deployment_out, but for a whole list -- batches the
+    Strategy/Instrument/PaperPortfolio/PaperPosition lookups into one query
+    each instead of 4 queries per deployment. That N+1 pattern is what made
+    listing deployments take ~28s once the DB moved off localhost."""
+    if not deployments:
+        return []
+
+    strategy_ids = {d.strategy_id for d in deployments}
+    instrument_ids = {d.instrument_id for d in deployments}
+    portfolio_ids = {d.portfolio_id for d in deployments}
+    deployment_ids = [d.id for d in deployments]
+
+    strategies = {s.id: s for s in (await db.execute(select(Strategy).where(Strategy.id.in_(strategy_ids)))).scalars()}
+    instruments = {i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))).scalars()}
+    portfolios = {p.id: p for p in (await db.execute(select(PaperPortfolio).where(PaperPortfolio.id.in_(portfolio_ids)))).scalars()}
+    positions_by_deployment = {
+        p.deployment_id: p for p in (await db.execute(select(PaperPosition).where(PaperPosition.deployment_id.in_(deployment_ids)))).scalars()
+    }
+
+    out: list[DeploymentOut] = []
+    for deployment in deployments:
+        strategy = strategies[deployment.strategy_id]
+        instrument = instruments[deployment.instrument_id]
+        portfolio = portfolios[deployment.portfolio_id]
+        position = positions_by_deployment.get(deployment.id)
+
+        position_out = None
+        if position is not None:
+            current_price = tick_engine.get_current_price(instrument.id)
+            unrealized = (current_price - position.avg_entry_price) * position.quantity if current_price else None
+            position_out = PositionOut(
+                instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
+                current_price=current_price, unrealized_pnl=unrealized, opened_at=position.opened_at,
+            )
+
+        out.append(
+            DeploymentOut(
+                id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
+                instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
+                portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
+                timeframe=deployment.timeframe, status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
+                created_at=deployment.created_at, stopped_at=deployment.stopped_at, open_position=position_out,
+            )
+        )
+    return out
 
 
 @router.post("/portfolios", response_model=PortfolioOut, status_code=status.HTTP_201_CREATED)
@@ -258,7 +317,7 @@ async def list_deployments(db: AsyncSession = Depends(get_db), user: User = Depe
         .where(PaperPortfolio.user_id == user.id)
         .order_by(PaperDeployment.created_at.desc())
     )
-    return [await _deployment_out(db, d) for d in result.scalars().all()]
+    return await _deployment_outs_batch(db, list(result.scalars().all()))
 
 
 @router.post("/deployments/{deployment_id}/stop", response_model=DeploymentOut)
