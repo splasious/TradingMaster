@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,9 +26,23 @@ class Settings(BaseSettings):
         # rewrites it once here rather than asking every deploy target to
         # know that detail.
         if value.startswith("postgres://"):
-            return "postgresql+asyncpg://" + value[len("postgres://") :]
-        if value.startswith("postgresql://") and "+asyncpg" not in value:
-            return "postgresql+asyncpg://" + value[len("postgresql://") :]
+            value = "postgresql+asyncpg://" + value[len("postgres://") :]
+        elif value.startswith("postgresql://") and "+asyncpg" not in value:
+            value = "postgresql+asyncpg://" + value[len("postgresql://") :]
+
+        if "+asyncpg" not in value:
+            return value
+
+        # Same story for the SSL query param: managed providers hand back
+        # ?sslmode=require (psycopg's spelling), but asyncpg's connect()
+        # doesn't accept an `sslmode` kwarg at all and raises TypeError --
+        # it wants `ssl=require` instead. Confirmed against InsForge's
+        # Postgres, whose connection-string uses exactly this psycopg form.
+        parts = urlsplit(value)
+        query = parse_qs(parts.query, keep_blank_values=True)
+        if "sslmode" in query:
+            query["ssl"] = query.pop("sslmode")
+            value = urlunsplit(parts._replace(query=urlencode(query, doseq=True)))
         return value
 
     redis_url: str = "redis://localhost:6379/0"
