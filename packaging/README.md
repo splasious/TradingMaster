@@ -40,9 +40,11 @@ cd backend
 # 2. Launcher exe
 .venv/Scripts/python.exe -m PyInstaller --name tradingmaster-launcher --onefile --console --distpath ../packaging/dist --workpath ../packaging/build --specpath ../packaging ../packaging/launcher.py
 
-# 3. Frontend production bundle (next.config.ts has output: "standalone")
+# 3. Frontend production bundle (DESKTOP_BUILD=1 opts into next.config.ts's
+#    output: "standalone" -- a plain `npm run build` for a normal
+#    Vercel/InsForge deploy must NOT set this)
 cd ../frontend
-npm run build
+DESKTOP_BUILD=1 npm run build
 mkdir -p ../packaging/dist/frontend
 cp -r .next/standalone/. ../packaging/dist/frontend/
 cp -r .next/static ../packaging/dist/frontend/.next/static
