@@ -1,0 +1,65 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "backend/**"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/tradingmaster-api:latest
+
+      - name: Redeploy on InsForge compute
+        run: |
+          npx -y @insforge/cli login --user-api-key "${{ secrets.INSFORGE_USER_API_KEY }}"
+          npx -y @insforge/cli link --project-id 63582f22-3b10-42bd-8e1f-0b1d3255e268 -y
+
+          SERVICE_ID=$(npx -y @insforge/cli compute list --json | jq -r '.[] | select(.name=="tradingmaster-api") | .id')
+          if [ -z "$SERVICE_ID" ]; then
+            echo "::error::Could not find an InsForge compute service named 'tradingmaster-api'"
+            exit 1
+          fi
+
+          npx -y @insforge/cli compute update "$SERVICE_ID" \
+            --image "ghcr.io/${{ github.repository_owner }}/tradingmaster-api:latest"
+
+      - name: Wait for health check
+        run: |
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+              https://tradingmaster-api-63582f22-3b10-42bd-8e1f-0b1d3255e268.fly.dev/api/v1/system/health || true)
+            if [ "$code" = "200" ]; then
+              echo "Backend healthy."
+              exit 0
+            fi
+            echo "Not healthy yet (attempt $i, status $code), waiting..."
+            sleep 10
+          done
+          echo "::error::Backend did not become healthy after redeploy"
+          exit 1
