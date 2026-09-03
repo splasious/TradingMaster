@@ -10,6 +10,7 @@ from app.core.deps import get_current_user
 from app.core.security import (
     create_access_token,
     generate_refresh_token,
+    hash_password,
     hash_refresh_token,
     verify_password,
 )
@@ -18,7 +19,7 @@ from app.db.session import get_db
 from app.models.session import Session as SessionModel
 from app.models.user import User, UserRole
 from app.schemas.auth import LoginRequest, TokenResponse
-from app.schemas.user import UserOut
+from app.schemas.user import UserOut, UserRegister
 from app.services.audit import write_audit_log
 
 router = APIRouter()
@@ -51,6 +52,38 @@ async def _issue_session(db: AsyncSession, response: Response, user: User, reque
     )
 
 
+@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+async def register(payload: UserRegister, request: Request, db: AsyncSession = Depends(get_db)) -> UserOut:
+    existing = await db.execute(select(User).where(User.email == payload.email))
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+
+    user = User(
+        email=payload.email,
+        hashed_password=hash_password(payload.password),
+        full_name=payload.full_name,
+        is_approved=False,
+    )
+    db.add(user)
+    await db.flush()
+
+    await write_audit_log(
+        db,
+        user_id=user.id,
+        action="USER_SIGNED_UP",
+        object_type="user",
+        object_id=str(user.id),
+        new_value={"email": user.email},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    await db.refresh(user, attribute_names=["user_roles"])
+    return UserOut(
+        id=str(user.id), email=user.email, full_name=user.full_name,
+        is_active=user.is_active, is_approved=user.is_approved, roles=user.role_names,
+    )
+
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)
@@ -64,6 +97,11 @@ async def login(
 
     if user is None or not user.is_active or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+
+    if not user.is_approved:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Your account is pending administrator approval"
+        )
 
     access_token = create_access_token(subject=str(user.id), roles=user.role_names)
     await _issue_session(db, response, user, request)
@@ -126,4 +164,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)) -> UserOut:
-    return UserOut(id=str(user.id), email=user.email, full_name=user.full_name, is_active=user.is_active, roles=user.role_names)
+    return UserOut(
+        id=str(user.id), email=user.email, full_name=user.full_name,
+        is_active=user.is_active, is_approved=user.is_approved, roles=user.role_names,
+    )

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -77,6 +78,13 @@ export default function LoginPage() {
           <Button type="submit" className="w-full" disabled={submitting}>
             {submitting ? "Signing in..." : "Sign in"}
           </Button>
+
+          <p className="text-center text-sm text-text-muted">
+            Don&apos;t have an account?{" "}
+            <Link href="/signup" className="text-brand hover:underline">
+              Sign up
+            </Link>
+          </p>
         </form>
       </div>
     </div>

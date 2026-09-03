@@ -3,6 +3,7 @@ export interface UserOut {
   email: string;
   full_name: string;
   is_active: boolean;
+  is_approved: boolean;
   roles: string[];
 }
 
@@ -43,6 +44,16 @@ export interface UserCreate {
   email: string;
   password: string;
   full_name: string;
+  roles: string[];
+}
+
+export interface UserRegister {
+  email: string;
+  password: string;
+  full_name: string;
+}
+
+export interface UserApprove {
   roles: string[];
 }
 

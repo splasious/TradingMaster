@@ -14,7 +14,65 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useUsers } from "@/lib/hooks";
-import { ROLES, type UserCreate, type UserOut } from "@/lib/types";
+import { ROLES, type UserApprove, type UserCreate, type UserOut } from "@/lib/types";
+
+function PendingUserRow({ user }: { user: UserOut }) {
+  const queryClient = useQueryClient();
+  const [role, setRole] = useState<string>("viewer");
+  const [error, setError] = useState<string | null>(null);
+
+  const approveMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<UserOut>(`/api/v1/users/${user.id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ roles: [role] } satisfies UserApprove),
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to approve user"),
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/users/${user.id}/reject`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to reject user"),
+  });
+
+  return (
+    <tr>
+      <Td>{user.full_name}</Td>
+      <Td className="text-text-secondary">{user.email}</Td>
+      <Td>
+        <Select value={role} onChange={(e) => setRole(e.target.value)} className="w-32">
+          {ROLES.map((r) => (
+            <option key={r} value={r} className="capitalize">
+              {r}
+            </option>
+          ))}
+        </Select>
+      </Td>
+      <Td>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => approveMutation.mutate()}
+            disabled={approveMutation.isPending || rejectMutation.isPending}
+          >
+            {approveMutation.isPending ? "Approving..." : "Approve"}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => rejectMutation.mutate()}
+            disabled={approveMutation.isPending || rejectMutation.isPending}
+          >
+            {rejectMutation.isPending ? "Rejecting..." : "Reject"}
+          </Button>
+        </div>
+        {error && <p className="mt-1 text-xs text-negative">{error}</p>}
+      </Td>
+    </tr>
+  );
+}
 
 function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
@@ -98,6 +156,9 @@ export default function UsersSettingsPage() {
     );
   }
 
+  const pendingUsers = users?.filter((u) => !u.is_approved) ?? [];
+  const approvedUsers = users?.filter((u) => u.is_approved) ?? [];
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -107,6 +168,31 @@ export default function UsersSettingsPage() {
         </div>
         <Button onClick={() => setModalOpen(true)}>Create User</Button>
       </div>
+
+      {pendingUsers.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pending Approval</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <Thead>
+                <tr>
+                  <Th>Name</Th>
+                  <Th>Email</Th>
+                  <Th>Role to assign</Th>
+                  <Th>Action</Th>
+                </tr>
+              </Thead>
+              <Tbody>
+                {pendingUsers.map((u) => (
+                  <PendingUserRow key={u.id} user={u} />
+                ))}
+              </Tbody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -128,7 +214,7 @@ export default function UsersSettingsPage() {
                 </tr>
               </Thead>
               <Tbody>
-                {users?.map((u) => (
+                {approvedUsers.map((u) => (
                   <tr key={u.id}>
                     <Td>{u.full_name}</Td>
                     <Td className="text-text-secondary">{u.email}</Td>
