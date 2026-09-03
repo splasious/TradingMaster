@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useBacktestJob, useBacktestResult, useBacktestTrades, useStrategies } from "@/lib/hooks";
+import { useBacktestJob, useBacktestResult, useBacktestsForStrategy, useBacktestTrades, useInstrument, useStrategies } from "@/lib/hooks";
 import {
   TIMEFRAMES,
   type BacktestJobOut,
@@ -86,6 +86,78 @@ function BacktestJobRow({ queued, isFocused, onSelect }: { queued: QueuedBacktes
         <span className="capitalize">{status}</span>
       </span>
     </button>
+  );
+}
+
+function HistoryRow({ job, isFocused, onSelect }: { job: BacktestJobOut; isFocused: boolean; onSelect: () => void }) {
+  const { data: instrument } = useInstrument(job.instrument_id);
+  const completed = job.status === "completed";
+  const { data: result } = useBacktestResult(job.id, completed);
+
+  return (
+    <tr
+      onClick={onSelect}
+      className={`cursor-pointer ${isFocused ? "bg-active-soft" : "hover:bg-surface-elevated"}`}
+    >
+      <Td className="font-medium">{instrument?.symbol ?? "..."}</Td>
+      <Td className="text-text-secondary">{job.timeframe}</Td>
+      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td>
+        <span
+          className={`capitalize ${
+            job.status === "completed" ? "text-positive" : job.status === "failed" ? "text-negative" : "text-active"
+          }`}
+        >
+          {job.status}
+        </span>
+      </Td>
+      <Td className="text-right font-financial">
+        {completed && result ? (
+          <span className={result.metrics.net_profit >= 0 ? "text-positive" : "text-negative"}>
+            {result.metrics.net_profit >= 0 ? "+" : ""}
+            {result.metrics.net_profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </span>
+        ) : (
+          <span className="text-text-muted">--</span>
+        )}
+      </Td>
+    </tr>
+  );
+}
+
+function BacktestHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategyId: string; focusedJobId: string | null; onSelect: (jobId: string) => void }) {
+  const { data: jobs, isLoading } = useBacktestsForStrategy(strategyId);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>History{jobs?.length ? ` (${jobs.length})` : ""}</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <p className="p-4 text-sm text-text-muted">Loading past runs...</p>
+        ) : !jobs?.length ? (
+          <p className="p-4 text-sm text-text-muted">No backtests run yet for this strategy.</p>
+        ) : (
+          <Table>
+            <Thead>
+              <tr>
+                <Th>Instrument</Th>
+                <Th>Timeframe</Th>
+                <Th>Ran</Th>
+                <Th>Status</Th>
+                <Th className="text-right">Net Profit</Th>
+              </tr>
+            </Thead>
+            <Tbody>
+              {jobs.map((j) => (
+                <HistoryRow key={j.id} job={j} isFocused={j.id === focusedJobId} onSelect={() => onSelect(j.id)} />
+              ))}
+            </Tbody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -207,6 +279,7 @@ function TradesTable({ trades, showSymbol }: { trades: TaggedTrade[]; showSymbol
 }
 
 export default function BacktestingPage() {
+  const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
   const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
@@ -296,6 +369,7 @@ export default function BacktestingPage() {
       // drill-down only appears once the user clicks a row in Queued Backtests.
       setFocusedJobId(results.length === 1 ? (results[0].jobId ?? null) : null);
       setPerInstrumentResults(new Map());
+      if (strategy) queryClient.invalidateQueries({ queryKey: ["backtests-for-strategy", strategy.id] });
     },
   });
 
@@ -438,6 +512,17 @@ export default function BacktestingPage() {
           )}
         </CardContent>
       </Card>
+
+      {strategy && (
+        <BacktestHistoryPanel
+          strategyId={strategy.id}
+          focusedJobId={focusedJobId}
+          onSelect={(jobId) => {
+            setQueuedJobs([]);
+            setFocusedJobId(jobId);
+          }}
+        />
+      )}
 
       {queuedJobs.length > 1 &&
         queuedJobs.map(

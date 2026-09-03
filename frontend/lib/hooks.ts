@@ -218,6 +218,10 @@ export function useBacktestsForStrategy(strategyId: string) {
   return useQuery({
     queryKey: ["backtests-for-strategy", strategyId],
     queryFn: () => apiFetch<BacktestJobOut[]>(`/api/v1/backtests?strategy_id=${strategyId}`),
+    refetchInterval: (query) => {
+      const stillRunning = query.state.data?.some((j) => j.status === "pending" || j.status === "running");
+      return stillRunning ? 3000 : false;
+    },
   });
 }
 
