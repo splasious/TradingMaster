@@ -202,7 +202,18 @@ export function SourceBlock({ source }: { source: BfSource }) {
 
         <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-text-secondary">Timeframe(s)</label>
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-text-secondary">Timeframe(s)</label>
+              {timeframeOptions && timeframeOptions.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setTimeframes(timeframeOptions.map((o) => o.value))}
+                  className="text-xs text-active hover:underline"
+                >
+                  Select all
+                </button>
+              )}
+            </div>
             <TimeframeMultiSelect options={timeframeOptions} value={timeframes} onChange={setTimeframes} />
           </div>
           <div />
@@ -243,7 +254,12 @@ export function SourceBlock({ source }: { source: BfSource }) {
             disabled={!status?.connected || bulkBackfillMutation.isPending || isDisabledSource}
             title={isDisabledSource ? "Disabled -- pending Zerodha integration" : undefined}
           >
-            <Layers className="h-3.5 w-3.5" /> {bulkBackfillMutation.isPending ? "Queuing..." : BULK_LABEL[source]}
+            <Layers className="h-3.5 w-3.5" />{" "}
+            {bulkBackfillMutation.isPending
+              ? "Queuing..."
+              : timeframes.length > 1
+                ? `${BULK_LABEL[source]} (${timeframes.length} timeframes)`
+                : BULK_LABEL[source]}
           </Button>
         </div>
 
