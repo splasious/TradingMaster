@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "./api";
 import type {
@@ -454,6 +454,44 @@ export function useBfWatchlistItems(watchlistId: string | null) {
     queryFn: () => apiFetch<BfWatchlistItemOut[]>(`/api/v1/backfill-platform/watchlists/${watchlistId}/items`),
     enabled: !!watchlistId,
   });
+}
+
+// Short badge labels for the curated Delta token watchlists, keyed by their
+// exact Data Backfill Platform watchlist name -- the real, current source
+// of Delta category membership (replaced the older static BTC/ETH/SOL
+// prefix guess, which matched almost nothing since most Delta instruments
+// are xStock/bStock tokens, not crypto pairs).
+const DELTA_CATEGORY_LABELS: Record<string, string> = {
+  "Delta Metals (Gold/Silver Tokens)": "Metals",
+  "Delta DeFi Tokens": "DeFi",
+  "Delta Meme Tokens": "Meme",
+  "Delta Smart Contract Platforms": "Smart Contract",
+};
+
+/** Symbol -> short category label (e.g. "BTCUSD" -> "Metals"), derived from
+ * live membership of the 4 curated Delta watchlists. Undefined while still
+ * loading; a symbol with no entry belongs to none of the curated lists. */
+export function useDeltaCategoryMap(): Map<string, string> | undefined {
+  const { data: watchlists } = useBfWatchlists();
+  const categoryWatchlists = (watchlists ?? []).filter((w) => w.name in DELTA_CATEGORY_LABELS);
+
+  const itemQueries = useQueries({
+    queries: categoryWatchlists.map((w) => ({
+      queryKey: ["bf-watchlist-items", w.id],
+      queryFn: () => apiFetch<BfWatchlistItemOut[]>(`/api/v1/backfill-platform/watchlists/${w.id}/items`),
+    })),
+  });
+
+  if (!watchlists) return undefined;
+
+  const map = new Map<string, string>();
+  categoryWatchlists.forEach((w, idx) => {
+    const label = DELTA_CATEGORY_LABELS[w.name];
+    for (const item of itemQueries[idx]?.data ?? []) {
+      if (item.source === "delta") map.set(item.symbol, label);
+    }
+  });
+  return map;
 }
 
 export function useBfTimeframes(source: BfSource) {

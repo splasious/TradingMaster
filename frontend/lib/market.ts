@@ -17,15 +17,10 @@ export function brokerForExchange(exchange: string): string {
   return "--";
 }
 
-// Derived from the symbol prefix (e.g. "BTCUSD" -> "BTC") since the
-// instrument model has no dedicated category/base-asset field yet --
-// deliberately not inventing new backend data for a UI-only pass.
-const DELTA_CATEGORY_PREFIXES = ["BTC", "ETH", "SOL"] as const;
-export type DeltaCategory = (typeof DELTA_CATEGORY_PREFIXES)[number];
-
-// null (not an "Other" catch-all) for anything that doesn't match one of
-// the above -- most Delta instruments are xStock/bStock tokens, not
-// crypto, so a badge that read "Other" on nearly every row was just noise.
-export function getDeltaCategory(symbol: string): DeltaCategory | null {
-  return DELTA_CATEGORY_PREFIXES.find((prefix) => symbol.toUpperCase().startsWith(prefix)) ?? null;
+// Looks up which curated Delta watchlist (Metals/DeFi/Meme/Smart Contract)
+// a symbol belongs to, via the live membership map from useDeltaCategoryMap.
+// null (not an "Other" catch-all) for anything not in one of those 4 lists
+// -- a badge that read "Other" on every uncategorized row was just noise.
+export function getDeltaCategory(symbol: string, categoryMap: Map<string, string> | undefined): string | null {
+  return categoryMap?.get(symbol) ?? null;
 }

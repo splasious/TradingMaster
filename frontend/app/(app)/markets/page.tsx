@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
-import { useInstruments, useQuotes } from "@/lib/hooks";
+import { useDeltaCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
 import { getDeltaCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
 import { useMarketDataSocket } from "@/lib/ws";
@@ -51,7 +51,10 @@ function SortableTh({
 export default function MarketsPage() {
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
-  const { data: instruments, isLoading, isError } = useInstruments(q, exchange || undefined);
+  const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined);
+  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse"), [rawInstruments]);
+  const categoryMap = useDeltaCategoryMap();
 
   const instrumentIds = useMemo(() => (instruments ?? []).map((i) => i.id), [instruments]);
   const { status, prices, latencyMs } = useMarketDataSocket(instrumentIds);
@@ -121,7 +124,7 @@ export default function MarketsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Markets</h1>
-          <p className="text-sm text-text-muted">NSE Markets (real history via nse-yahoo-data) and Delta Markets (real history, public API).</p>
+          <p className="text-sm text-text-muted">Delta Markets (real history, public API).</p>
         </div>
         <div className="flex items-center gap-3">
           {latencyMs !== null && <span className="font-financial text-xs text-text-muted">{latencyMs}ms</span>}
@@ -133,7 +136,6 @@ export default function MarketsPage() {
         <Input placeholder="Search symbol or name..." value={q} onChange={(e) => setQ(e.target.value)} className="max-w-xs" />
         <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-40">
           <option value="">All Markets</option>
-          <option value="NSE">NSE Markets</option>
           <option value="DELTA">Delta Markets</option>
         </Select>
       </div>
@@ -168,7 +170,7 @@ export default function MarketsPage() {
                   const tick = prices[instrument.id];
                   const quote = quoteByInstrument.get(instrument.id);
                   const change = pctChange(instrument.id);
-                  const category = instrument.exchange === "DELTA" ? getDeltaCategory(instrument.symbol) : null;
+                  const category = instrument.exchange === "DELTA" ? getDeltaCategory(instrument.symbol, categoryMap) : null;
                   return (
                     <tr key={instrument.id}>
                       <Td>

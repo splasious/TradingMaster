@@ -103,7 +103,9 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
   const [brokerAccountId, setBrokerAccountId] = useState("");
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
-  const { data: instrumentResults } = useInstruments(instrumentQuery);
+  const { data: rawInstrumentResults } = useInstruments(instrumentQuery);
+  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  const instrumentResults = rawInstrumentResults?.filter((i) => i.data_source !== "yahoo_nse");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [timeframe, setTimeframe] = useState("1d");
   const [allocatedCapital, setAllocatedCapital] = useState("");

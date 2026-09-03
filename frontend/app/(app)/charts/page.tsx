@@ -18,7 +18,15 @@ import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { syncChartTimeScales } from "@/lib/chart-sync";
-import { useChartCandles, useIndicator, useIndicatorList, useInstrument, useInstruments, useResampleBase } from "@/lib/hooks";
+import {
+  useChartCandles,
+  useDeltaCategoryMap,
+  useIndicator,
+  useIndicatorList,
+  useInstrument,
+  useInstruments,
+  useResampleBase,
+} from "@/lib/hooks";
 import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
 import { TIMEFRAMES, type CatalogSyncItemOut, type IndicatorSpecOut, type InstrumentOut } from "@/lib/types";
 
@@ -219,7 +227,10 @@ export default function ChartsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot default seeding once the registry loads, guarded by the ref above
   }, [indicatorList]);
 
-  const { data: instruments } = useInstruments(q, exchange || undefined);
+  const { data: rawInstruments } = useInstruments(q, exchange || undefined);
+  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse"), [rawInstruments]);
+  const categoryMap = useDeltaCategoryMap();
 
   // Deep-link support (e.g. hyperlinked symbols elsewhere in the app):
   // prefer ?instrument_id=, fall back to ?symbol=&exchange= for callers
@@ -336,12 +347,11 @@ export default function ChartsPage() {
           <Input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
           <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
             <option value="">All Markets</option>
-            <option value="NSE">NSE Markets</option>
             <option value="DELTA">Delta Markets</option>
           </Select>
           <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
             {instruments?.map((i) => {
-              const category = i.exchange === "DELTA" ? getDeltaCategory(i.symbol) : null;
+              const category = i.exchange === "DELTA" ? getDeltaCategory(i.symbol, categoryMap) : null;
               return (
                 <button
                   key={i.id}
