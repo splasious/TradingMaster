@@ -35,25 +35,22 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/tradingmaster-api:latest
 
-      - name: Redeploy on InsForge compute
-        run: |
-          npx -y @insforge/cli login --user-api-key "${{ secrets.INSFORGE_USER_API_KEY }}"
-          npx -y @insforge/cli link --project-id 63582f22-3b10-42bd-8e1f-0b1d3255e268 -y
-
-          SERVICE_ID=$(npx -y @insforge/cli compute list --json | jq -r '.[] | select(.name=="tradingmaster-api") | .id')
-          if [ -z "$SERVICE_ID" ]; then
-            echo "::error::Could not find an InsForge compute service named 'tradingmaster-api'"
-            exit 1
-          fi
-
-          npx -y @insforge/cli compute update "$SERVICE_ID" \
-            --image "ghcr.io/${{ github.repository_owner }}/tradingmaster-api:latest"
+      - name: Redeploy on VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/tradingmaster
+            docker compose -f docker-compose.prod.yml --env-file .env pull backend
+            docker compose -f docker-compose.prod.yml --env-file .env up -d backend
 
       - name: Wait for health check
         run: |
           for i in $(seq 1 15); do
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-              https://tradingmaster-api-63582f22-3b10-42bd-8e1f-0b1d3255e268.fly.dev/api/v1/system/health || true)
+              https://api.tradingmaster.online/api/v1/system/health || true)
             if [ "$code" = "200" ]; then
               echo "Backend healthy."
               exit 0

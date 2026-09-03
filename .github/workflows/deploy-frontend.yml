@@ -31,15 +31,37 @@ jobs:
         run: npm ci
 
       - name: Build check
-        # Fails fast with a real error message here instead of the opaque
-        # "npm run build exited with 1" InsForge's remote build reports --
-        # this is how the DESKTOP_BUILD/output:"standalone" bug got found.
+        # Fails fast with a real error message here instead of a remote
+        # build's opaque "npm run build exited with 1" -- this is how the
+        # DESKTOP_BUILD/output:"standalone" bug got found originally.
         env:
-          NEXT_PUBLIC_API_URL: https://tradingmaster-api-63582f22-3b10-42bd-8e1f-0b1d3255e268.fly.dev
+          NEXT_PUBLIC_API_URL: https://api.tradingmaster.online
         run: npm run build
 
-      - name: Deploy to InsForge
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/tradingmaster/TradingMaster
+            git fetch origin master
+            git reset --hard origin/master
+            cd /opt/tradingmaster
+            docker compose -f docker-compose.prod.yml --env-file .env build frontend
+            docker compose -f docker-compose.prod.yml --env-file .env up -d frontend
+
+      - name: Wait for health check
         run: |
-          npx -y @insforge/cli login --user-api-key "${{ secrets.INSFORGE_USER_API_KEY }}"
-          npx -y @insforge/cli link --project-id 63582f22-3b10-42bd-8e1f-0b1d3255e268 -y
-          npx -y @insforge/cli deployments deploy .
+          for i in $(seq 1 15); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://tradingmaster.online || true)
+            if [ "$code" = "200" ]; then
+              echo "Frontend healthy."
+              exit 0
+            fi
+            echo "Not healthy yet (attempt $i, status $code), waiting..."
+            sleep 10
+          done
+          echo "::error::Frontend did not become healthy after redeploy"
+          exit 1
