@@ -6,12 +6,10 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiFetch, ApiError } from "@/lib/api";
-import type { UserRegister } from "@/lib/types";
+import type { ForgotPasswordRequest } from "@/lib/types";
 
-export default function SignupPage() {
-  const [fullName, setFullName] = useState("");
+export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -21,14 +19,14 @@ export default function SignupPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await apiFetch("/api/v1/auth/register", {
+      await apiFetch("/api/v1/auth/forgot-password", {
         method: "POST",
-        body: JSON.stringify({ email, password, full_name: fullName } satisfies UserRegister),
+        body: JSON.stringify({ email } satisfies ForgotPasswordRequest),
         skipAuthRetry: true,
       });
       setSubmitted(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Unable to sign up. Please try again.");
+      setError(err instanceof ApiError ? err.message : "Unable to submit request. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -40,13 +38,13 @@ export default function SignupPage() {
         <div className="mb-8 flex flex-col items-center gap-2">
           <div className="h-3 w-3 rounded-full bg-brand" />
           <h1 className="text-lg font-semibold text-text-primary">TradingMaster</h1>
-          <p className="text-sm text-text-muted">Create your account</p>
+          <p className="text-sm text-text-muted">Reset your password</p>
         </div>
 
         {submitted ? (
           <div className="space-y-4 rounded-lg border border-border bg-surface p-6 text-center">
             <p className="text-sm text-text-primary">
-              Account created. An administrator needs to approve it before you can sign in.
+              If that account exists, an administrator has been notified and will set a new password for you.
             </p>
             <Link href="/login" className="text-sm text-brand hover:underline">
               Back to sign in
@@ -54,19 +52,9 @@ export default function SignupPage() {
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4 rounded-lg border border-border bg-surface p-6">
-            <div className="space-y-1.5">
-              <label htmlFor="full_name" className="text-sm font-medium text-text-secondary">
-                Full name
-              </label>
-              <Input
-                id="full_name"
-                name="full_name"
-                autoComplete="name"
-                required
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-              />
-            </div>
+            <p className="text-sm text-text-muted">
+              Enter your email and an administrator will set a new password for your account.
+            </p>
 
             <div className="space-y-1.5">
               <label htmlFor="email" className="text-sm font-medium text-text-secondary">
@@ -83,22 +71,6 @@ export default function SignupPage() {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <label htmlFor="password" className="text-sm font-medium text-text-secondary">
-                Password
-              </label>
-              <Input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={8}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-            </div>
-
             {error && (
               <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative" role="alert">
                 {error}
@@ -106,13 +78,12 @@ export default function SignupPage() {
             )}
 
             <Button type="submit" className="w-full" disabled={submitting}>
-              {submitting ? "Creating account..." : "Sign up"}
+              {submitting ? "Submitting..." : "Request password reset"}
             </Button>
 
             <p className="text-center text-sm text-text-muted">
-              Already have an account?{" "}
               <Link href="/login" className="text-brand hover:underline">
-                Sign in
+                Back to sign in
               </Link>
             </p>
           </form>

@@ -14,7 +14,7 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useUsers } from "@/lib/hooks";
-import { ROLES, type UserApprove, type UserCreate, type UserOut } from "@/lib/types";
+import { ROLES, type AdminResetPassword, type UserApprove, type UserCreate, type UserOut } from "@/lib/types";
 
 function PendingUserRow({ user }: { user: UserOut }) {
   const queryClient = useQueryClient();
@@ -71,6 +71,63 @@ function PendingUserRow({ user }: { user: UserOut }) {
         {error && <p className="mt-1 text-xs text-negative">{error}</p>}
       </Td>
     </tr>
+  );
+}
+
+function ResetPasswordModal({ user, onClose }: { user: UserOut | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [newPassword, setNewPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const resetMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<UserOut>(`/api/v1/users/${user!.id}/reset-password`, {
+        method: "POST",
+        body: JSON.stringify({ new_password: newPassword } satisfies AdminResetPassword),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      setNewPassword("");
+      onClose();
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to reset password"),
+  });
+
+  return (
+    <Modal open={user !== null} onClose={onClose} title={`Reset Password${user ? ` — ${user.full_name}` : ""}`}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          resetMutation.mutate();
+        }}
+        className="space-y-4"
+      >
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">New password</label>
+          <Input
+            required
+            type="password"
+            minLength={8}
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <p className="text-xs text-text-muted">Share this with the user directly -- they can change it after signing in.</p>
+        </div>
+
+        {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={resetMutation.isPending}>
+            {resetMutation.isPending ? "Resetting..." : "Set new password"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -147,6 +204,7 @@ export default function UsersSettingsPage() {
   const { hasRole } = useAuth();
   const { data: users, isLoading, isError } = useUsers();
   const [modalOpen, setModalOpen] = useState(false);
+  const [resetTarget, setResetTarget] = useState<UserOut | null>(null);
 
   if (!hasRole("administrator")) {
     return (
@@ -211,6 +269,7 @@ export default function UsersSettingsPage() {
                   <Th>Email</Th>
                   <Th>Roles</Th>
                   <Th>Status</Th>
+                  <Th>Action</Th>
                 </tr>
               </Thead>
               <Tbody>
@@ -228,7 +287,15 @@ export default function UsersSettingsPage() {
                       </div>
                     </Td>
                     <Td>
-                      <Badge tone={u.is_active ? "positive" : "inactive"}>{u.is_active ? "Active" : "Inactive"}</Badge>
+                      <div className="flex items-center gap-1.5">
+                        <Badge tone={u.is_active ? "positive" : "inactive"}>{u.is_active ? "Active" : "Inactive"}</Badge>
+                        {u.password_reset_requested && <Badge tone="warning">Reset requested</Badge>}
+                      </div>
+                    </Td>
+                    <Td>
+                      <Button size="sm" variant="secondary" onClick={() => setResetTarget(u)}>
+                        Reset password
+                      </Button>
                     </Td>
                   </tr>
                 ))}
@@ -239,6 +306,7 @@ export default function UsersSettingsPage() {
       </Card>
 
       <CreateUserModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      <ResetPasswordModal user={resetTarget} onClose={() => setResetTarget(null)} />
     </div>
   );
 }

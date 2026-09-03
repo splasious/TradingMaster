@@ -1,15 +1,17 @@
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import require_role
 from app.core.security import hash_password
 from app.db.session import get_db
+from app.models.session import Session as SessionModel
 from app.models.user import Role, User, UserRole
-from app.schemas.user import UserApprove, UserCreate, UserOut, UserUpdateRoles
+from app.schemas.user import AdminResetPassword, UserApprove, UserCreate, UserOut, UserUpdateRoles
 from app.services.audit import write_audit_log
 
 router = APIRouter()
@@ -17,8 +19,9 @@ router = APIRouter()
 
 def _to_out(user: User) -> UserOut:
     return UserOut(
-        id=str(user.id), email=user.email, full_name=user.full_name,
-        is_active=user.is_active, is_approved=user.is_approved, roles=user.role_names,
+        id=str(user.id), email=user.email, full_name=user.full_name, is_active=user.is_active,
+        is_approved=user.is_approved, password_reset_requested=user.password_reset_requested,
+        roles=user.role_names,
     )
 
 
@@ -134,6 +137,43 @@ async def reject_user(
     )
     await db.delete(user)
     await db.commit()
+
+
+@router.post("/{user_id}/reset-password", response_model=UserOut)
+async def reset_password(
+    user_id: str,
+    payload: AdminResetPassword,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_role("administrator")),
+) -> UserOut:
+    result = await db.execute(
+        select(User).options(selectinload(User.user_roles).selectinload(UserRole.role)).where(User.id == uuid.UUID(user_id))
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.hashed_password = hash_password(payload.new_password)
+    user.password_reset_requested = False
+    # Force re-login everywhere with the new password.
+    await db.execute(
+        update(SessionModel)
+        .where(SessionModel.user_id == user.id, SessionModel.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+
+    await write_audit_log(
+        db,
+        user_id=admin.id,
+        action="PASSWORD_RESET_BY_ADMIN",
+        object_type="user",
+        object_id=str(user.id),
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+    await db.refresh(user, attribute_names=["user_roles"])
+    return _to_out(user)
 
 
 @router.put("/{user_id}/roles", response_model=UserOut)

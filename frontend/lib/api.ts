@@ -13,6 +13,24 @@ export function getAccessToken() {
   return accessToken;
 }
 
+// Explicitly prompts the browser to offer saving the credential, via the
+// Credential Management API -- native form-submit heuristics that Chrome
+// otherwise relies on are unreliable here since login/signup submit through
+// fetch(), not a real form POST. Chrome/Edge only (feature-detected); other
+// browsers silently fall back to their own autocomplete heuristics, which
+// name/autoComplete attributes on the inputs already support.
+export async function storeCredentialForAutofill(email: string, password: string) {
+  if (typeof window === "undefined" || !("PasswordCredential" in window)) return;
+  try {
+    const PasswordCredentialCtor = (window as unknown as { PasswordCredential: new (data: unknown) => Credential })
+      .PasswordCredential;
+    const credential = new PasswordCredentialCtor({ id: email, password, name: email });
+    await navigator.credentials.store(credential);
+  } catch {
+    // Best-effort only -- never block login/signup on this.
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,

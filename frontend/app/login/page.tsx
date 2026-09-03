@@ -47,6 +47,7 @@ export default function LoginPage() {
             </label>
             <Input
               id="email"
+              name="email"
               type="email"
               autoComplete="email"
               required
@@ -56,11 +57,17 @@ export default function LoginPage() {
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="password" className="text-sm font-medium text-text-secondary">
-              Password
-            </label>
+            <div className="flex items-center justify-between">
+              <label htmlFor="password" className="text-sm font-medium text-text-secondary">
+                Password
+              </label>
+              <Link href="/forgot-password" className="text-xs text-brand hover:underline">
+                Forgot password?
+              </Link>
+            </div>
             <Input
               id="password"
+              name="password"
               type="password"
               autoComplete="current-password"
               required

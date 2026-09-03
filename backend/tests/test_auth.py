@@ -134,3 +134,56 @@ async def test_admin_can_reject_pending_user(client: AsyncClient, seeded_admin: 
 
     result = await db_session.execute(select(User).where(User.email == "reject-me@example.com"))
     assert result.scalar_one_or_none() is None
+
+
+async def test_forgot_password_flags_existing_user(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    resp = await client.post("/api/v1/auth/forgot-password", json={"email": seeded_admin["email"]})
+    assert resp.status_code == 204
+
+    result = await db_session.execute(select(User).where(User.email == seeded_admin["email"]))
+    user = result.scalar_one()
+    assert user.password_reset_requested is True
+
+
+async def test_forgot_password_unknown_email_still_returns_204(client: AsyncClient):
+    resp = await client.post("/api/v1/auth/forgot-password", json={"email": "nobody@example.com"})
+    assert resp.status_code == 204
+
+
+async def test_admin_reset_password_lets_user_log_in_with_new_password(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    register_resp = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "resetme@example.com", "password": "OldPass123!", "full_name": "Reset Me"},
+    )
+    user_id = register_resp.json()["id"]
+
+    admin_token_resp = await client.post("/api/v1/auth/login", json=seeded_admin)
+    admin_token = admin_token_resp.json()["access_token"]
+    await client.post(
+        f"/api/v1/users/{user_id}/approve",
+        json={"roles": ["viewer"]},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    forgot_resp = await client.post("/api/v1/auth/forgot-password", json={"email": "resetme@example.com"})
+    assert forgot_resp.status_code == 204
+
+    reset_resp = await client.post(
+        f"/api/v1/users/{user_id}/reset-password",
+        json={"new_password": "BrandNewPass123!"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["password_reset_requested"] is False
+
+    old_login = await client.post(
+        "/api/v1/auth/login", json={"email": "resetme@example.com", "password": "OldPass123!"}
+    )
+    assert old_login.status_code == 401
+
+    new_login = await client.post(
+        "/api/v1/auth/login", json={"email": "resetme@example.com", "password": "BrandNewPass123!"}
+    )
+    assert new_login.status_code == 200

@@ -19,7 +19,7 @@ from app.db.session import get_db
 from app.models.session import Session as SessionModel
 from app.models.user import User, UserRole
 from app.schemas.auth import LoginRequest, TokenResponse
-from app.schemas.user import UserOut, UserRegister
+from app.schemas.user import ForgotPasswordRequest, UserOut, UserRegister
 from app.services.audit import write_audit_log
 
 router = APIRouter()
@@ -79,9 +79,30 @@ async def register(payload: UserRegister, request: Request, db: AsyncSession = D
     await db.commit()
     await db.refresh(user, attribute_names=["user_roles"])
     return UserOut(
-        id=str(user.id), email=user.email, full_name=user.full_name,
-        is_active=user.is_active, is_approved=user.is_approved, roles=user.role_names,
+        id=str(user.id), email=user.email, full_name=user.full_name, is_active=user.is_active,
+        is_approved=user.is_approved, password_reset_requested=user.password_reset_requested, roles=user.role_names,
     )
+
+
+@router.post("/forgot-password", status_code=status.HTTP_204_NO_CONTENT)
+async def forgot_password(
+    payload: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> None:
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    # Always respond 204 regardless of whether the email is registered --
+    # otherwise this endpoint would let anyone enumerate real accounts.
+    if user is not None:
+        user.password_reset_requested = True
+        await write_audit_log(
+            db,
+            user_id=user.id,
+            action="PASSWORD_RESET_REQUESTED",
+            object_type="user",
+            object_id=str(user.id),
+            ip_address=request.client.host if request.client else None,
+        )
+        await db.commit()
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -165,6 +186,6 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)) -> UserOut:
     return UserOut(
-        id=str(user.id), email=user.email, full_name=user.full_name,
-        is_active=user.is_active, is_approved=user.is_approved, roles=user.role_names,
+        id=str(user.id), email=user.email, full_name=user.full_name, is_active=user.is_active,
+        is_approved=user.is_approved, password_reset_requested=user.password_reset_requested, roles=user.role_names,
     )

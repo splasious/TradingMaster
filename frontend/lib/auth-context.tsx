@@ -2,7 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 
-import { apiFetch, refreshAccessToken, setAccessToken } from "./api";
+import { apiFetch, refreshAccessToken, setAccessToken, storeCredentialForAutofill } from "./api";
 import type { TokenResponse, UserOut } from "./types";
 
 interface AuthContextValue {
@@ -52,6 +52,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
       setAccessToken(tokenResponse.access_token);
       await loadUser();
+      await storeCredentialForAutofill(email, password);
     },
     [loadUser],
   );

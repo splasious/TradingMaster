@@ -4,6 +4,7 @@ export interface UserOut {
   full_name: string;
   is_active: boolean;
   is_approved: boolean;
+  password_reset_requested: boolean;
   roles: string[];
 }
 
@@ -55,6 +56,14 @@ export interface UserRegister {
 
 export interface UserApprove {
   roles: string[];
+}
+
+export interface ForgotPasswordRequest {
+  email: string;
+}
+
+export interface AdminResetPassword {
+  new_password: string;
 }
 
 export const TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d", "1wk", "1mo"] as const;
