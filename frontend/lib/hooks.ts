@@ -466,6 +466,7 @@ const DELTA_CATEGORY_LABELS: Record<string, string> = {
   "Delta DeFi Tokens": "DeFi",
   "Delta Meme Tokens": "Meme",
   "Delta Smart Contract Platforms": "Smart Contract",
+  "Delta US Stocks (xStock/bStocks Tokens)": "US Stocks",
 };
 
 /** Symbol -> short category label (e.g. "BTCUSD" -> "Metals"), derived from
