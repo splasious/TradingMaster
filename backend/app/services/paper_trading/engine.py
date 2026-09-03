@@ -10,12 +10,12 @@ for backfill/backtest jobs.
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.alert import AlertSeverity, AlertType
+from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import OrderStatus, PaperDeployment, PaperOrder, PaperPortfolio, PaperPosition, PaperTrade
@@ -30,6 +30,14 @@ from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
 
 LOOKBACK_BARS = 60
+
+# A rejection reason like "max positions reached" is an ongoing, expected
+# state while a deployment stays fully allocated -- re-alerting on every
+# 10-second evaluation tick (paper_trading/scheduler.py's
+# EVALUATION_INTERVAL_SECONDS) for as long as it persists is spam, not
+# signal. Still recorded as a rejected PaperOrder every tick (real audit
+# trail of every attempt); only the user-facing Alert is throttled.
+REJECTION_ALERT_COOLDOWN = timedelta(minutes=30)
 
 
 @dataclass
@@ -196,16 +204,30 @@ async def _try_enter(
     )
 
     if not decision.approved:
+        rejection_message = decision.reason or "Order rejected by risk engine"
         db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=quantity, price=price, status=OrderStatus.REJECTED.value, reason=decision.reason))
         await write_audit_log(
             db, user_id=portfolio.user_id, action="PAPER_ORDER_REJECTED", object_type="paper_deployment", object_id=str(deployment.id),
             new_value={"reason": decision.reason},
         )
-        await create_alert(
-            db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.WARNING,
-            title="Paper order rejected", message=decision.reason or "Order rejected by risk engine",
-            object_type="paper_deployment", object_id=str(deployment.id),
-        )
+        recent_same_alert = (
+            await db.execute(
+                select(Alert.id)
+                .where(
+                    Alert.object_type == "paper_deployment",
+                    Alert.object_id == str(deployment.id),
+                    Alert.message == rejection_message,
+                    Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if recent_same_alert is None:
+            await create_alert(
+                db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.WARNING,
+                title="Paper order rejected", message=rejection_message,
+                object_type="paper_deployment", object_id=str(deployment.id),
+            )
         await db.commit()
         return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
 

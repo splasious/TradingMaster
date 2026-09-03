@@ -18,13 +18,13 @@ and `_submit_and_confirm` -- everything above that point is broker-agnostic.
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_payload
-from app.models.alert import AlertSeverity, AlertType
+from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.broker import Broker, BrokerAccount, BrokerCredential
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition, LiveTrade
@@ -42,6 +42,12 @@ from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
 
 LOOKBACK_BARS = 60
+
+# See paper_trading/engine.py's REJECTION_ALERT_COOLDOWN -- same reasoning:
+# a rejection reason like "max positions reached" is an ongoing, expected
+# state while a deployment stays fully allocated, not a new event on every
+# evaluation tick.
+REJECTION_ALERT_COOLDOWN = timedelta(minutes=30)
 
 
 @dataclass
@@ -221,15 +227,29 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
         max_daily_loss_pct=version.risk_rules.get("max_daily_loss_pct"),
     )
     if not decision.approved:
+        rejection_message = decision.reason or "Order rejected by risk engine"
         await write_audit_log(
             db, user_id=deployment.owner_id, action="LIVE_ORDER_REJECTED", object_type="live_deployment",
             object_id=str(deployment.id), new_value={"reason": decision.reason},
         )
-        await create_alert(
-            db, user_id=deployment.owner_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.CRITICAL,
-            title="LIVE order rejected", message=decision.reason or "Order rejected by risk engine",
-            object_type="live_deployment", object_id=str(deployment.id),
-        )
+        recent_same_alert = (
+            await db.execute(
+                select(Alert.id)
+                .where(
+                    Alert.object_type == "live_deployment",
+                    Alert.object_id == str(deployment.id),
+                    Alert.message == rejection_message,
+                    Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if recent_same_alert is None:
+            await create_alert(
+                db, user_id=deployment.owner_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.CRITICAL,
+                title="LIVE order rejected", message=rejection_message,
+                object_type="live_deployment", object_id=str(deployment.id),
+            )
         await db.commit()
         return LiveOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
 

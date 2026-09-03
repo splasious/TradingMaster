@@ -429,3 +429,47 @@ async def test_rejected_order_visible_via_api(client: AsyncClient, seeded_admin:
 
     orders_resp = await client.get(f"/api/v1/paper-trading/orders?deployment_id={deployment_id}", headers=headers)
     assert orders_resp.json()[0]["status"] == "rejected"
+
+
+async def test_repeated_rejection_does_not_spam_alerts(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    # A deployment stuck at its position cap gets re-evaluated every
+    # scheduler tick (10s) -- each attempt should still log a rejected
+    # order (real audit trail), but only the first should raise a
+    # user-facing alert; repeats within the cooldown are the same ongoing
+    # condition, not a new event worth notifying about again.
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Repeat Rejection Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+                "risk_rules": {"max_positions": 0},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    for _ in range(3):
+        eval_resp = await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/evaluate", headers=headers)
+        assert eval_resp.json()["action"] == "rejected"
+
+    orders_resp = await client.get(f"/api/v1/paper-trading/orders?deployment_id={deployment_id}", headers=headers)
+    assert len(orders_resp.json()) == 3
+
+    alerts_resp = await client.get("/api/v1/alerts", headers=headers)
+    rejection_alerts = [a for a in alerts_resp.json() if a["title"] == "Paper order rejected"]
+    assert len(rejection_alerts) == 1
