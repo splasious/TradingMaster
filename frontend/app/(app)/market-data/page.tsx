@@ -55,12 +55,11 @@ function SyncInstrumentCatalog() {
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-text-muted">
-          Pulls the full tracked universe from each real data source into the instrument catalog above -- the
-          nse-yahoo-data service&apos;s ~750 NSE symbols, or Delta Exchange&apos;s live perpetual futures list. Safe to
-          run repeatedly -- already-tracked instruments are skipped, never duplicated.
+          Pulls the full tracked universe from each real data source into the instrument catalog above -- Delta
+          Exchange&apos;s live perpetual futures list. Safe to run repeatedly -- already-tracked instruments are
+          skipped, never duplicated.
         </p>
         <div className="flex flex-wrap gap-6">
-          <SyncSourceButton dataSource="yahoo_nse" label="Sync NSE Universe (Yahoo)" />
           <SyncSourceButton dataSource="delta_exchange" label="Sync Delta Markets" />
         </div>
       </CardContent>
@@ -77,6 +76,10 @@ function InstrumentPicker({
 }) {
   const [q, setQ] = useState("");
   const { data: instruments } = useInstruments(q);
+  // NSE/Yahoo is hidden app-wide (unreliable source, no live backend to
+  // serve it) -- the underlying instrument rows are left in place rather
+  // than deleted since real strategies/history could still reference them.
+  const visibleInstruments = instruments?.filter((i) => i.data_source !== "yahoo_nse");
 
   return (
     <Card>
@@ -91,7 +94,7 @@ function InstrumentPicker({
           onChange={(e) => setQ(e.target.value)}
         />
         <div className="max-h-96 space-y-0.5 overflow-y-auto">
-          {instruments?.map((i) => (
+          {visibleInstruments?.map((i) => (
             <button
               key={i.id}
               onClick={() => onSelect(i)}
@@ -225,8 +228,9 @@ export default function MarketDataPage() {
         <TabsContent value="backfill-platform">
           <div className="space-y-6">
             <LiveSyncStatus />
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-              <SourceBlock source="yahoo" />
+            {/* Yahoo/NSE is hidden app-wide -- no reachable data source in
+                production, superseded by the planned Zerodha integration. */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <SourceBlock source="delta" />
               <SourceBlock source="zerodha" />
             </div>
