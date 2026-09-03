@@ -50,7 +50,14 @@ jobs:
             git reset --hard origin/master
             cd /opt/tradingmaster
             docker compose -f docker-compose.prod.yml --env-file .env build frontend
-            docker compose -f docker-compose.prod.yml --env-file .env up -d frontend
+            # See deploy-backend.yml: container removal during recreate is
+            # async and can still be in flight from a just-finished prior
+            # deploy -- retry rather than fail on that transient race.
+            for i in 1 2 3; do
+              docker compose -f docker-compose.prod.yml --env-file .env up -d frontend && break
+              echo "up -d frontend failed (attempt $i), retrying in 5s..."
+              sleep 5
+            done
 
       - name: Wait for health check
         run: |

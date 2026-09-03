@@ -44,7 +44,15 @@ jobs:
           script: |
             cd /opt/tradingmaster
             docker compose -f docker-compose.prod.yml --env-file .env pull backend
-            docker compose -f docker-compose.prod.yml --env-file .env up -d backend
+            # Docker's container removal during recreate is async and can
+            # still be in flight from a just-finished prior deploy, racing
+            # this one with "removal of container ... already in progress" --
+            # retry rather than fail the whole deploy on that transient race.
+            for i in 1 2 3; do
+              docker compose -f docker-compose.prod.yml --env-file .env up -d backend && break
+              echo "up -d backend failed (attempt $i), retrying in 5s..."
+              sleep 5
+            done
 
       - name: Wait for health check
         run: |
