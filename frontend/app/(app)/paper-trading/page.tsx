@@ -17,6 +17,7 @@ import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import {
+  useAllPaperTrades,
   useInstruments,
   usePaperDeployments,
   usePaperOrders,
@@ -341,15 +342,25 @@ function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
                 <Th>Entry</Th>
                 <Th>Exit</Th>
                 <Th className="text-right">Qty</Th>
+                <Th className="text-right">Trade Value</Th>
                 <Th className="text-right">PnL</Th>
               </tr>
             </Thead>
             <Tbody>
-              {trades.map((t, i) => (
-                <tr key={i}>
-                  <Td className="font-financial">{t.entry_price.toFixed(2)}</Td>
-                  <Td className="font-financial">{t.exit_price.toFixed(2)}</Td>
+              {trades.map((t) => (
+                <tr key={t.id}>
+                  <Td className="font-financial text-xs">
+                    {new Date(t.entry_ts).toLocaleDateString()} {new Date(t.entry_ts).toLocaleTimeString()}
+                    <span className="ml-1.5 text-text-muted">@ {t.entry_price.toFixed(2)}</span>
+                  </Td>
+                  <Td className="font-financial text-xs">
+                    {new Date(t.exit_ts).toLocaleDateString()} {new Date(t.exit_ts).toLocaleTimeString()}
+                    <span className="ml-1.5 text-text-muted">@ {t.exit_price.toFixed(2)}</span>
+                  </Td>
                   <Td className="text-right font-financial">{t.quantity}</Td>
+                  <Td className="text-right font-financial">
+                    {(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </Td>
                   <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
                 </tr>
               ))}
@@ -444,6 +455,23 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
             <span className="text-text-muted">flat</span>
           )}
         </Td>
+        <Td className="text-text-secondary">
+          {deployment.open_position ? (
+            <span className="font-financial text-xs" title={new Date(deployment.open_position.opened_at).toISOString()}>
+              {new Date(deployment.open_position.opened_at).toLocaleDateString()}{" "}
+              {new Date(deployment.open_position.opened_at).toLocaleTimeString()}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
+        <Td className="text-right font-financial">
+          {deployment.open_position
+            ? (deployment.open_position.quantity * deployment.open_position.avg_entry_price).toLocaleString(undefined, {
+                maximumFractionDigits: 2,
+              })
+            : <span className="text-text-muted">--</span>}
+        </Td>
         <Td className="text-right font-financial">
           {deployment.open_position && deployment.open_position.unrealized_pnl !== null ? (
             <span className={deployment.open_position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
@@ -501,7 +529,7 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={8} className="p-0">
+          <td colSpan={10} className="p-0">
             <DeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -517,6 +545,8 @@ const DEPLOYMENT_TABLE_HEADERS = (
     <Th>Pool</Th>
     <Th>Status</Th>
     <Th>Position</Th>
+    <Th>Entered</Th>
+    <Th className="text-right">Trade Value</Th>
     <Th className="text-right">P&amp;L</Th>
     <Th>Last Signal</Th>
     <Th />
@@ -727,6 +757,63 @@ function PortfolioCard({
   );
 }
 
+function ClosedTradesPanel() {
+  const { data: trades, isLoading } = useAllPaperTrades();
+
+  return (
+    <CollapsibleSection title="Closed Trades" count={trades?.length ?? 0}>
+      {isLoading ? (
+        <LoadingState />
+      ) : (
+        <Table>
+          <Thead>
+            <tr>
+              <Th>Strategy</Th>
+              <Th>Instrument</Th>
+              <Th>Entered</Th>
+              <Th>Exited</Th>
+              <Th className="text-right">Qty</Th>
+              <Th className="text-right">Trade Value</Th>
+              <Th className="text-right">P&amp;L</Th>
+              <Th className="text-right">P&amp;L %</Th>
+              <Th>Exit Reason</Th>
+            </tr>
+          </Thead>
+          <Tbody>
+            {trades?.map((t) => (
+              <tr key={t.id}>
+                <Td className="font-medium">{t.strategy_name ?? "--"}</Td>
+                <Td>{t.instrument_symbol ?? "--"}</Td>
+                <Td className="font-financial text-xs">
+                  {new Date(t.entry_ts).toLocaleDateString()} {new Date(t.entry_ts).toLocaleTimeString()}
+                  <span className="ml-1.5 text-text-muted">@ {t.entry_price.toFixed(2)}</span>
+                </Td>
+                <Td className="font-financial text-xs">
+                  {new Date(t.exit_ts).toLocaleDateString()} {new Date(t.exit_ts).toLocaleTimeString()}
+                  <span className="ml-1.5 text-text-muted">@ {t.exit_price.toFixed(2)}</span>
+                </Td>
+                <Td className="text-right font-financial">{t.quantity}</Td>
+                <Td className="text-right font-financial">
+                  {(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                </Td>
+                <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
+                  {t.pnl >= 0 ? "+" : ""}
+                  {t.pnl.toFixed(2)}
+                </Td>
+                <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
+                  {t.pnl_pct >= 0 ? "+" : ""}
+                  {t.pnl_pct.toFixed(2)}%
+                </Td>
+                <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+              </tr>
+            ))}
+          </Tbody>
+        </Table>
+      )}
+    </CollapsibleSection>
+  );
+}
+
 export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolios } = usePaperPortfolios();
@@ -796,6 +883,8 @@ export default function PaperTradingPage() {
       <CollapsibleSection title="Stopped" count={stopped.length}>
         <DeploymentsTable deployments={stopped} onDelete={setToDelete} />
       </CollapsibleSection>
+
+      <ClosedTradesPanel />
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} portfolios={portfolios ?? []} />
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}

@@ -374,6 +374,10 @@ export interface PaperOrderOut {
 }
 
 export interface PaperTradeOut {
+  id: string;
+  deployment_id: string;
+  instrument_symbol: string | null;
+  strategy_name: string | null;
   entry_ts: string;
   entry_price: number;
   exit_ts: string;

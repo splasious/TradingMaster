@@ -73,6 +73,14 @@ class OrderOut(BaseModel):
 
 
 class TradeOut(BaseModel):
+    id: str
+    deployment_id: str
+    # Populated only for the portfolio-wide listing (no deployment_id
+    # filter) -- the per-deployment listing already has this context from
+    # the page it's rendered on, so it leaves these null rather than
+    # re-fetching what the caller already knows.
+    instrument_symbol: str | None = None
+    strategy_name: str | None = None
     entry_ts: datetime
     entry_price: float
     exit_ts: datetime
@@ -81,8 +89,6 @@ class TradeOut(BaseModel):
     pnl: float
     pnl_pct: float
     exit_reason: str
-
-    model_config = {"from_attributes": True}
 
 
 class EvaluationOut(BaseModel):

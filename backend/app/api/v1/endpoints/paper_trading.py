@@ -410,9 +410,35 @@ async def list_orders(deployment_id: str, db: AsyncSession = Depends(get_db), _:
     ]
 
 
-@router.get("/trades", response_model=list[TradeOut])
-async def list_trades(deployment_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[TradeOut]:
-    result = await db.execute(
-        select(PaperTrade).where(PaperTrade.deployment_id == uuid.UUID(deployment_id)).order_by(PaperTrade.exit_ts.desc())
+def _trade_out(t: PaperTrade, *, instrument_symbol: str | None = None, strategy_name: str | None = None) -> TradeOut:
+    return TradeOut(
+        id=str(t.id), deployment_id=str(t.deployment_id), instrument_symbol=instrument_symbol, strategy_name=strategy_name,
+        entry_ts=t.entry_ts, entry_price=t.entry_price, exit_ts=t.exit_ts, exit_price=t.exit_price,
+        quantity=t.quantity, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
     )
-    return [TradeOut.model_validate(t, from_attributes=True) for t in result.scalars().all()]
+
+
+@router.get("/trades", response_model=list[TradeOut])
+async def list_trades(
+    deployment_id: str | None = None, limit: int = 200,
+    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> list[TradeOut]:
+    if deployment_id:
+        result = await db.execute(
+            select(PaperTrade).where(PaperTrade.deployment_id == uuid.UUID(deployment_id)).order_by(PaperTrade.exit_ts.desc())
+        )
+        return [_trade_out(t) for t in result.scalars().all()]
+
+    # No deployment_id -- every closed trade across all of this user's
+    # deployments, newest first, for the portfolio-wide Closed Trades view.
+    result = await db.execute(
+        select(PaperTrade, Instrument.symbol, Strategy.name)
+        .join(PaperDeployment, PaperTrade.deployment_id == PaperDeployment.id)
+        .join(PaperPortfolio, PaperDeployment.portfolio_id == PaperPortfolio.id)
+        .join(Instrument, PaperDeployment.instrument_id == Instrument.id)
+        .join(Strategy, PaperDeployment.strategy_id == Strategy.id)
+        .where(PaperPortfolio.user_id == user.id)
+        .order_by(PaperTrade.exit_ts.desc())
+        .limit(limit)
+    )
+    return [_trade_out(t, instrument_symbol=symbol, strategy_name=name) for t, symbol, name in result.all()]

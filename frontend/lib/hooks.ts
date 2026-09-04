@@ -305,6 +305,16 @@ export function usePaperTrades(deploymentId: string | null) {
   });
 }
 
+/** Every closed trade across all of the user's paper deployments, newest
+ * first -- for a portfolio-wide Closed Trades view, as opposed to
+ * usePaperTrades' single-deployment scope. */
+export function useAllPaperTrades() {
+  return useQuery({
+    queryKey: ["paper-trades", "all"],
+    queryFn: () => apiFetch<PaperTradeOut[]>("/api/v1/paper-trading/trades"),
+  });
+}
+
 export function useLiveDeployments() {
   return useQuery({
     queryKey: ["live-deployments"],

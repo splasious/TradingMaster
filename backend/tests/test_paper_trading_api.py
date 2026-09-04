@@ -124,6 +124,52 @@ async def test_manual_exit_closes_open_position(client: AsyncClient, seeded_admi
     assert deployment["status"] == "active"  # exiting a position doesn't stop the deployment
 
 
+async def test_portfolio_wide_trades_list_omits_deployment_id(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    # No deployment_id -- every closed trade across the user's own
+    # deployments, enriched with instrument/strategy context since the
+    # caller (a global Closed Trades view) has no single deployment page
+    # to already know that from.
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Global Trades Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id, "timeframe": "1d"},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/evaluate", headers=headers)
+    await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/exit", headers=headers)
+
+    all_trades_resp = await client.get("/api/v1/paper-trading/trades", headers=headers)
+    assert all_trades_resp.status_code == 200
+    trades = all_trades_resp.json()
+    assert len(trades) == 1
+    assert trades[0]["deployment_id"] == deployment_id
+    assert trades[0]["instrument_symbol"] == instrument.symbol
+    assert trades[0]["strategy_name"] == "Global Trades Strategy"
+
+    scoped_resp = await client.get(f"/api/v1/paper-trading/trades?deployment_id={deployment_id}", headers=headers)
+    assert scoped_resp.json()[0]["instrument_symbol"] is None  # per-deployment view already knows this
+
+
 async def test_manual_exit_rejects_when_flat(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = await _seed_instrument(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
