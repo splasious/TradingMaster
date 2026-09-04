@@ -709,13 +709,27 @@ function DeletePortfolioModal({
 
 function PortfolioCard({
   portfolio,
+  deployments,
   onEdit,
   onDelete,
 }: {
   portfolio: PaperPortfolioOut;
+  deployments: PaperDeploymentOut[];
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  // Derived from the same deployments the tables below already render,
+  // not the portfolio API's own unrealized_pnl/equity -- those come from a
+  // separate request, and with live-streaming prices, two independent
+  // snapshots a few seconds apart can legitimately disagree with what's
+  // shown per-row. Summing the already-loaded rows guarantees this card
+  // always matches what's underneath it.
+  const myPositions = deployments
+    .filter((d) => d.portfolio_id === portfolio.id && d.open_position)
+    .map((d) => d.open_position!);
+  const unrealizedPnl = myPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0);
+  const equity = portfolio.cash + myPositions.reduce((sum, p) => sum + p.quantity * (p.current_price ?? p.avg_entry_price), 0);
+
   return (
     <Card>
       <CardHeader>
@@ -729,7 +743,7 @@ function PortfolioCard({
       <CardContent className="grid grid-cols-2 gap-4 pt-0 md:grid-cols-4">
         <div>
           <div className="text-xs text-text-muted">Equity</div>
-          <div className="font-financial text-lg font-semibold text-text-primary">{portfolio.equity.toFixed(2)}</div>
+          <div className="font-financial text-lg font-semibold text-text-primary">{equity.toFixed(2)}</div>
         </div>
         <div>
           <div className="flex items-center justify-between">
@@ -742,8 +756,8 @@ function PortfolioCard({
         </div>
         <div>
           <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
-          <div className={`font-financial text-lg font-semibold ${portfolio.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}`}>
-            {portfolio.unrealized_pnl.toFixed(2)}
+          <div className={`font-financial text-lg font-semibold ${unrealizedPnl >= 0 ? "text-positive" : "text-negative"}`}>
+            {unrealizedPnl.toFixed(2)}
           </div>
         </div>
         <div>
@@ -851,7 +865,13 @@ export default function PaperTradingPage() {
       {portfolios && portfolios.length > 0 && (
         <div className="space-y-3">
           {portfolios.map((p) => (
-            <PortfolioCard key={p.id} portfolio={p} onEdit={() => setEditingPortfolio(p)} onDelete={() => setDeletingPortfolio(p)} />
+            <PortfolioCard
+              key={p.id}
+              portfolio={p}
+              deployments={deployments ?? []}
+              onEdit={() => setEditingPortfolio(p)}
+              onDelete={() => setDeletingPortfolio(p)}
+            />
           ))}
         </div>
       )}
