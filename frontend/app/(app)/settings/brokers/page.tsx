@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LogIn } from "lucide-react";
+import { AlertTriangle, LogIn } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -131,6 +131,24 @@ function LoginWithZerodhaButton({ accountId }: { accountId: string }) {
   );
 }
 
+function KiteSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }) {
+  const expired = accounts.filter((a) => a.broker.code === "zerodha_kite" && a.connection_status === "error");
+  if (!expired.length) return null;
+  return (
+    <div className="flex items-start gap-3 rounded-md border border-negative/30 bg-negative-soft px-4 py-3 text-sm text-negative">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="space-y-1">
+        {expired.map((a) => (
+          <p key={a.id}>
+            <span className="font-medium">{a.account_label}</span>: {a.connection_last_error || "Zerodha Kite session lost."} Kite&apos;s
+            daily session expires every day (~6am IST, no refresh token) -- use &quot;Login with Zerodha&quot; below to reconnect.
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function BrokersSettingsPage() {
   const { hasRole } = useAuth();
   const { data: accounts, isLoading, isError } = useBrokerAccounts();
@@ -156,6 +174,8 @@ export default function BrokersSettingsPage() {
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
       </div>
+
+      {accounts && <KiteSessionExpiredBanner accounts={accounts} />}
 
       <Card>
         <CardHeader>
@@ -187,6 +207,9 @@ export default function BrokersSettingsPage() {
                     <Td className="capitalize">{account.environment}</Td>
                     <Td>
                       <ConnectionStatusBadge status={account.connection_status} />
+                      {account.connection_status === "error" && account.connection_last_error && (
+                        <p className="mt-1 max-w-xs text-xs text-text-muted">{account.connection_last_error}</p>
+                      )}
                     </Td>
                     {canManage && (
                       <Td className="text-right">

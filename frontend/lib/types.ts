@@ -31,6 +31,7 @@ export interface BrokerAccountOut {
   environment: "paper" | "live";
   is_active: boolean;
   connection_status: ConnectionStatus;
+  connection_last_error: string | null;
 }
 
 export interface SystemHealth {
@@ -504,6 +505,7 @@ export interface ApplicationMetricsOut {
   paper_trading_scheduler_running: boolean;
   real_price_feed_running: boolean;
   active_timeframe_sync_scheduler_running: boolean;
+  kite_session_monitor_running: boolean;
 }
 
 export interface TradingMetricsOut {

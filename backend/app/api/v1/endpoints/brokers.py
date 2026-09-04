@@ -35,6 +35,7 @@ def _account_out(account: BrokerAccount) -> BrokerAccountOut:
         environment=account.environment,
         is_active=account.is_active,
         connection_status=account.connection.status if account.connection else ConnectionStatus.DISCONNECTED.value,
+        connection_last_error=account.connection.last_error if account.connection else None,
     )
 
 

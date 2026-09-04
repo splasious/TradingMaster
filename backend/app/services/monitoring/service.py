@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.live_trading import LiveDeployment
 from app.models.paper_trading import PaperDeployment
+from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
@@ -40,6 +41,7 @@ class ApplicationMetrics:
     paper_trading_scheduler_running: bool
     real_price_feed_running: bool
     active_timeframe_sync_scheduler_running: bool
+    kite_session_monitor_running: bool
 
 
 @dataclass
@@ -70,6 +72,7 @@ def get_application_metrics() -> ApplicationMetrics:
         paper_trading_scheduler_running=paper_trading_scheduler._task is not None,
         real_price_feed_running=real_price_feed.running,
         active_timeframe_sync_scheduler_running=active_timeframe_sync_scheduler.running,
+        kite_session_monitor_running=kite_session_monitor_scheduler.running,
     )
 
 

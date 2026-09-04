@@ -20,6 +20,7 @@ class BrokerAccountOut(BaseModel):
     environment: str
     is_active: bool
     connection_status: str
+    connection_last_error: str | None = None
 
     model_config = {"from_attributes": True}
 
