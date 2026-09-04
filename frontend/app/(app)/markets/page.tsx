@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
-import { useDeltaCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
+import { DELTA_CATEGORY_OPTIONS, useDeltaCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
 import { getDeltaCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
 import { useMarketDataSocket } from "@/lib/ws";
@@ -51,10 +51,17 @@ function SortableTh({
 export default function MarketsPage() {
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined);
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
-  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse"), [rawInstruments]);
   const categoryMap = useDeltaCategoryMap();
+  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  const instruments = useMemo(
+    () =>
+      rawInstruments?.filter(
+        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getDeltaCategory(i.symbol, categoryMap) === categoryFilter),
+      ),
+    [rawInstruments, categoryFilter, categoryMap],
+  );
 
   const instrumentIds = useMemo(() => (instruments ?? []).map((i) => i.id), [instruments]);
   const { status, prices, latencyMs } = useMarketDataSocket(instrumentIds);
@@ -137,6 +144,12 @@ export default function MarketsPage() {
         <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-40">
           <option value="">All Markets</option>
           <option value="DELTA">Delta Markets</option>
+        </Select>
+        <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="w-40">
+          <option value="">All Categories</option>
+          {DELTA_CATEGORY_OPTIONS.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
         </Select>
       </div>
 

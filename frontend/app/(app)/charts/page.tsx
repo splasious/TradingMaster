@@ -19,6 +19,7 @@ import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { syncChartTimeScales } from "@/lib/chart-sync";
 import {
+  DELTA_CATEGORY_OPTIONS,
   useChartCandles,
   useDeltaCategoryMap,
   useIndicator,
@@ -203,6 +204,7 @@ export default function ChartsPage() {
 
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
   const [timeframe, setTimeframe] = useState("1d");
   const [indicatorLines, setIndicatorLines] = useState<Map<string, OverlayLine[]>>(new Map());
@@ -228,9 +230,15 @@ export default function ChartsPage() {
   }, [indicatorList]);
 
   const { data: rawInstruments } = useInstruments(q, exchange || undefined);
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
-  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse"), [rawInstruments]);
   const categoryMap = useDeltaCategoryMap();
+  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  const instruments = useMemo(
+    () =>
+      rawInstruments?.filter(
+        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getDeltaCategory(i.symbol, categoryMap) === categoryFilter),
+      ),
+    [rawInstruments, categoryFilter, categoryMap],
+  );
 
   // Deep-link support (e.g. hyperlinked symbols elsewhere in the app):
   // prefer ?instrument_id=, fall back to ?symbol=&exchange= for callers
@@ -348,6 +356,12 @@ export default function ChartsPage() {
           <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
             <option value="">All Markets</option>
             <option value="DELTA">Delta Markets</option>
+          </Select>
+          <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+            <option value="">All Categories</option>
+            {DELTA_CATEGORY_OPTIONS.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
           </Select>
           <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
             {instruments?.map((i) => {

@@ -473,6 +473,10 @@ const DELTA_CATEGORY_LABELS: Record<string, string> = {
   "Delta US Stocks (xStock/bStocks Tokens)": "US Stocks",
 };
 
+// One source of truth for the category filter dropdowns on Markets/Charts,
+// so they can't drift from the labels useDeltaCategoryMap actually assigns.
+export const DELTA_CATEGORY_OPTIONS = Object.values(DELTA_CATEGORY_LABELS);
+
 /** Symbol -> short category label (e.g. "BTCUSD" -> "Metals"), derived from
  * live membership of the 4 curated Delta watchlists. Undefined while still
  * loading; a symbol with no entry belongs to none of the curated lists. */
