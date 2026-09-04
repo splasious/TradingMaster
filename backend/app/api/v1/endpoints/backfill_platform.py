@@ -3,7 +3,7 @@ import io
 import uuid
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,7 @@ from app.schemas.backfill_platform import (
     TimeframeOptionOut,
     CatalogSyncItemOut,
     CatalogSyncSchedulerStatusOut,
+    WatchlistBackfillRequest,
     WatchlistBulkAddResult,
     WatchlistCatalogSyncResult,
     WatchlistImportResult,
@@ -544,15 +545,28 @@ async def remove_watchlist_item(
 async def backfill_watchlist(
     watchlist_id: str, background_tasks: BackgroundTasks, timeframe: str = Query("1d"),
     start_date: date | None = Query(None), end_date: date | None = Query(None),
+    payload: WatchlistBackfillRequest | None = Body(None),
     db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> list[BfBackfillJobOut]:
+    """Backfills every item in the watchlist by default, or -- when the
+    caller (the checkbox-select UI) passes item_ids -- just that subset.
+    Silently skips any item whose source doesn't natively support the
+    requested timeframe (e.g. Zerodha has no native 1wk/1mo candle) rather
+    than queuing a job that's guaranteed to fail against that source's
+    real API."""
     wl = await _load_owned_watchlist(db, watchlist_id, user)
-    items = (await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id))).scalars().all()
+    stmt = select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id)
+    if payload and payload.item_ids:
+        stmt = stmt.where(BfWatchlistItem.id.in_([uuid.UUID(i) for i in payload.item_ids]))
+    items = (await db.execute(stmt)).scalars().all()
 
     jobs_out = []
     for item in items:
         symbol = await db.get(BfSymbol, item.symbol_id)
         if symbol is None:
+            continue
+        native_timeframes = {o.value for o in timeframes_for_source(symbol.source) if o.native}
+        if timeframe not in native_timeframes:
             continue
         job = BfBackfillJob(
             symbol_id=symbol.id, source=symbol.source, timeframe=timeframe,

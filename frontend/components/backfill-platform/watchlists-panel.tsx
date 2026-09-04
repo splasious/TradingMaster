@@ -5,6 +5,7 @@ import { Download, Plus, Trash2, Upload } from "lucide-react";
 import Link from "next/link";
 import { useRef, useState } from "react";
 
+import { TimeframeMultiSelect } from "@/components/backfill-platform/timeframe-multiselect";
 import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,19 +14,66 @@ import { EmptyState, LoadingState } from "@/components/ui/data-state";
 import { Input } from "@/components/ui/input";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError, getAccessToken } from "@/lib/api";
-import { useBfWatchlistItems, useBfWatchlists } from "@/lib/hooks";
-import type { BfSource, BfWatchlistOut, InstrumentOut, WatchlistBulkAddResult, WatchlistCatalogSyncResult } from "@/lib/types";
+import { useBfTimeframes, useBfWatchlistItems, useBfWatchlists } from "@/lib/hooks";
+import type {
+  BfBackfillJobOut,
+  BfSource,
+  BfWatchlistOut,
+  InstrumentOut,
+  TimeframeOptionOut,
+  WatchlistBulkAddResult,
+  WatchlistCatalogSyncResult,
+} from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
   yahoo_nse: "yahoo",
   delta_exchange: "delta",
 };
 
+/** Merges each source's own native timeframe set (they genuinely differ --
+ * see timeframes.py) into one option list scoped to whichever sources this
+ * particular watchlist's items actually use, so a mixed-source watchlist
+ * doesn't offer a timeframe that would just fail for one of its items. */
+function useUnionTimeframeOptions(presentSources: Set<BfSource>): TimeframeOptionOut[] {
+  const { data: yahoo } = useBfTimeframes("yahoo");
+  const { data: delta } = useBfTimeframes("delta");
+  const { data: zerodha } = useBfTimeframes("zerodha");
+  const bySource: Record<BfSource, TimeframeOptionOut[] | undefined> = { yahoo, delta, zerodha };
+  const merged = new Map<string, TimeframeOptionOut>();
+  for (const source of presentSources) {
+    for (const opt of bySource[source] ?? []) {
+      const existing = merged.get(opt.value);
+      merged.set(opt.value, { value: opt.value, native: existing?.native || opt.native });
+    }
+  }
+  const order = ["1m", "5m", "15m", "30m", "60m", "4h", "1d", "1wk", "1mo"];
+  return [...merged.values()].sort((a, b) => order.indexOf(a.value) - order.indexOf(b.value));
+}
+
 function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { data: items, isLoading } = useBfWatchlistItems(watchlist.id);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [picked, setPicked] = useState<InstrumentOut[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [timeframes, setTimeframes] = useState<string[]>(["1d"]);
+
+  const presentSources = new Set((items ?? []).map((i) => i.source));
+  const timeframeOptions = useUnionTimeframeOptions(presentSources);
+
+  function toggleItem(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = !!items?.length && items.every((i) => selectedIds.has(i.id));
+  function toggleSelectAll() {
+    setSelectedIds(allSelected ? new Set() : new Set((items ?? []).map((i) => i.id)));
+  }
 
   const bulkAddMutation = useMutation({
     mutationFn: () =>
@@ -53,7 +101,18 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
   });
 
   const bulkBackfillMutation = useMutation({
-    mutationFn: () => apiFetch(`/api/v1/backfill-platform/watchlists/${watchlist.id}/backfill?timeframe=1d`, { method: "POST" }),
+    mutationFn: async () => {
+      const itemIds = selectedIds.size ? [...selectedIds] : undefined;
+      const results = await Promise.all(
+        timeframes.map((tf) =>
+          apiFetch<BfBackfillJobOut[]>(`/api/v1/backfill-platform/watchlists/${watchlist.id}/backfill?timeframe=${tf}`, {
+            method: "POST",
+            body: JSON.stringify({ item_ids: itemIds ?? null }),
+          }),
+        ),
+      );
+      return results.reduce((sum, jobs) => sum + jobs.length, 0);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bf-jobs"] });
       queryClient.invalidateQueries({ queryKey: ["bf-watchlist-items", watchlist.id] });
@@ -98,9 +157,17 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="secondary" onClick={() => bulkBackfillMutation.mutate()} disabled={bulkBackfillMutation.isPending || !items?.length}>
-            {bulkBackfillMutation.isPending ? "Starting..." : "Backfill All (1d)"}
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="w-48 space-y-1">
+            <label className="text-xs font-medium text-text-secondary">Timeframe(s)</label>
+            <TimeframeMultiSelect options={timeframeOptions} value={timeframes} onChange={setTimeframes} />
+          </div>
+          <Button size="sm" onClick={() => bulkBackfillMutation.mutate()} disabled={bulkBackfillMutation.isPending || !items?.length}>
+            {bulkBackfillMutation.isPending
+              ? "Starting..."
+              : selectedIds.size
+                ? `Backfill Selected (${selectedIds.size})`
+                : `Backfill All (${items?.length ?? 0})`}
           </Button>
           <Button
             size="sm" variant="secondary"
@@ -121,6 +188,17 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
             <Upload className="h-3.5 w-3.5" /> {importMutation.isPending ? "Importing..." : "Import CSV"}
           </Button>
         </div>
+        <p className="text-xs text-text-muted">
+          {selectedIds.size ? `${selectedIds.size} symbol(s) checked below -- backfill runs on just those.` : "Nothing checked -- backfill runs on every symbol in this watchlist."}
+        </p>
+        {bulkBackfillMutation.data != null && (
+          <p className="text-xs text-positive">Queued {bulkBackfillMutation.data} background job(s) -- see Job History below.</p>
+        )}
+        {bulkBackfillMutation.isError && (
+          <p className="text-xs text-negative">
+            {bulkBackfillMutation.error instanceof ApiError ? bulkBackfillMutation.error.message : "Backfill failed to start"}
+          </p>
+        )}
         {importMutation.data && (
           <p className="text-xs text-text-muted">Imported: {importMutation.data.added} added, {importMutation.data.skipped} skipped.</p>
         )}
@@ -166,11 +244,15 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
         ) : (
           <Table>
             <Thead>
-              <tr><Th>Source</Th><Th>Symbol</Th><Th>Name</Th><Th className="text-right">Bars</Th><Th>Last Job</Th><Th /></tr>
+              <tr>
+                <Th><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} aria-label="Select all" /></Th>
+                <Th>Source</Th><Th>Symbol</Th><Th>Name</Th><Th className="text-right">Bars</Th><Th>Last Job</Th><Th />
+              </tr>
             </Thead>
             <Tbody>
               {items.map((item) => (
                 <tr key={item.id}>
+                  <Td><input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleItem(item.id)} aria-label={`Select ${item.symbol}`} /></Td>
                   <Td className="capitalize">{item.source}</Td>
                   <Td className="font-medium">
                     {item.source === "yahoo" || item.source === "delta" ? (

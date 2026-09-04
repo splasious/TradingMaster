@@ -338,6 +338,56 @@ async def test_concurrent_jobs_for_a_brand_new_symbol_do_not_crash(client: Async
     assert len({r.json()["id"] for r in responses}) == 3  # three distinct jobs, one shared symbol
 
 
+async def test_watchlist_backfill_scoped_to_selected_item_ids(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    """The checkbox-select UI passes item_ids to run the watchlist backfill
+    on just the checked symbols instead of every item."""
+    _patch_yahoo_ohlcv(monkeypatch, [])
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    wl_resp = await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Two Symbols", "tags": []}, headers=headers)
+    watchlist_id = wl_resp.json()["id"]
+    item1 = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
+        json={"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"}, headers=headers,
+    )
+    await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
+        json={"source": "yahoo", "symbol": "TCS", "display_name": "Tata Consultancy Services"}, headers=headers,
+    )
+
+    resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/backfill",
+        params={"timeframe": "1d"},
+        json={"item_ids": [item1.json()["id"]]},
+        headers=headers,
+    )
+    assert resp.status_code == 202
+    jobs = resp.json()
+    assert len(jobs) == 1
+    assert jobs[0]["symbol"] == "RELIANCE"
+
+
+async def test_watchlist_backfill_skips_timeframe_unsupported_by_source(client: AsyncClient, seeded_admin: dict):
+    """Zerodha has no native 1wk/1mo candle -- queuing a job for it would
+    just fail against Kite's real API, so it's skipped instead."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    wl_resp = await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Zerodha Only", "tags": []}, headers=headers)
+    watchlist_id = wl_resp.json()["id"]
+    await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
+        json={"source": "zerodha", "symbol": "RELIANCE", "display_name": "Reliance Industries"}, headers=headers,
+    )
+
+    resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/backfill", params={"timeframe": "1mo"}, headers=headers,
+    )
+    assert resp.status_code == 202
+    assert resp.json() == []
+
+
 async def test_zerodha_backfill_all_only_queues_watchlisted_symbols(client: AsyncClient, seeded_admin: dict):
     """Kite's NSE instrument dump is the entire exchange (10,000+ rows) --
     "Backfill All Tracked Symbols" for Zerodha must never queue that whole

@@ -94,6 +94,13 @@ class WatchlistBulkAddResult(BaseModel):
     skipped: int
 
 
+class WatchlistBackfillRequest(BaseModel):
+    # None (or omitted body) backfills every item, preserving the original
+    # all-items behavior -- an explicit list scopes the run to a
+    # checkbox-selected subset instead.
+    item_ids: list[str] | None = None
+
+
 class WatchlistImportRow(BaseModel):
     source: str
     symbol: str
