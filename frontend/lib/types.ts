@@ -503,6 +503,7 @@ export interface ApplicationMetricsOut {
   tick_engine_subscribed_instruments: number;
   paper_trading_scheduler_running: boolean;
   real_price_feed_running: boolean;
+  active_timeframe_sync_scheduler_running: boolean;
 }
 
 export interface TradingMetricsOut {

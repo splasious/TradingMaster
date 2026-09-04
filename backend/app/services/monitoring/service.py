@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.live_trading import LiveDeployment
 from app.models.paper_trading import PaperDeployment
+from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.scheduler import paper_trading_scheduler
@@ -38,6 +39,7 @@ class ApplicationMetrics:
     tick_engine_subscribed_instruments: int
     paper_trading_scheduler_running: bool
     real_price_feed_running: bool
+    active_timeframe_sync_scheduler_running: bool
 
 
 @dataclass
@@ -67,6 +69,7 @@ def get_application_metrics() -> ApplicationMetrics:
         tick_engine_subscribed_instruments=sum(1 for c in tick_engine._subscriber_counts.values() if c > 0),
         paper_trading_scheduler_running=paper_trading_scheduler._task is not None,
         real_price_feed_running=real_price_feed.running,
+        active_timeframe_sync_scheduler_running=active_timeframe_sync_scheduler.running,
     )
 
 
