@@ -238,3 +238,28 @@ async def test_get_instruments_parses_csv_response(monkeypatch):
     broker._api_key, broker._access_token = "k", "t"
     instruments = await broker.get_instruments()
     assert instruments == [{"instrument_token": "408065", "tradingsymbol": "INFY", "name": "INFOSYS", "exchange": "NSE"}]
+
+
+async def test_get_instruments_is_cached_across_broker_instances(monkeypatch):
+    """The real production incident: a bulk backfill creates a fresh
+    ZerodhaKiteBroker per symbol/job, and get_historical_data() calls
+    get_instruments() every time -- without a shared cache, backfilling a
+    few hundred symbols re-downloads Kite's entire NSE instrument dump a
+    few hundred times in quick succession, which is exactly what tripped
+    Kite's real rate limit (HTTP 429) and failed every single job."""
+    csv_body = "instrument_token,tradingsymbol,name,exchange\n408065,INFY,INFOSYS,NSE\n"
+    call_count = 0
+
+    async def fake_get(self, url, headers=None):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, content=csv_body.encode(), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    for _ in range(5):
+        broker = ZerodhaKiteBroker()
+        broker._api_key, broker._access_token = "k", "t"
+        await broker.get_instruments()
+
+    assert call_count == 1

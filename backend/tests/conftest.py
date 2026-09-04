@@ -16,7 +16,23 @@ from app.models.user import Role, User, UserRole
 from app.services.backfill_platform import jobs as backfill_platform_jobs
 from app.services.backtest import runner as backtest_runner
 from app.services.backtest import optimization_runner
+from app.services.broker.zerodha_broker import _INSTRUMENTS_CACHE
 from app.services.market_data import backfill as market_data_backfill
+
+
+@pytest.fixture(autouse=True)
+def _reset_kite_instruments_cache():
+    """ZerodhaKiteBroker.get_instruments() caches process-wide (see its
+    docstring) so a real bulk backfill doesn't re-download Kite's whole NSE
+    dump per symbol -- but that same cache would otherwise leak a mocked
+    instrument list from one test into the next, since pytest runs every
+    test in the same process."""
+    _INSTRUMENTS_CACHE["rows"] = None
+    _INSTRUMENTS_CACHE["fetched_at"] = None
+    yield
+    _INSTRUMENTS_CACHE["rows"] = None
+    _INSTRUMENTS_CACHE["fetched_at"] = None
+
 
 @pytest_asyncio.fixture
 async def db_engine():

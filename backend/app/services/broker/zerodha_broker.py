@@ -70,6 +70,10 @@ class KiteAPIError(Exception):
     pass
 
 
+_INSTRUMENTS_CACHE: dict[str, Any] = {"rows": None, "fetched_at": None}
+_INSTRUMENTS_CACHE_TTL = timedelta(minutes=30)
+
+
 class KiteLoginRequired(KiteAPIError):
     """Raised by authenticate() when only api_key/api_secret are available
     and no request_token or previously-issued access_token was supplied --
@@ -210,7 +214,21 @@ class ZerodhaKiteBroker(BrokerInterface):
     async def get_instruments(self) -> list[dict[str, Any]]:
         """Kite serves this as a CSV dump, not JSON -- scoped to the NSE
         segment (GET /instruments/NSE) rather than the full multi-exchange
-        dump, since NSE is the only segment this platform trades."""
+        dump, since NSE is the only segment this platform trades.
+
+        Cached process-wide for _INSTRUMENTS_CACHE_TTL: NSE's instrument
+        list (tradingsymbol -> instrument_token) doesn't change intraday,
+        but get_historical_data() calls this on every single symbol, and a
+        bulk backfill creates a fresh ZerodhaKiteBroker per job -- without
+        this cache, backfilling a few hundred symbols means a few hundred
+        full re-downloads of the same multi-thousand-row CSV in quick
+        succession, which is exactly what tripped Kite's rate limit
+        (HTTP 429) during a real production run."""
+        now = datetime.now(timezone.utc)
+        cached_rows, fetched_at = _INSTRUMENTS_CACHE["rows"], _INSTRUMENTS_CACHE["fetched_at"]
+        if cached_rows is not None and fetched_at is not None and now - fetched_at < _INSTRUMENTS_CACHE_TTL:
+            return cached_rows
+
         if not self._api_key:
             raise KiteAPIError("Not authenticated: call authenticate() with api_key/api_secret first")
         headers = {"X-Kite-Version": self.API_VERSION}
@@ -225,7 +243,10 @@ class ZerodhaKiteBroker(BrokerInterface):
             raise KiteAPIError("Zerodha Kite API request timed out.") from exc
         if resp.status_code != 200:
             raise KiteAPIError(f"Zerodha Kite instrument dump request failed (HTTP {resp.status_code}).")
-        return list(csv.DictReader(io.StringIO(resp.text)))
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        _INSTRUMENTS_CACHE["rows"] = rows
+        _INSTRUMENTS_CACHE["fetched_at"] = now
+        return rows
 
     async def get_historical_data(
         self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None
