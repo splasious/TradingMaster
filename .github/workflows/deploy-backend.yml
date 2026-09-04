@@ -42,14 +42,36 @@ jobs:
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            # A registry/network hiccup mid-script must abort the deploy,
+            # not silently fall through to "up -d" with no new image --
+            # this already happened on the frontend workflow once: a
+            # transient registry failure left the old container running
+            # while the health check passed against stale code with no
+            # error anywhere in the log. set -e plus explicit retry-then-
+            # fail (not retry-then-continue) closes that gap here too.
+            set -e
             cd /opt/tradingmaster
-            docker compose -f docker-compose.prod.yml --env-file .env pull backend
+
+            for i in 1 2 3; do
+              docker compose -f docker-compose.prod.yml --env-file .env pull backend && break
+              if [ "$i" = 3 ]; then
+                echo "::error::pull backend failed after 3 attempts"
+                exit 1
+              fi
+              echo "pull backend failed (attempt $i), retrying in 10s..."
+              sleep 10
+            done
+
             # Docker's container removal during recreate is async and can
             # still be in flight from a just-finished prior deploy, racing
             # this one with "removal of container ... already in progress" --
             # retry rather than fail the whole deploy on that transient race.
             for i in 1 2 3; do
               docker compose -f docker-compose.prod.yml --env-file .env up -d backend && break
+              if [ "$i" = 3 ]; then
+                echo "::error::up -d backend failed after 3 attempts"
+                exit 1
+              fi
               echo "up -d backend failed (attempt $i), retrying in 5s..."
               sleep 5
             done
