@@ -473,6 +473,21 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
             : <span className="text-text-muted">--</span>}
         </Td>
         <Td className="text-right font-financial">
+          {deployment.open_position ? (
+            <>
+              {(
+                deployment.open_position.quantity *
+                (deployment.open_position.current_price ?? deployment.open_position.avg_entry_price)
+              ).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              {deployment.open_position.current_price == null && (
+                <span className="ml-1 text-[10px] uppercase text-text-muted">stale</span>
+              )}
+            </>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
+        <Td className="text-right font-financial">
           {deployment.open_position && deployment.open_position.unrealized_pnl !== null ? (
             <span className={deployment.open_position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
               {deployment.open_position.unrealized_pnl >= 0 ? "+" : ""}
@@ -529,7 +544,7 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={10} className="p-0">
+          <td colSpan={11} className="p-0">
             <DeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -547,6 +562,7 @@ const DEPLOYMENT_TABLE_HEADERS = (
     <Th>Position</Th>
     <Th>Entered</Th>
     <Th className="text-right">Trade Value</Th>
+    <Th className="text-right">Live Value</Th>
     <Th className="text-right">P&amp;L</Th>
     <Th>Last Signal</Th>
     <Th />
