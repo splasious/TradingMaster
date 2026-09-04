@@ -82,14 +82,6 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
         return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
 
     now = datetime.now(timezone.utc)
-    synthetic_bar = OhlcvCandle(
-        instrument_id=instrument.id, timeframe=deployment.timeframe, ts=now,
-        open=candles[-1].close if candles else current_price,
-        high=max((candles[-1].close if candles else current_price), current_price),
-        low=min((candles[-1].close if candles else current_price), current_price),
-        close=current_price, volume=0.0, source="live_paper",
-    )
-    bars_for_eval = [*candles, synthetic_bar]
 
     # Standing stop-loss/take-profit checks take priority over the signal,
     # same as the backtest engine's convention.
@@ -104,8 +96,20 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
             return await _exit_position(db, deployment, portfolio, position, target_price, now, "take_profit")
 
     if version.python_code:
+        # Signal evaluation deliberately uses only real, closed candles --
+        # matching compute_visual_signals()'s "candles[:i+1]" backtest
+        # convention exactly (see signals.py). A synthetic bar built from
+        # the live tick used to be appended here, which meant an
+        # entry/exit rule got re-evaluated against a constantly-moving
+        # price on every 10-second scheduler tick instead of once per
+        # closed bar -- a strategy backtested to hold for a full 15m
+        # candle would instead exit within minutes, reacting to
+        # intra-candle price noise no backtest ever saw. Real-time
+        # responsiveness for protective exits already has its own correct
+        # path above (stop_loss/take_profit checked directly against
+        # current_price, independent of the strategy's own rules).
         bars_dicts = [
-            {"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in bars_for_eval
+            {"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in candles
         ]
         sandbox_params = dict(version.parameters)
         if len(version.instrument_ids) > 1:
@@ -126,8 +130,8 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
             return EvaluationOutcome(action="error", reason=sandbox_result.error)
         signal = sandbox_result.signal
     else:
-        entry_met = evaluate_rule_node(bars_for_eval, version.entry_rules)
-        exit_met = evaluate_rule_node(bars_for_eval, version.exit_rules)
+        entry_met = evaluate_rule_node(candles, version.entry_rules)
+        exit_met = evaluate_rule_node(candles, version.exit_rules)
         signal = "BUY" if entry_met else ("SELL" if exit_met else "HOLD")
 
     deployment.last_evaluated_at = now

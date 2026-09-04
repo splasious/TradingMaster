@@ -105,6 +105,37 @@ async def test_exit_signal_closes_position_and_records_trade(db_session: AsyncSe
     assert trade.quantity == 10
 
 
+async def test_exit_signal_ignores_live_tick_price_between_closed_candles(db_session: AsyncSession):
+    """The actual production bug this test guards against: a live tick
+    price satisfying the exit rule must NOT close the position on its own
+    -- only a genuinely new closed candle can flip the signal, exactly
+    like backtesting's candles[:i+1] convention (signals.py). Before this
+    fix, evaluate_deployment injected a synthetic "current bar" built from
+    the live tick, so an exit rule like "close > 129" (false against the
+    real last candle, close=129) fired the instant the tick price moved
+    above 129 -- causing real deployments to exit within minutes instead
+    of holding through a full candle, confirmed live on "RS Scalper -
+    Delta" (trades closing in 3-12 minutes on a 15m-timeframe strategy)."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
+    tick_engine._last_price.pop(ctx["instrument"].id, None)
+    enter_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert enter_outcome.action == "entered"
+
+    # Last stored candle's close is 129 (see _setup: close = 100 + i, i up
+    # to 29) -- this rule is false against that candle but would have been
+    # true against the old synthetic bar once the tick below is set.
+    version = await db_session.get(StrategyVersion, ctx["deployment"].strategy_version_id)
+    version.exit_rules = {"all": [{"field": "close", "operator": ">", "value": 129}]}
+    await db_session.commit()
+    tick_engine._last_price[ctx["instrument"].id] = 150.0  # well above 129
+
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "hold"
+
+    still_open = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one_or_none()
+    assert still_open is not None
+
+
 async def test_stop_loss_triggers_before_signal_check(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, risk_rules={"stop_loss_pct": 5.0})
     tick_engine._last_price.pop(ctx["instrument"].id, None)
@@ -146,18 +177,23 @@ async def test_python_strategy_evaluates_via_sandbox(db_session: AsyncSession):
 
 
 async def test_indicator_based_rule_does_not_crash_on_mixed_tz_datetimes(db_session: AsyncSession):
-    """Regression test: the synthetic "current bar" built from a live tick
-    is a freshly constructed timezone-aware datetime, while candles loaded
-    from SQLite come back naive (see core/time.py). An indicator-based rule
-    (unlike a raw "close" rule) sends both through candles_to_frame's
-    pandas sort, which used to crash with "can't compare offset-naive and
-    offset-aware datetimes" -- see indicators/base.py's as_aware_utc fix."""
+    """Regression test for indicators/base.py's as_aware_utc fix: an
+    indicator-based rule (unlike a raw "close" rule) sends candle
+    timestamps through candles_to_frame's pandas sort, which used to crash
+    with "can't compare offset-naive and offset-aware datetimes" whenever
+    the series mixed naive and aware datetimes. evaluate_deployment no
+    longer builds a synthetic "current bar" from the live tick (see
+    evaluate_deployment's docstring on why -- it made an entry/exit rule
+    re-evaluate against constantly-moving live price every scheduler tick
+    instead of once per closed bar), so this no longer exercises that
+    exact mixed-tz path, but stays as general coverage that indicator
+    rules evaluate cleanly against real stored candles."""
     ctx = await _setup(
         db_session,
         entry_rules={"all": [{"field": "rsi.rsi", "operator": ">", "value": 0}]},
         exit_rules=NEVER,
     )
-    tick_engine._last_price[ctx["instrument"].id] = 150.0  # force the tz-aware synthetic-bar path
+    tick_engine._last_price[ctx["instrument"].id] = 150.0
 
     outcome = await evaluate_deployment(db_session, ctx["deployment"])
     assert outcome.action in ("entered", "hold")  # must not raise
