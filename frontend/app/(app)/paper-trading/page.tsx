@@ -439,16 +439,19 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
           {deployment.open_position ? (
             <span className="font-financial">
               {deployment.open_position.quantity} @ {deployment.open_position.avg_entry_price.toFixed(2)}
-              {deployment.open_position.unrealized_pnl !== null && (
-                <span className={deployment.open_position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
-                  {" "}
-                  ({deployment.open_position.unrealized_pnl >= 0 ? "+" : ""}
-                  {deployment.open_position.unrealized_pnl.toFixed(2)})
-                </span>
-              )}
             </span>
           ) : (
             <span className="text-text-muted">flat</span>
+          )}
+        </Td>
+        <Td className="text-right font-financial">
+          {deployment.open_position && deployment.open_position.unrealized_pnl !== null ? (
+            <span className={deployment.open_position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
+              {deployment.open_position.unrealized_pnl >= 0 ? "+" : ""}
+              {deployment.open_position.unrealized_pnl.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
           )}
         </Td>
         <Td className="max-w-xs text-xs text-text-muted">
@@ -498,7 +501,7 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={7} className="p-0">
+          <td colSpan={8} className="p-0">
             <DeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -514,6 +517,7 @@ const DEPLOYMENT_TABLE_HEADERS = (
     <Th>Pool</Th>
     <Th>Status</Th>
     <Th>Position</Th>
+    <Th className="text-right">P&amp;L</Th>
     <Th>Last Signal</Th>
     <Th />
   </tr>

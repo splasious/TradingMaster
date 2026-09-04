@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Loader2, Trash2, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
@@ -89,10 +89,29 @@ function BacktestJobRow({ queued, isFocused, onSelect }: { queued: QueuedBacktes
   );
 }
 
-function HistoryRow({ job, isFocused, onSelect }: { job: BacktestJobOut; isFocused: boolean; onSelect: () => void }) {
+function HistoryRow({
+  job,
+  isFocused,
+  onSelect,
+  onDeleted,
+}: {
+  job: BacktestJobOut;
+  isFocused: boolean;
+  onSelect: () => void;
+  onDeleted: () => void;
+}) {
+  const queryClient = useQueryClient();
   const { data: instrument } = useInstrument(job.instrument_id);
   const completed = job.status === "completed";
   const { data: result } = useBacktestResult(job.id, completed);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/backtests/${job.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["backtests-for-strategy", job.strategy_id] });
+      onDeleted();
+    },
+  });
 
   return (
     <tr
@@ -121,11 +140,22 @@ function HistoryRow({ job, isFocused, onSelect }: { job: BacktestJobOut; isFocus
           <span className="text-text-muted">--</span>
         )}
       </Td>
+      <Td className="text-right" onClick={(e) => e.stopPropagation()}>
+        <Button
+          variant="ghost" size="sm"
+          onClick={() => deleteMutation.mutate()}
+          disabled={deleteMutation.isPending}
+          className="text-text-muted hover:text-negative"
+          title="Delete this backtest run"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </Td>
     </tr>
   );
 }
 
-function BacktestHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategyId: string; focusedJobId: string | null; onSelect: (jobId: string) => void }) {
+function BacktestHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategyId: string; focusedJobId: string | null; onSelect: (jobId: string | null) => void }) {
   const { data: jobs, isLoading } = useBacktestsForStrategy(strategyId);
 
   return (
@@ -147,11 +177,18 @@ function BacktestHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategy
                 <Th>Ran</Th>
                 <Th>Status</Th>
                 <Th className="text-right">Net Profit</Th>
+                <Th />
               </tr>
             </Thead>
             <Tbody>
               {jobs.map((j) => (
-                <HistoryRow key={j.id} job={j} isFocused={j.id === focusedJobId} onSelect={() => onSelect(j.id)} />
+                <HistoryRow
+                  key={j.id}
+                  job={j}
+                  isFocused={j.id === focusedJobId}
+                  onSelect={() => onSelect(j.id)}
+                  onDeleted={() => onSelect(j.id === focusedJobId ? null : focusedJobId)}
+                />
               ))}
             </Tbody>
           </Table>

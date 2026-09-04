@@ -273,3 +273,56 @@ async def test_backtest_fails_gracefully_with_insufficient_candles(client: Async
     job = (await client.get(f"/api/v1/backtests/{job_id}", headers=headers)).json()
     assert job["status"] == "failed"
     assert "at least 30" in job["error_message"]
+
+
+async def test_owner_can_delete_backtest_job(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Deletable Backtest Strategy", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    backtest_resp = await client.post(
+        "/api/v1/backtests", json={"strategy_id": strategy_id, "instrument_id": str(instrument.id)}, headers=headers
+    )
+    job_id = backtest_resp.json()["id"]
+
+    delete_resp = await client.delete(f"/api/v1/backtests/{job_id}", headers=headers)
+    assert delete_resp.status_code == 204
+
+    get_resp = await client.get(f"/api/v1/backtests/{job_id}", headers=headers)
+    assert get_resp.status_code == 404
+
+    list_resp = await client.get(f"/api/v1/backtests?strategy_id={strategy_id}", headers=headers)
+    assert job_id not in [j["id"] for j in list_resp.json()]
+
+
+async def test_non_owner_cannot_delete_backtest_job(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    instrument = await _seed_instrument_with_candles(db_session)
+    trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()
+    password = "TraderPassY1!"
+    other = User(email="tradery1@tradingmaster.internal", hashed_password=hash_password(password), full_name="Trader Y")
+    other.user_roles = [UserRole(role=trader_role)]
+    db_session.add(other)
+    await db_session.commit()
+
+    admin_token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Owned Not Deletable", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    strategy_id = strategy_resp.json()["id"]
+    backtest_resp = await client.post(
+        "/api/v1/backtests", json={"strategy_id": strategy_id, "instrument_id": str(instrument.id)},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    job_id = backtest_resp.json()["id"]
+
+    other_token = await _login(client, "tradery1@tradingmaster.internal", password)
+    delete_resp = await client.delete(f"/api/v1/backtests/{job_id}", headers={"Authorization": f"Bearer {other_token}"})
+    assert delete_resp.status_code == 403

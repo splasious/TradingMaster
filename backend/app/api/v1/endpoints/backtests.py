@@ -111,3 +111,21 @@ async def get_backtest_trades(job_id: str, db: AsyncSession = Depends(get_db), _
         select(BacktestTrade).where(BacktestTrade.job_id == uuid.UUID(job_id)).order_by(BacktestTrade.entry_ts)
     )
     return [BacktestTradeOut.model_validate(t, from_attributes=True) for t in result.scalars().all()]
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_backtest(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> None:
+    job = await db.get(BacktestJob, uuid.UUID(job_id))
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest job not found")
+
+    strategy = await db.get(Strategy, job.strategy_id)
+    if strategy is not None and strategy.owner_id != user.id and "administrator" not in user.role_names:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
+
+    await write_audit_log(
+        db, user_id=user.id, action="BACKTEST_DELETED", object_type="backtest_job", object_id=str(job.id),
+        previous_value={"strategy_id": str(job.strategy_id), "instrument_id": str(job.instrument_id)},
+    )
+    await db.delete(job)  # BacktestResult/BacktestTrade cascade via FK ondelete
+    await db.commit()
