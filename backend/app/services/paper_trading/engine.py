@@ -179,7 +179,13 @@ async def _try_enter(
     sizing = PositionSizing(**version.position_sizing)
     quantity = quantity_for(portfolio.cash, price, sizing)
     if quantity <= 0:
-        db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=0, price=price, status=OrderStatus.REJECTED.value, reason="Position sizing produced zero quantity"))
+        # Rejections are never persisted as orders -- the Orders/Trades UI
+        # is meant to reflect real activity only. The audit log is the
+        # compliance trail for every attempt, rejected or not.
+        await write_audit_log(
+            db, user_id=portfolio.user_id, action="PAPER_ORDER_REJECTED", object_type="paper_deployment",
+            object_id=str(deployment.id), new_value={"reason": "Position sizing produced zero quantity"},
+        )
         await db.commit()
         return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason="zero quantity")
 
@@ -205,29 +211,37 @@ async def _try_enter(
 
     if not decision.approved:
         rejection_message = decision.reason or "Order rejected by risk engine"
-        db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=quantity, price=price, status=OrderStatus.REJECTED.value, reason=decision.reason))
+        # Rejections are never persisted as orders -- see the zero-quantity
+        # branch above for why. The audit log still captures every attempt.
         await write_audit_log(
             db, user_id=portfolio.user_id, action="PAPER_ORDER_REJECTED", object_type="paper_deployment", object_id=str(deployment.id),
             new_value={"reason": decision.reason},
         )
-        recent_same_alert = (
-            await db.execute(
-                select(Alert.id)
-                .where(
-                    Alert.object_type == "paper_deployment",
-                    Alert.object_id == str(deployment.id),
-                    Alert.message == rejection_message,
-                    Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+        # "Max positions reached" is a routine, ongoing state while a
+        # deployment stays fully allocated -- never worth a user-facing
+        # alert on its own. Rarer, more actionable rejections (insufficient
+        # cash, daily loss limit breached) still alert, throttled to once
+        # per cooldown window so a persistent condition doesn't spam either.
+        is_capacity_rejection = rejection_message.startswith("Max open positions reached")
+        if not is_capacity_rejection:
+            recent_same_alert = (
+                await db.execute(
+                    select(Alert.id)
+                    .where(
+                        Alert.object_type == "paper_deployment",
+                        Alert.object_id == str(deployment.id),
+                        Alert.message == rejection_message,
+                        Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if recent_same_alert is None:
-            await create_alert(
-                db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.WARNING,
-                title="Paper order rejected", message=rejection_message,
-                object_type="paper_deployment", object_id=str(deployment.id),
-            )
+            ).scalar_one_or_none()
+            if recent_same_alert is None:
+                await create_alert(
+                    db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.WARNING,
+                    title="Paper order rejected", message=rejection_message,
+                    object_type="paper_deployment", object_id=str(deployment.id),
+                )
         await db.commit()
         return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
 

@@ -130,8 +130,10 @@ async def test_risk_engine_rejects_when_insufficient_cash(db_session: AsyncSessi
     position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one_or_none()
     assert position is None
 
-    order = (await db_session.execute(select(PaperOrder).where(PaperOrder.deployment_id == ctx["deployment"].id))).scalar_one()
-    assert order.status == "rejected"
+    # Rejections leave no order record -- Orders/Trades reflects real
+    # activity only; the audit log is the compliance trail for the attempt.
+    order = (await db_session.execute(select(PaperOrder).where(PaperOrder.deployment_id == ctx["deployment"].id))).scalar_one_or_none()
+    assert order is None
 
 
 async def test_python_strategy_evaluates_via_sandbox(db_session: AsyncSession):

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
+from app.models.audit import AuditLog
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.user import Role, User, UserRole
@@ -396,7 +397,12 @@ async def test_non_owner_cannot_start_or_stop_deployment(client: AsyncClient, se
     assert resp.status_code == 403
 
 
-async def test_rejected_order_visible_via_api(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+async def test_rejected_order_is_not_persisted_but_audit_logged(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    # Orders/Trades is meant to reflect real activity only -- a rejected
+    # entry attempt leaves no order record, just an audit-log entry (the
+    # compliance trail, not user-facing).
     instrument = await _seed_instrument(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
@@ -428,15 +434,17 @@ async def test_rejected_order_visible_via_api(client: AsyncClient, seeded_admin:
     assert "Max open positions" in eval_resp.json()["reason"]
 
     orders_resp = await client.get(f"/api/v1/paper-trading/orders?deployment_id={deployment_id}", headers=headers)
-    assert orders_resp.json()[0]["status"] == "rejected"
+    assert orders_resp.json() == []
+
+    audit_result = await db_session.execute(select(AuditLog).where(AuditLog.action == "PAPER_ORDER_REJECTED"))
+    assert audit_result.scalar_one_or_none() is not None
 
 
-async def test_repeated_rejection_does_not_spam_alerts(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
-    # A deployment stuck at its position cap gets re-evaluated every
-    # scheduler tick (10s) -- each attempt should still log a rejected
-    # order (real audit trail), but only the first should raise a
-    # user-facing alert; repeats within the cooldown are the same ongoing
-    # condition, not a new event worth notifying about again.
+async def test_max_position_rejection_never_alerts(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    # A deployment stuck at its position cap re-evaluates every scheduler
+    # tick (10s) for as long as it stays fully allocated -- that's routine,
+    # expected operation, never a user-facing alert, no matter how many
+    # times it repeats.
     instrument = await _seed_instrument(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
@@ -468,7 +476,54 @@ async def test_repeated_rejection_does_not_spam_alerts(client: AsyncClient, seed
         assert eval_resp.json()["action"] == "rejected"
 
     orders_resp = await client.get(f"/api/v1/paper-trading/orders?deployment_id={deployment_id}", headers=headers)
-    assert len(orders_resp.json()) == 3
+    assert orders_resp.json() == []
+
+    alerts_resp = await client.get("/api/v1/alerts", headers=headers)
+    rejection_alerts = [a for a in alerts_resp.json() if a["title"] == "Paper order rejected"]
+    assert len(rejection_alerts) == 0
+
+
+async def test_insufficient_cash_rejection_still_alerts_once_per_cooldown(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    # Unlike "max positions reached", insufficient cash is a rarer,
+    # genuinely actionable condition -- still worth a user-facing alert,
+    # just throttled to once per cooldown so a persistent shortfall
+    # doesn't spam on every 10s tick either.
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Oversized Position Strategy",
+            "version": {
+                "entry_rules": {"all": [{"field": "close", "operator": ">", "value": 0}]},
+                "exit_rules": {"all": [{"field": "close", "operator": "<", "value": 0}]},
+                "position_sizing": {"type": "fixed_quantity", "value": 1000000},
+                "risk_rules": {},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    for _ in range(3):
+        eval_resp = await client.post(f"/api/v1/paper-trading/deployments/{deployment_id}/evaluate", headers=headers)
+        assert eval_resp.json()["action"] == "rejected"
+        assert "Insufficient cash" in eval_resp.json()["reason"]
+
+    orders_resp = await client.get(f"/api/v1/paper-trading/orders?deployment_id={deployment_id}", headers=headers)
+    assert orders_resp.json() == []
 
     alerts_resp = await client.get("/api/v1/alerts", headers=headers)
     rejection_alerts = [a for a in alerts_resp.json() if a["title"] == "Paper order rejected"]

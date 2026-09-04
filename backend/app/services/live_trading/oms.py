@@ -232,6 +232,10 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
             db, user_id=deployment.owner_id, action="LIVE_ORDER_REJECTED", object_type="live_deployment",
             object_id=str(deployment.id), new_value={"reason": decision.reason},
         )
+        # "Max positions reached" is a routine, ongoing state while a
+        # deployment stays fully allocated -- never worth a user-facing
+        # alert on its own (see paper_trading/engine.py's identical logic).
+        is_capacity_rejection = rejection_message.startswith("Max open positions reached")
         recent_same_alert = (
             await db.execute(
                 select(Alert.id)
@@ -244,7 +248,7 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if recent_same_alert is None:
+        if not is_capacity_rejection and recent_same_alert is None:
             await create_alert(
                 db, user_id=deployment.owner_id, alert_type=AlertType.ORDER_REJECTED.value, severity=AlertSeverity.CRITICAL,
                 title="LIVE order rejected", message=rejection_message,
