@@ -1,3 +1,4 @@
+import asyncio
 import io
 
 import httpx
@@ -313,3 +314,60 @@ async def test_invalid_source_rejected(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.get("/api/v1/backfill-platform/sources/nasdaq/status", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400
+
+
+async def test_concurrent_jobs_for_a_brand_new_symbol_do_not_crash(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    """Reproduces the real production incident: selecting several
+    timeframes for one symbol fires one POST /jobs per timeframe in
+    parallel, and every one of them races to create the same brand-new
+    bf_symbols row. Before the ON CONFLICT DO NOTHING fix in
+    get_or_create_symbol, the loser of that race 500'd on a
+    UniqueViolationError instead of just reusing the winner's row."""
+    _patch_yahoo_ohlcv(monkeypatch, [])
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload_base = {"source": "yahoo", "symbol": "RACENEW", "display_name": "Race New Co"}
+    responses = await asyncio.gather(
+        *[
+            client.post("/api/v1/backfill-platform/jobs", json={**payload_base, "timeframe": tf}, headers=headers)
+            for tf in ["1d", "1wk", "1mo"]
+        ]
+    )
+    assert [r.status_code for r in responses] == [202, 202, 202]
+    assert len({r.json()["id"] for r in responses}) == 3  # three distinct jobs, one shared symbol
+
+
+async def test_zerodha_backfill_all_only_queues_watchlisted_symbols(client: AsyncClient, seeded_admin: dict):
+    """Kite's NSE instrument dump is the entire exchange (10,000+ rows) --
+    "Backfill All Tracked Symbols" for Zerodha must never queue that whole
+    catalog. It should queue exactly the symbols the user explicitly added
+    to a watchlist, and it must do so without ever calling out to Kite's
+    API (no broker connection needed to trigger a purely DB-scoped
+    action)."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    wl_resp = await client.post(
+        "/api/v1/backfill-platform/watchlists", json={"name": "My Zerodha Picks", "tags": []}, headers=headers
+    )
+    watchlist_id = wl_resp.json()["id"]
+    item_resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
+        json={"source": "zerodha", "symbol": "RELIANCE", "display_name": "Reliance Industries"},
+        headers=headers,
+    )
+    assert item_resp.status_code == 201
+
+    # No Kite account is connected in this test at all -- if backfill-all
+    # still tried to reach Kite's real API for the full catalog (the old
+    # behavior), this would 502 instead of the 202 asserted below.
+    resp = await client.post(
+        "/api/v1/backfill-platform/sources/zerodha/backfill-all", params={"timeframe": "1d"}, headers=headers
+    )
+    assert resp.status_code == 202
+    assert resp.json()["queued"] == 1
+
+    jobs_resp = await client.get("/api/v1/backfill-platform/jobs", params={"source": "zerodha"}, headers=headers)
+    symbols_queued = {j["symbol"] for j in jobs_resp.json()}
+    assert symbols_queued == {"RELIANCE"}
