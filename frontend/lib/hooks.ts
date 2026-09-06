@@ -483,16 +483,31 @@ const DELTA_CATEGORY_LABELS: Record<string, string> = {
   "Delta US Stocks (xStock/bStocks Tokens)": "US Stocks",
 };
 
-// One source of truth for the category filter dropdowns on Markets/Charts,
-// so they can't drift from the labels useDeltaCategoryMap actually assigns.
-export const DELTA_CATEGORY_OPTIONS = Object.values(DELTA_CATEGORY_LABELS);
+// Short badge labels for the curated NSE index-tier watchlists (built from
+// NSE's own official Nifty constituent lists), keyed by their exact Data
+// Backfill Platform watchlist name -- same pattern as the Delta categories
+// above, so selecting one narrows Markets/Charts to that basket's symbols.
+const NSE_CATEGORY_LABELS: Record<string, string> = {
+  "NSE Nifty 50 (Zerodha)": "Nifty 50",
+  "NSE Nifty Next 50 (Zerodha)": "Nifty Next 50",
+  "NSE Nifty 200 (Zerodha)": "Nifty 200",
+  "NSE Nifty 500 (Zerodha)": "Nifty 500",
+};
 
-/** Symbol -> short category label (e.g. "BTCUSD" -> "Metals"), derived from
- * live membership of the 4 curated Delta watchlists. Undefined while still
- * loading; a symbol with no entry belongs to none of the curated lists. */
-export function useDeltaCategoryMap(): Map<string, string> | undefined {
+// One source of truth for the category filter dropdowns on Markets/Charts,
+// so they can't drift from the labels useCategoryMap actually assigns.
+export const DELTA_CATEGORY_OPTIONS = Object.values(DELTA_CATEGORY_LABELS);
+export const NSE_CATEGORY_OPTIONS = Object.values(NSE_CATEGORY_LABELS);
+export const CATEGORY_OPTIONS = [...DELTA_CATEGORY_OPTIONS, ...NSE_CATEGORY_OPTIONS];
+
+/** Symbol -> short category label, derived from live membership of a set of
+ * curated Data Backfill Platform watchlists (matched by exact name) --
+ * shared implementation for both the Delta token categories and the NSE
+ * Nifty-tier categories, which differ only in which watchlists/source they
+ * read from. */
+function useWatchlistCategoryMap(labels: Record<string, string>, source: string): Map<string, string> | undefined {
   const { data: watchlists } = useBfWatchlists();
-  const categoryWatchlists = (watchlists ?? []).filter((w) => w.name in DELTA_CATEGORY_LABELS);
+  const categoryWatchlists = (watchlists ?? []).filter((w) => w.name in labels);
 
   const itemQueries = useQueries({
     queries: categoryWatchlists.map((w) => ({
@@ -505,12 +520,30 @@ export function useDeltaCategoryMap(): Map<string, string> | undefined {
 
   const map = new Map<string, string>();
   categoryWatchlists.forEach((w, idx) => {
-    const label = DELTA_CATEGORY_LABELS[w.name];
+    const label = labels[w.name];
     for (const item of itemQueries[idx]?.data ?? []) {
-      if (item.source === "delta") map.set(item.symbol, label);
+      if (item.source === source) map.set(item.symbol, label);
     }
   });
   return map;
+}
+
+export function useDeltaCategoryMap(): Map<string, string> | undefined {
+  return useWatchlistCategoryMap(DELTA_CATEGORY_LABELS, "delta");
+}
+
+export function useNseCategoryMap(): Map<string, string> | undefined {
+  return useWatchlistCategoryMap(NSE_CATEGORY_LABELS, "zerodha");
+}
+
+/** Combined Delta + NSE category map, for pages that offer one unified
+ * "All Categories" dropdown covering both. Delta and NSE symbols never
+ * overlap, so a plain merge is safe. */
+export function useCategoryMap(): Map<string, string> | undefined {
+  const delta = useDeltaCategoryMap();
+  const nse = useNseCategoryMap();
+  if (!delta || !nse) return undefined;
+  return new Map([...delta, ...nse]);
 }
 
 export function useBfTimeframes(source: BfSource) {

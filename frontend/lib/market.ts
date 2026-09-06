@@ -17,10 +17,12 @@ export function brokerForExchange(exchange: string): string {
   return "--";
 }
 
-// Looks up which curated Delta watchlist (Metals/DeFi/Meme/Smart Contract)
-// a symbol belongs to, via the live membership map from useDeltaCategoryMap.
-// null (not an "Other" catch-all) for anything not in one of those 4 lists
-// -- a badge that read "Other" on every uncategorized row was just noise.
-export function getDeltaCategory(symbol: string, categoryMap: Map<string, string> | undefined): string | null {
+// Looks up which curated watchlist category (Delta's Metals/DeFi/Meme/Smart
+// Contract/US Stocks, or NSE's Nifty 50/Next 50/200/500) a symbol belongs
+// to, via the live membership map from useCategoryMap/useDeltaCategoryMap/
+// useNseCategoryMap. null (not an "Other" catch-all) for anything not in
+// one of those curated lists -- a badge that read "Other" on every
+// uncategorized row was just noise.
+export function getCategory(symbol: string, categoryMap: Map<string, string> | undefined): string | null {
   return categoryMap?.get(symbol) ?? null;
 }

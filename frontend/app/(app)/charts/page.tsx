@@ -19,16 +19,16 @@ import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { syncChartTimeScales } from "@/lib/chart-sync";
 import {
-  DELTA_CATEGORY_OPTIONS,
+  CATEGORY_OPTIONS,
+  useCategoryMap,
   useChartCandles,
-  useDeltaCategoryMap,
   useIndicator,
   useIndicatorList,
   useInstrument,
   useInstruments,
   useResampleBase,
 } from "@/lib/hooks";
-import { brokerForExchange, getDeltaCategory, marketLabel } from "@/lib/market";
+import { brokerForExchange, getCategory, marketLabel } from "@/lib/market";
 import { TIMEFRAMES, type CatalogSyncItemOut, type IndicatorSpecOut, type InstrumentOut } from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
@@ -234,12 +234,12 @@ export default function ChartsPage() {
   // comfortably past any realistic catalog size instead of only the
   // alphabetically-first 200 across all exchanges combined.
   const { data: rawInstruments } = useInstruments(q, exchange || undefined, 2000);
-  const categoryMap = useDeltaCategoryMap();
+  const categoryMap = useCategoryMap();
   // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
   const instruments = useMemo(
     () =>
       rawInstruments?.filter(
-        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getDeltaCategory(i.symbol, categoryMap) === categoryFilter),
+        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getCategory(i.symbol, categoryMap) === categoryFilter),
       ),
     [rawInstruments, categoryFilter, categoryMap],
   );
@@ -364,13 +364,13 @@ export default function ChartsPage() {
           </Select>
           <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
             <option value="">All Categories</option>
-            {DELTA_CATEGORY_OPTIONS.map((c) => (
+            {CATEGORY_OPTIONS.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </Select>
           <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
             {instruments?.map((i) => {
-              const category = i.exchange === "DELTA" ? getDeltaCategory(i.symbol, categoryMap) : null;
+              const category = getCategory(i.symbol, categoryMap);
               return (
                 <button
                   key={i.id}

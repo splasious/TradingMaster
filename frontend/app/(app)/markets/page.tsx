@@ -11,8 +11,8 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
-import { DELTA_CATEGORY_OPTIONS, useDeltaCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
-import { getDeltaCategory, marketLabel } from "@/lib/market";
+import { CATEGORY_OPTIONS, useCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
+import { getCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
 import { useMarketDataSocket } from "@/lib/ws";
 
@@ -57,12 +57,12 @@ export default function MarketsPage() {
   // comfortably past any realistic catalog size instead of only the
   // alphabetically-first 200 across all exchanges combined.
   const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined, 2000);
-  const categoryMap = useDeltaCategoryMap();
+  const categoryMap = useCategoryMap();
   // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
   const instruments = useMemo(
     () =>
       rawInstruments?.filter(
-        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getDeltaCategory(i.symbol, categoryMap) === categoryFilter),
+        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getCategory(i.symbol, categoryMap) === categoryFilter),
       ),
     [rawInstruments, categoryFilter, categoryMap],
   );
@@ -152,7 +152,7 @@ export default function MarketsPage() {
         </Select>
         <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="w-40">
           <option value="">All Categories</option>
-          {DELTA_CATEGORY_OPTIONS.map((c) => (
+          {CATEGORY_OPTIONS.map((c) => (
             <option key={c} value={c}>{c}</option>
           ))}
         </Select>
@@ -188,7 +188,7 @@ export default function MarketsPage() {
                   const tick = prices[instrument.id];
                   const quote = quoteByInstrument.get(instrument.id);
                   const change = pctChange(instrument.id);
-                  const category = instrument.exchange === "DELTA" ? getDeltaCategory(instrument.symbol, categoryMap) : null;
+                  const category = getCategory(instrument.symbol, categoryMap);
                   return (
                     <tr key={instrument.id}>
                       <Td>
