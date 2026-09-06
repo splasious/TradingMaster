@@ -59,11 +59,23 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
         db.add(instrument)
         await db.flush()
         instrument_created = True
-    elif not instrument.is_active:
-        # This bridge only ever runs on a symbol the user explicitly chose
-        # to sync from their own watchlist -- re-activate it if it was
-        # previously deactivated (e.g. it predates a catalog cleanup).
-        instrument.is_active = True
+    else:
+        if not instrument.is_active:
+            # This bridge only ever runs on a symbol the user explicitly
+            # chose to sync from their own watchlist -- re-activate it if
+            # it was previously deactivated (e.g. it predates a catalog
+            # cleanup).
+            instrument.is_active = True
+        if instrument.data_source != data_source:
+            # An instrument created back when Yahoo was NSE's only source
+            # keeps data_source="yahoo_nse" forever unless updated here --
+            # even after Zerodha starts writing real candles into it, which
+            # left every such instrument permanently hidden from Markets/
+            # Charts (both filter out data_source=="yahoo_nse" app-wide,
+            # see market-data pages) despite having real current data.
+            # Zerodha is the live, unretired source for NSE now, so it
+            # takes over the label whenever it re-syncs an existing row.
+            instrument.data_source = data_source
 
     bars = (await db.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id))).scalars().all()
     if not bars:

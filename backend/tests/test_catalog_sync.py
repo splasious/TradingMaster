@@ -80,6 +80,33 @@ async def test_sync_symbol_reuses_existing_instrument(db_session: AsyncSession):
     assert result.instrument_id == str(existing.id)
 
 
+async def test_sync_symbol_updates_data_source_when_zerodha_takes_over_a_yahoo_instrument(db_session: AsyncSession):
+    """Regression test: an instrument created back when Yahoo was NSE's
+    only source kept data_source="yahoo_nse" forever, even once Zerodha
+    (the live, unretired source) started writing real candles into the
+    same row -- which left it permanently hidden from Markets/Charts
+    (both filter out data_source=="yahoo_nse" app-wide) despite having
+    real current data. Confirmed live: the entire Nifty 500 backfill
+    matched pre-existing Yahoo instruments and vanished from Markets."""
+    existing = Instrument(exchange="NSE", symbol="TAKEOVER", name="Old Yahoo Name", instrument_type="equity", data_source="yahoo_nse", external_ref="TAKEOVER")
+    db_session.add(existing)
+    await db_session.flush()
+
+    symbol = BfSymbol(source="zerodha", symbol="TAKEOVER", display_name="Takeover Co")
+    db_session.add(symbol)
+    await db_session.flush()
+    db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))
+    await db_session.commit()
+
+    result = await sync_symbol_to_catalog(db_session, symbol)
+    await db_session.commit()
+
+    assert result.instrument_created is False
+    assert result.instrument_id == str(existing.id)
+    await db_session.refresh(existing)
+    assert existing.data_source == "zerodha_kite"
+
+
 async def test_sync_symbol_rejects_unmapped_source(db_session: AsyncSession):
     """No real source is unmapped today (yahoo/delta/zerodha all bridge
     into the main catalog) -- this covers the guard itself against a
