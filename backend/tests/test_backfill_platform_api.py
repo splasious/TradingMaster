@@ -30,6 +30,21 @@ def _patch_yahoo_ohlcv(monkeypatch, bars):
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 
 
+def _patch_delta_ohlcv(monkeypatch, rows):
+    """rows: Delta's raw candle shape, e.g. {"time": <unix_ts>, "open":...,
+    "high":..., "low":..., "close":..., "volume":...}. Yahoo is retired
+    from backfill (see _BACKFILL_RETIRED_SOURCES), so tests exercising
+    generic job/watchlist mechanics use Delta as the live, unretired
+    stand-in source instead."""
+
+    async def fake_get(client_self, url, **kwargs):
+        if "delta.exchange" not in str(url):
+            return await _original_get(client_self, url, **kwargs)
+        return httpx.Response(200, json={"success": True, "result": rows}, request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+
 async def test_yahoo_status_reflects_real_reachability(client: AsyncClient, seeded_admin: dict, monkeypatch):
     async def fake_get(client_self, url, **kwargs):
         if str(url).endswith("/health"):
@@ -83,16 +98,16 @@ async def test_search_yahoo_symbols_filters_by_query(client: AsyncClient, seeded
 
 
 async def test_create_and_complete_backfill_job(client: AsyncClient, seeded_admin: dict, monkeypatch):
-    _patch_yahoo_ohlcv(monkeypatch, [
-        {"ts": "2024-01-01T00:00:00+00:00", "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "adj_close": 103.0, "volume": 1000},
-        {"ts": "2024-01-02T00:00:00+00:00", "open": 103.0, "high": 106.0, "low": 101.0, "close": 104.0, "adj_close": 104.0, "volume": 1200},
+    _patch_delta_ohlcv(monkeypatch, [
+        {"time": 1704067200, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000},
+        {"time": 1704153600, "open": 103.0, "high": 106.0, "low": 101.0, "close": 104.0, "volume": 1200},
     ])
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
 
     create_resp = await client.post(
         "/api/v1/backfill-platform/jobs",
-        json={"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries", "timeframe": "1d"},
+        json={"source": "delta", "symbol": "RELIANCE", "display_name": "Reliance Industries", "timeframe": "1d"},
         headers=headers,
     )
     assert create_resp.status_code == 202
@@ -107,7 +122,7 @@ async def test_create_and_complete_backfill_job(client: AsyncClient, seeded_admi
 
 async def test_backfill_job_surfaces_source_error(client: AsyncClient, seeded_admin: dict, monkeypatch):
     async def fake_get(client_self, url, **kwargs):
-        if "127.0.0.1:8800" in str(url):
+        if "delta.exchange" in str(url):
             raise httpx.ConnectError("refused")
         return await _original_get(client_self, url, **kwargs)
 
@@ -117,7 +132,7 @@ async def test_backfill_job_surfaces_source_error(client: AsyncClient, seeded_ad
 
     create_resp = await client.post(
         "/api/v1/backfill-platform/jobs",
-        json={"source": "yahoo", "symbol": "FAILCASE", "display_name": "Fail Case", "timeframe": "1d"},
+        json={"source": "delta", "symbol": "FAILCASE", "display_name": "Fail Case", "timeframe": "1d"},
         headers=headers,
     )
     job_id = create_resp.json()["id"]
@@ -283,19 +298,19 @@ async def test_completeness_marks_weekends_correctly_for_yahoo(client: AsyncClie
 
 
 async def test_export_symbol_xlsx_returns_real_workbook(client: AsyncClient, seeded_admin: dict, monkeypatch):
-    _patch_yahoo_ohlcv(monkeypatch, [
-        {"ts": "2024-01-01T00:00:00+00:00", "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "adj_close": 103.0, "volume": 1000},
+    _patch_delta_ohlcv(monkeypatch, [
+        {"time": 1704067200, "open": 100.0, "high": 105.0, "low": 99.0, "close": 103.0, "volume": 1000},
     ])
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
     create_resp = await client.post(
         "/api/v1/backfill-platform/jobs",
-        json={"source": "yahoo", "symbol": "XLSXTEST", "display_name": "Xlsx Test", "timeframe": "1d"},
+        json={"source": "delta", "symbol": "XLSXTEST", "display_name": "Xlsx Test", "timeframe": "1d"},
         headers=headers,
     )
     assert create_resp.json()
 
-    resp = await client.get("/api/v1/backfill-platform/export/symbol.xlsx", params={"source": "yahoo", "symbol": "XLSXTEST", "timeframe": "1d"}, headers=headers)
+    resp = await client.get("/api/v1/backfill-platform/export/symbol.xlsx", params={"source": "delta", "symbol": "XLSXTEST", "timeframe": "1d"}, headers=headers)
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/vnd.openxmlformats")
     assert resp.content[:2] == b"PK"  # xlsx is a real zip archive
@@ -323,15 +338,15 @@ async def test_concurrent_jobs_for_a_brand_new_symbol_do_not_crash(client: Async
     bf_symbols row. Before the ON CONFLICT DO NOTHING fix in
     get_or_create_symbol, the loser of that race 500'd on a
     UniqueViolationError instead of just reusing the winner's row."""
-    _patch_yahoo_ohlcv(monkeypatch, [])
+    _patch_delta_ohlcv(monkeypatch, [])
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
 
-    payload_base = {"source": "yahoo", "symbol": "RACENEW", "display_name": "Race New Co"}
+    payload_base = {"source": "delta", "symbol": "RACENEW", "display_name": "Race New Co"}
     responses = await asyncio.gather(
         *[
             client.post("/api/v1/backfill-platform/jobs", json={**payload_base, "timeframe": tf}, headers=headers)
-            for tf in ["1d", "1wk", "1mo"]
+            for tf in ["1d", "15m", "60m"]
         ]
     )
     assert [r.status_code for r in responses] == [202, 202, 202]
@@ -341,7 +356,7 @@ async def test_concurrent_jobs_for_a_brand_new_symbol_do_not_crash(client: Async
 async def test_watchlist_backfill_scoped_to_selected_item_ids(client: AsyncClient, seeded_admin: dict, monkeypatch):
     """The checkbox-select UI passes item_ids to run the watchlist backfill
     on just the checked symbols instead of every item."""
-    _patch_yahoo_ohlcv(monkeypatch, [])
+    _patch_delta_ohlcv(monkeypatch, [])
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -349,11 +364,11 @@ async def test_watchlist_backfill_scoped_to_selected_item_ids(client: AsyncClien
     watchlist_id = wl_resp.json()["id"]
     item1 = await client.post(
         f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
-        json={"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"}, headers=headers,
+        json={"source": "delta", "symbol": "RELIANCE", "display_name": "Reliance Industries"}, headers=headers,
     )
     await client.post(
         f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
-        json={"source": "yahoo", "symbol": "TCS", "display_name": "Tata Consultancy Services"}, headers=headers,
+        json={"source": "delta", "symbol": "TCS", "display_name": "Tata Consultancy Services"}, headers=headers,
     )
 
     resp = await client.post(
@@ -383,6 +398,27 @@ async def test_watchlist_backfill_skips_timeframe_unsupported_by_source(client: 
 
     resp = await client.post(
         f"/api/v1/backfill-platform/watchlists/{watchlist_id}/backfill", params={"timeframe": "1mo"}, headers=headers,
+    )
+    assert resp.status_code == 202
+    assert resp.json() == []
+
+
+async def test_watchlist_backfill_skips_retired_yahoo_items(client: AsyncClient, seeded_admin: dict):
+    """A watchlist item left over from before Yahoo was retired must be
+    silently skipped, not re-trigger a pull into the shared Instrument row
+    Zerodha now owns."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    wl_resp = await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Legacy Yahoo", "tags": []}, headers=headers)
+    watchlist_id = wl_resp.json()["id"]
+    await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/items",
+        json={"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries"}, headers=headers,
+    )
+
+    resp = await client.post(
+        f"/api/v1/backfill-platform/watchlists/{watchlist_id}/backfill", params={"timeframe": "1d"}, headers=headers,
     )
     assert resp.status_code == 202
     assert resp.json() == []

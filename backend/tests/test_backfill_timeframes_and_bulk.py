@@ -74,26 +74,26 @@ async def test_resampled_candles_derive_weekly_from_stored_daily_bars(client: As
 
 async def test_bulk_backfill_queues_a_job_per_symbol(client: AsyncClient, seeded_admin: dict, monkeypatch):
     async def fake_get(client_self, url, **kwargs):
-        if "127.0.0.1:8800" in str(url) and str(url).endswith("/symbols"):
-            return httpx.Response(200, json=[
-                {"nse_code": "RELIANCE", "yahoo_ticker": "RELIANCE.NS", "name": "Reliance Industries", "is_active": True},
-                {"nse_code": "TCS", "yahoo_ticker": "TCS.NS", "name": "Tata Consultancy", "is_active": True},
-            ], request=httpx.Request("GET", str(url)))
-        if "127.0.0.1:8800" in str(url) and str(url).endswith("/ohlcv"):
-            return httpx.Response(200, json=[], request=httpx.Request("GET", str(url)))
-        return await _original_get(client_self, url, **kwargs)
+        if "delta.exchange" not in str(url):
+            return await _original_get(client_self, url, **kwargs)
+        if str(url).endswith("/v2/products"):
+            return httpx.Response(200, json={"success": True, "result": [
+                {"symbol": "NVDAXUSD", "description": "NVIDIA xStock Token"},
+                {"symbol": "PLTRXUSD", "description": "Palantir Technologies xStock Token"},
+            ]}, request=httpx.Request("GET", str(url)))
+        return httpx.Response(200, json={"success": True, "result": []}, request=httpx.Request("GET", str(url)))
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.post(
-        "/api/v1/backfill-platform/sources/yahoo/backfill-all",
+        "/api/v1/backfill-platform/sources/delta/backfill-all",
         params={"timeframe": "1d"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 202
     assert resp.json()["queued"] == 2
 
-    jobs_resp = await client.get("/api/v1/backfill-platform/jobs?source=yahoo", headers={"Authorization": f"Bearer {token}"})
+    jobs_resp = await client.get("/api/v1/backfill-platform/jobs?source=delta", headers={"Authorization": f"Bearer {token}"})
     assert len(jobs_resp.json()) == 2
 
 
@@ -111,8 +111,29 @@ async def test_bulk_backfill_requires_administrator(client: AsyncClient, seeded_
 
     login_resp = await client.post("/api/v1/auth/login", json={"email": "trader_bulk@tradingmaster.internal", "password": "TraderPass123!"})
     token = login_resp.json()["access_token"]
-    resp = await client.post("/api/v1/backfill-platform/sources/yahoo/backfill-all", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.post("/api/v1/backfill-platform/sources/delta/backfill-all", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
+
+
+async def test_bulk_backfill_rejects_retired_yahoo_source(client: AsyncClient, seeded_admin: dict):
+    """Yahoo's NSE coverage is retired now that Zerodha backfills the same
+    instruments -- bulk-all must reject it outright rather than re-pulling
+    into the same shared Instrument row Zerodha now owns."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.post("/api/v1/backfill-platform/sources/yahoo/backfill-all", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 400
+    assert "retired" in resp.json()["detail"].lower()
+
+
+async def test_single_job_creation_rejects_retired_yahoo_source(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.post(
+        "/api/v1/backfill-platform/jobs",
+        json={"source": "yahoo", "symbol": "RELIANCE", "display_name": "Reliance Industries", "timeframe": "1d"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "retired" in resp.json()["detail"].lower()
 
 
 async def test_live_sync_status_endpoint(client: AsyncClient, seeded_admin: dict):

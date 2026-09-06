@@ -58,11 +58,28 @@ from app.services.market_data.resample import resample_candles
 router = APIRouter()
 
 _VALID_SOURCES = ("yahoo", "delta", "zerodha")
+# Yahoo's NSE coverage is retired now that Zerodha backfills the same
+# instruments with a real broker-grade source -- kept in _VALID_SOURCES so
+# already-backfilled Yahoo data, watchlists, and exports still work, but no
+# new backfill can be queued against it. Without this, a stray "Backfill
+# All" or an old watchlist item could re-trigger a Yahoo pull that lands in
+# the exact same shared Instrument row Zerodha now owns, mixing two
+# differently-lagged sources into one candle series.
+_BACKFILL_RETIRED_SOURCES = frozenset({"yahoo"})
 
 
 def _check_source(source: str) -> None:
     if source not in _VALID_SOURCES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"source must be one of {_VALID_SOURCES}")
+
+
+def _check_backfill_allowed(source: str) -> None:
+    _check_source(source)
+    if source in _BACKFILL_RETIRED_SOURCES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Yahoo Finance backfill is retired -- NSE data now comes from Zerodha to avoid two sources writing the same instrument's candles.",
+        )
 
 
 # ---------------------------------------------------------------- status --
@@ -111,11 +128,11 @@ async def backfill_all_for_source(
     start_date: date | None = Query(None), end_date: date | None = Query(None),
     db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator")),
 ) -> BulkBackfillResult:
-    """Pulls the entire tracked universe for a source -- all ~750
-    nse-yahoo-data NSE symbols, or all of Delta's RWA tokens -- queuing one
-    background job per symbol rather than blocking the request on however
-    long hundreds of real network calls take."""
-    _check_source(source)
+    """Pulls the entire tracked universe for a source -- Kite's full NSE
+    instrument list, or all of Delta's RWA tokens -- queuing one background
+    job per symbol rather than blocking the request on however long
+    hundreds of real network calls take."""
+    _check_backfill_allowed(source)
     try:
         all_symbols = await symbols_service.list_all_symbols(db, source, user.id)
     except MarketDataSourceError as exc:
@@ -205,7 +222,7 @@ async def create_backfill_job(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> BfBackfillJobOut:
-    _check_source(payload.source)
+    _check_backfill_allowed(payload.source)
     symbol = await symbols_service.get_or_create_symbol(db, payload.source, payload.symbol, payload.display_name)
 
     job = BfBackfillJob(
@@ -553,7 +570,9 @@ async def backfill_watchlist(
     Silently skips any item whose source doesn't natively support the
     requested timeframe (e.g. Zerodha has no native 1wk/1mo candle) rather
     than queuing a job that's guaranteed to fail against that source's
-    real API."""
+    real API, and any item on a retired source (Yahoo -- see
+    _BACKFILL_RETIRED_SOURCES) rather than re-triggering a pull that would
+    write into the same shared instrument Zerodha now owns."""
     wl = await _load_owned_watchlist(db, watchlist_id, user)
     stmt = select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id)
     if payload and payload.item_ids:
@@ -564,6 +583,8 @@ async def backfill_watchlist(
     for item in items:
         symbol = await db.get(BfSymbol, item.symbol_id)
         if symbol is None:
+            continue
+        if symbol.source in _BACKFILL_RETIRED_SOURCES:
             continue
         native_timeframes = {o.value for o in timeframes_for_source(symbol.source) if o.native}
         if timeframe not in native_timeframes:

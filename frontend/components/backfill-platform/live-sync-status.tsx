@@ -28,9 +28,7 @@ export function LiveSyncStatus() {
           )}
           {status.last_error && <span className="text-negative"> -- last error: {status.last_error}</span>}
         </span>
-        <span className="ml-auto text-text-muted">
-          Delta polled every 60s always; NSE/Yahoo polled only during market hours (09:15-15:30 IST, weekdays).
-        </span>
+        <span className="ml-auto text-text-muted">Delta polled every 60s. Yahoo is retired -- NSE now backfills from Zerodha.</span>
       </div>
 
       {catalogStatus && (

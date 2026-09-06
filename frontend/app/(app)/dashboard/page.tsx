@@ -13,7 +13,6 @@ import { cn } from "@/lib/utils";
 const COMPONENT_LABELS: Record<string, string> = {
   database: "Database",
   broker_engine: "Broker Engine",
-  market_data_yahoo_nse: "Market Data: NSE (Yahoo)",
   market_data_delta: "Market Data: Delta Exchange",
 };
 
