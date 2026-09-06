@@ -265,6 +265,13 @@ class ZerodhaKiteBroker(BrokerInterface):
         instruments = await self.get_instruments()
         match = next((row for row in instruments if row.get("tradingsymbol") == symbol), None)
         if match is None:
+            # NSE periodically moves a stock into its "BE" (trade-to-trade)
+            # settlement series for surveillance reasons -- Kite then lists
+            # it under "<SYMBOL>-BE" rather than the plain tradingsymbol.
+            # Confirmed live: HEG and HFCL, both real, actively-traded NSE
+            # equities, only appear in Kite's dump as "HEG-BE"/"HFCL-BE".
+            match = next((row for row in instruments if row.get("tradingsymbol") == f"{symbol}-BE"), None)
+        if match is None:
             raise KiteAPIError(f"'{symbol}' not found in Kite's NSE instrument list")
         token = match["instrument_token"]
 

@@ -226,6 +226,34 @@ async def test_get_historical_data_raises_for_unknown_symbol(monkeypatch):
         await broker.get_historical_data("NOTAREALSYMBOL", "1d", datetime.now(timezone.utc), datetime.now(timezone.utc))
 
 
+async def test_get_historical_data_falls_back_to_be_series_suffix(monkeypatch):
+    """Confirmed live in production: NSE periodically moves a stock into
+    its "BE" (trade-to-trade) settlement series, and Kite then lists it
+    only as "<SYMBOL>-BE" -- HEG and HFCL, both real actively-traded NSE
+    equities, failed every backfill with "not found" until this fallback,
+    even though they're legitimately listed."""
+    csv_body = "instrument_token,tradingsymbol,name,exchange\n999111,HEG-BE,HEG LTD,NSE\n"
+
+    async def fake_get(self, url, headers=None):
+        return httpx.Response(200, content=csv_body.encode(), request=httpx.Request("GET", url))
+
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        assert url == "https://api.kite.trade/instruments/historical/999111/day"
+        return _mock_response(200, {"status": "success", "data": {"candles": [
+            ["2024-01-01T00:00:00+0530", 100.0, 105.0, 99.0, 103.0, 10000],
+        ]}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    from datetime import datetime, timezone
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    bars = await broker.get_historical_data("HEG", "1d", datetime.now(timezone.utc), datetime.now(timezone.utc))
+    assert len(bars) == 1
+
+
 async def test_get_instruments_parses_csv_response(monkeypatch):
     csv_body = "instrument_token,tradingsymbol,name,exchange\n408065,INFY,INFOSYS,NSE\n"
 
