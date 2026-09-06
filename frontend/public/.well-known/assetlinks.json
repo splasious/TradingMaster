@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "online.tradingmaster.twa",
+      "sha256_cert_fingerprints": [
+        "97:51:00:01:EB:B2:41:DE:F3:BC:9E:37:AA:C1:49:00:4F:96:1C:D2:63:DA:27:A5:2C:03:1E:79:6F:71:97:A6"
+      ]
+    }
+  }
+]
