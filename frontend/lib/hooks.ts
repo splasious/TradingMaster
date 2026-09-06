@@ -504,7 +504,15 @@ export const CATEGORY_OPTIONS = [...DELTA_CATEGORY_OPTIONS, ...NSE_CATEGORY_OPTI
  * curated Data Backfill Platform watchlists (matched by exact name) --
  * shared implementation for both the Delta token categories and the NSE
  * Nifty-tier categories, which differ only in which watchlists/source they
- * read from. */
+ * read from.
+ *
+ * Returns undefined (not a partial map) until every watchlist's items have
+ * actually loaded -- returning early with whatever's resolved so far looks
+ * identical to "this symbol belongs to no category" to every caller (a
+ * plain Map has no isLoading flag), which made selecting a category filter
+ * right as the page loads show a false "no instruments match" until each
+ * item fetch happened to finish, rather than genuinely reflecting "not
+ * ready yet." */
 function useWatchlistCategoryMap(labels: Record<string, string>, source: string): Map<string, string> | undefined {
   const { data: watchlists } = useBfWatchlists();
   const categoryWatchlists = (watchlists ?? []).filter((w) => w.name in labels);
@@ -517,6 +525,7 @@ function useWatchlistCategoryMap(labels: Record<string, string>, source: string)
   });
 
   if (!watchlists) return undefined;
+  if (itemQueries.some((q) => q.data === undefined)) return undefined;
 
   const map = new Map<string, string>();
   categoryWatchlists.forEach((w, idx) => {

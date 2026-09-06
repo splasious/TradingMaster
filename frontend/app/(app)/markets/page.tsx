@@ -62,7 +62,11 @@ export default function MarketsPage() {
   const instruments = useMemo(
     () =>
       rawInstruments?.filter(
-        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || getCategory(i.symbol, categoryMap) === categoryFilter),
+        // categoryMap is undefined while its underlying watchlist-item
+        // fetches are still in flight -- don't apply the filter yet in
+        // that window (would otherwise show a false "no instruments
+        // match" for every symbol until the map finishes loading).
+        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || !categoryMap || getCategory(i.symbol, categoryMap) === categoryFilter),
       ),
     [rawInstruments, categoryFilter, categoryMap],
   );
