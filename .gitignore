@@ -35,3 +35,10 @@ frontend/*.log
 packaging/build/
 packaging/dist/
 packaging/installer_output/
+
+# Android APK wrapper (Bubblewrap TWA project): the generated Gradle
+# project, build output, and -- critically -- the release signing
+# keystore and its passwords. Never commit a signing key to source
+# control; keep android-app/output/ (the APK) and the keystore backed up
+# separately and securely instead.
+android-app/
