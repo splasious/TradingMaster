@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
 import { AuthProvider } from "@/lib/auth-context";
@@ -20,6 +20,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "TradingMaster",
   description: "Institutional-grade multi-strategy trading platform",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0a0e17",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
