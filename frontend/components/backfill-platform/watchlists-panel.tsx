@@ -28,6 +28,7 @@ import type {
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
   yahoo_nse: "yahoo",
   delta_exchange: "delta",
+  zerodha_kite: "zerodha",
 };
 
 /** Merges each source's own native timeframe set (they genuinely differ --
@@ -255,9 +256,9 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
                   <Td><input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleItem(item.id)} aria-label={`Select ${item.symbol}`} /></Td>
                   <Td className="capitalize">{item.source}</Td>
                   <Td className="font-medium">
-                    {item.source === "yahoo" || item.source === "delta" ? (
+                    {item.source === "yahoo" || item.source === "delta" || item.source === "zerodha" ? (
                       <Link
-                        href={`/charts?symbol=${encodeURIComponent(item.symbol)}&exchange=${item.source === "yahoo" ? "NSE" : "DELTA"}`}
+                        href={`/charts?symbol=${encodeURIComponent(item.symbol)}&exchange=${item.source === "delta" ? "DELTA" : "NSE"}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-active underline underline-offset-2 hover:opacity-80"

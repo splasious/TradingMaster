@@ -34,6 +34,7 @@ import { TIMEFRAMES, type CatalogSyncItemOut, type IndicatorSpecOut, type Instru
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
   yahoo_nse: "yahoo",
   delta_exchange: "delta",
+  zerodha_kite: "zerodha",
 };
 
 interface ActiveIndicator {
