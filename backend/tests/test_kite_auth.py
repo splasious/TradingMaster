@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import encrypt_payload
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.services.backfill_platform.kite_auth import get_authenticated_kite_broker
+from app.services.backfill_platform.status import zerodha_status
 from app.services.broker.zerodha_broker import KiteAPIError
 
 _original_request = httpx.AsyncClient.request
@@ -80,3 +81,22 @@ async def test_falls_back_to_most_recent_when_none_connected(db_session: AsyncSe
 async def test_raises_when_no_account_connected(db_session: AsyncSession, seeded_admin):
     with pytest.raises(KiteAPIError, match="No Zerodha Kite account connected"):
         await get_authenticated_kite_broker(db_session, uuid.uuid4())
+
+
+async def test_status_reflects_connected_account_not_an_older_broken_one(db_session: AsyncSession, seeded_admin):
+    """Same bug, different call site: zerodha_status() had the identical
+    unordered .first() as get_authenticated_kite_broker, so the "Zerodha
+    Kite" status card on the Data Backfill Platform kept showing an old
+    account's "Disconnected"/TokenException from days earlier even while
+    the real, currently-connected account (reconnected minutes before) was
+    healthy -- confirmed live, right after the get_authenticated_kite_broker
+    fix already shipped, so this was a separate lingering instance of the
+    same class of bug."""
+    user_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    await _kite_account(db_session, user_id=user_id, status=ConnectionStatus.ERROR.value, access_token="dead_token", created_at=now - timedelta(days=2))
+    await _kite_account(db_session, user_id=user_id, status=ConnectionStatus.CONNECTED.value, access_token="fresh_token", created_at=now)
+
+    result = await zerodha_status(db_session, user_id)
+    assert result.connected is True
+    assert result.detail == "Connected"

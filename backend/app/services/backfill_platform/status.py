@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models.broker import Broker, BrokerAccount, BrokerConnection
+from app.models.broker import Broker, BrokerAccount, BrokerConnection, ConnectionStatus
 
 # Kite sessions expire daily at a fixed time, but the exact expiry instant
 # isn't returned anywhere in the session response -- this is the documented
@@ -57,12 +57,24 @@ async def delta_status() -> SourceStatus:
 
 
 async def zerodha_status(db: AsyncSession, user_id) -> SourceStatus:
+    # A user can end up with more than one zerodha_kite BrokerAccount (e.g.
+    # reconnecting via "Connect Broker" instead of "Login with Zerodha" on
+    # the existing one after the daily session expired) -- same ordering
+    # fix as get_authenticated_kite_broker (kite_auth.py): without it, this
+    # picked whichever row Postgres scanned first, which in practice was a
+    # stale/broken account from days earlier, showing "Disconnected" with
+    # its old error even while the real, currently-connected account was
+    # healthy seconds ago.
     row = (
         await db.execute(
             select(BrokerConnection)
             .join(BrokerAccount, BrokerAccount.id == BrokerConnection.broker_account_id)
             .join(Broker, Broker.id == BrokerAccount.broker_id)
             .where(BrokerAccount.user_id == user_id, Broker.code == "zerodha_kite")
+            .order_by(
+                case((BrokerConnection.status == ConnectionStatus.CONNECTED.value, 0), else_=1),
+                BrokerAccount.created_at.desc(),
+            )
         )
     ).scalars().first()
 
