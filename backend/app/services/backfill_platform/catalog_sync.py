@@ -18,13 +18,14 @@ from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 
-_SOURCE_TO_EXCHANGE = {"yahoo": "NSE", "delta": "DELTA"}
-_SOURCE_TO_DATA_SOURCE = {"yahoo": "yahoo_nse", "delta": "delta_exchange"}
+_SOURCE_TO_EXCHANGE = {"yahoo": "NSE", "delta": "DELTA", "zerodha": "NSE"}
+_SOURCE_TO_DATA_SOURCE = {"yahoo": "yahoo_nse", "delta": "delta_exchange", "zerodha": "zerodha_kite"}
 
 
 class CatalogSyncError(Exception):
-    """Raised when a bf_symbol's source has no main-catalog mapping (e.g.
-    Zerodha isn't synced into the main Instrument catalog today)."""
+    """Raised when a bf_symbol's source has no main-catalog mapping. Every
+    real source (yahoo/delta/zerodha) has one; this now only fires for a
+    source added to _VALID_SOURCES without a matching entry here."""
 
 
 @dataclass

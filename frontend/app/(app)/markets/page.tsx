@@ -52,7 +52,11 @@ export default function MarketsPage() {
   const [q, setQ] = useState("");
   const [exchange, setExchange] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
-  const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined);
+  // Default backend limit (200) undercuts the full catalog now that NSE
+  // alone can carry hundreds of Zerodha-backfilled symbols -- request
+  // comfortably past any realistic catalog size instead of only the
+  // alphabetically-first 200 across all exchanges combined.
+  const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined, 2000);
   const categoryMap = useDeltaCategoryMap();
   // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
   const instruments = useMemo(

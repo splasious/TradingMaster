@@ -229,7 +229,11 @@ export default function ChartsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot default seeding once the registry loads, guarded by the ref above
   }, [indicatorList]);
 
-  const { data: rawInstruments } = useInstruments(q, exchange || undefined);
+  // Default backend limit (200) undercuts the full catalog now that NSE
+  // alone can carry hundreds of Zerodha-backfilled symbols -- request
+  // comfortably past any realistic catalog size instead of only the
+  // alphabetically-first 200 across all exchanges combined.
+  const { data: rawInstruments } = useInstruments(q, exchange || undefined, 2000);
   const categoryMap = useDeltaCategoryMap();
   // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
   const instruments = useMemo(

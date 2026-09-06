@@ -79,8 +79,10 @@ class CatalogSyncScheduler:
                     synced_symbols += 1
                     synced_bars += result.bars_synced
                 except CatalogSyncError:
-                    # No main-catalog mapping for this source (e.g. Zerodha) --
-                    # mark synced anyway so it isn't retried every tick.
+                    # No main-catalog mapping for this source -- every real
+                    # source has one today, so this only fires for a source
+                    # added to _VALID_SOURCES without a matching catalog_sync
+                    # entry. Mark synced anyway so it isn't retried every tick.
                     pass
                 symbol.last_synced_at = now
             await db.commit()

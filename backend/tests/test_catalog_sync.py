@@ -81,7 +81,11 @@ async def test_sync_symbol_reuses_existing_instrument(db_session: AsyncSession):
 
 
 async def test_sync_symbol_rejects_unmapped_source(db_session: AsyncSession):
-    symbol = BfSymbol(source="zerodha", symbol="NOTMAPPED", display_name="Not Mapped")
+    """No real source is unmapped today (yahoo/delta/zerodha all bridge
+    into the main catalog) -- this covers the guard itself against a
+    made-up source name rather than asserting on one that's since been
+    given a real mapping."""
+    symbol = BfSymbol(source="bogus", symbol="NOTMAPPED", display_name="Not Mapped")
     db_session.add(symbol)
     await db_session.commit()
 
@@ -90,6 +94,28 @@ async def test_sync_symbol_rejects_unmapped_source(db_session: AsyncSession):
         assert False, "expected CatalogSyncError"
     except CatalogSyncError:
         pass
+
+
+async def test_sync_symbol_maps_zerodha_to_nse_catalog(db_session: AsyncSession):
+    """Regression test: Zerodha-backfilled symbols must actually reach
+    Markets/Charts/Strategy Builder -- CatalogSyncScheduler already ran
+    continuously for every source, but zerodha had no catalog_sync mapping
+    so every one of its symbols silently failed this step forever."""
+    symbol = BfSymbol(source="zerodha", symbol="ZKATALOG", display_name="Zerodha Catalog Co")
+    db_session.add(symbol)
+    await db_session.flush()
+    db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))
+    await db_session.commit()
+
+    result = await sync_symbol_to_catalog(db_session, symbol)
+    await db_session.commit()
+
+    assert result.instrument_created is True
+    assert result.bars_synced == 1
+
+    instrument = (await db_session.execute(select(Instrument).where(Instrument.symbol == "ZKATALOG"))).scalar_one()
+    assert instrument.exchange == "NSE"
+    assert instrument.data_source == "zerodha_kite"
 
 
 async def test_sync_single_symbol_endpoint(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
