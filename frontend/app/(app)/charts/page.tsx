@@ -359,7 +359,8 @@ export default function ChartsPage() {
           <Input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
           <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
             <option value="">All Markets</option>
-            <option value="DELTA">Delta Markets</option>
+            <option value="NSE">{marketLabel("NSE")}</option>
+            <option value="DELTA">{marketLabel("DELTA")}</option>
           </Select>
           <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
             <option value="">All Categories</option>

@@ -147,7 +147,8 @@ export default function MarketsPage() {
         <Input placeholder="Search symbol or name..." value={q} onChange={(e) => setQ(e.target.value)} className="max-w-xs" />
         <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-40">
           <option value="">All Markets</option>
-          <option value="DELTA">Delta Markets</option>
+          <option value="NSE">{marketLabel("NSE")}</option>
+          <option value="DELTA">{marketLabel("DELTA")}</option>
         </Select>
         <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="w-40">
           <option value="">All Categories</option>
