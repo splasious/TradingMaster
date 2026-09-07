@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.paper_trading import ranking as ranking_module
-from app.services.paper_trading.ranking import RANK_LOOKBACK_BARS, get_universe_ranks
+from app.services.paper_trading.ranking import RANK_LOOKBACK_BARS, basket_breadth, get_universe_ranks
 
 
 async def _make_instrument(db_session: AsyncSession, symbol: str, closes: list[float]) -> Instrument:
@@ -58,6 +58,34 @@ async def test_insufficient_history_excludes_instrument_from_ranking(db_session:
     assert enough.id in ranks
     assert too_few.id not in ranks
     assert ranks[enough.id]["total"] == 1
+
+
+async def test_basket_breadth_counts_advancers_and_decliners(db_session: AsyncSession):
+    ranking_module._cache.clear()
+    n = RANK_LOOKBACK_BARS + 1
+    up_a = await _make_instrument(db_session, "UPAUSD", [100 + i for i in range(n)])
+    up_b = await _make_instrument(db_session, "UPBUSD", [100 + i * 2 for i in range(n)])
+    down = await _make_instrument(db_session, "DOWNUSD", [100 - i for i in range(n)])
+    flat = await _make_instrument(db_session, "FLATBUSD", [100.0] * n)
+
+    ranks = await get_universe_ranks(db_session, uuid.uuid4(), [up_a.id, up_b.id, down.id, flat.id], "1d", top_n=5)
+    breadth = basket_breadth(ranks)
+
+    assert breadth["advancers"] == 2
+    assert breadth["decliners"] == 1
+    assert breadth["advance_decline_ratio"] == 2.0
+
+
+async def test_basket_breadth_all_advancing_avoids_division_by_zero():
+    ranks = {uuid.uuid4(): {"score": 5.0}, uuid.uuid4(): {"score": 3.0}}
+    breadth = basket_breadth(ranks)
+    assert breadth["decliners"] == 0
+    assert breadth["advance_decline_ratio"] == 2.0  # falls back to advancer count, not a crash
+
+
+async def test_basket_breadth_empty_basket_is_neutral():
+    breadth = basket_breadth({})
+    assert breadth == {"advancers": 0, "decliners": 0, "advance_decline_ratio": 1.0}
 
 
 async def test_result_is_cached_within_ttl(db_session: AsyncSession, monkeypatch):

@@ -275,6 +275,86 @@ async def test_basket_strategy_injects_rank_params_into_sandbox(db_session: Asyn
     assert weak_outcome.action == "hold"
 
 
+async def test_basket_strategy_injects_advance_decline_ratio_into_sandbox(db_session: AsyncSession):
+    """Basket-wide breadth (advancers/decliners among the strategy's own
+    instrument_ids) reaches every deployment's sandbox call as the same
+    shared value, unlike rank/in_top_n which differ per instrument -- this
+    is the real, computable substitute for a PCR-style basket sentiment
+    gauge on instruments (Delta's RWA tokens) that have no options market
+    to derive an actual put/call ratio from."""
+    from app.services.paper_trading import ranking as ranking_module
+
+    ranking_module._cache.clear()
+
+    role = Role(name="trader_breadth", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"breadth_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="Breadth User")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+
+    n = 25
+    base = datetime.now(timezone.utc) - timedelta(days=n)
+
+    async def make_instrument(symbol: str, step: float) -> Instrument:
+        instrument = Instrument(
+            exchange="DELTA", symbol=symbol, name=symbol, instrument_type="perpetual_future",
+            data_source="delta_exchange", external_ref=symbol,
+        )
+        db_session.add(instrument)
+        await db_session.flush()
+        for i in range(n):
+            close = 100 + i * step
+            db_session.add(
+                OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base + timedelta(days=i), open=close, high=close + 1, low=close - 1, close=close, volume=1000, source="test")
+            )
+        return instrument
+
+    # 2 advancers, 1 decliner -> advance_decline_ratio == 2.0 for the whole basket.
+    up_a = await make_instrument("BREADTHUPAUSD", step=1.0)
+    up_b = await make_instrument("BREADTHUPBUSD", step=2.0)
+    down = await make_instrument("BREADTHDOWNUSD", step=-1.0)
+    await db_session.commit()
+
+    code = 'def generate_signal(candles, params):\n    return "BUY" if params.get("advance_decline_ratio", 0.0) >= 1.5 else "HOLD"'
+    strategy = Strategy(name="Breadth Strategy", owner_id=user.id, code_type="python")
+    db_session.add(strategy)
+    await db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe="1d",
+        instrument_ids=[str(up_a.id), str(up_b.id), str(down.id)], parameters={},
+        entry_rules=None, exit_rules=None, python_code=code,
+        position_sizing={"type": "fixed_quantity", "value": 1}, risk_rules={},
+    )
+    db_session.add(version)
+    await db_session.flush()
+
+    portfolio = PaperPortfolio(user_id=user.id, cash=100000.0, initial_capital=100000.0)
+    db_session.add(portfolio)
+    await db_session.flush()
+
+    deployments = {}
+    for inst in (up_a, up_b, down):
+        deployment = PaperDeployment(
+            portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=inst.id,
+            timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+        )
+        db_session.add(deployment)
+        deployments[inst.symbol] = deployment
+    await db_session.commit()
+
+    for inst in (up_a, up_b, down):
+        tick_engine._last_price.pop(inst.id, None)
+
+    # The basket-wide ratio (2.0) is the same for every instrument -- even
+    # the decliner's own deployment sees it and enters, since this is a
+    # market-breadth filter, not a per-instrument momentum check.
+    for symbol, deployment in deployments.items():
+        outcome = await evaluate_deployment(db_session, deployment)
+        assert outcome.action == "entered", f"{symbol}: expected entry on basket-wide breadth, got {outcome.action} ({outcome.reason})"
+
+
 async def test_no_price_data_skips_evaluation(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
     tick_engine._last_price.pop(ctx["instrument"].id, None)

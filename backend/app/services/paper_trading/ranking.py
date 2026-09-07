@@ -77,3 +77,27 @@ async def get_universe_ranks(
 
     _cache[cache_key] = (now, result_map)
     return result_map
+
+
+def basket_breadth(ranks: dict[uuid.UUID, dict]) -> dict:
+    """Advance/decline breadth across a basket, derived from the same
+    trailing-momentum scores get_universe_ranks already computed for
+    ranking -- no extra DB round-trip. "Advancing" means a positive score
+    (price now above its value RANK_LOOKBACK_BARS bars ago), "declining"
+    means negative.
+
+    This exists as a real, computable stand-in for what a strategy might
+    otherwise reach for a Put-Call-Ratio-style basket sentiment gauge --
+    PCR itself needs an options market, which Delta Exchange's RWA/
+    tokenized-stock perpetuals (AAPLXUSD, TSLAXUSD, etc.) don't have at
+    all (confirmed live: Delta lists options only on BTC/ETH/XAUT), so
+    breadth across the basket's own price action is the honest substitute:
+    same "is the crowd leaning bullish or bearish right now" question,
+    answered from data that actually exists for these instruments."""
+    advancers = sum(1 for r in ranks.values() if r["score"] > 0)
+    decliners = sum(1 for r in ranks.values() if r["score"] < 0)
+    if decliners > 0:
+        ratio = advancers / decliners
+    else:
+        ratio = float(advancers) if advancers > 0 else 1.0
+    return {"advancers": advancers, "decliners": decliners, "advance_decline_ratio": ratio}

@@ -24,7 +24,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.market_data.tick_engine import tick_engine
-from app.services.paper_trading.ranking import get_universe_ranks
+from app.services.paper_trading.ranking import basket_breadth, get_universe_ranks
 from app.services.risk.engine import evaluate_entry, evaluate_exit
 from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
@@ -125,6 +125,13 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
                         "in_top_n": my_rank["in_top_n"], "in_bottom_n": my_rank["in_bottom_n"],
                     }
                 )
+            breadth = basket_breadth(ranks)
+            sandbox_params.update(
+                {
+                    "advancers": float(breadth["advancers"]), "decliners": float(breadth["decliners"]),
+                    "advance_decline_ratio": breadth["advance_decline_ratio"],
+                }
+            )
         sandbox_result = await run_python_strategy(version.python_code, bars_dicts, sandbox_params)
         if sandbox_result.error:
             return EvaluationOutcome(action="error", reason=sandbox_result.error)
