@@ -31,6 +31,9 @@ import type {
   PaperOrderOut,
   PaperPortfolioOut,
   PaperTradeOut,
+  PortfolioBacktestJobOut,
+  PortfolioBacktestResultOut,
+  PortfolioBacktestTradeOut,
   QualityReportOut,
   QuoteOut,
   ReportSummaryOut,
@@ -249,6 +252,45 @@ export function useBacktestTrades(jobId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: ["backtest-trades", jobId],
     queryFn: () => apiFetch<BacktestTradeOut[]>(`/api/v1/backtests/${jobId}/trades`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function usePortfolioBacktestsForStrategy(strategyId: string) {
+  return useQuery({
+    queryKey: ["portfolio-backtests-for-strategy", strategyId],
+    queryFn: () => apiFetch<PortfolioBacktestJobOut[]>(`/api/v1/portfolio-backtests?strategy_id=${strategyId}`),
+    refetchInterval: (query) => {
+      const stillRunning = query.state.data?.some((j) => j.status === "pending" || j.status === "running");
+      return stillRunning ? 3000 : false;
+    },
+  });
+}
+
+export function usePortfolioBacktestJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["portfolio-backtest-job", jobId],
+    queryFn: () => apiFetch<PortfolioBacktestJobOut>(`/api/v1/portfolio-backtests/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "running" ? 1000 : false;
+    },
+  });
+}
+
+export function usePortfolioBacktestResult(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["portfolio-backtest-result", jobId],
+    queryFn: () => apiFetch<PortfolioBacktestResultOut>(`/api/v1/portfolio-backtests/${jobId}/result`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function usePortfolioBacktestTrades(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["portfolio-backtest-trades", jobId],
+    queryFn: () => apiFetch<PortfolioBacktestTradeOut[]>(`/api/v1/portfolio-backtests/${jobId}/trades`),
     enabled: !!jobId && enabled,
   });
 }

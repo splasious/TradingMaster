@@ -1,7 +1,16 @@
 from app.models.alert import Alert
 from app.models.audit import AuditLog
 from app.models.backfill_platform import BfBackfillJob, BfOhlcvBar, BfSymbol, BfWatchlist, BfWatchlistItem
-from app.models.backtest import BacktestJob, BacktestResult, BacktestTrade, OptimizationJob, OptimizationResult
+from app.models.backtest import (
+    BacktestJob,
+    BacktestResult,
+    BacktestTrade,
+    OptimizationJob,
+    OptimizationResult,
+    PortfolioBacktestJob,
+    PortfolioBacktestResult,
+    PortfolioBacktestTrade,
+)
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
 from app.models.live_trading import KillSwitch, LiveDeployment, LiveOrder, LivePosition, LiveTrade
@@ -42,6 +51,9 @@ __all__ = [
     "PaperPortfolio",
     "PaperPosition",
     "PaperTrade",
+    "PortfolioBacktestJob",
+    "PortfolioBacktestResult",
+    "PortfolioBacktestTrade",
     "SavedScan",
     "Session",
     "Strategy",

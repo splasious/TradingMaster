@@ -470,6 +470,45 @@ export interface BacktestTradeOut {
   exit_reason: string;
 }
 
+export interface PortfolioBacktestJobOut {
+  id: string;
+  strategy_id: string;
+  instrument_ids: string[];
+  timeframe: string;
+  start_date: string | null;
+  end_date: string | null;
+  initial_capital: number;
+  position_size_pct: number;
+  max_open_positions: number;
+  status: BacktestStatus;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface PortfolioBacktestResultOut {
+  metrics: BacktestMetrics;
+  equity_curve: [string, number][];
+  instrument_count: number;
+  skipped_symbols: string[];
+}
+
+export interface PortfolioBacktestTradeOut {
+  instrument_id: string;
+  symbol: string;
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string | null;
+  exit_price: number | null;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+  bars_held: number;
+  exit_reason: string;
+  status: "open" | "closed";
+}
+
 export type AlertSeverity = "info" | "warning" | "critical";
 
 export interface AlertOut {

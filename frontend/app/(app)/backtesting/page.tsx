@@ -13,13 +13,26 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useBacktestJob, useBacktestResult, useBacktestsForStrategy, useBacktestTrades, useInstrument, useStrategies } from "@/lib/hooks";
+import {
+  useBacktestJob,
+  useBacktestResult,
+  useBacktestsForStrategy,
+  useBacktestTrades,
+  useInstrument,
+  usePortfolioBacktestJob,
+  usePortfolioBacktestResult,
+  usePortfolioBacktestsForStrategy,
+  usePortfolioBacktestTrades,
+  useStrategies,
+} from "@/lib/hooks";
 import {
   TIMEFRAMES,
   type BacktestJobOut,
   type BacktestMetrics,
   type BacktestTradeOut,
   type InstrumentOut,
+  type PortfolioBacktestJobOut,
+  type PortfolioBacktestTradeOut,
   type StrategyOut,
 } from "@/lib/types";
 
@@ -315,11 +328,168 @@ function TradesTable({ trades, showSymbol }: { trades: TaggedTrade[]; showSymbol
   );
 }
 
+function PortfolioTradesTable({ trades }: { trades: PortfolioBacktestTradeOut[] }) {
+  return (
+    <div className="max-h-96 overflow-y-auto">
+      <Table>
+        <Thead>
+          <tr>
+            <Th>Symbol</Th>
+            <Th>Entry</Th>
+            <Th>Exit</Th>
+            <Th className="text-right">Qty</Th>
+            <Th className="text-right">Position Value</Th>
+            <Th className="text-right">PnL</Th>
+            <Th className="text-right">PnL %</Th>
+            <Th>Status</Th>
+          </tr>
+        </Thead>
+        <Tbody>
+          {trades.map((t, i) => (
+            <tr key={i}>
+              <Td className="font-medium">{t.symbol}</Td>
+              <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
+              <Td className="font-financial">
+                {t.exit_ts && t.exit_price !== null ? `${new Date(t.exit_ts).toLocaleDateString()} @ ${t.exit_price.toFixed(2)}` : "--"}
+              </Td>
+              <Td className="text-right font-financial">{Math.round(t.quantity)}</Td>
+              <Td className="text-right font-financial">{(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 0 })}</Td>
+              <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
+              <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl_pct.toFixed(2)}%</Td>
+              <Td>
+                {t.status === "open" ? (
+                  <span className="text-active">Open Long</span>
+                ) : (
+                  <span className="text-text-muted">{t.exit_reason.replace("_", " ")}</span>
+                )}
+              </Td>
+            </tr>
+          ))}
+        </Tbody>
+      </Table>
+    </div>
+  );
+}
+
+function PortfolioHistoryRow({
+  job,
+  isFocused,
+  onSelect,
+  onDeleted,
+}: {
+  job: PortfolioBacktestJobOut;
+  isFocused: boolean;
+  onSelect: () => void;
+  onDeleted: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const completed = job.status === "completed";
+  const { data: result } = usePortfolioBacktestResult(job.id, completed);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/portfolio-backtests/${job.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["portfolio-backtests-for-strategy", job.strategy_id] });
+      onDeleted();
+    },
+  });
+
+  return (
+    <tr
+      onClick={onSelect}
+      className={`cursor-pointer ${isFocused ? "bg-active-soft" : "hover:bg-surface-elevated"}`}
+    >
+      <Td className="font-medium">{job.instrument_ids.length} instruments</Td>
+      <Td className="text-text-secondary">{job.timeframe}</Td>
+      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td>
+        <span
+          className={`capitalize ${
+            job.status === "completed" ? "text-positive" : job.status === "failed" ? "text-negative" : "text-active"
+          }`}
+        >
+          {job.status}
+        </span>
+      </Td>
+      <Td className="text-right font-financial">
+        {completed && result ? (
+          <span className={result.metrics.net_profit >= 0 ? "text-positive" : "text-negative"}>
+            {result.metrics.net_profit >= 0 ? "+" : ""}
+            {result.metrics.net_profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </span>
+        ) : (
+          <span className="text-text-muted">--</span>
+        )}
+      </Td>
+      <Td className="text-right" onClick={(e) => e.stopPropagation()}>
+        <Button
+          variant="ghost" size="sm"
+          onClick={() => deleteMutation.mutate()}
+          disabled={deleteMutation.isPending}
+          className="text-text-muted hover:text-negative"
+          title="Delete this portfolio backtest run"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </Td>
+    </tr>
+  );
+}
+
+function PortfolioHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategyId: string; focusedJobId: string | null; onSelect: (jobId: string | null) => void }) {
+  const { data: jobs, isLoading } = usePortfolioBacktestsForStrategy(strategyId);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Portfolio History{jobs?.length ? ` (${jobs.length})` : ""}</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <p className="p-4 text-sm text-text-muted">Loading past runs...</p>
+        ) : !jobs?.length ? (
+          <p className="p-4 text-sm text-text-muted">No portfolio backtests run yet for this strategy.</p>
+        ) : (
+          <Table>
+            <Thead>
+              <tr>
+                <Th>Basket</Th>
+                <Th>Timeframe</Th>
+                <Th>Ran</Th>
+                <Th>Status</Th>
+                <Th className="text-right">Net Profit</Th>
+                <Th />
+              </tr>
+            </Thead>
+            <Tbody>
+              {jobs.map((j) => (
+                <PortfolioHistoryRow
+                  key={j.id}
+                  job={j}
+                  isFocused={j.id === focusedJobId}
+                  onSelect={() => onSelect(j.id)}
+                  onDeleted={() => onSelect(j.id === focusedJobId ? null : focusedJobId)}
+                />
+              ))}
+            </Tbody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function BacktestingPage() {
   const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
   const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
+
+  // "single" mirrors the historical behavior (one independent backtest job
+  // per instrument, each with the full initial capital, summed client-side).
+  // "portfolio" is one shared-capital-pool run across the whole basket at
+  // once -- the Amibroker-style portfolio backtester.
+  const [mode, setMode] = useState<"single" | "portfolio">("single");
 
   const [timeframe, setTimeframe] = useState("1d");
   const [startDate, setStartDate] = useState("");
@@ -335,9 +505,18 @@ export default function BacktestingPage() {
   const [oosSplit, setOosSplit] = useState(70);
   const [monteCarlo, setMonteCarlo] = useState(false);
 
+  // Portfolio-mode-only sizing: % of *current total portfolio equity* per
+  // new position (Amibroker's "% of Equity"), capped by how many positions
+  // can be open at once when more entry signals fire than there's capital
+  // or room for -- the highest position-score candidate wins.
+  const [positionSizePct, setPositionSizePct] = useState(10);
+  const [maxOpenPositions, setMaxOpenPositions] = useState(10);
+
   const [queuedJobs, setQueuedJobs] = useState<QueuedBacktest[]>([]);
   const [focusedJobId, setFocusedJobId] = useState<string | null>(null);
   const [perInstrumentResults, setPerInstrumentResults] = useState<Map<string, PerInstrumentResult>>(new Map());
+
+  const [portfolioJobId, setPortfolioJobId] = useState<string | null>(null);
 
   const { data: job } = useBacktestJob(focusedJobId);
   const completed = job?.status === "completed";
@@ -348,6 +527,11 @@ export default function BacktestingPage() {
     () => (trades ?? []).map((t) => ({ ...t, symbol: focusedSymbol ?? "" })),
     [trades, focusedSymbol],
   );
+
+  const { data: portfolioJob } = usePortfolioBacktestJob(portfolioJobId);
+  const portfolioCompleted = portfolioJob?.status === "completed";
+  const { data: portfolioResult } = usePortfolioBacktestResult(portfolioJobId, portfolioCompleted);
+  const { data: portfolioTrades } = usePortfolioBacktestTrades(portfolioJobId, portfolioCompleted);
 
   const combined = useMemo(() => {
     const results = [...perInstrumentResults.values()];
@@ -410,6 +594,30 @@ export default function BacktestingPage() {
     },
   });
 
+  const portfolioRunMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<PortfolioBacktestJobOut>("/api/v1/portfolio-backtests", {
+        method: "POST",
+        body: JSON.stringify({
+          strategy_id: strategy!.id,
+          instrument_ids: instruments.map((i) => i.id),
+          timeframe,
+          start_date: startDate || null,
+          end_date: endDate || null,
+          initial_capital: initialCapital,
+          position_size_pct: positionSizePct,
+          max_open_positions: maxOpenPositions,
+          brokerage_pct: brokeragePct,
+          slippage_pct: slippagePct,
+          tax_pct: taxPct,
+        }),
+      }),
+    onSuccess: (job) => {
+      setPortfolioJobId(job.id);
+      if (strategy) queryClient.invalidateQueries({ queryKey: ["portfolio-backtests-for-strategy", strategy.id] });
+    },
+  });
+
   return (
     <div className="space-y-6">
       <div>
@@ -418,6 +626,32 @@ export default function BacktestingPage() {
           Signal at bar close, fill at next bar&apos;s open -- the same rule/Python evaluators as the Strategy Builder, run bar-by-bar.
         </p>
       </div>
+
+      <div className="flex gap-2 rounded-lg border border-border bg-surface-elevated p-1 w-fit">
+        <button
+          onClick={() => setMode("single")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            mode === "single" ? "bg-active-soft text-active" : "text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          Per-Instrument
+        </button>
+        <button
+          onClick={() => setMode("portfolio")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            mode === "portfolio" ? "bg-active-soft text-active" : "text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          Portfolio
+        </button>
+      </div>
+      {mode === "portfolio" && (
+        <p className="-mt-4 text-xs text-text-muted">
+          One shared capital pool split across the whole basket, matching Amibroker&apos;s portfolio backtester: equal-value
+          position sizing, a position-score tiebreak when signals exceed available capital or open-position slots, and one
+          combined trade list/equity curve rather than one independent run per instrument.
+        </p>
+      )}
 
       <Card>
         <CardHeader>
@@ -451,7 +685,9 @@ export default function BacktestingPage() {
               <InstrumentMultiSelect value={instruments} onChange={setInstruments} />
               {instruments.length > 0 && (
                 <p className="text-xs text-text-muted">
-                  {instruments.length} instrument{instruments.length === 1 ? "" : "s"} selected -- one backtest job runs per instrument.
+                  {mode === "single"
+                    ? `${instruments.length} instrument${instruments.length === 1 ? "" : "s"} selected -- one backtest job runs per instrument.`
+                    : `${instruments.length} instrument${instruments.length === 1 ? "" : "s"} selected -- one portfolio backtest job runs across all of them together${instruments.length < 2 ? " (needs at least 2)" : ""}.`}
                 </p>
               )}
             </div>
@@ -498,59 +734,95 @@ export default function BacktestingPage() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-sm text-text-secondary">
-              <input type="checkbox" checked={sizingOverride} onChange={(e) => setSizingOverride(e.target.checked)} />
-              Override position sizing for this run (default: use the strategy&apos;s own sizing)
-            </label>
-            {sizingOverride && (
+          {mode === "single" ? (
+            <>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input type="checkbox" checked={sizingOverride} onChange={(e) => setSizingOverride(e.target.checked)} />
+                  Override position sizing for this run (default: use the strategy&apos;s own sizing)
+                </label>
+                {sizingOverride && (
+                  <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-text-secondary">Sizing Basis</label>
+                      <Select value={sizingType} onChange={(e) => setSizingType(e.target.value as typeof sizingType)}>
+                        <option value="fixed_quantity">Capital per Share (fixed qty)</option>
+                        <option value="percent_capital">% of Capital</option>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-text-secondary">
+                        {sizingType === "fixed_quantity" ? "Shares per Trade" : "% of Capital"}
+                      </label>
+                      <Input type="number" value={sizingValue} onChange={(e) => setSizingValue(Number(e.target.value))} />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-6">
+                <label className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input type="checkbox" checked={oosEnabled} onChange={(e) => setOosEnabled(e.target.checked)} />
+                  Out-of-sample split
+                </label>
+                {oosEnabled && (
+                  <Input type="number" value={oosSplit} onChange={(e) => setOosSplit(Number(e.target.value))} className="w-24" />
+                )}
+                <label className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input type="checkbox" checked={monteCarlo} onChange={(e) => setMonteCarlo(e.target.checked)} />
+                  Monte Carlo (trade resampling)
+                </label>
+              </div>
+
+              <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
+                {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Backtests` : "Run Backtest"}
+              </Button>
+
+              {queuedJobs.some((q) => q.error) && (
+                <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                  {queuedJobs.filter((q) => q.error).map((q) => (
+                    <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
               <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-text-secondary">Sizing Basis</label>
-                  <Select value={sizingType} onChange={(e) => setSizingType(e.target.value as typeof sizingType)}>
-                    <option value="fixed_quantity">Capital per Share (fixed qty)</option>
-                    <option value="percent_capital">% of Capital</option>
-                  </Select>
+                  <label className="text-xs font-medium text-text-secondary">Position Size (% of equity)</label>
+                  <Input type="number" step="1" value={positionSizePct} onChange={(e) => setPositionSizePct(Number(e.target.value))} />
                 </div>
                 <div className="space-y-1.5">
-                  <label className="text-xs font-medium text-text-secondary">
-                    {sizingType === "fixed_quantity" ? "Shares per Trade" : "% of Capital"}
-                  </label>
-                  <Input type="number" value={sizingValue} onChange={(e) => setSizingValue(Number(e.target.value))} />
+                  <label className="text-xs font-medium text-text-secondary">Max Open Positions</label>
+                  <Input type="number" step="1" value={maxOpenPositions} onChange={(e) => setMaxOpenPositions(Number(e.target.value))} />
+                </div>
+                <div className="col-span-2 flex items-end">
+                  <p className="text-xs text-text-muted">
+                    When more entry signals fire than free capital/slots allow, the candidate with the strongest trailing
+                    momentum (position score) wins the slot.
+                  </p>
                 </div>
               </div>
-            )}
-          </div>
 
-          <div className="flex flex-wrap items-center gap-6">
-            <label className="flex items-center gap-2 text-sm text-text-secondary">
-              <input type="checkbox" checked={oosEnabled} onChange={(e) => setOosEnabled(e.target.checked)} />
-              Out-of-sample split
-            </label>
-            {oosEnabled && (
-              <Input type="number" value={oosSplit} onChange={(e) => setOosSplit(Number(e.target.value))} className="w-24" />
-            )}
-            <label className="flex items-center gap-2 text-sm text-text-secondary">
-              <input type="checkbox" checked={monteCarlo} onChange={(e) => setMonteCarlo(e.target.checked)} />
-              Monte Carlo (trade resampling)
-            </label>
-          </div>
+              <Button
+                onClick={() => portfolioRunMutation.mutate()}
+                disabled={!strategy || instruments.length < 2 || portfolioRunMutation.isPending}
+              >
+                {portfolioRunMutation.isPending ? "Starting..." : `Run Portfolio Backtest (${instruments.length} instruments)`}
+              </Button>
 
-          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
-            {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Backtests` : "Run Backtest"}
-          </Button>
-
-          {queuedJobs.some((q) => q.error) && (
-            <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-              {queuedJobs.filter((q) => q.error).map((q) => (
-                <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
-              ))}
-            </div>
+              {portfolioRunMutation.isError && (
+                <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                  {portfolioRunMutation.error instanceof ApiError ? portfolioRunMutation.error.message : "Failed to start"}
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
 
-      {strategy && (
+      {mode === "single" && strategy && (
         <BacktestHistoryPanel
           strategyId={strategy.id}
           focusedJobId={focusedJobId}
@@ -561,7 +833,16 @@ export default function BacktestingPage() {
         />
       )}
 
-      {queuedJobs.length > 1 &&
+      {mode === "portfolio" && strategy && (
+        <PortfolioHistoryPanel
+          strategyId={strategy.id}
+          focusedJobId={portfolioJobId}
+          onSelect={setPortfolioJobId}
+        />
+      )}
+
+      {mode === "single" &&
+        queuedJobs.length > 1 &&
         queuedJobs.map(
           (q) =>
             q.jobId && (
@@ -579,7 +860,7 @@ export default function BacktestingPage() {
             ),
         )}
 
-      {queuedJobs.length > 1 && (
+      {mode === "single" && queuedJobs.length > 1 && (
         <Card>
           <CardHeader>
             <CardTitle>Queued Backtests ({queuedJobs.length})</CardTitle>
@@ -597,7 +878,7 @@ export default function BacktestingPage() {
         </Card>
       )}
 
-      {queuedJobs.length > 1 && (
+      {mode === "single" && queuedJobs.length > 1 && (
         <Card>
           <CardHeader>
             <CardTitle>
@@ -639,7 +920,7 @@ export default function BacktestingPage() {
         </Card>
       )}
 
-      {job && (
+      {mode === "single" && job && (
         <Card>
           <CardHeader>
             <CardTitle>
@@ -700,6 +981,58 @@ export default function BacktestingPage() {
                   <div>
                     <h3 className="mb-2 text-sm font-semibold text-text-primary">Trades ({taggedTrades.length})</h3>
                     <TradesTable trades={taggedTrades} showSymbol={queuedJobs.length > 1} />
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {mode === "portfolio" && portfolioJob && (
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              Portfolio Status: <span className="capitalize">{portfolioJob.status}</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {portfolioJob.status === "failed" && <p className="text-sm text-negative">{portfolioJob.error_message}</p>}
+            {(portfolioJob.status === "pending" || portfolioJob.status === "running") && (
+              <p className="text-sm text-text-muted">Running bar-by-bar simulation across the basket...</p>
+            )}
+
+            {portfolioResult && (
+              <div className="space-y-6">
+                <KpiGrid metrics={portfolioResult.metrics} />
+
+                <p className="text-xs text-text-muted">
+                  {portfolioResult.instrument_count} of {portfolioJob.instrument_ids.length} instruments had enough data to trade.
+                  {portfolioResult.skipped_symbols.length > 0 && (
+                    <> Skipped (not enough backfilled candles): {portfolioResult.skipped_symbols.join(", ")}.</>
+                  )}
+                </p>
+
+                <RiskAnalytics metrics={portfolioResult.metrics} />
+
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-text-primary">Combined Equity Curve</h3>
+                  <OscillatorChart
+                    lines={[{ id: "equity", color: "#15803d", points: portfolioResult.equity_curve.map(([ts, equity]) => ({ ts, value: equity })) }]}
+                    bands={[portfolioJob.initial_capital]}
+                    height={220}
+                  />
+                </div>
+
+                <MetricsGrid metrics={portfolioResult.metrics} title="Full Metrics" />
+
+                {portfolioTrades && portfolioTrades.length > 0 && (
+                  <div>
+                    <h3 className="mb-2 text-sm font-semibold text-text-primary">
+                      Trades ({portfolioTrades.length}
+                      {portfolioTrades.some((t) => t.status === "open") && `, ${portfolioTrades.filter((t) => t.status === "open").length} still open`})
+                    </h3>
+                    <PortfolioTradesTable trades={portfolioTrades} />
                   </div>
                 )}
               </div>
