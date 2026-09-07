@@ -26,7 +26,7 @@ class StrategyVersionCreate(BaseModel):
     parameters: dict[str, float] = Field(default_factory=dict)
     entry_rules: RuleNode | None = None
     exit_rules: RuleNode | None = None
-    python_code: str | None = Field(default=None, max_length=20000)
+    python_code: str | None = Field(default=None, max_length=50000)
     position_sizing: PositionSizing = Field(default_factory=PositionSizing)
     risk_rules: RiskRules = Field(default_factory=RiskRules)
 
