@@ -149,3 +149,164 @@ def test_equity_curve_has_one_point_per_candle():
     signals = BarSignals(entry=[False] * 7, exit=[False] * 7)
     output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
     assert len(output.equity_curve) == 7
+
+
+# ---------------------------------------------------------------- shorts --
+
+
+def _no_signal(n: int) -> list[bool]:
+    return [False] * n
+
+
+def test_short_entry_fills_at_next_bar_open_not_same_bar():
+    candles = [
+        _candle(0, 100, 101, 99, 100),  # SHORT signal fires here (close-based)
+        _candle(1, 105, 106, 104, 105),  # must fill HERE at open=105
+        _candle(2, 110, 111, 109, 110),
+    ]
+    n = len(candles)
+    signals = BarSignals(entry=_no_signal(n), exit=_no_signal(n), short_entry=[True, False, False], short_exit=_no_signal(n))
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "short"
+    assert output.trades[0].entry_price == 105
+    assert output.trades[0].entry_ts == candles[1].ts
+
+
+def test_cover_signal_fills_at_next_bar_open():
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 105, 106, 104, 105),  # short entry fill here
+        _candle(2, 95, 96, 94, 95),  # COVER signal fires here (based on this bar's close)
+        _candle(3, 90, 91, 89, 90),  # cover must fill HERE at open=90
+    ]
+    n = len(candles)
+    signals = BarSignals(
+        entry=_no_signal(n), exit=_no_signal(n),
+        short_entry=[True, False, False, False], short_exit=[False, False, True, False],
+    )
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].exit_price == 90
+    assert output.trades[0].exit_ts == candles[3].ts
+    assert output.trades[0].pnl > 0  # covered lower than entry -> profit on a short
+
+
+def test_short_stop_loss_triggers_intrabar_on_high():
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 100, 101, 99, 100),  # short entry at open=100
+        _candle(2, 100, 105, 99, 103),  # high=105 breaches a 5% stop (105)
+    ]
+    n = len(candles)
+    signals = BarSignals(entry=_no_signal(n), exit=_no_signal(n), short_entry=[True, False, False], short_exit=_no_signal(n))
+    risk = RiskRules(stop_loss_pct=5.0)
+    output = simulate_trades(candles, signals, 100000, FIXED_1, risk, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "short"
+    assert output.trades[0].exit_reason == "stop_loss"
+    assert output.trades[0].exit_price == pytest.approx(105.0)  # entry(100) * (1 + 5%)
+    assert output.trades[0].pnl < 0  # stopped out higher than entry -> loss on a short
+
+
+def test_short_take_profit_triggers_intrabar_on_low():
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 100, 101, 99, 100),  # short entry at open=100
+        _candle(2, 100, 101, 88, 95),  # low=88 breaches a 10% target (90)
+    ]
+    n = len(candles)
+    signals = BarSignals(entry=_no_signal(n), exit=_no_signal(n), short_entry=[True, False, False], short_exit=_no_signal(n))
+    risk = RiskRules(take_profit_pct=10.0)
+    output = simulate_trades(candles, signals, 100000, FIXED_1, risk, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].exit_reason == "take_profit"
+    assert output.trades[0].exit_price == pytest.approx(90.0)
+    assert output.trades[0].pnl > 0
+
+
+def test_open_short_closed_at_end_of_data():
+    candles = [_candle(0, 100, 101, 99, 100), _candle(1, 100, 101, 99, 100), _candle(2, 100, 105, 95, 97)]
+    n = len(candles)
+    signals = BarSignals(entry=_no_signal(n), exit=_no_signal(n), short_entry=[True, False, False], short_exit=_no_signal(n))
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "short"
+    assert output.trades[0].exit_reason == "end_of_data"
+    assert output.trades[0].exit_price == candles[-1].close
+
+
+def test_short_slippage_worsens_entry_and_exit_fills():
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 100, 101, 99, 100),  # short entry here
+        _candle(2, 100, 101, 99, 100),  # cover signal fires here
+        _candle(3, 100, 101, 99, 100),  # cover fills here
+    ]
+    n = len(candles)
+    signals = BarSignals(
+        entry=_no_signal(n), exit=_no_signal(n),
+        short_entry=[True, False, False, False], short_exit=[False, False, True, False],
+    )
+    costs = CostConfig(brokerage_pct=0, slippage_pct=1.0, tax_pct=0)
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, costs)
+
+    # Opening a short is a sale -- adverse slippage moves the fill DOWN.
+    assert output.trades[0].entry_price == pytest.approx(100 * 0.99)
+    # Covering is a purchase -- adverse slippage moves the fill UP.
+    assert output.trades[0].exit_price == pytest.approx(100 * 1.01)
+
+
+def test_short_signal_while_long_closes_the_long_via_automatic_reversal():
+    """A strategy that only ever emits BUY/SHORT (never an explicit SELL)
+    still gets its long closed when the bearish setup fires -- the
+    opposite-direction signal is the exit condition, since generate_signal
+    has no way to know it's currently long."""
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 100, 101, 99, 100),  # long entry fills here
+        _candle(2, 100, 101, 99, 90),  # SHORT signal fires here (close-based)
+        _candle(3, 85, 86, 84, 85),  # long must close HERE at open=85 -- no explicit SELL ever fired
+    ]
+    n = len(candles)
+    signals = BarSignals(entry=[True, False, False, False], exit=_no_signal(n), short_entry=[False, False, True, False], short_exit=_no_signal(n))
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "long"
+    assert output.trades[0].exit_price == 85
+    assert output.trades[0].exit_ts == candles[3].ts
+
+
+def test_buy_signal_while_short_covers_via_automatic_reversal():
+    candles = [
+        _candle(0, 100, 101, 99, 100),
+        _candle(1, 100, 101, 99, 100),  # short entry fills here
+        _candle(2, 100, 101, 99, 110),  # BUY signal fires here (close-based) -- no explicit COVER ever fired
+        _candle(3, 115, 116, 114, 115),  # short must cover HERE at open=115
+    ]
+    n = len(candles)
+    signals = BarSignals(entry=[False, False, True, False], exit=_no_signal(n), short_entry=[True, False, False, False], short_exit=_no_signal(n))
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "short"
+    assert output.trades[0].exit_price == 115
+    assert output.trades[0].exit_ts == candles[3].ts
+
+
+def test_cannot_open_long_and_short_at_once():
+    """A BUY and a SHORT signal on the same flat bar can't both win --
+    long entry is checked first, so it takes the slot and the short signal
+    is simply dropped for that bar (no crash, no split position)."""
+    candles = [_candle(0, 100, 101, 99, 100), _candle(1, 100, 101, 99, 100)]
+    signals = BarSignals(entry=[True, False], exit=[False, False], short_entry=[True, False], short_exit=[False, False])
+    output = simulate_trades(candles, signals, 100000, FIXED_1, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    assert output.trades[0].side == "long"

@@ -537,6 +537,7 @@ export interface PortfolioBacktestTradeOut {
   bars_held: number;
   exit_reason: string;
   status: "open" | "closed";
+  side: "long" | "short";
 }
 
 export type AlertSeverity = "info" | "warning" | "critical";

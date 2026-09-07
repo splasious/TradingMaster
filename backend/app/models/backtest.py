@@ -232,3 +232,4 @@ class PortfolioBacktestTrade(Base):
     bars_held: Mapped[int] = mapped_column(Integer, nullable=False)
     exit_reason: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(10), nullable=False)  # "closed" | "open"
+    side: Mapped[str] = mapped_column(String(10), nullable=False, default="long")  # "long" | "short"

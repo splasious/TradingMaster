@@ -55,7 +55,14 @@ def _build_globals() -> dict:
     return glb
 
 
-ALLOWED_SIGNALS = {"BUY", "SELL", "HOLD"}
+ALLOWED_SIGNALS = {"BUY", "SELL", "SHORT", "COVER", "HOLD"}
+# SHORT (open a short) / COVER (close a short) are honored by the backtest
+# and portfolio backtest engines only (see backtest/engine.py,
+# backtest/portfolio_engine.py). Live and paper trading's evaluate_deployment
+# only ever act on "BUY"/"SELL" -- a strategy returning SHORT/COVER there
+# falls through to a harmless no-op "hold" outcome, never an error, so
+# widening this set here doesn't change live/paper trading's long-only
+# behavior; it only unlocks backtesting a mirrored bearish-side entry/exit.
 
 
 def _load_generate_signal(code: str):

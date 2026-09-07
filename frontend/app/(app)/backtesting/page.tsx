@@ -335,6 +335,7 @@ function PortfolioTradesTable({ trades }: { trades: PortfolioBacktestTradeOut[] 
         <Thead>
           <tr>
             <Th>Symbol</Th>
+            <Th>Side</Th>
             <Th>Entry</Th>
             <Th>Exit</Th>
             <Th className="text-right">Qty</Th>
@@ -348,6 +349,11 @@ function PortfolioTradesTable({ trades }: { trades: PortfolioBacktestTradeOut[] 
           {trades.map((t, i) => (
             <tr key={i}>
               <Td className="font-medium">{t.symbol}</Td>
+              <Td>
+                <span className={t.side === "short" ? "text-negative" : "text-positive"}>
+                  {t.side === "short" ? "Short" : "Long"}
+                </span>
+              </Td>
               <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
               <Td className="font-financial">
                 {t.exit_ts && t.exit_price !== null ? `${new Date(t.exit_ts).toLocaleDateString()} @ ${t.exit_price.toFixed(2)}` : "--"}
@@ -358,7 +364,7 @@ function PortfolioTradesTable({ trades }: { trades: PortfolioBacktestTradeOut[] 
               <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl_pct.toFixed(2)}%</Td>
               <Td>
                 {t.status === "open" ? (
-                  <span className="text-active">Open Long</span>
+                  <span className="text-active">{t.side === "short" ? "Open Short" : "Open Long"}</span>
                 ) : (
                   <span className="text-text-muted">{t.exit_reason.replace("_", " ")}</span>
                 )}

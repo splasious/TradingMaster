@@ -111,7 +111,7 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
                         job_id=job.id, instrument_id=uuid.UUID(trade.instrument_id), symbol=trade.symbol,
                         entry_ts=trade.entry_ts, entry_price=trade.entry_price, exit_ts=trade.exit_ts,
                         exit_price=trade.exit_price, quantity=trade.quantity, pnl=trade.pnl, pnl_pct=trade.pnl_pct,
-                        bars_held=trade.bars_held, exit_reason=trade.exit_reason, status=trade.status,
+                        bars_held=trade.bars_held, exit_reason=trade.exit_reason, status=trade.status, side=trade.side,
                     )
                 )
 

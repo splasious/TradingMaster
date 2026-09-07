@@ -1,9 +1,14 @@
-"""Turns a strategy definition into one BUY/SELL/HOLD-shaped pair of arrays
-(entry[i], exit[i]) aligned to the candle list, with the "no look-ahead"
-guarantee enforced by construction rather than merely asserted: every
-value at index i comes from evaluating the strategy against
-`candles[: i + 1]` only, whether that's the visual rule-tree evaluator or
-the sandboxed Python path (see sandbox_worker.py's run_backtest_signals).
+"""Turns a strategy definition into BUY/SELL/SHORT/COVER/HOLD-shaped arrays
+aligned to the candle list, with the "no look-ahead" guarantee enforced by
+construction rather than merely asserted: every value at index i comes
+from evaluating the strategy against `candles[: i + 1]` only, whether
+that's the visual rule-tree evaluator or the sandboxed Python path (see
+sandbox_worker.py's run_backtest_signals).
+
+SHORT/COVER (opening/closing a short position) is Python-strategy only --
+visual mode's rule DSL has no short-side primitive, so compute_visual_signals
+always reports short_entry/short_exit as all-False (a visual strategy is
+long-only, exactly as before this pair was added).
 
 Recomputes indicators from scratch on the growing prefix for every bar in
 visual mode -- O(n^2) rolling-window calls rather than an incrementally
@@ -24,6 +29,12 @@ WARMUP_BARS = 20
 class BarSignals:
     entry: list[bool]
     exit: list[bool]
+    # None (the default) means "no short-side signals at all" -- visual
+    # strategies and any existing caller constructing BarSignals with just
+    # entry/exit keep working unchanged; the engines treat a None list the
+    # same as a same-length all-False list at every bar.
+    short_entry: list[bool] | None = None
+    short_exit: list[bool] | None = None
 
 
 class SignalComputationError(Exception):
@@ -56,4 +67,7 @@ async def compute_python_signals(candles: list[OhlcvCandle], python_code: str, p
     if result.error:
         raise SignalComputationError(result.error)
     signals = result.signals or []
-    return BarSignals(entry=[s == "BUY" for s in signals], exit=[s == "SELL" for s in signals])
+    return BarSignals(
+        entry=[s == "BUY" for s in signals], exit=[s == "SELL" for s in signals],
+        short_entry=[s == "SHORT" for s in signals], short_exit=[s == "COVER" for s in signals],
+    )

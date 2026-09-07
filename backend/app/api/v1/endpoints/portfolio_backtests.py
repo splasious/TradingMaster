@@ -120,7 +120,7 @@ async def get_portfolio_backtest_trades(job_id: str, db: AsyncSession = Depends(
         PortfolioBacktestTradeOut(
             instrument_id=str(t.instrument_id), symbol=t.symbol, entry_ts=t.entry_ts, entry_price=t.entry_price,
             exit_ts=t.exit_ts, exit_price=t.exit_price, quantity=t.quantity, pnl=t.pnl, pnl_pct=t.pnl_pct,
-            bars_held=t.bars_held, exit_reason=t.exit_reason, status=t.status,
+            bars_held=t.bars_held, exit_reason=t.exit_reason, status=t.status, side=t.side,
         )
         for t in result.scalars().all()
     ]

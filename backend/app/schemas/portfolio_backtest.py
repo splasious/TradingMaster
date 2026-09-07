@@ -68,3 +68,4 @@ class PortfolioBacktestTradeOut(BaseModel):
     bars_held: int
     exit_reason: str
     status: str
+    side: str

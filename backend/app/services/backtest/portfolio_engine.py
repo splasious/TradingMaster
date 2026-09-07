@@ -23,6 +23,18 @@ separates a strategy's Buy/Sell signals from its PositionScore:
 Fill convention matches engine.py exactly: a signal computed from bar i's
 close fills at bar i+1's open. Stop-loss/take-profit are standing orders
 and may trigger intrabar, same bar the signal that opened them fired.
+
+SHORT/COVER mirror BUY/SELL on the opposite side, same economics as
+engine.py's single-instrument mirror (see that module's docstring for the
+full breakdown: slippage direction, stop/target sides, PnL sign, and the
+collateral-reservation cash convention). One extra wrinkle here: a long
+and a short candidate can both want the same scarce capital/slot on the
+same bar, so they compete on one combined, direction-aware position-score
+scale -- a short candidate's score is the *negative* of its trailing
+momentum (strong downward momentum scores as "strong" for a short, the
+same way strong upward momentum scores as "strong" for a long), so the
+existing "highest score wins the slot" mechanic picks the most convicted
+trade regardless of which side it's on.
 """
 
 import math
@@ -58,6 +70,7 @@ class PortfolioTrade:
     bars_held: int
     exit_reason: str  # "signal" | "stop_loss" | "take_profit" | "open"
     status: str  # "closed" | "open"
+    side: str = "long"  # "long" | "short"
 
 
 @dataclass
@@ -81,6 +94,16 @@ def _position_score(candles: list[OhlcvCandle], idx: int, lookback: int = POSITI
     return (candles[idx].close - prior) / prior * 100
 
 
+def _position_value(pos: dict, mark_price: float) -> float:
+    """Mark-to-market value of one open position, mirrored by side -- a
+    long's value rises with price; a short's "value if covered now" rises
+    as price falls below entry (2x entry minus mark, exactly engine.py's
+    single-instrument formula)."""
+    if pos["side"] == "long":
+        return pos["quantity"] * mark_price
+    return pos["quantity"] * (2 * pos["entry_price"] - mark_price)
+
+
 def simulate_portfolio(
     instruments: list[Instrument],
     candles_by_instrument: dict[str, list[OhlcvCandle]],
@@ -98,9 +121,11 @@ def simulate_portfolio(
     all_ts = sorted({c.ts for candles in candles_by_instrument.values() for c in candles})
 
     cash = initial_capital
-    open_positions: dict[str, dict] = {}  # inst_id -> {entry_price, quantity, entry_ts, entry_idx}
+    open_positions: dict[str, dict] = {}  # inst_id -> {entry_price, quantity, entry_ts, entry_idx, side}
     pending_entries: set[str] = set()
+    pending_short_entries: set[str] = set()
     pending_exits: set[str] = set()
+    pending_covers: set[str] = set()
     trades: list[PortfolioTrade] = []
     equity_curve: list[tuple[datetime, float]] = []
     last_close: dict[str, float] = {}
@@ -114,53 +139,90 @@ def simulate_portfolio(
     def _close_position(inst_id: str, exit_price: float, exit_ts: datetime, reason: str, bar_idx: int) -> None:
         nonlocal cash
         pos = open_positions.pop(inst_id)
-        fill = _apply_slippage(exit_price, buying=False)
-        notional = fill * pos["quantity"]
-        fee = _brokerage(notional)
-        gross_pnl = (fill - pos["entry_price"]) * pos["quantity"]
-        tax = max(0.0, gross_pnl) * (costs.tax_pct / 100)
-        net_pnl = gross_pnl - fee - tax
-        cash += notional - fee - tax
-        pnl_pct = (fill - pos["entry_price"]) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
+        if pos["side"] == "long":
+            fill = _apply_slippage(exit_price, buying=False)
+            notional = fill * pos["quantity"]
+            fee = _brokerage(notional)
+            gross_pnl = (fill - pos["entry_price"]) * pos["quantity"]
+            tax = max(0.0, gross_pnl) * (costs.tax_pct / 100)
+            net_pnl = gross_pnl - fee - tax
+            cash += notional - fee - tax
+            pnl_pct = (fill - pos["entry_price"]) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
+        else:
+            fill = _apply_slippage(exit_price, buying=True)  # covering = buying back, adverse slippage upward
+            notional = fill * pos["quantity"]
+            fee = _brokerage(notional)
+            gross_pnl = (pos["entry_price"] - fill) * pos["quantity"]  # profits when price fell
+            tax = max(0.0, gross_pnl) * (costs.tax_pct / 100)
+            net_pnl = gross_pnl - fee - tax
+            entry_notional = pos["entry_price"] * pos["quantity"]
+            cash += entry_notional + net_pnl  # return reserved collateral, plus realized net pnl
+            pnl_pct = (pos["entry_price"] - fill) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
         trades.append(
             PortfolioTrade(
                 instrument_id=inst_id, symbol=symbol_by_id[inst_id], entry_ts=pos["entry_ts"],
                 entry_price=pos["entry_price"], exit_ts=exit_ts, exit_price=fill, quantity=pos["quantity"],
                 pnl=net_pnl, pnl_pct=pnl_pct, bars_held=bar_idx - pos["entry_idx"], exit_reason=reason, status="closed",
+                side=pos["side"],
             )
         )
 
     for ts in all_ts:
-        # 1. Exits scheduled from the previous bar's signal, filled at this
-        # bar's open -- processed before entries so freed capital is
-        # available to this same bar's new positions.
+        # 1. Exits/covers scheduled from the previous bar's signal, filled
+        # at this bar's open -- processed before entries so freed capital
+        # is available to this same bar's new positions. Side-gated: an
+        # exit signal only closes a long, a cover only closes a short.
         for inst_id in list(pending_exits):
+            if inst_id not in open_positions or open_positions[inst_id]["side"] != "long":
+                continue
             idx = ts_index[inst_id].get(ts)
-            if idx is None or inst_id not in open_positions:
+            if idx is None:
                 continue
             candle = candles_by_instrument[inst_id][idx]
             _close_position(inst_id, candle.open, candle.ts, "signal", idx)
         pending_exits.clear()
 
+        for inst_id in list(pending_covers):
+            if inst_id not in open_positions or open_positions[inst_id]["side"] != "short":
+                continue
+            idx = ts_index[inst_id].get(ts)
+            if idx is None:
+                continue
+            candle = candles_by_instrument[inst_id][idx]
+            _close_position(inst_id, candle.open, candle.ts, "signal", idx)
+        pending_covers.clear()
+
         # 2. Standing stop-loss/take-profit, intrabar against this bar's
-        # high/low -- same convention as the single-instrument engine.
+        # high/low -- same convention as the single-instrument engine,
+        # mirrored by side (a short's stop is a price rise, its target a
+        # price fall -- the opposite of a long's).
         for inst_id in list(open_positions.keys()):
             idx = ts_index.get(inst_id, {}).get(ts)
             if idx is None:
                 continue
             candle = candles_by_instrument[inst_id][idx]
             pos = open_positions[inst_id]
-            stop_price = pos["entry_price"] * (1 - risk.stop_loss_pct / 100) if risk.stop_loss_pct else None
-            target_price = pos["entry_price"] * (1 + risk.take_profit_pct / 100) if risk.take_profit_pct else None
-            if stop_price is not None and candle.low <= stop_price:
-                _close_position(inst_id, stop_price, candle.ts, "stop_loss", idx)
-            elif target_price is not None and candle.high >= target_price:
-                _close_position(inst_id, target_price, candle.ts, "take_profit", idx)
+            entry_price = pos["entry_price"]
+            if pos["side"] == "long":
+                stop_price = entry_price * (1 - risk.stop_loss_pct / 100) if risk.stop_loss_pct else None
+                target_price = entry_price * (1 + risk.take_profit_pct / 100) if risk.take_profit_pct else None
+                if stop_price is not None and candle.low <= stop_price:
+                    _close_position(inst_id, stop_price, candle.ts, "stop_loss", idx)
+                elif target_price is not None and candle.high >= target_price:
+                    _close_position(inst_id, target_price, candle.ts, "take_profit", idx)
+            else:
+                stop_price = entry_price * (1 + risk.stop_loss_pct / 100) if risk.stop_loss_pct else None
+                target_price = entry_price * (1 - risk.take_profit_pct / 100) if risk.take_profit_pct else None
+                if stop_price is not None and candle.high >= stop_price:
+                    _close_position(inst_id, stop_price, candle.ts, "stop_loss", idx)
+                elif target_price is not None and candle.low <= target_price:
+                    _close_position(inst_id, target_price, candle.ts, "take_profit", idx)
 
         # 3. Entries scheduled from the previous bar's signal, filled at
-        # this bar's open. When more candidates exist than capital/slots
-        # allow, the highest position score wins -- Amibroker's
-        # PositionScore mechanic.
+        # this bar's open. Long and short candidates compete on one
+        # combined, direction-aware position-score scale -- see module
+        # docstring -- for scarce capital/slots. Amibroker's PositionScore
+        # mechanic, extended to a mixed long/short candidate pool.
         candidates = []
         for inst_id in pending_entries:
             if inst_id in open_positions:
@@ -169,19 +231,28 @@ def simulate_portfolio(
             if idx is None:
                 continue
             candles = candles_by_instrument[inst_id]
-            candidates.append((_position_score(candles, idx), inst_id, candles[idx], idx))
+            candidates.append((_position_score(candles, idx), "long", inst_id, candles[idx], idx))
+        for inst_id in pending_short_entries:
+            if inst_id in open_positions:
+                continue
+            idx = ts_index.get(inst_id, {}).get(ts)
+            if idx is None:
+                continue
+            candles = candles_by_instrument[inst_id]
+            candidates.append((-_position_score(candles, idx), "short", inst_id, candles[idx], idx))
         candidates.sort(key=lambda c: c[0], reverse=True)
         pending_entries.clear()
+        pending_short_entries.clear()
 
-        for _score, inst_id, candle, idx in candidates:
+        for _score, side, inst_id, candle, idx in candidates:
             if len(open_positions) >= sizing.max_open_positions:
                 break
             equity_now = cash + sum(
-                open_positions[oid]["quantity"] * last_close.get(oid, open_positions[oid]["entry_price"])
+                _position_value(open_positions[oid], last_close.get(oid, open_positions[oid]["entry_price"]))
                 for oid in open_positions
             )
             allocation = min(equity_now * sizing.position_size_pct / 100, cash)
-            fill = _apply_slippage(candle.open, buying=True)
+            fill = _apply_slippage(candle.open, buying=(side == "long"))
             if fill <= 0:
                 continue
             quantity = float(math.floor(allocation / fill))
@@ -192,7 +263,7 @@ def simulate_portfolio(
             if notional + fee > cash:
                 continue
             cash -= notional + fee
-            open_positions[inst_id] = {"entry_price": fill, "quantity": quantity, "entry_ts": candle.ts, "entry_idx": idx}
+            open_positions[inst_id] = {"entry_price": fill, "quantity": quantity, "entry_ts": candle.ts, "entry_idx": idx, "side": side}
 
         # 4. Evaluate today's close for tomorrow's fills, and mark equity.
         for inst_id, candles in candles_by_instrument.items():
@@ -202,27 +273,51 @@ def simulate_portfolio(
             candle = candles[idx]
             last_close[inst_id] = candle.close
             signals = signals_by_instrument[inst_id]
-            if inst_id not in open_positions and idx < len(signals.entry) and signals.entry[idx]:
-                pending_entries.add(inst_id)
-            elif inst_id in open_positions and idx < len(signals.exit) and signals.exit[idx]:
-                pending_exits.add(inst_id)
+            if inst_id not in open_positions:
+                if idx < len(signals.entry) and signals.entry[idx]:
+                    pending_entries.add(inst_id)
+                elif signals.short_entry is not None and idx < len(signals.short_entry) and signals.short_entry[idx]:
+                    pending_short_entries.add(inst_id)
+            else:
+                pos_side = open_positions[inst_id]["side"]
+                has_short_entry = signals.short_entry is not None and idx < len(signals.short_entry) and signals.short_entry[idx]
+                has_short_exit = signals.short_exit is not None and idx < len(signals.short_exit) and signals.short_exit[idx]
+                if pos_side == "long":
+                    if idx < len(signals.exit) and signals.exit[idx]:
+                        pending_exits.add(inst_id)
+                    elif has_short_entry:
+                        # Automatic reversal for a strategy that only ever emits
+                        # BUY/SHORT: the opposite-direction setup firing while
+                        # long IS the exit condition -- see engine.py's mirrored
+                        # comment for the full rationale.
+                        pending_exits.add(inst_id)
+                else:  # short
+                    if has_short_exit:
+                        pending_covers.add(inst_id)
+                    elif idx < len(signals.entry) and signals.entry[idx]:
+                        pending_covers.add(inst_id)
 
-        equity = cash + sum(open_positions[oid]["quantity"] * last_close.get(oid, 0.0) for oid in open_positions)
+        equity = cash + sum(_position_value(open_positions[oid], last_close.get(oid, 0.0)) for oid in open_positions)
         equity_curve.append((ts, equity))
 
     # Still-open positions at the end of the range stay open (unrealized,
     # marked at the instrument's own last close) rather than force-closed
-    # -- matching Amibroker's "Open Long" rows.
+    # -- matching Amibroker's "Open Long"/"Open Short" rows.
     for inst_id, pos in open_positions.items():
         mark = last_close.get(inst_id, pos["entry_price"])
-        unrealized_pnl = (mark - pos["entry_price"]) * pos["quantity"]
-        pnl_pct = (mark - pos["entry_price"]) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
+        if pos["side"] == "long":
+            unrealized_pnl = (mark - pos["entry_price"]) * pos["quantity"]
+            pnl_pct = (mark - pos["entry_price"]) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
+        else:
+            unrealized_pnl = (pos["entry_price"] - mark) * pos["quantity"]
+            pnl_pct = (pos["entry_price"] - mark) / pos["entry_price"] * 100 if pos["entry_price"] else 0.0
         last_idx = len(candles_by_instrument[inst_id]) - 1
         trades.append(
             PortfolioTrade(
                 instrument_id=inst_id, symbol=symbol_by_id[inst_id], entry_ts=pos["entry_ts"],
                 entry_price=pos["entry_price"], exit_ts=None, exit_price=None, quantity=pos["quantity"],
                 pnl=unrealized_pnl, pnl_pct=pnl_pct, bars_held=last_idx - pos["entry_idx"], exit_reason="open", status="open",
+                side=pos["side"],
             )
         )
 
@@ -245,7 +340,7 @@ def as_metrics_input(output: PortfolioBacktestOutput, initial_capital: float) ->
             entry_ts=t.entry_ts, entry_price=t.entry_price,
             exit_ts=t.exit_ts if t.exit_ts is not None else (last_ts or t.entry_ts),
             exit_price=t.exit_price if t.exit_price is not None else t.entry_price + (t.pnl / t.quantity if t.quantity else 0.0),
-            quantity=t.quantity, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+            quantity=t.quantity, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason, side=t.side,
         )
         for t in output.trades
     ]
