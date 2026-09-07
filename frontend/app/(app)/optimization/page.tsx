@@ -12,8 +12,20 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
-import { useOptimizationJob, useOptimizationResult, useStrategies } from "@/lib/hooks";
-import type { InstrumentOut, OptimizationJobOut, ParamRangeIn, StrategyOut } from "@/lib/types";
+import {
+  useOptimizationJob,
+  useOptimizationResult,
+  usePortfolioOptimizationJob,
+  usePortfolioOptimizationResult,
+  useStrategies,
+} from "@/lib/hooks";
+import type {
+  InstrumentOut,
+  OptimizationJobOut,
+  ParamRangeIn,
+  PortfolioOptimizationJobOut,
+  StrategyOut,
+} from "@/lib/types";
 
 const RANK_METRICS = ["net_profit", "sharpe_ratio", "profit_factor", "cagr_pct", "win_rate_pct"];
 
@@ -54,15 +66,28 @@ export default function OptimizationPage() {
   const pythonStrategies = strategies?.filter((s) => s.code_type === "python");
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
 
+  // "single" mirrors the historical behavior (one independent grid search
+  // per instrument). "portfolio" evaluates every parameter combination as
+  // one real portfolio backtest across the whole basket at once (shared
+  // capital, position-score gating) -- see portfolio_optimization_runner.py.
+  const [mode, setMode] = useState<"single" | "portfolio">("single");
+
   const [instruments, setInstruments] = useState<InstrumentOut[]>([]);
 
   const [ranges, setRanges] = useState<ParamRangeIn[]>([{ name: "threshold", min: 0, max: 10, step: 5 }]);
   const [rankMetric, setRankMetric] = useState("sharpe_ratio");
 
+  const [positionSizePct, setPositionSizePct] = useState(10);
+  const [maxOpenPositions, setMaxOpenPositions] = useState(10);
+
   const [queuedJobs, setQueuedJobs] = useState<QueuedOptimization[]>([]);
   const [focusedJobId, setFocusedJobId] = useState<string | null>(null);
   const { data: job } = useOptimizationJob(focusedJobId);
   const { data: result } = useOptimizationResult(focusedJobId, job?.status === "completed");
+
+  const [portfolioJobId, setPortfolioJobId] = useState<string | null>(null);
+  const { data: portfolioJob } = usePortfolioOptimizationJob(portfolioJobId);
+  const { data: portfolioResult } = usePortfolioOptimizationResult(portfolioJobId, portfolioJob?.status === "completed");
 
   const runMutation = useMutation({
     mutationFn: async () => {
@@ -92,6 +117,23 @@ export default function OptimizationPage() {
     },
   });
 
+  const portfolioRunMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<PortfolioOptimizationJobOut>("/api/v1/portfolio-optimization", {
+        method: "POST",
+        body: JSON.stringify({
+          strategy_id: strategy!.id,
+          instrument_ids: instruments.map((i) => i.id),
+          timeframe: "1d",
+          position_size_pct: positionSizePct,
+          max_open_positions: maxOpenPositions,
+          param_ranges: ranges,
+          rank_metric: rankMetric,
+        }),
+      }),
+    onSuccess: (job) => setPortfolioJobId(job.id),
+  });
+
   return (
     <div className="space-y-6">
       <div>
@@ -100,6 +142,33 @@ export default function OptimizationPage() {
           Grid search over a Python strategy&apos;s <code>params</code> -- re-runs the same backtest engine for every combination.
         </p>
       </div>
+
+      <div className="flex gap-2 rounded-lg border border-border bg-surface-elevated p-1 w-fit">
+        <button
+          onClick={() => setMode("single")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            mode === "single" ? "bg-active-soft text-active" : "text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          Per-Instrument
+        </button>
+        <button
+          onClick={() => setMode("portfolio")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            mode === "portfolio" ? "bg-active-soft text-active" : "text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          Portfolio
+        </button>
+      </div>
+      {mode === "portfolio" && (
+        <p className="-mt-4 text-xs text-text-muted">
+          Every parameter combination is evaluated as one real portfolio backtest across the whole basket (shared
+          capital pool, position-score gating when signals exceed open slots) -- not one instrument in isolation with
+          unlimited capital. A combination that looks best per-instrument can perform far worse once actually run as
+          a portfolio, since it can&apos;t see which instruments compete for scarce capital/slots.
+        </p>
+      )}
 
       <Card>
         <CardHeader>
@@ -131,11 +200,26 @@ export default function OptimizationPage() {
               <InstrumentMultiSelect value={instruments} onChange={setInstruments} />
               {instruments.length > 0 && (
                 <p className="text-xs text-text-muted">
-                  {instruments.length} instrument{instruments.length === 1 ? "" : "s"} selected -- one grid search runs per instrument.
+                  {mode === "single"
+                    ? `${instruments.length} instrument${instruments.length === 1 ? "" : "s"} selected -- one grid search runs per instrument.`
+                    : `${instruments.length} instrument${instruments.length === 1 ? "" : "s"} selected -- one portfolio grid search runs across all of them together${instruments.length < 2 ? " (needs at least 2)" : ""}.`}
                 </p>
               )}
             </div>
           </div>
+
+          {mode === "portfolio" && (
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-text-secondary">Position Size (% of equity)</label>
+                <Input type="number" step="1" value={positionSizePct} onChange={(e) => setPositionSizePct(Number(e.target.value))} />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-text-secondary">Max Open Positions</label>
+                <Input type="number" step="1" value={maxOpenPositions} onChange={(e) => setMaxOpenPositions(Number(e.target.value))} />
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2">
             <label className="text-xs font-medium uppercase tracking-wide text-text-muted">Parameter Ranges</label>
@@ -173,21 +257,40 @@ export default function OptimizationPage() {
             </Select>
           </div>
 
-          <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
-            {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Optimizations` : "Run Optimization"}
-          </Button>
+          {mode === "single" ? (
+            <>
+              <Button onClick={() => runMutation.mutate()} disabled={!strategy || !instruments.length || runMutation.isPending}>
+                {runMutation.isPending ? "Starting..." : instruments.length > 1 ? `Run ${instruments.length} Optimizations` : "Run Optimization"}
+              </Button>
 
-          {queuedJobs.some((q) => q.error) && (
-            <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-              {queuedJobs.filter((q) => q.error).map((q) => (
-                <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
-              ))}
-            </div>
+              {queuedJobs.some((q) => q.error) && (
+                <div className="space-y-1 rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                  {queuedJobs.filter((q) => q.error).map((q) => (
+                    <div key={q.instrument.id}>{q.instrument.symbol}: {q.error}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <Button
+                onClick={() => portfolioRunMutation.mutate()}
+                disabled={!strategy || instruments.length < 2 || portfolioRunMutation.isPending}
+              >
+                {portfolioRunMutation.isPending ? "Starting..." : `Run Portfolio Optimization (${instruments.length} instruments)`}
+              </Button>
+
+              {portfolioRunMutation.isError && (
+                <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                  {portfolioRunMutation.error instanceof ApiError ? portfolioRunMutation.error.message : "Failed to start"}
+                </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
 
-      {queuedJobs.length > 1 && (
+      {mode === "single" && queuedJobs.length > 1 && (
         <Card>
           <CardHeader>
             <CardTitle>Queued Optimizations ({queuedJobs.length})</CardTitle>
@@ -205,7 +308,7 @@ export default function OptimizationPage() {
         </Card>
       )}
 
-      {job && (
+      {mode === "single" && job && (
         <Card>
           <CardHeader>
             <CardTitle>
@@ -247,6 +350,69 @@ export default function OptimizationPage() {
                         <Td className="text-right font-financial">{run.metrics.profit_factor}</Td>
                         <Td className="text-right font-financial">{run.metrics.win_rate_pct}%</Td>
                         <Td className="text-right font-financial">{run.metrics.num_trades}</Td>
+                      </tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {mode === "portfolio" && portfolioJob && (
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              Portfolio Status: <span className="capitalize">{portfolioJob.status}</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {portfolioJob.status === "failed" && <p className="text-sm text-negative">{portfolioJob.error_message}</p>}
+            {(portfolioJob.status === "pending" || portfolioJob.status === "running") && (
+              <p className="text-sm text-text-muted">Running portfolio grid search across {instruments.length} instruments...</p>
+            )}
+
+            {portfolioResult && (
+              <div className="space-y-2">
+                <p className="text-xs text-text-muted">
+                  {portfolioResult.runs.length} combinations, each a full portfolio backtest across the basket, ranked by{" "}
+                  <span className="font-medium">{rankMetric}</span>. Overfitting warning: the best in-sample parameters are not
+                  guaranteed to hold out-of-sample -- validate with a fresh portfolio backtest on more recent data before trusting a result.
+                </p>
+                <Table>
+                  <Thead>
+                    <tr>
+                      {Object.keys(portfolioResult.runs[0]?.params ?? {}).map((p) => (
+                        <Th key={p}>{p}</Th>
+                      ))}
+                      <Th className="text-right">Net Profit</Th>
+                      <Th className="text-right">Sharpe</Th>
+                      <Th className="text-right">Profit Factor</Th>
+                      <Th className="text-right">Win Rate</Th>
+                      <Th className="text-right">Max DD</Th>
+                      <Th className="text-right">Trades</Th>
+                      <Th className="text-right">Instruments</Th>
+                    </tr>
+                  </Thead>
+                  <Tbody>
+                    {portfolioResult.runs.map((run, i) => (
+                      <tr key={i} className={i === 0 ? "bg-positive-soft" : undefined}>
+                        {Object.values(run.params).map((v, j) => (
+                          <Td key={j} className="font-financial">{v}</Td>
+                        ))}
+                        <Td className="text-right font-financial">{run.metrics.net_profit}</Td>
+                        <Td className="text-right font-financial">{run.metrics.sharpe_ratio}</Td>
+                        <Td className="text-right font-financial">{run.metrics.profit_factor}</Td>
+                        <Td className="text-right font-financial">{run.metrics.win_rate_pct}%</Td>
+                        <Td className="text-right font-financial">{run.metrics.max_drawdown_pct}%</Td>
+                        <Td className="text-right font-financial">{run.metrics.num_trades}</Td>
+                        <Td className="text-right font-financial">
+                          {run.instrument_count}
+                          {run.skipped_symbols.length > 0 && (
+                            <span className="text-text-muted"> ({run.skipped_symbols.length} skipped)</span>
+                          )}
+                        </Td>
                       </tr>
                     ))}
                   </Tbody>

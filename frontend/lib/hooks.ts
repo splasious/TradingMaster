@@ -34,6 +34,8 @@ import type {
   PortfolioBacktestJobOut,
   PortfolioBacktestResultOut,
   PortfolioBacktestTradeOut,
+  PortfolioOptimizationJobOut,
+  PortfolioOptimizationResultOut,
   QualityReportOut,
   QuoteOut,
   ReportSummaryOut,
@@ -311,6 +313,37 @@ export function useOptimizationResult(jobId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: ["optimization-result", jobId],
     queryFn: () => apiFetch<OptimizationResultOut>(`/api/v1/optimization/${jobId}/result`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function usePortfolioOptimizationsForStrategy(strategyId: string) {
+  return useQuery({
+    queryKey: ["portfolio-optimizations-for-strategy", strategyId],
+    queryFn: () => apiFetch<PortfolioOptimizationJobOut[]>(`/api/v1/portfolio-optimization?strategy_id=${strategyId}`),
+    refetchInterval: (query) => {
+      const stillRunning = query.state.data?.some((j) => j.status === "pending" || j.status === "running");
+      return stillRunning ? 3000 : false;
+    },
+  });
+}
+
+export function usePortfolioOptimizationJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["portfolio-optimization-job", jobId],
+    queryFn: () => apiFetch<PortfolioOptimizationJobOut>(`/api/v1/portfolio-optimization/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "running" ? 1000 : false;
+    },
+  });
+}
+
+export function usePortfolioOptimizationResult(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["portfolio-optimization-result", jobId],
+    queryFn: () => apiFetch<PortfolioOptimizationResultOut>(`/api/v1/portfolio-optimization/${jobId}/result`),
     enabled: !!jobId && enabled,
   });
 }

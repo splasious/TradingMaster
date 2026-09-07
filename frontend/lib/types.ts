@@ -320,6 +320,36 @@ export interface OptimizationResultOut {
   runs: OptimizationRunOut[];
 }
 
+export interface PortfolioOptimizationJobOut {
+  id: string;
+  strategy_id: string;
+  instrument_ids: string[];
+  timeframe: string;
+  start_date: string | null;
+  end_date: string | null;
+  initial_capital: number;
+  position_size_pct: number;
+  max_open_positions: number;
+  param_ranges: ParamRangeIn[];
+  rank_metric: string;
+  status: BacktestStatus;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface PortfolioOptimizationRunOut {
+  params: Record<string, number>;
+  metrics: BacktestMetrics;
+  instrument_count: number;
+  skipped_symbols: string[];
+}
+
+export interface PortfolioOptimizationResultOut {
+  runs: PortfolioOptimizationRunOut[];
+}
+
 export interface PaperPositionOut {
   instrument_symbol: string;
   quantity: number;

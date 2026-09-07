@@ -10,6 +10,8 @@ from app.models.backtest import (
     PortfolioBacktestJob,
     PortfolioBacktestResult,
     PortfolioBacktestTrade,
+    PortfolioOptimizationJob,
+    PortfolioOptimizationResult,
 )
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.instrument import Instrument
@@ -54,6 +56,8 @@ __all__ = [
     "PortfolioBacktestJob",
     "PortfolioBacktestResult",
     "PortfolioBacktestTrade",
+    "PortfolioOptimizationJob",
+    "PortfolioOptimizationResult",
     "SavedScan",
     "Session",
     "Strategy",

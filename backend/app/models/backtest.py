@@ -107,6 +107,62 @@ class OptimizationResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PortfolioOptimizationJob(Base):
+    """Grid search over a Python strategy's `params`, exactly like
+    OptimizationJob -- except every combination is evaluated with a real
+    portfolio backtest across the whole basket (shared capital pool,
+    position-score gating when signals exceed open-position slots) rather
+    than one instrument in isolation with the full capital and no cap.
+
+    That distinction is not cosmetic: a basket strategy's parameters
+    interact with which instruments *compete* for scarce capital/slots,
+    something a single-instrument grid search cannot see at all -- ranking
+    parameter combinations by their single-instrument, unconstrained-
+    capital performance can favor a combination that performs far worse
+    once actually run as a portfolio (confirmed in practice: the best
+    single-instrument-optimized combination for this app's own reference
+    strategy underperformed its portfolio-backtested defaults on every
+    instrument-averaged metric)."""
+
+    __tablename__ = "portfolio_optimization_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    strategy_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False)
+    strategy_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("strategy_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_ids: Mapped[list] = mapped_column(JSON, nullable=False)  # [str(uuid), ...] the basket
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    initial_capital: Mapped[float] = mapped_column(Float, nullable=False, default=100000.0)
+    position_size_pct: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    max_open_positions: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    brokerage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.03)
+    slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.05)
+    tax_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    param_ranges: Mapped[list] = mapped_column(JSON, nullable=False)  # [{name, min, max, step}, ...]
+    rank_metric: Mapped[str] = mapped_column(String(30), nullable=False, default="sharpe_ratio")
+    status: Mapped[str] = mapped_column(String(20), default=BacktestStatus.PENDING.value, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PortfolioOptimizationResult(Base):
+    __tablename__ = "portfolio_optimization_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("portfolio_optimization_jobs.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    # [{params, metrics, instrument_count, skipped_symbols}, ...] ranked best-first by rank_metric
+    runs: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class PortfolioBacktestJob(Base):
     """One strategy, run across a whole basket of instruments at once with
     a single shared capital pool -- the "Amibroker-style" portfolio

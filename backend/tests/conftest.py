@@ -16,6 +16,7 @@ from app.models.user import Role, User, UserRole
 from app.services.backfill_platform import jobs as backfill_platform_jobs
 from app.services.backtest import runner as backtest_runner
 from app.services.backtest import optimization_runner
+from app.services.backtest import portfolio_optimization_runner
 from app.services.backtest import portfolio_runner
 from app.services.broker.zerodha_broker import _INSTRUMENTS_CACHE
 from app.services.market_data import backfill as market_data_backfill
@@ -75,6 +76,7 @@ async def client(db_engine, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
     monkeypatch.setattr(backtest_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(optimization_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(portfolio_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(portfolio_optimization_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(backfill_platform_jobs, "AsyncSessionLocal", session_factory)
 
     transport = ASGITransport(app=app)
