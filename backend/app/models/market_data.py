@@ -7,8 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
-# Matches the interval vocabulary the yahoo_nse source supports (PRD section
-# 8.2's full list is a later-phase target once broker data sources land).
+# PRD section 8.2's full interval vocabulary.
 TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "1d", "1wk", "1mo")
 
 

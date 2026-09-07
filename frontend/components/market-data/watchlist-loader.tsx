@@ -8,7 +8,7 @@ import { apiFetch } from "@/lib/api";
 import { useBfWatchlists } from "@/lib/hooks";
 import type { BfWatchlistItemOut, InstrumentOut } from "@/lib/types";
 
-const BF_SOURCE_TO_EXCHANGE: Record<string, string> = { yahoo: "NSE", delta: "DELTA", zerodha: "NSE" };
+const BF_SOURCE_TO_EXCHANGE: Record<string, string> = { delta: "DELTA", zerodha: "NSE" };
 
 interface WatchlistLoaderProps {
   onLoad: (instruments: InstrumentOut[]) => void;

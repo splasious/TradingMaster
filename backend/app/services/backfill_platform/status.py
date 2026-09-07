@@ -9,7 +9,6 @@ import httpx
 from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, ConnectionStatus
 
 # Kite sessions expire daily at a fixed time, but the exact expiry instant
@@ -26,19 +25,6 @@ class SourceStatus:
     connected: bool
     detail: str
     expires_at: datetime | None = None  # Zerodha only, estimated
-
-
-async def yahoo_status() -> SourceStatus:
-    settings = get_settings()
-    url = f"{settings.yahoo_data_service_url.rstrip('/')}/health"
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-        if resp.status_code == 200:
-            return SourceStatus(source="yahoo", connected=True, detail="nse-yahoo-data service reachable")
-        return SourceStatus(source="yahoo", connected=False, detail=f"nse-yahoo-data returned HTTP {resp.status_code}")
-    except (httpx.ConnectError, httpx.TimeoutException):
-        return SourceStatus(source="yahoo", connected=False, detail=f"Could not reach nse-yahoo-data at {url}")
 
 
 async def delta_status() -> SourceStatus:

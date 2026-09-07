@@ -19,7 +19,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 async def _seed_instrument_with_candles(db_session: AsyncSession, symbol: str, base_price: float, n=60) -> Instrument:
     instrument = Instrument(
         exchange="NSE", symbol=symbol, name=f"{symbol} Co", instrument_type="equity",
-        data_source="yahoo_nse", external_ref=symbol,
+        data_source="zerodha_kite", external_ref=symbol,
     )
     db_session.add(instrument)
     await db_session.flush()
@@ -97,7 +97,7 @@ async def test_full_portfolio_backtest_flow_via_api(client: AsyncClient, seeded_
 
 async def test_portfolio_backtest_skips_instrument_with_too_few_candles(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     inst_a = await _seed_instrument_with_candles(db_session, "THICK", 100, n=60)
-    thin = Instrument(exchange="NSE", symbol="THIN2", name="Thin Co", instrument_type="equity", data_source="yahoo_nse", external_ref="THIN2")
+    thin = Instrument(exchange="NSE", symbol="THIN2", name="Thin Co", instrument_type="equity", data_source="zerodha_kite", external_ref="THIN2")
     db_session.add(thin)
     await db_session.flush()
     base = datetime(2026, 1, 5, tzinfo=timezone.utc)

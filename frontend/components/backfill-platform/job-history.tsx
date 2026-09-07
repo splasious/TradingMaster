@@ -22,7 +22,6 @@ const STATUS_ICON: Record<BfBackfillJobOut["status"], React.ReactNode> = {
 
 const SOURCE_TABS: { value: string; label: string; source?: BfSource }[] = [
   { value: "all", label: "All Sources" },
-  { value: "yahoo", label: "Yahoo Finance", source: "yahoo" },
   { value: "delta", label: "Delta Exchange", source: "delta" },
   { value: "zerodha", label: "Zerodha Kite", source: "zerodha" },
 ];

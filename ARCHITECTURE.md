@@ -115,21 +115,19 @@ Same pluggable-adapter shape as the broker layer, but for historical OHLCV:
 
 ```
 MarketDataSource (ABC)          backend/app/services/market_data/base.py
-   ├── YahooNSEDataSource         real NSE equities/indices via the local
-   │                              nse-yahoo-data sidecar service (its own
-   │                              repo, HTTP API on :8800) -- 750+ symbols,
-   │                              daily history back to listing. Optional:
-   │                              not running → backfills fail with a clear
-   │                              MarketDataSourceError, not a raw traceback.
    └── DeltaExchangeDataSource     real crypto perpetuals via Delta Exchange
                                    India's public REST API -- no API key
                                    needed for market data (candles/products
                                    are public endpoints).
 ```
 
-`registry.py` maps `Instrument.data_source` ("yahoo_nse" / "delta_exchange")
-to an adapter, same pattern as the broker registry. A real Zerodha- or
-Delta-order-flow-sourced data adapter plugs in the same way in a later phase.
+`registry.py` maps `Instrument.data_source` ("delta_exchange") to an
+adapter, same pattern as the broker registry. NSE equities/indices now go
+through Zerodha instead (see the Data Backfill Platform section below) --
+that adapter is user-authenticated per broker session, so it's registered
+and dispatched separately from this generic registry rather than through
+it. An instrument with no live source backing it yet carries
+`data_source="unassigned"` and stays hidden app-wide until backfilled.
 
 **Backfill** (`services/market_data/backfill.py`): `POST /market-data/backfill`
 creates a `BackfillJob` row and runs the actual fetch as a FastAPI
@@ -521,20 +519,23 @@ instead of patching around it.
 Reachable from Market Data Management's "Data Backfill Platform" tab
 (the original per-instrument backfill+quality panel, which strategies and
 backtesting actually read from, moved to an adjacent "Instrument Catalog"
-tab, unchanged). Three source blocks (Yahoo, Delta, Zerodha), each with
-real connection status, symbol search scoped to that source, date-range
-backfill, and a real per-day completeness heatmap (weekend-aware for
-equities, not for crypto, not exchange-holiday-aware -- same documented
-heuristic as the main platform's quality panel). Watchlists support
-CSV import/export and bulk backfill. Excel export (single symbol, a full
-watchlist as one workbook with one sheet per symbol, or everything) via
-`openpyxl`, always with a summary sheet first.
+tab, unchanged). Two source blocks (Delta, Zerodha -- Yahoo/nse-yahoo-data
+was retired and fully removed once Zerodha could backfill the same NSE
+instruments from a real broker-grade source), each with real connection
+status, symbol search scoped to that source, date-range backfill, and a
+real per-day completeness heatmap (weekend-aware for equities, not for
+crypto, not exchange-holiday-aware -- same documented heuristic as the
+main platform's quality panel). Watchlists support CSV import/export and
+bulk backfill. Excel export (single symbol, a full watchlist as one
+workbook with one sheet per symbol, or everything) via `openpyxl`, always
+with a summary sheet first.
 
 **Zerodha's historical backfill is newly real here** -- `zerodha_broker.py`'s
 `get_historical_data()` previously raised `NotImplementedError` (Phase 7
-deferred it, pointing at Yahoo instead); this PRD asked for a real,
-working Kite block, so it now does a live instrument-token lookup against
-Kite's CSV dump and calls their real historical-candles endpoint. Still
+deferred it, pointing at Yahoo instead, back when Yahoo was still NSE's
+only source); this PRD asked for a real, working Kite block, so it now
+does a live instrument-token lookup against Kite's CSV dump and calls
+their real historical-candles endpoint. Still
 subject to the same caveat as the rest of the Kite adapter: verified
 against Kite's live API with placeholder credentials (real request/error
 shapes confirmed), not with an actual authenticated session end-to-end.

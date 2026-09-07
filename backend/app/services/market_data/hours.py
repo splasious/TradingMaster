@@ -1,7 +1,6 @@
-"""NSE market-hours heuristic shared by the Data Backfill Platform's live
-sync scheduler and the Markets page real price feed -- real weekday +
-09:15-15:30 IST window check. Not holiday-aware (same documented limitation
-used elsewhere in this codebase, e.g. the quality-panel gap detection)."""
+"""NSE market-hours heuristic -- real weekday + 09:15-15:30 IST window
+check. Not holiday-aware (same documented limitation used elsewhere in
+this codebase, e.g. the quality-panel gap detection)."""
 
 from datetime import datetime, timedelta, timezone
 

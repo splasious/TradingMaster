@@ -1,34 +1,29 @@
-"""Feeds `TickEngine` with genuine prices polled from Yahoo Finance (NSE,
-via nse-yahoo-data) and Delta Exchange's real public ticker API, for
-whichever instruments currently have subscribers on the Markets page
-WebSocket. Mirrors the Data Backfill Platform's live sync scheduler pattern
-(same asyncio-task shape), but writes into TickEngine instead of the bf_*
-tables so the existing Markets WS protocol and paper-trading fills pick up
-real prices with no other code changes.
+"""Feeds `TickEngine` with genuine prices polled from Delta Exchange's real
+public ticker API, for whichever instruments currently have subscribers on
+the Markets page WebSocket. Mirrors the Data Backfill Platform's live sync
+scheduler pattern (same asyncio-task shape), but writes into TickEngine
+instead of the bf_* tables so the existing Markets WS protocol and
+paper-trading fills pick up real prices with no other code changes.
 
 Real, not tick-by-tick: refreshed on a periodic REST poll
 (REFRESH_INTERVAL_SECONDS), not a push/streaming feed -- no source used
 here offers one. Delta (RWA tokens only -- crypto is deliberately excluded,
 per the same instruction that scoped the Data Backfill Platform's Delta
-block) is polled continuously; Yahoo/NSE only during real market hours,
-since nse-yahoo-data has nothing new to report outside them anyway.
+block) is polled continuously.
 """
 
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
-from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import TickEngine, tick_engine
-from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 logger = logging.getLogger(__name__)
 REFRESH_INTERVAL_SECONDS = 15
@@ -42,25 +37,12 @@ REFRESH_INTERVAL_SECONDS = 15
 MAX_CONCURRENT_FETCHES = 20
 
 
-async def fetch_real_price(instrument: Instrument, *, market_open: bool | None = None) -> tuple[float, str] | None:
+async def fetch_real_price(instrument: Instrument) -> tuple[float, str] | None:
     """One real price lookup for a single instrument, or None if this
-    instrument has no real source mapped (or the source has nothing new
-    right now, e.g. NSE outside market hours on a first-ever fetch)."""
+    instrument has no real source mapped."""
     if instrument.data_source == "delta_exchange":
         ticker = await DeltaExchangeDataSource().get_ticker(instrument.external_ref)
         return ticker["price"], "delta"
-    if instrument.data_source == "yahoo_nse":
-        if not get_settings().yahoo_live_polling_enabled:
-            return None
-        if market_open is None:
-            market_open = nse_market_open(datetime.now(timezone.utc))
-        if not market_open:
-            return None
-        end = datetime.now(timezone.utc)
-        bars = await YahooNSEDataSource().get_historical_data(instrument.external_ref, "1m", end - timedelta(hours=6), end)
-        if bars:
-            return bars[-1]["close"], "yahoo"
-        return None
     return None
 
 
@@ -99,7 +81,6 @@ class RealPriceFeed:
         active_ids = [iid for iid, count in self._engine._subscriber_counts.items() if count > 0]
         if not active_ids:
             return 0
-        market_open = nse_market_open(datetime.now(timezone.utc))
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(Instrument).where(Instrument.id.in_(active_ids)))
             instruments = result.scalars().all()
@@ -109,7 +90,7 @@ class RealPriceFeed:
         async def _refresh_one(instrument: Instrument) -> bool:
             async with semaphore:
                 try:
-                    real = await fetch_real_price(instrument, market_open=market_open)
+                    real = await fetch_real_price(instrument)
                 except MarketDataSourceError:
                     return False
                 except Exception:

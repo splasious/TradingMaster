@@ -8,14 +8,14 @@ from app.services.backfill_platform.jobs import fail_orphaned_jobs_on_startup
 
 
 async def test_fail_orphaned_jobs_marks_pending_and_running_as_failed(db_session: AsyncSession, monkeypatch):
-    symbol = BfSymbol(source="yahoo", symbol="ORPHANTEST", display_name="Orphan Test Co")
+    symbol = BfSymbol(source="zerodha", symbol="ORPHANTEST", display_name="Orphan Test Co")
     db_session.add(symbol)
     await db_session.flush()
 
-    pending = BfBackfillJob(symbol_id=symbol.id, source="yahoo", timeframe="1d", status=BfBackfillStatus.PENDING.value)
-    running = BfBackfillJob(symbol_id=symbol.id, source="yahoo", timeframe="1d", status=BfBackfillStatus.RUNNING.value)
+    pending = BfBackfillJob(symbol_id=symbol.id, source="zerodha", timeframe="1d", status=BfBackfillStatus.PENDING.value)
+    running = BfBackfillJob(symbol_id=symbol.id, source="zerodha", timeframe="1d", status=BfBackfillStatus.RUNNING.value)
     completed = BfBackfillJob(
-        symbol_id=symbol.id, source="yahoo", timeframe="1d", status=BfBackfillStatus.COMPLETED.value,
+        symbol_id=symbol.id, source="zerodha", timeframe="1d", status=BfBackfillStatus.COMPLETED.value,
         completed_at=datetime.now(timezone.utc),
     )
     db_session.add_all([pending, running, completed])

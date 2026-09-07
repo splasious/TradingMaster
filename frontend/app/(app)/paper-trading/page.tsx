@@ -106,8 +106,8 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
   const { data: rawInstrumentResults } = useInstruments(instrumentQuery);
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
-  const instrumentResults = rawInstrumentResults?.filter((i) => i.data_source !== "yahoo_nse");
+  // Instruments with no live source backing them are hidden app-wide.
+  const instrumentResults = rawInstrumentResults?.filter((i) => i.data_source !== "yahoo_nse" && i.data_source !== "unassigned");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [portfolioId, setPortfolioId] = useState("");
   const [creatingPool, setCreatingPool] = useState(false);

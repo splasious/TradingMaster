@@ -5,7 +5,6 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.backfill_platform.timeframes import timeframes_for_source
-from app.services.market_data import yahoo_source as yahoo_source_module
 
 _original_get = httpx.AsyncClient.get
 
@@ -14,12 +13,6 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
     resp = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200
     return resp.json()["access_token"]
-
-
-def test_yahoo_timeframes_are_its_real_native_set():
-    options = timeframes_for_source("yahoo")
-    native_values = {o.value for o in options if o.native}
-    assert native_values == {"1m", "5m", "15m", "30m", "60m", "1d", "1wk", "1mo"}
 
 
 def test_delta_timeframes_include_4h_native_no_native_monthly():
@@ -115,17 +108,14 @@ async def test_bulk_backfill_requires_administrator(client: AsyncClient, seeded_
     assert resp.status_code == 403
 
 
-async def test_bulk_backfill_rejects_retired_yahoo_source(client: AsyncClient, seeded_admin: dict):
-    """Yahoo's NSE coverage is retired now that Zerodha backfills the same
-    instruments -- bulk-all must reject it outright rather than re-pulling
-    into the same shared Instrument row Zerodha now owns."""
+async def test_bulk_backfill_rejects_unknown_source(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.post("/api/v1/backfill-platform/sources/yahoo/backfill-all", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 400
-    assert "retired" in resp.json()["detail"].lower()
+    assert "source must be one of" in resp.json()["detail"].lower()
 
 
-async def test_single_job_creation_rejects_retired_yahoo_source(client: AsyncClient, seeded_admin: dict):
+async def test_single_job_creation_rejects_unknown_source(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     resp = await client.post(
         "/api/v1/backfill-platform/jobs",
@@ -133,7 +123,7 @@ async def test_single_job_creation_rejects_retired_yahoo_source(client: AsyncCli
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 400
-    assert "retired" in resp.json()["detail"].lower()
+    assert "source must be one of" in resp.json()["detail"].lower()
 
 
 async def test_live_sync_status_endpoint(client: AsyncClient, seeded_admin: dict):

@@ -10,11 +10,14 @@ from app.db.base import Base
 class Instrument(Base):
     """Tradeable instrument catalog (PRD section 8/42.3).
 
-    Phase 2 supports one real data source: NSE equities/indices via the
-    local nse-yahoo-data service (data_source="yahoo_nse", external_ref is
-    the NSE code that service's API expects, e.g. "RELIANCE" or "NIFTY 50").
-    Later phases add broker-sourced instruments (Zerodha, Delta) the same
-    way -- a new data_source value and adapter, no schema change.
+    `data_source` identifies which adapter/broker backs an instrument's
+    candles -- "delta_exchange" (services/market_data/delta_source.py) or
+    "zerodha_kite" (the Data Backfill Platform's Zerodha block, bridged in
+    via services/backfill_platform/catalog_sync.py). `external_ref` is the
+    symbol that source's own API expects (e.g. "RELIANCE" or "NIFTY 50").
+    A row can also carry a stale data_source left over from a retired
+    source with no adapter anymore ("yahoo_nse") -- such rows are inert
+    (hidden app-wide) until re-synced from a live source.
     """
 
     __tablename__ = "instruments"

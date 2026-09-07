@@ -18,14 +18,14 @@ from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 
-_SOURCE_TO_EXCHANGE = {"yahoo": "NSE", "delta": "DELTA", "zerodha": "NSE"}
-_SOURCE_TO_DATA_SOURCE = {"yahoo": "yahoo_nse", "delta": "delta_exchange", "zerodha": "zerodha_kite"}
+_SOURCE_TO_EXCHANGE = {"delta": "DELTA", "zerodha": "NSE"}
+_SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite"}
 
 
 class CatalogSyncError(Exception):
     """Raised when a bf_symbol's source has no main-catalog mapping. Every
-    real source (yahoo/delta/zerodha) has one; this now only fires for a
-    source added to _VALID_SOURCES without a matching entry here."""
+    real source (delta/zerodha) has one; this now only fires for a source
+    added to _VALID_SOURCES without a matching entry here."""
 
 
 @dataclass
@@ -67,14 +67,16 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
             # cleanup).
             instrument.is_active = True
         if instrument.data_source != data_source:
-            # An instrument created back when Yahoo was NSE's only source
-            # keeps data_source="yahoo_nse" forever unless updated here --
-            # even after Zerodha starts writing real candles into it, which
-            # left every such instrument permanently hidden from Markets/
-            # Charts (both filter out data_source=="yahoo_nse" app-wide,
-            # see market-data pages) despite having real current data.
-            # Zerodha is the live, unretired source for NSE now, so it
-            # takes over the label whenever it re-syncs an existing row.
+            # A seeded/pre-existing instrument with no live source backing
+            # it (data_source="unassigned", or a stale legacy value like
+            # "yahoo_nse" from before that source was retired) keeps that
+            # label forever unless updated here -- even after Zerodha
+            # starts writing real candles into it, which would otherwise
+            # leave it permanently hidden from Markets/Charts (both filter
+            # out anything but a real data_source app-wide, see
+            # market-data pages) despite having real current data. Zerodha
+            # is the live source for NSE now, so it takes over the label
+            # whenever it re-syncs an existing row.
             instrument.data_source = data_source
 
     bars = (await db.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id))).scalars().all()

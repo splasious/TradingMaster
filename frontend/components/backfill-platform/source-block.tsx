@@ -15,9 +15,8 @@ import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfTimeframes, useBfWatchlists } from "@/lib/hooks";
 import type { BfBackfillJobOut, BfSource, BulkBackfillResult, SymbolSearchResultOut } from "@/lib/types";
 
-const SOURCE_LABEL: Record<BfSource, string> = { yahoo: "Yahoo Finance", delta: "Delta Exchange", zerodha: "Zerodha Kite" };
+const SOURCE_LABEL: Record<BfSource, string> = { delta: "Delta Exchange", zerodha: "Zerodha Kite" };
 const BULK_LABEL: Record<BfSource, string> = {
-  yahoo: "Backfill All NSE Symbols",
   delta: "Backfill All RWA Tokens",
   zerodha: "Backfill All Tracked Symbols",
 };
@@ -141,13 +140,6 @@ export function SourceBlock({ source }: { source: BfSource }) {
     },
   });
 
-  // Yahoo's NSE coverage is retired -- Zerodha backfills the same
-  // instruments from a real broker-grade source now, and the backend
-  // rejects any new Yahoo backfill outright (see _BACKFILL_RETIRED_SOURCES).
-  // This card is only ever rendered for "delta"/"zerodha" (see
-  // market-data/page.tsx); Yahoo's existing historical data and watchlist
-  // items stay intact and viewable elsewhere, just with no route back into
-  // this card.
   const canBackfill = !!selected && (status?.connected ?? false);
 
   return (

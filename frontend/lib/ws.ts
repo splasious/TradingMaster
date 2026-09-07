@@ -25,9 +25,9 @@ interface MarketDataSocketState {
 /** Subscribes to live ticks for a set of instrument ids over the
  * market-data WebSocket (PRD section 9's connection lifecycle: connecting /
  * connected / reconnecting / disconnected / error, with heartbeat-derived
- * latency). Each price carries a `source` -- "yahoo" or "delta" for a real
- * poll, "simulated" as a random-walk fallback where no real source is
- * mapped for that instrument yet -- see tick_engine.py. */
+ * latency). Each price carries a `source` -- "delta" for a real poll,
+ * "simulated" as a random-walk fallback where no real source is mapped
+ * for that instrument yet -- see tick_engine.py. */
 export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketState {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [prices, setPrices] = useState<Record<string, PriceState>>({});

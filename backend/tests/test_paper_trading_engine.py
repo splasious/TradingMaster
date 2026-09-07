@@ -24,7 +24,7 @@ async def _setup(
     db_session.add(user)
     await db_session.flush()
 
-    instrument = Instrument(exchange="NSE", symbol="PTX", name="Paper Co", instrument_type="equity", data_source="yahoo_nse", external_ref="PTX")
+    instrument = Instrument(exchange="NSE", symbol="PTX", name="Paper Co", instrument_type="equity", data_source="zerodha_kite", external_ref="PTX")
     db_session.add(instrument)
     await db_session.flush()
 

@@ -32,7 +32,6 @@ import { brokerForExchange, getCategory, marketLabel } from "@/lib/market";
 import { TIMEFRAMES, type CatalogSyncItemOut, type IndicatorSpecOut, type InstrumentOut } from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, string> = {
-  yahoo_nse: "yahoo",
   delta_exchange: "delta",
   zerodha_kite: "zerodha",
 };
@@ -236,7 +235,7 @@ export default function ChartsPage() {
   // alphabetically-first 200 across all exchanges combined.
   const { data: rawInstruments } = useInstruments(q, exchange || undefined, 2000);
   const categoryMap = useCategoryMap();
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  // Instruments with no live source backing them are hidden app-wide.
   const instruments = useMemo(
     () =>
       rawInstruments?.filter(
@@ -244,7 +243,7 @@ export default function ChartsPage() {
         // fetches are still in flight -- don't apply the filter yet in
         // that window (would otherwise show a false "no instruments
         // match" for every symbol until the map finishes loading).
-        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || !categoryMap || getCategory(i.symbol, categoryMap) === categoryFilter),
+        (i) => i.data_source !== "yahoo_nse" && i.data_source !== "unassigned" && (!categoryFilter || !categoryMap || getCategory(i.symbol, categoryMap) === categoryFilter),
       ),
     [rawInstruments, categoryFilter, categoryMap],
   );

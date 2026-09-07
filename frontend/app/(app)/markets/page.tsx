@@ -58,7 +58,7 @@ export default function MarketsPage() {
   // alphabetically-first 200 across all exchanges combined.
   const { data: rawInstruments, isLoading, isError } = useInstruments(q, exchange || undefined, 2000);
   const categoryMap = useCategoryMap();
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
+  // Instruments with no live source backing them are hidden app-wide.
   const instruments = useMemo(
     () =>
       rawInstruments?.filter(
@@ -66,7 +66,7 @@ export default function MarketsPage() {
         // fetches are still in flight -- don't apply the filter yet in
         // that window (would otherwise show a false "no instruments
         // match" for every symbol until the map finishes loading).
-        (i) => i.data_source !== "yahoo_nse" && (!categoryFilter || !categoryMap || getCategory(i.symbol, categoryMap) === categoryFilter),
+        (i) => i.data_source !== "yahoo_nse" && i.data_source !== "unassigned" && (!categoryFilter || !categoryMap || getCategory(i.symbol, categoryMap) === categoryFilter),
       ),
     [rawInstruments, categoryFilter, categoryMap],
   );

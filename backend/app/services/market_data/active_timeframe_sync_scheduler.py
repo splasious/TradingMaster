@@ -21,7 +21,6 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
@@ -101,14 +100,11 @@ class ActiveTimeframeSyncScheduler:
             i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))).scalars()
         }
 
-        yahoo_enabled = get_settings().yahoo_live_polling_enabled
         now = datetime.now(timezone.utc)
         synced = 0
         for instrument_id, timeframe in pairs:
             instrument = instruments.get(instrument_id)
             if instrument is None:
-                continue
-            if instrument.data_source == "yahoo_nse" and not yahoo_enabled:
                 continue
 
             try:

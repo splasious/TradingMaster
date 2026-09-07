@@ -20,7 +20,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 async def _seed_instrument_with_candles(db_session: AsyncSession, n=60) -> Instrument:
     instrument = Instrument(
         exchange="NSE", symbol="BTQ", name="Backtest Co", instrument_type="equity",
-        data_source="yahoo_nse", external_ref="BTQ",
+        data_source="zerodha_kite", external_ref="BTQ",
     )
     db_session.add(instrument)
     await db_session.flush()
@@ -245,7 +245,7 @@ async def test_non_owner_cannot_start_backtest(client: AsyncClient, seeded_admin
 
 
 async def test_backtest_fails_gracefully_with_insufficient_candles(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
-    instrument = Instrument(exchange="NSE", symbol="THIN", name="Thin Co", instrument_type="equity", data_source="yahoo_nse", external_ref="THIN")
+    instrument = Instrument(exchange="NSE", symbol="THIN", name="Thin Co", instrument_type="equity", data_source="zerodha_kite", external_ref="THIN")
     db_session.add(instrument)
     await db_session.flush()
     for i in range(5):

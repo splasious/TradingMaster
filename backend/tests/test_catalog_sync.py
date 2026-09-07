@@ -18,7 +18,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 
 
 async def test_sync_symbol_creates_instrument_and_candles(db_session: AsyncSession):
-    symbol = BfSymbol(source="yahoo", symbol="SYNCTEST", display_name="Sync Test Co")
+    symbol = BfSymbol(source="zerodha", symbol="SYNCTEST", display_name="Sync Test Co")
     db_session.add(symbol)
     await db_session.flush()
     db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=2, low=0.5, close=1.5, volume=100))
@@ -34,11 +34,11 @@ async def test_sync_symbol_creates_instrument_and_candles(db_session: AsyncSessi
 
     instrument = (await db_session.execute(select(Instrument).where(Instrument.symbol == "SYNCTEST"))).scalar_one()
     assert instrument.exchange == "NSE"
-    assert instrument.data_source == "yahoo_nse"
+    assert instrument.data_source == "zerodha_kite"
 
     candles = (await db_session.execute(select(OhlcvCandle).where(OhlcvCandle.instrument_id == instrument.id))).scalars().all()
     assert len(candles) == 2
-    assert all(c.source == "bf_yahoo" for c in candles)
+    assert all(c.source == "bf_zerodha" for c in candles)
 
 
 async def test_sync_symbol_is_idempotent(db_session: AsyncSession):
@@ -64,11 +64,11 @@ async def test_sync_symbol_is_idempotent(db_session: AsyncSession):
 
 
 async def test_sync_symbol_reuses_existing_instrument(db_session: AsyncSession):
-    existing = Instrument(exchange="NSE", symbol="ALREADYCATALOGED", name="Already Cataloged Co", instrument_type="equity", data_source="yahoo_nse", external_ref="ALREADYCATALOGED")
+    existing = Instrument(exchange="NSE", symbol="ALREADYCATALOGED", name="Already Cataloged Co", instrument_type="equity", data_source="unassigned", external_ref="ALREADYCATALOGED")
     db_session.add(existing)
     await db_session.flush()
 
-    symbol = BfSymbol(source="yahoo", symbol="ALREADYCATALOGED", display_name="Already Cataloged Co")
+    symbol = BfSymbol(source="zerodha", symbol="ALREADYCATALOGED", display_name="Already Cataloged Co")
     db_session.add(symbol)
     await db_session.flush()
     db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))
@@ -80,15 +80,15 @@ async def test_sync_symbol_reuses_existing_instrument(db_session: AsyncSession):
     assert result.instrument_id == str(existing.id)
 
 
-async def test_sync_symbol_updates_data_source_when_zerodha_takes_over_a_yahoo_instrument(db_session: AsyncSession):
-    """Regression test: an instrument created back when Yahoo was NSE's
-    only source kept data_source="yahoo_nse" forever, even once Zerodha
-    (the live, unretired source) started writing real candles into the
-    same row -- which left it permanently hidden from Markets/Charts
-    (both filter out data_source=="yahoo_nse" app-wide) despite having
-    real current data. Confirmed live: the entire Nifty 500 backfill
-    matched pre-existing Yahoo instruments and vanished from Markets."""
-    existing = Instrument(exchange="NSE", symbol="TAKEOVER", name="Old Yahoo Name", instrument_type="equity", data_source="yahoo_nse", external_ref="TAKEOVER")
+async def test_sync_symbol_updates_data_source_when_zerodha_takes_over_an_unassigned_instrument(db_session: AsyncSession):
+    """Regression test: an instrument seeded/created with no live source
+    backing it kept data_source="unassigned" forever, even once Zerodha
+    started writing real candles into the same row -- which left it
+    permanently hidden from Markets/Charts (both filter out anything but a
+    real data_source app-wide) despite having real current data. Confirmed
+    live: the entire Nifty 500 backfill matched pre-existing catalog rows
+    and vanished from Markets."""
+    existing = Instrument(exchange="NSE", symbol="TAKEOVER", name="Old Name", instrument_type="equity", data_source="unassigned", external_ref="TAKEOVER")
     db_session.add(existing)
     await db_session.flush()
 
@@ -108,10 +108,10 @@ async def test_sync_symbol_updates_data_source_when_zerodha_takes_over_a_yahoo_i
 
 
 async def test_sync_symbol_rejects_unmapped_source(db_session: AsyncSession):
-    """No real source is unmapped today (yahoo/delta/zerodha all bridge
-    into the main catalog) -- this covers the guard itself against a
-    made-up source name rather than asserting on one that's since been
-    given a real mapping."""
+    """No real source is unmapped today (delta/zerodha both bridge into
+    the main catalog) -- this covers the guard itself against a made-up
+    source name rather than asserting on one that's since been given a
+    real mapping."""
     symbol = BfSymbol(source="bogus", symbol="NOTMAPPED", display_name="Not Mapped")
     db_session.add(symbol)
     await db_session.commit()
@@ -182,7 +182,7 @@ async def test_sync_watchlist_to_catalog_endpoint(client: AsyncClient, seeded_ad
     wl_resp = await client.post("/api/v1/backfill-platform/watchlists", json={"name": "Sync WL", "tags": []}, headers=headers)
     wl_id = wl_resp.json()["id"]
 
-    symbol = BfSymbol(source="yahoo", symbol="ENDPOINTSYNC", display_name="Endpoint Sync Co")
+    symbol = BfSymbol(source="zerodha", symbol="ENDPOINTSYNC", display_name="Endpoint Sync Co")
     db_session.add(symbol)
     await db_session.flush()
     db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="1d", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))

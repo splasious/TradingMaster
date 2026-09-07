@@ -41,6 +41,12 @@ async def run_backfill_job(job_id: uuid.UUID) -> None:
             job.completed_at = datetime.now(timezone.utc)
             await db.commit()
             return
+        except Exception as exc:  # a backfill job must never leave "running" stuck on an unexpected bug -- e.g. an instrument's data_source has no registered adapter (Zerodha-sourced instruments go through the Data Backfill Platform instead, never this registry)
+            job.status = BackfillStatus.FAILED.value
+            job.error_message = f"{type(exc).__name__}: {exc}"
+            job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            return
 
         job.downloaded_count = len(bars)
 

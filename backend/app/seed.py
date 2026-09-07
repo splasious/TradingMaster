@@ -84,7 +84,11 @@ async def seed() -> None:
             db.add(
                 Instrument(
                     exchange="NSE", symbol=symbol, name=name, instrument_type=itype,
-                    data_source="yahoo_nse", external_ref=symbol,
+                    # No live source yet -- Data Backfill Platform > Zerodha
+                    # block owns real NSE data now; "Sync to Catalog" there
+                    # flips this to "zerodha_kite" once backfilled, which is
+                    # what makes a row visible in Markets/Charts/etc.
+                    data_source="unassigned", external_ref=symbol,
                 )
             )
         for symbol, name in DELTA_INSTRUMENTS:

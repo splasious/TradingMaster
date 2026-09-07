@@ -17,7 +17,6 @@ from app.services.backfill_platform.kite_auth import get_authenticated_kite_brok
 from app.services.broker.zerodha_broker import KiteAPIError
 from app.services.market_data.base import Bar, MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
-from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 
 async def fail_orphaned_jobs_on_startup() -> int:
@@ -48,8 +47,6 @@ def _to_datetime(d: date | None, end_of_day: bool = False) -> datetime | None:
 
 
 async def _fetch_bars(db: AsyncSession, source: str, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, user_id) -> list[Bar]:
-    if source == "yahoo":
-        return await YahooNSEDataSource().get_historical_data(symbol, timeframe, start, end)
     if source == "delta":
         return await DeltaExchangeDataSource().get_historical_data(symbol, timeframe, start, end)
     if source == "zerodha":

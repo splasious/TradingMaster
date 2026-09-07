@@ -13,7 +13,6 @@ from app.services.backfill_platform.kite_auth import get_authenticated_kite_brok
 from app.services.broker.zerodha_broker import KiteAPIError
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
-from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 
 @dataclass
@@ -24,14 +23,6 @@ class SymbolSearchResult:
 
 async def search_symbols(db: AsyncSession, source: str, query: str, user_id) -> list[SymbolSearchResult]:
     query_upper = query.upper().strip()
-
-    if source == "yahoo":
-        try:
-            symbols = await YahooNSEDataSource().list_symbols()
-        except MarketDataSourceError as exc:
-            raise MarketDataSourceError(str(exc)) from exc
-        matches = [s for s in symbols if query_upper in s["nse_code"].upper() or query_upper in (s.get("name") or "").upper()]
-        return [SymbolSearchResult(symbol=s["nse_code"], display_name=s.get("name") or s["nse_code"]) for s in matches[:50]]
 
     if source == "delta":
         try:
@@ -63,18 +54,15 @@ async def list_all_symbols(db: AsyncSession, source: str, user_id) -> list[Symbo
     used by "Backfill All" (PRD 4's watchlist bulk actions, extended to a
     whole source).
 
-    For Yahoo and Delta that universe is a real, naturally bounded exchange
-    catalog: nse-yahoo-data's ~750 NSE symbols, or Delta's RWA token list.
-    Zerodha has no such bounded catalog of its own -- Kite's NSE instrument
-    dump is the *entire* exchange (equities, indices, ETFs, bonds,
-    preference shares -- 10,000+ rows), not something any user actually
-    wants backfilled wholesale. So for Zerodha "all tracked symbols" means
-    exactly that: symbols this user has explicitly added to a watchlist,
-    the same set the button's own label promises -- never a live Kite API
-    call, and never more than what was deliberately opted into."""
-    if source == "yahoo":
-        symbols = await YahooNSEDataSource().list_symbols()
-        return [SymbolSearchResult(symbol=s["nse_code"], display_name=s.get("name") or s["nse_code"]) for s in symbols if s.get("is_active", True)]
+    For Delta that universe is a real, naturally bounded exchange catalog:
+    its RWA token list. Zerodha has no such bounded catalog of its own --
+    Kite's NSE instrument dump is the *entire* exchange (equities, indices,
+    ETFs, bonds, preference shares -- 10,000+ rows), not something any user
+    actually wants backfilled wholesale. So for Zerodha "all tracked
+    symbols" means exactly that: symbols this user has explicitly added to
+    a watchlist, the same set the button's own label promises -- never a
+    live Kite API call, and never more than what was deliberately opted
+    into."""
     if source == "delta":
         products = await DeltaExchangeDataSource().list_rwa_token_products()
         return [SymbolSearchResult(symbol=p["symbol"], display_name=p.get("description") or p["symbol"]) for p in products]

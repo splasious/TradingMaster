@@ -16,19 +16,17 @@ from app.services.market_data.base import Bar, MarketDataSource, MarketDataSourc
 from app.services.market_data.delta_source import DeltaExchangeDataSource
 from app.services.market_data.registry import get_market_data_source
 from app.services.market_data.validation import compute_quality
-from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 
 def test_adapters_implement_full_interface():
     interface_methods = {name for name, _ in inspect.getmembers(MarketDataSource, predicate=inspect.isfunction)}
-    for adapter in (YahooNSEDataSource(), DeltaExchangeDataSource()):
+    for adapter in (DeltaExchangeDataSource(),):
         for name in interface_methods:
             assert hasattr(adapter, name)
             assert inspect.iscoroutinefunction(getattr(adapter, name))
 
 
 def test_registry_resolves_known_sources():
-    assert isinstance(get_market_data_source("yahoo_nse"), YahooNSEDataSource)
     assert isinstance(get_market_data_source("delta_exchange"), DeltaExchangeDataSource)
 
 
@@ -115,7 +113,7 @@ class _StubSource(MarketDataSource):
 async def test_backfill_job_inserts_candles_and_detects_duplicates_on_rerun(db_session: AsyncSession, monkeypatch):
     instrument = Instrument(
         exchange="NSE", symbol="TESTCO", name="Test Co", instrument_type="equity",
-        data_source="yahoo_nse", external_ref="TESTCO",
+        data_source="zerodha_kite", external_ref="TESTCO",
     )
     db_session.add(instrument)
     await db_session.commit()
@@ -178,17 +176,17 @@ async def test_instruments_endpoint_requires_auth(client: AsyncClient):
 async def test_quotes_returns_latest_daily_bar_per_instrument(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = Instrument(
         exchange="NSE", symbol="QUOTETEST", name="Quote Test Co", instrument_type="equity",
-        data_source="yahoo_nse", external_ref="QUOTETEST",
+        data_source="zerodha_kite", external_ref="QUOTETEST",
     )
     db_session.add(instrument)
     await db_session.flush()
     base = datetime(2026, 1, 5, tzinfo=timezone.utc)
     db_session.add_all(
         [
-            OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base, open=100, high=101, low=99, close=100.5, volume=1000, source="yahoo_nse"),
+            OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base, open=100, high=101, low=99, close=100.5, volume=1000, source="zerodha_kite"),
             OhlcvCandle(
                 instrument_id=instrument.id, timeframe="1d", ts=base + timedelta(days=1),
-                open=101, high=105, low=100, close=104.0, volume=2500, source="yahoo_nse",
+                open=101, high=105, low=100, close=104.0, volume=2500, source="zerodha_kite",
             ),
         ]
     )
@@ -223,7 +221,7 @@ async def test_quotes_empty_ids_returns_empty_list(client: AsyncClient, seeded_a
 async def test_backfill_requires_trader_or_admin_role(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = Instrument(
         exchange="NSE", symbol="TESTCO2", name="Test Co 2", instrument_type="equity",
-        data_source="yahoo_nse", external_ref="TESTCO2",
+        data_source="zerodha_kite", external_ref="TESTCO2",
     )
     db_session.add(instrument)
     await db_session.commit()

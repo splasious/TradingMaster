@@ -76,10 +76,11 @@ function InstrumentPicker({
 }) {
   const [q, setQ] = useState("");
   const { data: instruments } = useInstruments(q);
-  // NSE/Yahoo is hidden app-wide (unreliable source, no live backend to
-  // serve it) -- the underlying instrument rows are left in place rather
-  // than deleted since real strategies/history could still reference them.
-  const visibleInstruments = instruments?.filter((i) => i.data_source !== "yahoo_nse");
+  // Instruments with no live source backing them yet (data_source left over
+  // from before Zerodha re-synced them) are hidden app-wide -- the
+  // underlying instrument rows are left in place rather than deleted since
+  // real strategies/history could still reference them.
+  const visibleInstruments = instruments?.filter((i) => i.data_source !== "yahoo_nse" && i.data_source !== "unassigned");
 
   return (
     <Card>
@@ -228,8 +229,6 @@ export default function MarketDataPage() {
         <TabsContent value="backfill-platform">
           <div className="space-y-6">
             <LiveSyncStatus />
-            {/* Yahoo/NSE is hidden app-wide -- no reachable data source in
-                production, superseded by the planned Zerodha integration. */}
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <SourceBlock source="delta" />
               <SourceBlock source="zerodha" />

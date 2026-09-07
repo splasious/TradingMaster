@@ -21,7 +21,7 @@ async def _setup(db_session: AsyncSession) -> dict:
     db_session.add(user)
     await db_session.flush()
 
-    instrument = Instrument(exchange="NSE", symbol="RPTX", name="Reports Co", instrument_type="equity", data_source="yahoo_nse", external_ref="RPTX")
+    instrument = Instrument(exchange="NSE", symbol="RPTX", name="Reports Co", instrument_type="equity", data_source="zerodha_kite", external_ref="RPTX")
     db_session.add(instrument)
     await db_session.flush()
 

@@ -31,7 +31,6 @@ from app.db.base import Base
 
 
 class BackfillSource(str, enum.Enum):
-    YAHOO = "yahoo"
     DELTA = "delta"
     ZERODHA = "zerodha"
 
@@ -46,8 +45,7 @@ class BfBackfillStatus(str, enum.Enum):
 class BfSymbol(Base):
     """A symbol tracked within this module, scoped to exactly one source --
     the same real-world instrument tracked from two sources is deliberately
-    two separate rows here (e.g. NSE RELIANCE via Yahoo vs via Zerodha),
-    each with its own bar history, never merged."""
+    two separate rows here, each with its own bar history, never merged."""
 
     __tablename__ = "bf_symbols"
 

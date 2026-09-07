@@ -6,7 +6,7 @@ how this codebase implements it.
 
 **Current status: Phases 1–8 — all phases in the PRD roadmap.** Auth, RBAC,
 database schema, app shell/navigation, design system, a real market data
-engine (NSE via the optional local `nse-yahoo-data` sidecar, Delta Exchange
+engine (NSE via Zerodha Kite's Data Backfill Platform block, Delta Exchange
 crypto via its public API), real analytics (13 technical indicators, a
 multi-timeframe engine, candlestick charting, a market scanner with saved
 filters), a real strategy engine (visual rule-based strategies and
@@ -41,11 +41,9 @@ rather than faking a file-copy backup that isn't one).
 - PostgreSQL 16 + Redis, **or** Docker — for production-like local dev
 - No Postgres/Docker available? The backend falls back to SQLite for local
   dev automatically (see `backend/.env.example`).
-- Optional, for real NSE historical data: the sibling
-  [`nse-yahoo-data`](../nse-yahoo-data) service running on `:8800`
-  (`python app/main.py` in that repo). Without it, NSE backfills fail with a
-  clear error; Delta Exchange market data works regardless (public API,
-  no local service needed).
+- Real NSE historical data comes from Zerodha Kite (Data Backfill Platform >
+  Zerodha block) -- needs a connected Zerodha account (Settings > Brokers).
+  Delta Exchange market data works regardless (public API, no auth needed).
 - For live trading on Delta Exchange: Delta requires the calling machine's
   IP to be whitelisted per API key (Delta Exchange > Account > API
   Management). Whitelist the IP the machine actually runs this backend

@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
-from app.services.backfill_platform.live_sync_scheduler import BfLiveSyncScheduler, nse_market_open
+from app.services.backfill_platform.live_sync_scheduler import BfLiveSyncScheduler
+from app.services.market_data.hours import nse_market_open
 
 _original_get = httpx.AsyncClient.get
 

@@ -1,8 +1,9 @@
 """Historical market-data source abstraction, mirroring the broker
 abstraction (app.services.broker.base): the rest of the platform depends on
-this interface, never on a specific provider. yahoo_nse is the only real
-adapter today; broker-sourced adapters (Zerodha, Delta) register here the
-same way in a later phase.
+this interface, never on a specific provider. Delta Exchange is the only
+adapter registered here today (see registry.py); Zerodha's NSE data goes
+through its own broker-scoped path (services/broker/zerodha_broker.py) via
+the Data Backfill Platform instead.
 """
 
 from abc import ABC, abstractmethod

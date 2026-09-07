@@ -6,11 +6,11 @@ with which one actually produced it (PRD Rule 11: financial data
 transparency -- never let the frontend mistake one for the other):
 
   - Real: `app.services.market_data.real_price_feed.RealPriceFeed` polls
-    Yahoo Finance (NSE) and Delta Exchange's real public APIs on a periodic
-    cycle and calls `set_real_price()` here. Once an instrument has a real
-    price on file, this engine always serves that value (held flat between
-    polls, never faked) tagged with its real source ("yahoo"/"delta") --
-    it never reverts to the random walk just because a poll is briefly late.
+    Delta Exchange's real public APIs on a periodic cycle and calls
+    `set_real_price()` here. Once an instrument has a real price on file,
+    this engine always serves that value (held flat between polls, never
+    faked) tagged with its real source ("delta") -- it never reverts to the
+    random walk just because a poll is briefly late.
   - Simulated: for instruments with no real source mapped (e.g. Zerodha, or
     anything RealPriceFeed hasn't covered yet), this engine falls back to a
     random walk seeded from the instrument's last known close, tagged
@@ -80,10 +80,9 @@ class TickEngine:
         return self._real_price.get(instrument_id, self._last_price.get(instrument_id))
 
     def set_real_price(self, instrument_id: uuid.UUID, price: float, source: str) -> None:
-        """Called by RealPriceFeed with a genuine price polled from Yahoo
-        or Delta. Once set, this instrument is served from here (flat
-        between polls, never randomly perturbed) instead of the simulated
-        random walk."""
+        """Called by RealPriceFeed with a genuine price polled from Delta.
+        Once set, this instrument is served from here (flat between polls,
+        never randomly perturbed) instead of the simulated random walk."""
         self._real_price[instrument_id] = price
         self._real_price_source[instrument_id] = source
         self._last_price[instrument_id] = price

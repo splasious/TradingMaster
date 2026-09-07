@@ -19,7 +19,7 @@ async def _completed_job(db_session: AsyncSession, symbol: BfSymbol, completed_a
 
 
 async def test_scheduler_syncs_symbol_never_synced_before(db_session: AsyncSession):
-    symbol = BfSymbol(source="yahoo", symbol="SCHEDNEVER", display_name="Sched Never Co")
+    symbol = BfSymbol(source="zerodha", symbol="SCHEDNEVER", display_name="Sched Never Co")
     db_session.add(symbol)
     await db_session.flush()
     await _completed_job(db_session, symbol, datetime.now(timezone.utc))
@@ -33,7 +33,7 @@ async def test_scheduler_syncs_symbol_never_synced_before(db_session: AsyncSessi
 
 
 async def test_scheduler_skips_symbol_synced_after_its_last_completed_job(db_session: AsyncSession):
-    symbol = BfSymbol(source="yahoo", symbol="SCHEDUPTODATE", display_name="Up To Date Co", last_synced_at=datetime.now(timezone.utc))
+    symbol = BfSymbol(source="zerodha", symbol="SCHEDUPTODATE", display_name="Up To Date Co", last_synced_at=datetime.now(timezone.utc))
     db_session.add(symbol)
     await db_session.flush()
     await _completed_job(db_session, symbol, datetime.now(timezone.utc) - timedelta(hours=1))
@@ -61,7 +61,7 @@ async def test_scheduler_resyncs_symbol_with_newer_completed_job_than_last_sync(
 
 
 async def test_sync_pending_actually_syncs_and_marks_last_synced_at(db_session: AsyncSession):
-    symbol = BfSymbol(source="yahoo", symbol="SCHEDREAL", display_name="Real Sync Co")
+    symbol = BfSymbol(source="zerodha", symbol="SCHEDREAL", display_name="Real Sync Co")
     db_session.add(symbol)
     await db_session.flush()
     await _completed_job(db_session, symbol, datetime.now(timezone.utc))

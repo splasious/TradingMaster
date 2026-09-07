@@ -17,8 +17,8 @@ router = APIRouter()
 # Core components: an error here means TradingMaster itself is unhealthy and
 # drives the overall status. Optional external data sources are reported
 # too (PRD section 30), but one being unreachable is a normal, expected
-# state (e.g. the local nse-yahoo-data sidecar simply isn't running) rather
-# than a platform fault, so it's excluded from the overall rollup.
+# state rather than a platform fault, so it's excluded from the overall
+# rollup.
 CORE_COMPONENTS = ("database", "broker_engine")
 
 
@@ -40,9 +40,6 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     except Exception:
         components["broker_engine"] = "error"
 
-    # Yahoo's NSE coverage is retired (superseded by Zerodha) -- no longer
-    # reported here, since a permanently "unreachable" reading for a
-    # deliberately-unused source is noise, not signal.
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get("https://api.india.delta.exchange/v2/products", params={"page_size": "1"})

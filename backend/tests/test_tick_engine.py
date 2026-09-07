@@ -25,7 +25,7 @@ def test_queue_does_not_drop_a_late_subscribers_tick_under_heavy_global_load():
     # dict insertion order puts it at the very end of the active list.
     my_instrument_id = uuid.uuid4()
     engine.subscribe(my_instrument_id, seed_price=100.0)
-    engine.set_real_price(my_instrument_id, 1234.5, "yahoo")
+    engine.set_real_price(my_instrument_id, 1234.5, "delta")
 
     now = datetime.now(timezone.utc).isoformat()
     active = [iid for iid, count in engine._subscriber_counts.items() if count > 0]
@@ -43,7 +43,7 @@ def test_queue_does_not_drop_a_late_subscribers_tick_under_heavy_global_load():
 
     my_ticks = [m for m in drained if m["instrument_id"] == str(my_instrument_id)]
     assert len(my_ticks) == 1
-    assert my_ticks[0]["source"] == "yahoo"
+    assert my_ticks[0]["source"] == "delta"
     assert my_ticks[0]["price"] == 1234.5
 
 

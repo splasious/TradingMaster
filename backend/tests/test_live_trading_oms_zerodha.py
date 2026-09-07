@@ -73,7 +73,7 @@ async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None,
     db_session.add(BrokerConnection(broker_account_id=broker_account.id, status=ConnectionStatus.CONNECTED.value))
     db_session.add(BrokerCredential(broker_account_id=broker_account.id, encrypted_payload=encrypt_payload(json.dumps({"api_key": "k", "api_secret": "s", "access_token": "t"}))))
 
-    instrument = Instrument(exchange="NSE", symbol="INFY", name="Infosys Ltd", instrument_type="equity", data_source="yahoo_nse", external_ref="INFY")
+    instrument = Instrument(exchange="NSE", symbol="INFY", name="Infosys Ltd", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
     db_session.add(instrument)
     await db_session.flush()
 

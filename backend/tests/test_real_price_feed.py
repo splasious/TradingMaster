@@ -43,7 +43,7 @@ def test_get_current_price_prefers_real_over_simulated():
     engine.subscribe(iid, seed_price=50.0)
     assert engine.get_current_price(iid) == 50.0
 
-    engine.set_real_price(iid, 999.0, "yahoo")
+    engine.set_real_price(iid, 999.0, "delta")
     assert engine.get_current_price(iid) == 999.0
 
 
@@ -60,47 +60,6 @@ async def test_fetch_real_price_delta_uses_real_ticker(monkeypatch):
     )
     result = await fetch_real_price(instrument)
     assert result == (42.5, "delta")
-
-
-async def test_fetch_real_price_yahoo_returns_none_outside_market_hours():
-    instrument = Instrument(
-        id=uuid.uuid4(), exchange="NSE", symbol="RELIANCE", name="Reliance",
-        instrument_type="equity", data_source="yahoo_nse", external_ref="RELIANCE",
-    )
-    result = await fetch_real_price(instrument, market_open=False)
-    assert result is None
-
-
-async def test_fetch_real_price_yahoo_returns_none_when_live_polling_disabled(monkeypatch):
-    # Default posture: Yahoo's inherent lag makes it unsuitable as a live
-    # source, so this stays off even during market hours until an operator
-    # opts in via Settings.yahoo_live_polling_enabled.
-    instrument = Instrument(
-        id=uuid.uuid4(), exchange="NSE", symbol="RELIANCE", name="Reliance",
-        instrument_type="equity", data_source="yahoo_nse", external_ref="RELIANCE",
-    )
-    result = await fetch_real_price(instrument, market_open=True)
-    assert result is None
-
-
-async def test_fetch_real_price_yahoo_returns_last_close_during_market_hours(monkeypatch):
-    from app.services.market_data import real_price_feed as real_price_feed_module
-    from app.services.market_data import yahoo_source as yahoo_module
-
-    async def fake_get_historical_data(self, external_ref, timeframe, start, end):
-        return [{"ts": datetime.now(timezone.utc), "open": 1, "high": 1, "low": 1, "close": 555.0, "volume": 10}]
-
-    monkeypatch.setattr(yahoo_module.YahooNSEDataSource, "get_historical_data", fake_get_historical_data)
-
-    settings = real_price_feed_module.get_settings()
-    monkeypatch.setattr(settings, "yahoo_live_polling_enabled", True)
-
-    instrument = Instrument(
-        id=uuid.uuid4(), exchange="NSE", symbol="RELIANCE", name="Reliance",
-        instrument_type="equity", data_source="yahoo_nse", external_ref="RELIANCE",
-    )
-    result = await fetch_real_price(instrument, market_open=True)
-    assert result == (555.0, "yahoo")
 
 
 async def test_fetch_real_price_unmapped_source_returns_none():

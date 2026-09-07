@@ -8,7 +8,7 @@ from app.services.backtest.candle_source import load_candles
 
 
 async def _seed_daily_candles(db_session: AsyncSession, symbol: str, n_days: int, start: datetime) -> Instrument:
-    instrument = Instrument(exchange="NSE", symbol=symbol, name=symbol, instrument_type="equity", data_source="yahoo_nse", external_ref=symbol)
+    instrument = Instrument(exchange="NSE", symbol=symbol, name=symbol, instrument_type="equity", data_source="zerodha_kite", external_ref=symbol)
     db_session.add(instrument)
     await db_session.flush()
     for i in range(n_days):
@@ -37,7 +37,7 @@ async def test_load_candles_resamples_when_target_not_directly_stored(db_session
 
 
 async def test_load_candles_returns_empty_when_no_usable_base(db_session: AsyncSession):
-    instrument = Instrument(exchange="NSE", symbol="LOADNONE", name="Load None", instrument_type="equity", data_source="yahoo_nse", external_ref="LOADNONE")
+    instrument = Instrument(exchange="NSE", symbol="LOADNONE", name="Load None", instrument_type="equity", data_source="zerodha_kite", external_ref="LOADNONE")
     db_session.add(instrument)
     await db_session.commit()
     candles = await load_candles(db_session, instrument.id, "1wk")

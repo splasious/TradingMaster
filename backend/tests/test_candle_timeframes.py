@@ -10,7 +10,7 @@ from app.models.market_data import OhlcvCandle
 async def _make_instrument_with_1m_candles(db_session: AsyncSession, symbol: str, n_minutes: int, start: datetime) -> Instrument:
     instrument = Instrument(
         exchange="NSE", symbol=symbol, name=symbol, instrument_type="equity",
-        data_source="yahoo_nse", external_ref=symbol,
+        data_source="zerodha_kite", external_ref=symbol,
     )
     db_session.add(instrument)
     await db_session.flush()
@@ -81,7 +81,7 @@ async def test_indicator_calculate_resamples_from_base_timeframe(client: AsyncCl
 
 
 async def test_indicator_calculate_returns_empty_when_base_has_no_candles(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
-    instrument = Instrument(exchange="NSE", symbol="INDNONE", name="Ind None", instrument_type="equity", data_source="yahoo_nse", external_ref="INDNONE")
+    instrument = Instrument(exchange="NSE", symbol="INDNONE", name="Ind None", instrument_type="equity", data_source="zerodha_kite", external_ref="INDNONE")
     db_session.add(instrument)
     await db_session.commit()
 

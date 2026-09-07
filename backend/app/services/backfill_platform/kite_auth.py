@@ -1,7 +1,7 @@
 """Shared helper: an authenticated ZerodhaKiteBroker for a given user's own
 connected account, reused by both symbol search and backfill (Kite's
-instrument list and historical candles both require auth, unlike Yahoo's
-sidecar service or Delta's public API)."""
+instrument list and historical candles both require auth, unlike Delta's
+public API)."""
 
 import json
 

@@ -127,7 +127,7 @@ export interface MarketTick {
   instrument_id: string;
   price: number;
   ts: string;
-  source: "yahoo" | "delta" | "simulated";
+  source: "delta" | "simulated";
 }
 
 export interface IndicatorSpecOut {
@@ -597,7 +597,7 @@ export interface InstrumentSyncResult {
   skipped: number;
 }
 
-export type BfSource = "yahoo" | "delta" | "zerodha";
+export type BfSource = "delta" | "zerodha";
 
 export interface SourceStatusOut {
   source: BfSource;

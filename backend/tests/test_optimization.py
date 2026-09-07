@@ -37,7 +37,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 
 
 async def test_optimization_api_ranks_results(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
-    instrument = Instrument(exchange="NSE", symbol="OPTX", name="Opt Co", instrument_type="equity", data_source="yahoo_nse", external_ref="OPTX")
+    instrument = Instrument(exchange="NSE", symbol="OPTX", name="Opt Co", instrument_type="equity", data_source="zerodha_kite", external_ref="OPTX")
     db_session.add(instrument)
     await db_session.flush()
     base = datetime(2026, 1, 5, tzinfo=timezone.utc)
@@ -90,7 +90,7 @@ async def test_optimization_api_ranks_results(client: AsyncClient, seeded_admin:
 
 
 async def test_optimization_rejects_visual_strategy(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
-    instrument = Instrument(exchange="NSE", symbol="VISX", name="Visual Co", instrument_type="equity", data_source="yahoo_nse", external_ref="VISX")
+    instrument = Instrument(exchange="NSE", symbol="VISX", name="Visual Co", instrument_type="equity", data_source="zerodha_kite", external_ref="VISX")
     db_session.add(instrument)
     await db_session.commit()
 

@@ -55,7 +55,7 @@ async def test_delete_strategy_removes_backtest_artifacts(client: AsyncClient, s
     from app.models.backtest import BacktestJob, BacktestResult
 
     version_id = strategy["latest_version"]["id"]
-    instrument = Instrument(exchange="NSE", symbol="DELX", name="Delete Test Co", instrument_type="equity", data_source="yahoo_nse", external_ref="DELX")
+    instrument = Instrument(exchange="NSE", symbol="DELX", name="Delete Test Co", instrument_type="equity", data_source="zerodha_kite", external_ref="DELX")
     db_session.add(instrument)
     await db_session.flush()
     job = BacktestJob(strategy_id=uuid.UUID(strategy["id"]), strategy_version_id=uuid.UUID(version_id), instrument_id=instrument.id, timeframe="1d", status="completed")
@@ -78,7 +78,7 @@ async def test_delete_strategy_with_paper_deployment_is_refused(client: AsyncCli
 
     admin = (await db_session.execute(select(User).where(User.email == seeded_admin["email"]))).scalar_one()
     version_id = strategy["latest_version"]["id"]
-    instrument = Instrument(exchange="NSE", symbol="DELY", name="Delete Test Co 2", instrument_type="equity", data_source="yahoo_nse", external_ref="DELY")
+    instrument = Instrument(exchange="NSE", symbol="DELY", name="Delete Test Co 2", instrument_type="equity", data_source="zerodha_kite", external_ref="DELY")
     db_session.add(instrument)
     await db_session.flush()
     portfolio = PaperPortfolio(user_id=admin.id, cash=100000.0, initial_capital=100000.0)

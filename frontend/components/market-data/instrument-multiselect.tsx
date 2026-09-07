@@ -32,8 +32,8 @@ export function InstrumentMultiSelect({ value, onChange, className }: Instrument
   const [exchange, setExchange] = useState("");
   const limit = q ? SEARCH_LIMIT : SELECT_ALL_LIMIT;
   const { data: rawInstruments, isLoading } = useInstruments(q, exchange || undefined, limit);
-  // NSE/Yahoo is hidden app-wide -- no reachable data source in production.
-  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse"), [rawInstruments]);
+  // Instruments with no live source backing them are hidden app-wide.
+  const instruments = useMemo(() => rawInstruments?.filter((i) => i.data_source !== "yahoo_nse" && i.data_source !== "unassigned"), [rawInstruments]);
 
   const selectedIds = useMemo(() => new Set(value.map((i) => i.id)), [value]);
 

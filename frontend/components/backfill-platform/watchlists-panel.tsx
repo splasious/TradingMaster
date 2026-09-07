@@ -26,7 +26,6 @@ import type {
 } from "@/lib/types";
 
 const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
-  yahoo_nse: "yahoo",
   delta_exchange: "delta",
   zerodha_kite: "zerodha",
 };
@@ -36,10 +35,9 @@ const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
  * particular watchlist's items actually use, so a mixed-source watchlist
  * doesn't offer a timeframe that would just fail for one of its items. */
 function useUnionTimeframeOptions(presentSources: Set<BfSource>): TimeframeOptionOut[] {
-  const { data: yahoo } = useBfTimeframes("yahoo");
   const { data: delta } = useBfTimeframes("delta");
   const { data: zerodha } = useBfTimeframes("zerodha");
-  const bySource: Record<BfSource, TimeframeOptionOut[] | undefined> = { yahoo, delta, zerodha };
+  const bySource: Record<BfSource, TimeframeOptionOut[] | undefined> = { delta, zerodha };
   const merged = new Map<string, TimeframeOptionOut>();
   for (const source of presentSources) {
     for (const opt of bySource[source] ?? []) {
@@ -256,18 +254,14 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
                   <Td><input type="checkbox" checked={selectedIds.has(item.id)} onChange={() => toggleItem(item.id)} aria-label={`Select ${item.symbol}`} /></Td>
                   <Td className="capitalize">{item.source}</Td>
                   <Td className="font-medium">
-                    {item.source === "yahoo" || item.source === "delta" || item.source === "zerodha" ? (
-                      <Link
-                        href={`/charts?symbol=${encodeURIComponent(item.symbol)}&exchange=${item.source === "delta" ? "DELTA" : "NSE"}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-active underline underline-offset-2 hover:opacity-80"
-                      >
-                        {item.symbol}
-                      </Link>
-                    ) : (
-                      item.symbol
-                    )}
+                    <Link
+                      href={`/charts?symbol=${encodeURIComponent(item.symbol)}&exchange=${item.source === "delta" ? "DELTA" : "NSE"}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-active underline underline-offset-2 hover:opacity-80"
+                    >
+                      {item.symbol}
+                    </Link>
                   </Td>
                   <Td className="text-text-secondary">{item.display_name}</Td>
                   <Td className="text-right font-financial">{item.bar_count}</Td>

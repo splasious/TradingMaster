@@ -11,7 +11,6 @@ from app.models.user import User
 from app.schemas.instrument import InstrumentOut, InstrumentSyncResult
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
-from app.services.market_data.yahoo_source import YahooNSEDataSource
 
 router = APIRouter()
 
@@ -69,29 +68,7 @@ async def sync_instruments(
     existing = {(row[0], row[1]) for row in existing_result.all()}
 
     created = 0
-    if data_source == "yahoo_nse":
-        try:
-            symbols = await YahooNSEDataSource().list_symbols()
-        except MarketDataSourceError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-        for s in symbols:
-            key = ("NSE", s["nse_code"])
-            if key in existing or not s.get("is_active", True):
-                continue
-            db.add(
-                Instrument(
-                    exchange="NSE",
-                    symbol=s["nse_code"],
-                    name=s["name"] or s["nse_code"],
-                    instrument_type="index" if " " in s["nse_code"] else "equity",
-                    data_source="yahoo_nse",
-                    external_ref=s["nse_code"],
-                )
-            )
-            existing.add(key)
-            created += 1
-        found = len(symbols)
-    elif data_source == "delta_exchange":
+    if data_source == "delta_exchange":
         try:
             products = await DeltaExchangeDataSource().list_rwa_token_products()
         except MarketDataSourceError as exc:

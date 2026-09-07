@@ -253,11 +253,11 @@ class ZerodhaKiteBroker(BrokerInterface):
     ) -> list[dict[str, Any]]:
         """Real Kite historical candles (GET /instruments/historical/{token}/{interval}),
         for the Data Backfill Platform's Zerodha block -- kept separate from
-        the yahoo_nse source's own NSE history (that PRD's own non-goal:
-        no cross-source merging, each source's data is independent, not a
-        second copy of the same series). Needs a numeric instrument_token,
-        looked up from get_instruments()'s CSV dump since Kite's historical
-        endpoint doesn't accept a plain tradingsymbol."""
+        Delta's own history (that PRD's own non-goal: no cross-source
+        merging, each source's data is independent, not a second copy of
+        the same series). Needs a numeric instrument_token, looked up from
+        get_instruments()'s CSV dump since Kite's historical endpoint
+        doesn't accept a plain tradingsymbol."""
         interval = KITE_INTERVAL_MAP.get(timeframe)
         if interval is None:
             raise KiteAPIError(f"Zerodha Kite does not support timeframe '{timeframe}' via this adapter (supported: {sorted(KITE_INTERVAL_MAP)})")

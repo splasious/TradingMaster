@@ -67,7 +67,7 @@ def test_evaluate_condition_insufficient_data_does_not_match():
 async def test_scanner_api_finds_matching_instrument(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     instrument = Instrument(
         exchange="NSE", symbol="RISING", name="Rising Co", instrument_type="equity",
-        data_source="yahoo_nse", external_ref="RISING",
+        data_source="zerodha_kite", external_ref="RISING",
     )
     db_session.add(instrument)
     await db_session.flush()

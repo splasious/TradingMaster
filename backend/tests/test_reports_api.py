@@ -17,7 +17,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 async def test_reports_endpoints_reflect_a_completed_paper_trade(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     from datetime import datetime, timedelta, timezone
 
-    instrument = Instrument(exchange="NSE", symbol="RPX", name="Report API Co", instrument_type="equity", data_source="yahoo_nse", external_ref="RPX")
+    instrument = Instrument(exchange="NSE", symbol="RPX", name="Report API Co", instrument_type="equity", data_source="zerodha_kite", external_ref="RPX")
     db_session.add(instrument)
     await db_session.flush()
     base = datetime.now(timezone.utc) - timedelta(days=30)

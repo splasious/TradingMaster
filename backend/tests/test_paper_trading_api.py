@@ -19,7 +19,7 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
 
 
 async def _seed_instrument(db_session: AsyncSession) -> Instrument:
-    instrument = Instrument(exchange="NSE", symbol="PAPX", name="Paper API Co", instrument_type="equity", data_source="yahoo_nse", external_ref="PAPX")
+    instrument = Instrument(exchange="NSE", symbol="PAPX", name="Paper API Co", instrument_type="equity", data_source="zerodha_kite", external_ref="PAPX")
     db_session.add(instrument)
     await db_session.flush()
     base = datetime.now(timezone.utc) - timedelta(days=30)
