@@ -126,6 +126,38 @@ async def test_portfolio_backtest_skips_instrument_with_too_few_candles(client: 
     assert result["skipped_symbols"] == ["THIN2"]
 
 
+async def test_portfolio_backtest_surfaces_python_strategy_error_not_data_error(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test: when every instrument fails signal computation for
+    the same reason (a broken Python strategy, not missing data), the job's
+    error_message must surface that real reason -- not the generic
+    "not enough backfilled candles" message, which is actively misleading
+    when the instruments have plenty of candles and the strategy code
+    itself is what's broken (e.g. it never defines generate_signal)."""
+    inst_a = await _seed_instrument_with_candles(db_session, "BROKENA", 100)
+    inst_b = await _seed_instrument_with_candles(db_session, "BROKENB", 200)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Broken Python Strategy", "version": {"python_code": "def not_the_right_function_name():\n    return 'BUY'"}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/portfolio-backtests",
+        json={"strategy_id": strategy_id, "instrument_ids": [str(inst_a.id), str(inst_b.id)], "timeframe": "1d"},
+        headers=headers,
+    )
+    job_id = resp.json()["id"]
+
+    job = (await client.get(f"/api/v1/portfolio-backtests/{job_id}", headers=headers)).json()
+    assert job["status"] == "failed"
+    assert "not enough backfilled candles" not in job["error_message"].lower()
+    assert "generate_signal" in job["error_message"]
+
+
 async def test_portfolio_backtest_rejects_single_instrument(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     inst_a = await _seed_instrument_with_candles(db_session, "SOLO", 100)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])

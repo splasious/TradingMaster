@@ -43,6 +43,13 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
             candles_by_instrument: dict[str, list] = {}
             signals_by_instrument: dict[str, object] = {}
             skipped_symbols: list[str] = []
+            # Kept separate from the generic "not enough candles" skip reason
+            # so a strategy-code bug (e.g. a Python strategy that fails the
+            # sandbox for every instrument alike) surfaces its real cause
+            # instead of the misleading "insufficient data" message -- both
+            # reasons land the same instrument in skipped_symbols, but only
+            # one of them means the data itself was the problem.
+            last_signal_error: str | None = None
 
             from app.models.instrument import Instrument  # local import: avoid a module-level cycle with strategy models
 
@@ -59,7 +66,8 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
                         signals = await compute_python_signals(candles, version.python_code, version.parameters)
                     else:
                         signals = compute_visual_signals(candles, version.entry_rules, version.exit_rules)
-                except SignalComputationError:
+                except SignalComputationError as exc:
+                    last_signal_error = str(exc)
                     skipped_symbols.append(instrument.symbol)
                     continue
 
@@ -69,6 +77,10 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
                 signals_by_instrument[inst_id] = signals
 
             if not instruments:
+                if last_signal_error:
+                    raise SignalComputationError(
+                        f"The strategy failed to compute a signal for every selected instrument: {last_signal_error}"
+                    )
                 raise SignalComputationError(
                     "None of the selected instruments have enough backfilled candles "
                     f"(need at least {MIN_CANDLES}) at timeframe '{job.timeframe}' to run a portfolio backtest"

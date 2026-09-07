@@ -1007,9 +1007,9 @@ export default function BacktestingPage() {
                 <KpiGrid metrics={portfolioResult.metrics} />
 
                 <p className="text-xs text-text-muted">
-                  {portfolioResult.instrument_count} of {portfolioJob.instrument_ids.length} instruments had enough data to trade.
+                  {portfolioResult.instrument_count} of {portfolioJob.instrument_ids.length} instruments were tradeable.
                   {portfolioResult.skipped_symbols.length > 0 && (
-                    <> Skipped (not enough backfilled candles): {portfolioResult.skipped_symbols.join(", ")}.</>
+                    <> Skipped (not enough backfilled candles, or the strategy failed to compute a signal for it): {portfolioResult.skipped_symbols.join(", ")}.</>
                   )}
                 </p>
 
