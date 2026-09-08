@@ -11,9 +11,10 @@ from app.services.backtest.signals import BarSignals
 
 
 class FakeInstrument:
-    def __init__(self, symbol: str):
+    def __init__(self, symbol: str, lot_size: int | None = None):
         self.id = uuid.uuid4()
         self.symbol = symbol
+        self.lot_size = lot_size
 
 
 def _candle(day_offset: int, open_, high, low, close, volume=1000.0) -> OhlcvCandle:
@@ -444,3 +445,21 @@ def test_as_metrics_input_handles_open_short_without_crashing():
 
     assert metrics["num_trades"] == 1
     assert metrics["net_profit"] == pytest.approx(output.final_equity - 100000)
+
+
+def test_portfolio_sizing_rounds_to_whole_lots_for_fno_instrument():
+    """An instrument with a lot_size (F&O) must fill in whole-lot
+    multiples, not whole units -- same rule as the single-instrument
+    engine's quantity_for, applied to the portfolio engine's own inline
+    allocation block."""
+    a = FakeInstrument("NIFTYCE", lot_size=75)
+    candles = [_candle(i, 100, 101, 99, 100) for i in range(10)]
+    signals = {str(a.id): BarSignals(entry=[False] * 5 + [True] + [False] * 4, exit=[False] * 10)}
+    sizing = PortfolioSizing(position_size_pct=20.0, max_open_positions=5)
+
+    output = simulate_portfolio([a], {str(a.id): candles}, signals, 100000, sizing, NO_RISK, NO_COSTS)
+
+    assert len(output.trades) == 1
+    # allocation = 100000*20% = 20000, one lot = 100*75 = 7500, floor(20000/7500)=2 lots -> 150 units.
+    assert output.trades[0].quantity == 150.0
+    assert output.trades[0].quantity % 75 == 0

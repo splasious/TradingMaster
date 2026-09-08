@@ -70,7 +70,7 @@ class KiteAPIError(Exception):
     pass
 
 
-_INSTRUMENTS_CACHE: dict[str, Any] = {"rows": None, "fetched_at": None}
+_INSTRUMENTS_CACHE: dict[str, dict[str, Any]] = {}  # segment -> {"rows": ..., "fetched_at": ...}
 _INSTRUMENTS_CACHE_TTL = timedelta(minutes=30)
 
 
@@ -211,23 +211,27 @@ class ZerodhaKiteBroker(BrokerInterface):
         trades = await self._request("GET", "/trades")
         return trades or []
 
-    async def get_instruments(self) -> list[dict[str, Any]]:
-        """Kite serves this as a CSV dump, not JSON -- scoped to the NSE
-        segment (GET /instruments/NSE) rather than the full multi-exchange
-        dump, since NSE is the only segment this platform trades.
+    async def get_instruments(self, segment: str = "NSE") -> list[dict[str, Any]]:
+        """Kite serves this as a CSV dump, not JSON -- scoped to one
+        segment at a time (GET /instruments/{segment}). "NSE" is equities/
+        indices (the only segment this adapter fetched before F&O support);
+        "NFO" is equity derivatives -- options/futures -- whose rows carry
+        extra columns this method's caller relies on for F&O: `name` (the
+        underlying's symbol, e.g. "NIFTY"), `expiry`, `strike`,
+        `instrument_type` ("CE"/"PE"/"FUT"), `lot_size`, `tick_size`.
 
-        Cached process-wide for _INSTRUMENTS_CACHE_TTL: NSE's instrument
-        list (tradingsymbol -> instrument_token) doesn't change intraday,
-        but get_historical_data() calls this on every single symbol, and a
-        bulk backfill creates a fresh ZerodhaKiteBroker per job -- without
-        this cache, backfilling a few hundred symbols means a few hundred
-        full re-downloads of the same multi-thousand-row CSV in quick
-        succession, which is exactly what tripped Kite's rate limit
-        (HTTP 429) during a real production run."""
+        Cached process-wide per segment for _INSTRUMENTS_CACHE_TTL: a
+        segment's instrument list (tradingsymbol -> instrument_token)
+        doesn't change intraday, but get_historical_data() calls this on
+        every single symbol, and a bulk backfill creates a fresh
+        ZerodhaKiteBroker per job -- without this cache, backfilling a few
+        hundred symbols means a few hundred full re-downloads of the same
+        multi-thousand-row CSV in quick succession, which is exactly what
+        tripped Kite's rate limit (HTTP 429) during a real production run."""
         now = datetime.now(timezone.utc)
-        cached_rows, fetched_at = _INSTRUMENTS_CACHE["rows"], _INSTRUMENTS_CACHE["fetched_at"]
-        if cached_rows is not None and fetched_at is not None and now - fetched_at < _INSTRUMENTS_CACHE_TTL:
-            return cached_rows
+        cached = _INSTRUMENTS_CACHE.get(segment)
+        if cached is not None and cached["fetched_at"] is not None and now - cached["fetched_at"] < _INSTRUMENTS_CACHE_TTL:
+            return cached["rows"]
 
         if not self._api_key:
             raise KiteAPIError("Not authenticated: call authenticate() with api_key/api_secret first")
@@ -236,7 +240,7 @@ class ZerodhaKiteBroker(BrokerInterface):
             headers["Authorization"] = f"token {self._api_key}:{self._access_token}"
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(f"{self.BASE_URL}/instruments/NSE", headers=headers)
+                resp = await client.get(f"{self.BASE_URL}/instruments/{segment}", headers=headers)
         except httpx.ConnectError as exc:
             raise KiteAPIError("Could not reach Zerodha Kite's API.") from exc
         except httpx.TimeoutException as exc:
@@ -244,12 +248,11 @@ class ZerodhaKiteBroker(BrokerInterface):
         if resp.status_code != 200:
             raise KiteAPIError(f"Zerodha Kite instrument dump request failed (HTTP {resp.status_code}).")
         rows = list(csv.DictReader(io.StringIO(resp.text)))
-        _INSTRUMENTS_CACHE["rows"] = rows
-        _INSTRUMENTS_CACHE["fetched_at"] = now
+        _INSTRUMENTS_CACHE[segment] = {"rows": rows, "fetched_at": now}
         return rows
 
     async def get_historical_data(
-        self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None
+        self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, segment: str = "NSE"
     ) -> list[dict[str, Any]]:
         """Real Kite historical candles (GET /instruments/historical/{token}/{interval}),
         for the Data Backfill Platform's Zerodha block -- kept separate from
@@ -257,12 +260,14 @@ class ZerodhaKiteBroker(BrokerInterface):
         merging, each source's data is independent, not a second copy of
         the same series). Needs a numeric instrument_token, looked up from
         get_instruments()'s CSV dump since Kite's historical endpoint
-        doesn't accept a plain tradingsymbol."""
+        doesn't accept a plain tradingsymbol. `segment` selects which
+        instrument dump to search ("NFO" for options/futures tradingsymbols
+        like "NIFTY25SEP25000CE", which only exist in that dump)."""
         interval = KITE_INTERVAL_MAP.get(timeframe)
         if interval is None:
             raise KiteAPIError(f"Zerodha Kite does not support timeframe '{timeframe}' via this adapter (supported: {sorted(KITE_INTERVAL_MAP)})")
 
-        instruments = await self.get_instruments()
+        instruments = await self.get_instruments(segment)
         match = next((row for row in instruments if row.get("tradingsymbol") == symbol), None)
         if match is None:
             # NSE periodically moves a stock into its "BE" (trade-to-trade)
@@ -272,7 +277,7 @@ class ZerodhaKiteBroker(BrokerInterface):
             # equities, only appear in Kite's dump as "HEG-BE"/"HFCL-BE".
             match = next((row for row in instruments if row.get("tradingsymbol") == f"{symbol}-BE"), None)
         if match is None:
-            raise KiteAPIError(f"'{symbol}' not found in Kite's NSE instrument list")
+            raise KiteAPIError(f"'{symbol}' not found in Kite's {segment} instrument list")
         token = match["instrument_token"]
 
         end = end or datetime.now(timezone.utc)

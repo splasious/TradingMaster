@@ -33,6 +33,7 @@ from app.db.base import Base
 class BackfillSource(str, enum.Enum):
     DELTA = "delta"
     ZERODHA = "zerodha"
+    ZERODHA_NFO = "zerodha_nfo"
 
 
 class BfBackfillStatus(str, enum.Enum):
@@ -57,6 +58,16 @@ class BfSymbol(Base):
     # Set by CatalogSyncScheduler after it last copied this symbol's bars
     # into the main Instrument/OhlcvCandle schema. NULL means never synced.
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F&O metadata (source="zerodha_nfo" only) -- captured once, at
+    # get_or_create_symbol time, straight from Kite's NFO instrument dump
+    # row the user searched/selected. Carried here (not re-fetched live at
+    # sync time) because catalog_sync_scheduler's background tick has no
+    # per-user Kite session to call back into -- see catalog_sync.py.
+    expiry: Mapped[date | None] = mapped_column(Date)
+    strike: Mapped[float | None] = mapped_column(Float)
+    option_type: Mapped[str | None] = mapped_column(String(2))
+    lot_size: Mapped[int | None] = mapped_column(Integer)
+    underlying_symbol: Mapped[str | None] = mapped_column(String(50))  # Kite's NFO "name" column, e.g. "NIFTY"
 
     bars: Mapped[list["BfOhlcvBar"]] = relationship(back_populates="symbol", cascade="all, delete-orphan")
 

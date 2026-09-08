@@ -22,6 +22,9 @@ from dataclasses import dataclass
 _NATIVE: dict[str, list[str]] = {
     "delta": ["1m", "5m", "15m", "30m", "60m", "4h", "1d", "1wk"],
     "zerodha": ["1m", "5m", "15m", "30m", "60m", "1d"],
+    # Kite's historical-candle API supports the same intervals across every
+    # segment (NSE/NFO/BFO/MCX) -- NFO options/futures get the same set.
+    "zerodha_nfo": ["1m", "5m", "15m", "30m", "60m", "1d"],
 }
 
 # Available everywhere as a resample of stored daily bars, even where not

@@ -55,7 +55,10 @@ class FakeKiteTransport:
         monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
 
 
-async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None, risk_rules=None):
+async def _setup(
+    db_session: AsyncSession, *, entry_rules=None, exit_rules=None, risk_rules=None,
+    instrument_type="equity", exchange="NSE", lot_size=None, product_override=None,
+):
     role = Role(name=f"role_{uuid.uuid4().hex[:6]}", description="x")
     db_session.add(role)
     await db_session.flush()
@@ -73,7 +76,12 @@ async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None,
     db_session.add(BrokerConnection(broker_account_id=broker_account.id, status=ConnectionStatus.CONNECTED.value))
     db_session.add(BrokerCredential(broker_account_id=broker_account.id, encrypted_payload=encrypt_payload(json.dumps({"api_key": "k", "api_secret": "s", "access_token": "t"}))))
 
-    instrument = Instrument(exchange="NSE", symbol="INFY", name="Infosys Ltd", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
+    instrument = Instrument(
+        exchange=exchange, symbol="INFY" if instrument_type == "equity" else "NIFTY25SEP25000CE",
+        name="Infosys Ltd" if instrument_type == "equity" else "NIFTY 25000 CE",
+        instrument_type=instrument_type, data_source="zerodha_kite",
+        external_ref="INFY" if instrument_type == "equity" else "NIFTY25SEP25000CE", lot_size=lot_size,
+    )
     db_session.add(instrument)
     await db_session.flush()
 
@@ -95,7 +103,7 @@ async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None,
 
     deployment = LiveDeployment(
         owner_id=user.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
-        broker_account_id=broker_account.id, timeframe="1d", status="active",
+        broker_account_id=broker_account.id, timeframe="1d", status="active", product_override=product_override,
     )
     db_session.add(deployment)
     await db_session.commit()
@@ -150,6 +158,39 @@ async def test_exit_signal_closes_kite_position(db_session: AsyncSession, monkey
     assert position is None
     assert len(fake.placed_orders) == 2
     assert fake.placed_orders[1]["transaction_type"] == "SELL"
+
+
+async def test_option_order_routes_to_nfo_segment_with_mis_product(db_session: AsyncSession, monkeypatch):
+    """An F&O instrument must route to Kite's NFO segment with the "MIS"
+    (intraday) product by default -- "CNC" isn't valid there, and "NSE" is
+    the wrong segment entirely for a derivatives tradingsymbol."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, instrument_type="option", exchange="NFO", lot_size=75)
+    fake = FakeKiteTransport(ltp=150.0)
+    fake.patch(monkeypatch)
+
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+
+    order = fake.placed_orders[0]
+    assert order["exchange"] == "NFO"
+    assert order["product"] == "MIS"
+    assert order["tradingsymbol"] == "NIFTY25SEP25000CE"
+
+    live_order = (await db_session.execute(select(LiveOrder).where(LiveOrder.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert live_order.product == "MIS"
+
+
+async def test_option_order_respects_product_override_for_carry_positions(db_session: AsyncSession, monkeypatch):
+    ctx = await _setup(
+        db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, instrument_type="option", exchange="NFO",
+        lot_size=75, product_override="NRML",
+    )
+    fake = FakeKiteTransport(ltp=150.0)
+    fake.patch(monkeypatch)
+
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+    assert fake.placed_orders[0]["product"] == "NRML"
 
 
 async def test_expired_kite_session_surfaces_as_authentication_error(db_session: AsyncSession, monkeypatch):

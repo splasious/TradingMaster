@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from app.db.session import AsyncSessionLocal
 from app.models.backtest import BacktestJob, BacktestResult, BacktestStatus, BacktestTrade
+from app.models.instrument import Instrument
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, simulate_trades
@@ -26,6 +27,8 @@ async def run_backtest_job(job_id: uuid.UUID) -> None:
 
         try:
             version = await db.get(StrategyVersion, job.strategy_version_id)
+            instrument = await db.get(Instrument, job.instrument_id)
+            lot_size = instrument.lot_size if instrument is not None else None
             candles = (await load_candles(db, job.instrument_id, job.timeframe, job.start_date, job.end_date))[-MAX_CANDLES:]
 
             if len(candles) < 30:
@@ -53,7 +56,7 @@ async def run_backtest_job(job_id: uuid.UUID) -> None:
             )
             costs = CostConfig(brokerage_pct=job.brokerage_pct, slippage_pct=job.slippage_pct, tax_pct=job.tax_pct)
 
-            output = simulate_trades(candles, signals, job.initial_capital, sizing, risk, costs)
+            output = simulate_trades(candles, signals, job.initial_capital, sizing, risk, costs, lot_size)
             metrics = compute_metrics(output, job.initial_capital, job.timeframe)
 
             out_of_sample_metrics = None
@@ -62,8 +65,8 @@ async def run_backtest_job(job_id: uuid.UUID) -> None:
                 if 10 < split_idx < len(candles) - 10:
                     in_sample_signals = type(signals)(entry=signals.entry[:split_idx], exit=signals.exit[:split_idx])
                     oos_signals = type(signals)(entry=signals.entry[split_idx:], exit=signals.exit[split_idx:])
-                    in_sample_output = simulate_trades(candles[:split_idx], in_sample_signals, job.initial_capital, sizing, risk, costs)
-                    oos_output = simulate_trades(candles[split_idx:], oos_signals, job.initial_capital, sizing, risk, costs)
+                    in_sample_output = simulate_trades(candles[:split_idx], in_sample_signals, job.initial_capital, sizing, risk, costs, lot_size)
+                    oos_output = simulate_trades(candles[split_idx:], oos_signals, job.initial_capital, sizing, risk, costs, lot_size)
                     metrics = compute_metrics(in_sample_output, job.initial_capital, job.timeframe)
                     out_of_sample_metrics = compute_metrics(oos_output, job.initial_capital, job.timeframe)
 

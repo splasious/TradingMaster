@@ -74,17 +74,33 @@ async def _get_authenticated_broker(db: AsyncSession, broker_account: BrokerAcco
     return broker
 
 
-async def _get_live_price_and_context(broker_code: str, broker, instrument: Instrument) -> tuple[float, dict]:
+_FNO_TYPES = ("option", "future")
+
+
+async def _get_live_price_and_context(
+    broker_code: str, broker, instrument: Instrument, product_override: str | None = None
+) -> tuple[float, dict]:
     """Real current price plus whatever broker-specific fields place_order()
     needs beyond quantity/side (Delta: a numeric product_id; Kite: the
     tradingsymbol/exchange/product it trades under) -- the only place in
-    this module that knows either broker's vocabulary."""
+    this module that knows either broker's vocabulary.
+
+    Kite's exchange/product both depend on what's actually being traded:
+    an option/future lives on the NFO segment and defaults to "MIS"
+    (intraday) rather than equity's "CNC" (delivery) -- MIS/NRML don't mean
+    anything for a cash-and-carry equity buy, and CNC isn't valid on NFO.
+    `product_override` (from LiveDeployment.product_override) lets a carry
+    (multi-day) F&O position use "NRML" instead of the MIS default; it has
+    no effect on equity, which always stays CNC."""
     if broker_code == "delta_exchange":
         ticker = await DeltaExchangeDataSource().get_ticker(instrument.external_ref)
         return ticker["price"], {"product_id": ticker["product_id"]}
     if broker_code == "zerodha_kite":
-        quote = await broker.get_ltp("NSE", instrument.external_ref)
-        return quote["price"], {"tradingsymbol": instrument.external_ref, "exchange": "NSE", "product": "CNC"}
+        is_fno = instrument.instrument_type in _FNO_TYPES
+        exchange = "NFO" if is_fno else "NSE"
+        product = product_override or ("MIS" if is_fno else "CNC")
+        quote = await broker.get_ltp(exchange, instrument.external_ref)
+        return quote["price"], {"tradingsymbol": instrument.external_ref, "exchange": exchange, "product": product}
     raise MarketDataSourceError(f"No live pricing wired up for broker '{broker_code}'")
 
 
@@ -109,7 +125,9 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
         return LiveOutcome(action="error", reason=f"Could not authenticate with broker: {exc}")
 
     try:
-        current_price, order_context = await _get_live_price_and_context(broker_row.code, broker, instrument)
+        current_price, order_context = await _get_live_price_and_context(
+            broker_row.code, broker, instrument, deployment.product_override
+        )
     except MarketDataSourceError as exc:
         return LiveOutcome(action="error", reason=f"Could not fetch live price: {exc}")
 
@@ -159,7 +177,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     deployment.last_evaluated_at = now
 
     if signal == "BUY" and position is None:
-        return await _try_enter(db, deployment, broker, broker_row.code, version, current_price, order_context, now)
+        return await _try_enter(db, deployment, broker, broker_row.code, version, current_price, order_context, now, instrument.lot_size)
     if signal == "SELL" and position is not None:
         return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "signal", current_price)
 
@@ -172,7 +190,7 @@ async def _submit_and_confirm(db, deployment, broker, broker_code, side, quantit
 
     live_order = LiveOrder(
         deployment_id=deployment.id, client_order_id=client_order_id, side=side, quantity=quantity,
-        order_type="market_order", status=LiveOrderStatus.SUBMITTED.value,
+        order_type="market_order", status=LiveOrderStatus.SUBMITTED.value, product=order_context.get("product"),
     )
     db.add(live_order)
     await db.flush()
@@ -204,7 +222,7 @@ async def _submit_and_confirm(db, deployment, broker, broker_code, side, quantit
     return live_order, None
 
 
-async def _try_enter(db, deployment, broker, broker_code, version, price, order_context, now):
+async def _try_enter(db, deployment, broker, broker_code, version, price, order_context, now, lot_size=None):
     # Live capital tracking comes from the broker's own real balance, never
     # a local ledger -- fetch it before sizing, not after.
     try:
@@ -216,7 +234,7 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
         available_cash = min(available_cash, deployment.allocated_capital)
 
     sizing = PositionSizing(**version.position_sizing)
-    quantity = quantity_for(available_cash, price, sizing)
+    quantity = quantity_for(available_cash, price, sizing, lot_size)
     if quantity <= 0:
         return LiveOutcome(action="rejected", signal="BUY", price=price, reason="Position sizing produced zero quantity")
 

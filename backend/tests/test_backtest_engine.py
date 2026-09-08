@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models.market_data import OhlcvCandle
-from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, simulate_trades
+from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, quantity_for, simulate_trades
 from app.services.backtest.signals import BarSignals
 
 
@@ -310,3 +310,33 @@ def test_cannot_open_long_and_short_at_once():
 
     assert len(output.trades) == 1
     assert output.trades[0].side == "long"
+
+
+def test_quantity_for_percent_capital_rounds_to_whole_lots_when_lot_size_given():
+    """An F&O instrument's lot_size makes percent_capital sizing floor to
+    the nearest whole LOT (a multiple of lot_size), not the nearest whole
+    unit -- an order for a non-multiple-of-lot-size quantity is simply
+    illegal on a real exchange."""
+    sizing = PositionSizing(type="percent_capital", value=20.0)
+    # cash=100000, price=100, lot_size=75 -> allocation=20000, one lot costs
+    # 100*75=7500, floor(20000/7500)=2 lots -> 150 units, not floor(20000/100)=200.
+    assert quantity_for(100000.0, 100.0, sizing, lot_size=75) == 150.0
+
+
+def test_quantity_for_percent_capital_ignores_lot_size_when_none():
+    """No lot_size (equity/crypto) -> unchanged whole-unit behavior."""
+    sizing = PositionSizing(type="percent_capital", value=20.0)
+    assert quantity_for(100000.0, 100.0, sizing, lot_size=None) == 200.0
+
+
+def test_quantity_for_lots_type_converts_lot_count_to_units():
+    sizing = PositionSizing(type="lots", value=3.0)
+    assert quantity_for(100000.0, 100.0, sizing, lot_size=75) == 225.0
+
+
+def test_quantity_for_lots_type_without_lot_size_falls_back_to_raw_value():
+    """Defensive fallback -- "lots" sizing should only ever be configured
+    for an F&O strategy, but if somehow called with no lot_size, treat the
+    value as raw units rather than silently zeroing it out."""
+    sizing = PositionSizing(type="lots", value=3.0)
+    assert quantity_for(100000.0, 100.0, sizing, lot_size=None) == 3.0

@@ -232,6 +232,7 @@ export default function MarketDataPage() {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <SourceBlock source="delta" />
               <SourceBlock source="zerodha" />
+              <SourceBlock source="zerodha_nfo" />
             </div>
             <WatchlistsPanel />
             <JobHistoryPanel />

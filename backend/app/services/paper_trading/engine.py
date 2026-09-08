@@ -145,7 +145,7 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
     deployment.last_evaluated_at = now
 
     if signal == "BUY" and position is None:
-        return await _try_enter(db, deployment, portfolio, version, current_price, now)
+        return await _try_enter(db, deployment, portfolio, version, current_price, now, instrument.lot_size)
     if signal == "SELL" and position is not None:
         return await _exit_position(db, deployment, portfolio, position, current_price, now, "signal")
 
@@ -209,15 +209,19 @@ async def _pool_equity(db: AsyncSession, portfolio: PaperPortfolio) -> float:
 
 async def _try_enter(
     db: AsyncSession, deployment: PaperDeployment, portfolio: PaperPortfolio, version: StrategyVersion,
-    price: float, now: datetime,
+    price: float, now: datetime, lot_size: int | None = None,
 ) -> EvaluationOutcome:
     sizing = PositionSizing(**version.position_sizing)
     if sizing.type == "percent_capital" and price > 0:
         equity_now = await _pool_equity(db, portfolio)
         allocation = min(equity_now * (sizing.value / 100), portfolio.cash)
-        quantity = float(math.floor(max(0.0, allocation / price)))
+        if lot_size and lot_size > 0:
+            lots = math.floor(max(0.0, allocation / (price * lot_size)))
+            quantity = float(lots * lot_size)
+        else:
+            quantity = float(math.floor(max(0.0, allocation / price)))
     else:
-        quantity = quantity_for(portfolio.cash, price, sizing)
+        quantity = quantity_for(portfolio.cash, price, sizing, lot_size)
     if quantity <= 0:
         # Rejections are never persisted as orders -- the Orders/Trades UI
         # is meant to reflect real activity only. The audit log is the

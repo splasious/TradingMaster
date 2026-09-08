@@ -25,10 +25,16 @@ import type {
   WatchlistCatalogSyncResult,
 } from "@/lib/types";
 
-const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
-  delta_exchange: "delta",
-  zerodha_kite: "zerodha",
-};
+/** data_source alone is ambiguous for Zerodha -- NSE equities and NFO
+ * options/futures both carry data_source="zerodha_kite", distinguished
+ * only by instrument_type. */
+function bfSourceFor(instrument: InstrumentOut): BfSource | undefined {
+  if (instrument.data_source === "delta_exchange") return "delta";
+  if (instrument.data_source === "zerodha_kite") {
+    return instrument.instrument_type === "option" || instrument.instrument_type === "future" ? "zerodha_nfo" : "zerodha";
+  }
+  return undefined;
+}
 
 /** Merges each source's own native timeframe set (they genuinely differ --
  * see timeframes.py) into one option list scoped to whichever sources this
@@ -37,7 +43,8 @@ const DATA_SOURCE_TO_BF_SOURCE: Record<string, BfSource> = {
 function useUnionTimeframeOptions(presentSources: Set<BfSource>): TimeframeOptionOut[] {
   const { data: delta } = useBfTimeframes("delta");
   const { data: zerodha } = useBfTimeframes("zerodha");
-  const bySource: Record<BfSource, TimeframeOptionOut[] | undefined> = { delta, zerodha };
+  const { data: zerodha_nfo } = useBfTimeframes("zerodha_nfo");
+  const bySource: Record<BfSource, TimeframeOptionOut[] | undefined> = { delta, zerodha, zerodha_nfo };
   const merged = new Map<string, TimeframeOptionOut>();
   for (const source of presentSources) {
     for (const opt of bySource[source] ?? []) {
@@ -80,8 +87,8 @@ function WatchlistDetail({ watchlist, onClose }: { watchlist: BfWatchlistOut; on
         method: "POST",
         body: JSON.stringify({
           items: picked
-            .map((i) => ({ source: DATA_SOURCE_TO_BF_SOURCE[i.data_source], symbol: i.symbol, display_name: i.name }))
-            .filter((i) => !!i.source),
+            .map((i) => ({ source: bfSourceFor(i), symbol: i.symbol, display_name: i.name }))
+            .filter((i): i is { source: BfSource; symbol: string; display_name: string } => !!i.source),
         }),
       }),
     onSuccess: () => {

@@ -41,7 +41,7 @@ class CostConfig:
 
 @dataclass
 class PositionSizing:
-    type: str = "fixed_quantity"  # "fixed_quantity" | "percent_capital"
+    type: str = "fixed_quantity"  # "fixed_quantity" | "percent_capital" | "lots"
     value: float = 1.0
 
 
@@ -71,11 +71,24 @@ class BacktestOutput:
     final_equity: float = 0.0
 
 
-def quantity_for(cash: float, price: float, sizing: PositionSizing) -> float:
+def quantity_for(cash: float, price: float, sizing: PositionSizing, lot_size: int | None = None) -> float:
+    """`lot_size` is F&O-only (an Instrument's own lot_size column, None for
+    equity/index/crypto) -- when set, "percent_capital" rounds down to the
+    nearest whole LOT rather than the nearest whole unit, since an NFO
+    order for e.g. 137 raw units of a 75-lot-size contract is simply
+    illegal; Kite (and every other exchange) only accepts multiples of the
+    contract's lot size. "lots" sizing (F&O only) always means whole lots
+    by construction -- `sizing.value` already IS a lot count."""
+    if sizing.type == "lots":
+        return max(0.0, sizing.value) * (lot_size or 1)
     if sizing.type == "percent_capital":
         if price <= 0:
             return 0.0
         allocation = cash * (sizing.value / 100)
+        if lot_size and lot_size > 0:
+            unit_price = price * lot_size
+            lots = math.floor(max(0.0, allocation / unit_price))
+            return float(lots * lot_size)
         # Whole shares only -- real equity/futures trading doesn't fill
         # fractional units, and flooring (never rounding up) guarantees
         # this never allocates more than the requested percentage of cash.
@@ -90,6 +103,7 @@ def simulate_trades(
     sizing: PositionSizing,
     risk: RiskRules,
     costs: CostConfig,
+    lot_size: int | None = None,
 ) -> BacktestOutput:
     cash = initial_capital
     position: dict | None = None  # {entry_price, quantity, entry_ts, side}
@@ -151,7 +165,7 @@ def simulate_trades(
         if position is None:
             if pending_entry:
                 fill = _apply_slippage(candle.open, buying=True)
-                quantity = quantity_for(cash, fill, sizing)
+                quantity = quantity_for(cash, fill, sizing, lot_size)
                 if quantity > 0:
                     notional = fill * quantity
                     fee = _brokerage(notional)
@@ -160,7 +174,7 @@ def simulate_trades(
                         position = {"entry_price": fill, "quantity": quantity, "entry_ts": candle.ts, "side": "long"}
             elif pending_short_entry:
                 fill = _apply_slippage(candle.open, buying=False)  # opening short = selling, adverse slippage is downward
-                quantity = quantity_for(cash, fill, sizing)
+                quantity = quantity_for(cash, fill, sizing, lot_size)
                 if quantity > 0:
                     notional = fill * quantity  # reserved as collateral, mirroring the long side's "pay to open"
                     fee = _brokerage(notional)

@@ -28,6 +28,12 @@ class LiveDeployment(Base):
     # behavior of sizing off the full broker balance.
     allocated_capital: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str | None] = mapped_column(String(3))
+    # Zerodha product override for F&O orders ("MIS" intraday | "NRML"
+    # carry) -- None means auto-decide from the traded instrument's own
+    # instrument_type (see oms.py:_get_live_price_and_context): "MIS" for
+    # option/future, "CNC" for equity (unchanged prior behavior). Has no
+    # effect on non-Zerodha brokers.
+    product_override: Mapped[str | None] = mapped_column(String(10))
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -45,6 +51,10 @@ class LiveOrder(Base):
     order_type: Mapped[str] = mapped_column(String(20), nullable=False, default="market_order")
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(1000))
+    # What was actually sent to the broker for this order (e.g. Zerodha's
+    # "CNC"/"MIS"/"NRML") -- null for brokers without a product concept
+    # (Delta). Recorded for audit, not read back by any logic.
+    product: Mapped[str | None] = mapped_column(String(10))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

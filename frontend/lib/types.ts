@@ -78,6 +78,11 @@ export interface InstrumentOut {
   instrument_type: string;
   data_source: string;
   is_active: boolean;
+  expiry: string | null;
+  strike: number | null;
+  option_type: string | null;
+  lot_size: number | null;
+  underlying_instrument_id: string | null;
 }
 
 export type BackfillStatus = "pending" | "running" | "completed" | "failed";
@@ -629,7 +634,7 @@ export interface InstrumentSyncResult {
   skipped: number;
 }
 
-export type BfSource = "delta" | "zerodha";
+export type BfSource = "delta" | "zerodha" | "zerodha_nfo";
 
 export interface SourceStatusOut {
   source: BfSource;
@@ -641,6 +646,12 @@ export interface SourceStatusOut {
 export interface SymbolSearchResultOut {
   symbol: string;
   display_name: string;
+  // F&O metadata (source="zerodha_nfo" only, otherwise always null)
+  expiry: string | null;
+  strike: number | null;
+  option_type: string | null;
+  lot_size: number | null;
+  underlying_symbol: string | null;
 }
 
 export interface BfBackfillJobOut {
@@ -702,6 +713,11 @@ export interface WatchlistItemAdd {
   source: BfSource;
   symbol: string;
   display_name: string;
+  expiry?: string | null;
+  strike?: number | null;
+  option_type?: string | null;
+  lot_size?: number | null;
+  underlying_symbol?: string | null;
 }
 
 export interface WatchlistBulkAddResult {

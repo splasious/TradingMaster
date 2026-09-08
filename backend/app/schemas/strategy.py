@@ -9,7 +9,9 @@ RuleNode = dict  # {"all"/"any": [RuleNode, ...]} or a leaf ScanCondition-shaped
 
 
 class PositionSizing(BaseModel):
-    type: Literal["fixed_quantity", "percent_capital"] = "fixed_quantity"
+    # "lots" -- F&O only: `value` is a lot count, converted to units via the
+    # traded instrument's own `lot_size` at fill time (see quantity_for).
+    type: Literal["fixed_quantity", "percent_capital", "lots"] = "fixed_quantity"
     value: float = 1.0
 
 

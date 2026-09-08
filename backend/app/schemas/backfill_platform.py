@@ -13,6 +13,12 @@ class SourceStatusOut(BaseModel):
 class SymbolSearchResultOut(BaseModel):
     symbol: str
     display_name: str
+    # F&O metadata (source="zerodha_nfo" only, otherwise always null)
+    expiry: date | None = None
+    strike: float | None = None
+    option_type: str | None = None
+    lot_size: int | None = None
+    underlying_symbol: str | None = None
 
 
 class BfBackfillJobCreate(BaseModel):
@@ -22,6 +28,11 @@ class BfBackfillJobCreate(BaseModel):
     timeframe: str
     start_date: date | None = None
     end_date: date | None = None
+    expiry: date | None = None
+    strike: float | None = None
+    option_type: str | None = None
+    lot_size: int | None = None
+    underlying_symbol: str | None = None
 
 
 class BfBackfillJobOut(BaseModel):
@@ -83,6 +94,11 @@ class WatchlistItemAdd(BaseModel):
     source: str
     symbol: str
     display_name: str
+    expiry: date | None = None
+    strike: float | None = None
+    option_type: str | None = None
+    lot_size: int | None = None
+    underlying_symbol: str | None = None
 
 
 class WatchlistItemBulkAdd(BaseModel):

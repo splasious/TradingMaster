@@ -3,6 +3,7 @@ with autocomplete scoped to that exchange"), plus get-or-create for the
 local bf_symbols row a backfill job or watchlist item points at."""
 
 from dataclasses import dataclass
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -19,6 +20,30 @@ from app.services.market_data.delta_source import DeltaExchangeDataSource
 class SymbolSearchResult:
     symbol: str
     display_name: str
+    # F&O metadata (source="zerodha_nfo" only; always None for delta/zerodha) --
+    # carried through get_or_create_symbol into BfSymbol, see that model's
+    # docstring for why it's captured here rather than re-fetched at sync time.
+    expiry: date | None = None
+    strike: float | None = None
+    option_type: str | None = None
+    lot_size: int | None = None
+    underlying_symbol: str | None = None
+
+
+def _parse_nfo_row(row: dict) -> dict:
+    kite_type = (row.get("instrument_type") or "").upper()
+    expiry_str = row.get("expiry")
+    expiry = date.fromisoformat(expiry_str) if expiry_str else None
+    strike_raw = row.get("strike")
+    strike = float(strike_raw) if strike_raw not in (None, "", "0") else None
+    lot_size_raw = row.get("lot_size")
+    return {
+        "option_type": kite_type if kite_type in ("CE", "PE") else None,
+        "expiry": expiry,
+        "strike": strike if kite_type in ("CE", "PE") else None,
+        "lot_size": int(lot_size_raw) if lot_size_raw else None,
+        "underlying_symbol": row.get("name") or None,
+    }
 
 
 async def search_symbols(db: AsyncSession, source: str, query: str, user_id) -> list[SymbolSearchResult]:
@@ -46,6 +71,21 @@ async def search_symbols(db: AsyncSession, source: str, query: str, user_id) -> 
         ]
         return [SymbolSearchResult(symbol=i["tradingsymbol"], display_name=i.get("name") or i["tradingsymbol"]) for i in matches[:50]]
 
+    if source == "zerodha_nfo":
+        try:
+            broker = await get_authenticated_kite_broker(db, user_id)
+            instruments = await broker.get_instruments("NFO")
+        except KiteAPIError as exc:
+            raise MarketDataSourceError(str(exc)) from exc
+        matches = [
+            i for i in instruments
+            if query_upper in (i.get("tradingsymbol") or "").upper() or query_upper in (i.get("name") or "").upper()
+        ]
+        return [
+            SymbolSearchResult(symbol=i["tradingsymbol"], display_name=i.get("tradingsymbol", ""), **_parse_nfo_row(i))
+            for i in matches[:50]
+        ]
+
     raise MarketDataSourceError(f"Unknown source '{source}'")
 
 
@@ -66,12 +106,12 @@ async def list_all_symbols(db: AsyncSession, source: str, user_id) -> list[Symbo
     if source == "delta":
         products = await DeltaExchangeDataSource().list_rwa_token_products()
         return [SymbolSearchResult(symbol=p["symbol"], display_name=p.get("description") or p["symbol"]) for p in products]
-    if source == "zerodha":
+    if source in ("zerodha", "zerodha_nfo"):
         watched = (
             await db.execute(
                 select(BfSymbol.symbol, BfSymbol.display_name)
                 .join(BfWatchlistItem, BfWatchlistItem.symbol_id == BfSymbol.id)
-                .where(BfSymbol.source == "zerodha")
+                .where(BfSymbol.source == source)
                 .distinct()
             )
         ).all()
@@ -79,7 +119,11 @@ async def list_all_symbols(db: AsyncSession, source: str, user_id) -> list[Symbo
     raise MarketDataSourceError(f"Unknown source '{source}'")
 
 
-async def get_or_create_symbol(db: AsyncSession, source: str, symbol: str, display_name: str) -> BfSymbol:
+async def get_or_create_symbol(
+    db: AsyncSession, source: str, symbol: str, display_name: str,
+    expiry: date | None = None, strike: float | None = None, option_type: str | None = None,
+    lot_size: int | None = None, underlying_symbol: str | None = None,
+) -> BfSymbol:
     """Concurrent callers race here more than it looks -- selecting several
     timeframes for one symbol fires one request per timeframe in parallel
     (both the single-symbol and "backfill all" flows), and every one of
@@ -96,7 +140,11 @@ async def get_or_create_symbol(db: AsyncSession, source: str, symbol: str, displ
 
     await db.execute(
         pg_insert(BfSymbol)
-        .values(source=source, symbol=symbol, display_name=display_name)
+        .values(
+            source=source, symbol=symbol, display_name=display_name,
+            expiry=expiry, strike=strike, option_type=option_type,
+            lot_size=lot_size, underlying_symbol=underlying_symbol,
+        )
         .on_conflict_do_nothing(index_elements=["source", "symbol"])
     )
     return (

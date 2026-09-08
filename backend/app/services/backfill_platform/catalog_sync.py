@@ -7,6 +7,7 @@ merging" rule) -- this is the bridge between them, run either on demand
 overwrites a candle the main catalog already has; a bar already present
 for (instrument, timeframe, ts) is left alone."""
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -18,8 +19,14 @@ from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 
-_SOURCE_TO_EXCHANGE = {"delta": "DELTA", "zerodha": "NSE"}
-_SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite"}
+_SOURCE_TO_EXCHANGE = {"delta": "DELTA", "zerodha": "NSE", "zerodha_nfo": "NFO"}
+_SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite", "zerodha_nfo": "zerodha_kite"}
+
+# A handful of NFO index underlyings whose Kite "name" doesn't match the
+# seeded index Instrument's own symbol verbatim (Kite: "NIFTY", this app's
+# seeded row: "NIFTY 50") -- best-effort resolution only, see
+# _resolve_underlying's docstring for what happens when nothing matches.
+_UNDERLYING_NAME_ALIASES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
 
 
 class CatalogSyncError(Exception):
@@ -37,6 +44,34 @@ class CatalogSyncResult:
     bars_skipped: int
 
 
+async def _resolve_underlying(db: AsyncSession, kite_name: str | None) -> uuid.UUID | None:
+    """Best-effort match of an NFO row's Kite `name` (e.g. "NIFTY",
+    "RELIANCE") against an already-synced equity/index Instrument's own
+    `symbol` -- exact match first, then the small known-alias table for
+    index names that don't match verbatim. Returns None (never raises) if
+    nothing matches yet, e.g. the underlying hasn't been synced from its
+    own NSE source first -- `underlying_instrument_id` is nullable exactly
+    for this reason, not a hard dependency ordering."""
+    if not kite_name:
+        return None
+    candidates = [kite_name, _UNDERLYING_NAME_ALIASES.get(kite_name, kite_name)]
+    for candidate in candidates:
+        match = (
+            await db.execute(select(Instrument.id).where(Instrument.exchange == "NSE", Instrument.symbol == candidate))
+        ).scalar_one_or_none()
+        if match is not None:
+            return match
+    return None
+
+
+def _instrument_type_for(bf_symbol: BfSymbol) -> str:
+    if bf_symbol.source == "delta":
+        return "perpetual_future"
+    if bf_symbol.source == "zerodha_nfo":
+        return "option" if bf_symbol.option_type else "future"
+    return "equity"
+
+
 async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> CatalogSyncResult:
     exchange = _SOURCE_TO_EXCHANGE.get(bf_symbol.source)
     data_source = _SOURCE_TO_DATA_SOURCE.get(bf_symbol.source)
@@ -48,13 +83,21 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
     ).scalar_one_or_none()
     instrument_created = False
     if instrument is None:
+        underlying_id = (
+            await _resolve_underlying(db, bf_symbol.underlying_symbol) if bf_symbol.source == "zerodha_nfo" else None
+        )
         instrument = Instrument(
             exchange=exchange,
             symbol=bf_symbol.symbol,
             name=bf_symbol.display_name,
-            instrument_type="perpetual_future" if bf_symbol.source == "delta" else "equity",
+            instrument_type=_instrument_type_for(bf_symbol),
             data_source=data_source,
             external_ref=bf_symbol.symbol,
+            expiry=bf_symbol.expiry,
+            strike=bf_symbol.strike,
+            option_type=bf_symbol.option_type,
+            lot_size=bf_symbol.lot_size,
+            underlying_instrument_id=underlying_id,
         )
         db.add(instrument)
         await db.flush()

@@ -11,8 +11,16 @@ import type { InstrumentOut } from "@/lib/types";
 const EXCHANGES = [
   { value: "", label: "All Markets" },
   { value: "NSE", label: "NSE Markets" },
+  { value: "NFO", label: "NFO Markets (F&O)" },
   { value: "DELTA", label: "Delta Markets" },
 ];
+
+function contractSuffix(i: InstrumentOut): string | null {
+  if (!i.expiry) return null;
+  const expiry = new Date(i.expiry).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" });
+  const detail = i.option_type ? `${i.strike} ${i.option_type}` : "FUT";
+  return `${expiry} · ${detail}${i.lot_size ? ` · lot ${i.lot_size}` : ""}`;
+}
 
 const SELECT_ALL_LIMIT = 3000;
 const SEARCH_LIMIT = 200;
@@ -101,6 +109,7 @@ export function InstrumentMultiSelect({ value, onChange, className }: Instrument
                   {i.symbol}
                 </Link>
                 <span className="truncate text-text-muted">{i.name}</span>
+                {contractSuffix(i) && <span className="shrink-0 text-[10px] text-text-muted">({contractSuffix(i)})</span>}
               </label>
             ))}
           </>

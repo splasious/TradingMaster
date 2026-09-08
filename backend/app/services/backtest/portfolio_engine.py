@@ -161,6 +161,7 @@ def simulate_portfolio(
     breadth_exit_threshold: float | None = None,
 ) -> PortfolioBacktestOutput:
     symbol_by_id = {str(i.id): i.symbol for i in instruments}
+    lot_size_by_id = {str(i.id): i.lot_size for i in instruments}
 
     ts_index: dict[str, dict[datetime, int]] = {
         inst_id: {c.ts: i for i, c in enumerate(candles)} for inst_id, candles in candles_by_instrument.items()
@@ -323,7 +324,12 @@ def simulate_portfolio(
             fill = _apply_slippage(candle.open, buying=(side == "long"))
             if fill <= 0:
                 continue
-            quantity = float(math.floor(allocation / fill))
+            lot_size = lot_size_by_id.get(inst_id)
+            if lot_size and lot_size > 0:
+                lots = math.floor(allocation / (fill * lot_size))
+                quantity = float(lots * lot_size)
+            else:
+                quantity = float(math.floor(allocation / fill))
             if quantity <= 0:
                 continue
             notional = fill * quantity

@@ -57,7 +57,7 @@ from app.services.market_data.resample import resample_candles
 
 router = APIRouter()
 
-_VALID_SOURCES = ("delta", "zerodha")
+_VALID_SOURCES = ("delta", "zerodha", "zerodha_nfo")
 
 
 def _check_source(source: str) -> None:
@@ -121,7 +121,11 @@ async def backfill_all_for_source(
 
     queued = 0
     for result in all_symbols:
-        symbol = await symbols_service.get_or_create_symbol(db, source, result.symbol, result.display_name)
+        symbol = await symbols_service.get_or_create_symbol(
+            db, source, result.symbol, result.display_name,
+            expiry=result.expiry, strike=result.strike, option_type=result.option_type,
+            lot_size=result.lot_size, underlying_symbol=result.underlying_symbol,
+        )
         job = BfBackfillJob(
             symbol_id=symbol.id, source=source, timeframe=timeframe,
             start_date=start_date, end_date=end_date, requested_by=user.id,
@@ -180,7 +184,13 @@ async def search_source_symbols(
         results = await symbols_service.search_symbols(db, source, q, user.id)
     except MarketDataSourceError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    return [SymbolSearchResultOut(symbol=r.symbol, display_name=r.display_name) for r in results]
+    return [
+        SymbolSearchResultOut(
+            symbol=r.symbol, display_name=r.display_name, expiry=r.expiry, strike=r.strike,
+            option_type=r.option_type, lot_size=r.lot_size, underlying_symbol=r.underlying_symbol,
+        )
+        for r in results
+    ]
 
 
 # ------------------------------------------------------------------ jobs --
@@ -204,7 +214,11 @@ async def create_backfill_job(
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> BfBackfillJobOut:
     _check_source(payload.source)
-    symbol = await symbols_service.get_or_create_symbol(db, payload.source, payload.symbol, payload.display_name)
+    symbol = await symbols_service.get_or_create_symbol(
+        db, payload.source, payload.symbol, payload.display_name,
+        expiry=payload.expiry, strike=payload.strike, option_type=payload.option_type,
+        lot_size=payload.lot_size, underlying_symbol=payload.underlying_symbol,
+    )
 
     job = BfBackfillJob(
         symbol_id=symbol.id, source=payload.source, timeframe=payload.timeframe,
@@ -410,7 +424,11 @@ async def add_watchlist_item(
 ) -> BfWatchlistItemOut:
     _check_source(payload.source)
     wl = await _load_owned_watchlist(db, watchlist_id, user)
-    symbol = await symbols_service.get_or_create_symbol(db, payload.source, payload.symbol, payload.display_name)
+    symbol = await symbols_service.get_or_create_symbol(
+        db, payload.source, payload.symbol, payload.display_name,
+        expiry=payload.expiry, strike=payload.strike, option_type=payload.option_type,
+        lot_size=payload.lot_size, underlying_symbol=payload.underlying_symbol,
+    )
 
     existing = (
         await db.execute(
@@ -447,7 +465,11 @@ async def bulk_add_watchlist_items(
     skipped = 0
     for entry in payload.items:
         _check_source(entry.source)
-        symbol = await symbols_service.get_or_create_symbol(db, entry.source, entry.symbol, entry.display_name)
+        symbol = await symbols_service.get_or_create_symbol(
+            db, entry.source, entry.symbol, entry.display_name,
+            expiry=entry.expiry, strike=entry.strike, option_type=entry.option_type,
+            lot_size=entry.lot_size, underlying_symbol=entry.underlying_symbol,
+        )
         if symbol.id in existing_symbol_ids:
             skipped += 1
             continue

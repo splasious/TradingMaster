@@ -24,6 +24,7 @@ const SOURCE_TABS: { value: string; label: string; source?: BfSource }[] = [
   { value: "all", label: "All Sources" },
   { value: "delta", label: "Delta Exchange", source: "delta" },
   { value: "zerodha", label: "Zerodha Kite", source: "zerodha" },
+  { value: "zerodha_nfo", label: "Zerodha NFO", source: "zerodha_nfo" },
 ];
 
 function JobHistoryTable({ source }: { source?: BfSource }) {

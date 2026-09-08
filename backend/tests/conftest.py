@@ -24,16 +24,14 @@ from app.services.market_data import backfill as market_data_backfill
 
 @pytest.fixture(autouse=True)
 def _reset_kite_instruments_cache():
-    """ZerodhaKiteBroker.get_instruments() caches process-wide (see its
-    docstring) so a real bulk backfill doesn't re-download Kite's whole NSE
-    dump per symbol -- but that same cache would otherwise leak a mocked
-    instrument list from one test into the next, since pytest runs every
-    test in the same process."""
-    _INSTRUMENTS_CACHE["rows"] = None
-    _INSTRUMENTS_CACHE["fetched_at"] = None
+    """ZerodhaKiteBroker.get_instruments() caches process-wide, per segment
+    (see its docstring) so a real bulk backfill doesn't re-download Kite's
+    whole instrument dump per symbol -- but that same cache would otherwise
+    leak a mocked instrument list from one test into the next, since pytest
+    runs every test in the same process."""
+    _INSTRUMENTS_CACHE.clear()
     yield
-    _INSTRUMENTS_CACHE["rows"] = None
-    _INSTRUMENTS_CACHE["fetched_at"] = None
+    _INSTRUMENTS_CACHE.clear()
 
 
 @pytest_asyncio.fixture

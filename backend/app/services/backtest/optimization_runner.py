@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from app.db.session import AsyncSessionLocal
 from app.models.backtest import BacktestStatus, OptimizationJob, OptimizationResult
+from app.models.instrument import Instrument
 from app.models.strategy import StrategyVersion
 from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import CostConfig, PositionSizing, RiskRules, simulate_trades
@@ -27,6 +28,8 @@ async def run_optimization_job(job_id: uuid.UUID) -> None:
             if not version.python_code:
                 raise SignalComputationError("Optimization is only supported for Python strategies")
 
+            instrument = await db.get(Instrument, job.instrument_id)
+            lot_size = instrument.lot_size if instrument is not None else None
             candles = await load_candles(db, job.instrument_id, job.timeframe)
             if len(candles) < 30:
                 raise SignalComputationError(
@@ -48,7 +51,7 @@ async def run_optimization_job(job_id: uuid.UUID) -> None:
             runs = []
             for params in grid:
                 signals = await compute_python_signals(candles, version.python_code, params)
-                output = simulate_trades(candles, signals, job.initial_capital, sizing, risk, DEFAULT_COSTS)
+                output = simulate_trades(candles, signals, job.initial_capital, sizing, risk, DEFAULT_COSTS, lot_size)
                 metrics = compute_metrics(output, job.initial_capital, job.timeframe)
                 runs.append({"params": params, "metrics": metrics})
 

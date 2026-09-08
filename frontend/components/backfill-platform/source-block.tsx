@@ -15,11 +15,18 @@ import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfTimeframes, useBfWatchlists } from "@/lib/hooks";
 import type { BfBackfillJobOut, BfSource, BulkBackfillResult, SymbolSearchResultOut } from "@/lib/types";
 
-const SOURCE_LABEL: Record<BfSource, string> = { delta: "Delta Exchange", zerodha: "Zerodha Kite" };
+const SOURCE_LABEL: Record<BfSource, string> = { delta: "Delta Exchange", zerodha: "Zerodha Kite", zerodha_nfo: "Zerodha NFO (F&O)" };
 const BULK_LABEL: Record<BfSource, string> = {
   delta: "Backfill All RWA Tokens",
   zerodha: "Backfill All Tracked Symbols",
+  zerodha_nfo: "Backfill All Tracked Symbols",
 };
+
+function contractLabel(r: SymbolSearchResultOut): string | null {
+  if (!r.expiry) return null;
+  const expiry = new Date(r.expiry).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" });
+  return r.option_type ? `${expiry} · ${r.strike} ${r.option_type}` : `${expiry} FUT`;
+}
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -91,6 +98,8 @@ export function SourceBlock({ source }: { source: BfSource }) {
             body: JSON.stringify({
               source, symbol: selected!.symbol, display_name: selected!.display_name, timeframe: tf,
               start_date: startDate, end_date: endDate,
+              expiry: selected!.expiry, strike: selected!.strike, option_type: selected!.option_type,
+              lot_size: selected!.lot_size, underlying_symbol: selected!.underlying_symbol,
             }),
           }),
         ),
@@ -132,7 +141,11 @@ export function SourceBlock({ source }: { source: BfSource }) {
     mutationFn: () =>
       apiFetch(`/api/v1/backfill-platform/watchlists/${watchlistToAdd}/items`, {
         method: "POST",
-        body: JSON.stringify({ source, symbol: selected!.symbol, display_name: selected!.display_name }),
+        body: JSON.stringify({
+          source, symbol: selected!.symbol, display_name: selected!.display_name,
+          expiry: selected!.expiry, strike: selected!.strike, option_type: selected!.option_type,
+          lot_size: selected!.lot_size, underlying_symbol: selected!.underlying_symbol,
+        }),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bf-watchlists"] });
@@ -175,12 +188,19 @@ export function SourceBlock({ source }: { source: BfSource }) {
                     className="block w-full px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-elevated"
                   >
                     {r.symbol} <span className="text-text-muted">({r.display_name})</span>
+                    {contractLabel(r) && <span className="ml-1 text-text-muted">— {contractLabel(r)}</span>}
                   </button>
                 ))
               )}
             </div>
           )}
-          {selected && <Badge tone="active">{selected.symbol}</Badge>}
+          {selected && (
+            <div className="flex items-center gap-1.5">
+              <Badge tone="active">{selected.symbol}</Badge>
+              {contractLabel(selected) && <Badge tone="neutral">{contractLabel(selected)}</Badge>}
+              {selected.lot_size != null && <Badge tone="neutral">Lot {selected.lot_size}</Badge>}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-2">

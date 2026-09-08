@@ -24,6 +24,11 @@ def _out(instrument: Instrument) -> InstrumentOut:
         instrument_type=instrument.instrument_type,
         data_source=instrument.data_source,
         is_active=instrument.is_active,
+        expiry=instrument.expiry,
+        strike=instrument.strike,
+        option_type=instrument.option_type,
+        lot_size=instrument.lot_size,
+        underlying_instrument_id=str(instrument.underlying_instrument_id) if instrument.underlying_instrument_id else None,
     )
 
 

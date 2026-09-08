@@ -49,10 +49,11 @@ def _to_datetime(d: date | None, end_of_day: bool = False) -> datetime | None:
 async def _fetch_bars(db: AsyncSession, source: str, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, user_id) -> list[Bar]:
     if source == "delta":
         return await DeltaExchangeDataSource().get_historical_data(symbol, timeframe, start, end)
-    if source == "zerodha":
+    if source in ("zerodha", "zerodha_nfo"):
+        segment = "NFO" if source == "zerodha_nfo" else "NSE"
         try:
             broker = await get_authenticated_kite_broker(db, user_id)
-            return await broker.get_historical_data(symbol, timeframe, start, end)  # type: ignore[return-value]
+            return await broker.get_historical_data(symbol, timeframe, start, end, segment)  # type: ignore[return-value]
         except KiteAPIError as exc:
             raise MarketDataSourceError(str(exc)) from exc
     raise MarketDataSourceError(f"Unknown source '{source}'")
