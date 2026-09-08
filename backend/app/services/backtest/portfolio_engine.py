@@ -35,6 +35,24 @@ momentum (strong downward momentum scores as "strong" for a short, the
 same way strong upward momentum scores as "strong" for a long), so the
 existing "highest score wins the slot" mechanic picks the most convicted
 trade regardless of which side it's on.
+
+breadth_exit_threshold (optional) adds a basket-wide, strategy-agnostic
+risk-off switch: at each bar, basket breadth (advancers vs. decliners
+among instruments with enough history -- the same trailing-momentum
+definition paper_trading/ranking.py's basket_breadth() uses live) is
+computed once for the whole basket, exactly like position score. When
+the resulting ratio drops below the threshold, every open LONG is force-
+closed (exit_reason="breadth_exit") and no new long can open until a
+later bar's breadth ratio rises back to/above the threshold -- "stay flat
+on longs while the basket is broadly falling". Shorts are untouched by
+this switch. This exists specifically because advance_decline_ratio
+(the live/paper-trading breadth signal injected into generate_signal's
+params -- see signals.py) has no backtest-time equivalent: params are
+fixed for a whole backtest run, not bar-varying, so a strategy can't see
+live breadth during a backtest. This engine-level switch is how that
+same "is the basket broadly bearish right now" question gets answered
+*in* a backtest, without threading a bar-varying value through the
+sandbox. Off (None) by default -- zero effect on existing behavior.
 """
 
 import math
@@ -94,6 +112,34 @@ def _position_score(candles: list[OhlcvCandle], idx: int, lookback: int = POSITI
     return (candles[idx].close - prior) / prior * 100
 
 
+def _basket_breadth_ratio(
+    candles_by_instrument: dict[str, list[OhlcvCandle]], ts_index: dict[str, dict[datetime, int]], ts: datetime,
+) -> float:
+    """Advance/decline ratio across the whole basket as of this bar's close
+    -- advancers / decliners, using the same trailing-momentum definition
+    (score > 0 / < 0) as _position_score. Mirrors basket_breadth() in
+    paper_trading/ranking.py exactly, just computed from already-loaded
+    backtest candles instead of a live DB query."""
+    advancers = 0
+    decliners = 0
+    for inst_id, candles in candles_by_instrument.items():
+        idx = ts_index[inst_id].get(ts)
+        # Skip instruments without enough history yet -- _position_score's
+        # -inf sentinel for that case would otherwise be miscounted as a
+        # decliner (-inf < 0), same exclusion basket_breadth() in
+        # paper_trading/ranking.py applies for the live equivalent.
+        if idx is None or idx < POSITION_SCORE_LOOKBACK_BARS:
+            continue
+        score = _position_score(candles, idx)
+        if score > 0:
+            advancers += 1
+        elif score < 0:
+            decliners += 1
+    if decliners > 0:
+        return advancers / decliners
+    return float(advancers) if advancers > 0 else 1.0
+
+
 def _position_value(pos: dict, mark_price: float) -> float:
     """Mark-to-market value of one open position, mirrored by side -- a
     long's value rises with price; a short's "value if covered now" rises
@@ -112,6 +158,7 @@ def simulate_portfolio(
     sizing: PortfolioSizing,
     risk: RiskRules,
     costs: CostConfig,
+    breadth_exit_threshold: float | None = None,
 ) -> PortfolioBacktestOutput:
     symbol_by_id = {str(i.id): i.symbol for i in instruments}
 
@@ -129,6 +176,9 @@ def simulate_portfolio(
     trades: list[PortfolioTrade] = []
     equity_curve: list[tuple[datetime, float]] = []
     last_close: dict[str, float] = {}
+    # Computed from the PREVIOUS bar's close, applied at this bar's open --
+    # same no-lookahead convention as every other signal in this engine.
+    breadth_is_bearish = False
 
     def _apply_slippage(price: float, buying: bool) -> float:
         return price * (1 + costs.slippage_pct / 100) if buying else price * (1 - costs.slippage_pct / 100)
@@ -168,6 +218,20 @@ def simulate_portfolio(
         )
 
     for ts in all_ts:
+        # 0. Basket-wide breadth risk-off, computed from the previous bar's
+        # close (see module docstring). Force-closes every open long --
+        # ahead of the strategy's own exit signals, which still get their
+        # normal chance to fire this same bar for anything not caught here.
+        if breadth_exit_threshold is not None and breadth_is_bearish:
+            for inst_id in list(open_positions.keys()):
+                if open_positions[inst_id]["side"] != "long":
+                    continue
+                idx = ts_index.get(inst_id, {}).get(ts)
+                if idx is None:
+                    continue
+                candle = candles_by_instrument[inst_id][idx]
+                _close_position(inst_id, candle.open, candle.ts, "breadth_exit", idx)
+
         # 1. Exits/covers scheduled from the previous bar's signal, filled
         # at this bar's open -- processed before entries so freed capital
         # is available to this same bar's new positions. Side-gated: an
@@ -224,14 +288,18 @@ def simulate_portfolio(
         # docstring -- for scarce capital/slots. Amibroker's PositionScore
         # mechanic, extended to a mixed long/short candidate pool.
         candidates = []
-        for inst_id in pending_entries:
-            if inst_id in open_positions:
-                continue
-            idx = ts_index.get(inst_id, {}).get(ts)
-            if idx is None:
-                continue
-            candles = candles_by_instrument[inst_id]
-            candidates.append((_position_score(candles, idx), "long", inst_id, candles[idx], idx))
+        # Breadth risk-off also blocks brand-new longs, not just open ones
+        # -- "stay flat on longs" means no new entries either while the
+        # basket stays broadly bearish.
+        if not (breadth_exit_threshold is not None and breadth_is_bearish):
+            for inst_id in pending_entries:
+                if inst_id in open_positions:
+                    continue
+                idx = ts_index.get(inst_id, {}).get(ts)
+                if idx is None:
+                    continue
+                candles = candles_by_instrument[inst_id]
+                candidates.append((_position_score(candles, idx), "long", inst_id, candles[idx], idx))
         for inst_id in pending_short_entries:
             if inst_id in open_positions:
                 continue
@@ -296,6 +364,9 @@ def simulate_portfolio(
                         pending_covers.add(inst_id)
                     elif idx < len(signals.entry) and signals.entry[idx]:
                         pending_covers.add(inst_id)
+
+        if breadth_exit_threshold is not None:
+            breadth_is_bearish = _basket_breadth_ratio(candles_by_instrument, ts_index, ts) < breadth_exit_threshold
 
         equity = cash + sum(_position_value(open_positions[oid], last_close.get(oid, 0.0)) for oid in open_positions)
         equity_curve.append((ts, equity))

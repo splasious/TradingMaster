@@ -94,7 +94,8 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
             costs = CostConfig(brokerage_pct=job.brokerage_pct, slippage_pct=job.slippage_pct, tax_pct=job.tax_pct)
 
             output = simulate_portfolio(
-                instruments, candles_by_instrument, signals_by_instrument, job.initial_capital, sizing, risk, costs
+                instruments, candles_by_instrument, signals_by_instrument, job.initial_capital, sizing, risk, costs,
+                breadth_exit_threshold=job.breadth_exit_threshold,
             )
             metrics = compute_metrics(as_metrics_input(output, job.initial_capital), job.initial_capital, job.timeframe)
 

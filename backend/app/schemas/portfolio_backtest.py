@@ -15,6 +15,9 @@ class PortfolioBacktestJobCreate(BaseModel):
     brokerage_pct: float = Field(default=0.03, ge=0)
     slippage_pct: float = Field(default=0.05, ge=0)
     tax_pct: float = Field(default=0.0, ge=0)
+    # Basket-wide advance/decline breadth risk-off switch -- None (default)
+    # leaves behavior unchanged. See portfolio_engine.simulate_portfolio.
+    breadth_exit_threshold: float | None = Field(default=None, gt=0)
 
     @field_validator("instrument_ids")
     @classmethod
@@ -41,6 +44,7 @@ class PortfolioBacktestJobOut(BaseModel):
     initial_capital: float
     position_size_pct: float
     max_open_positions: int
+    breadth_exit_threshold: float | None
     status: str
     error_message: str | None
     created_at: datetime

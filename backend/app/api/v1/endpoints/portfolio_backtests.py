@@ -27,7 +27,8 @@ def _job_out(job: PortfolioBacktestJob) -> PortfolioBacktestJobOut:
         id=str(job.id), strategy_id=str(job.strategy_id), instrument_ids=list(job.instrument_ids),
         timeframe=job.timeframe, start_date=job.start_date, end_date=job.end_date,
         initial_capital=job.initial_capital, position_size_pct=job.position_size_pct,
-        max_open_positions=job.max_open_positions, status=job.status, error_message=job.error_message,
+        max_open_positions=job.max_open_positions, breadth_exit_threshold=job.breadth_exit_threshold,
+        status=job.status, error_message=job.error_message,
         created_at=job.created_at, started_at=job.started_at, completed_at=job.completed_at,
     )
 
@@ -63,7 +64,8 @@ async def create_portfolio_backtest(
         timeframe=payload.timeframe, start_date=payload.start_date, end_date=payload.end_date,
         initial_capital=payload.initial_capital, position_size_pct=payload.position_size_pct,
         max_open_positions=payload.max_open_positions, brokerage_pct=payload.brokerage_pct,
-        slippage_pct=payload.slippage_pct, tax_pct=payload.tax_pct, requested_by=user.id,
+        slippage_pct=payload.slippage_pct, tax_pct=payload.tax_pct,
+        breadth_exit_threshold=payload.breadth_exit_threshold, requested_by=user.id,
     )
     db.add(job)
     await db.flush()

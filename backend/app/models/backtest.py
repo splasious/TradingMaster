@@ -190,6 +190,12 @@ class PortfolioBacktestJob(Base):
     brokerage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.03)
     slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.05)
     tax_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # Basket-wide advance/decline breadth risk-off switch (engine-level, strategy-
+    # agnostic -- see portfolio_engine.py). None = disabled (default), matching
+    # every job created before this field existed. When set, all open longs are
+    # force-closed and new long entries blocked while basket breadth is below
+    # this ratio; shorts are unaffected. See simulate_portfolio's docstring.
+    breadth_exit_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default=BacktestStatus.PENDING.value, nullable=False)
     error_message: Mapped[str | None] = mapped_column(String(1000))
     requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))

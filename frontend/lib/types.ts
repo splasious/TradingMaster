@@ -510,6 +510,7 @@ export interface PortfolioBacktestJobOut {
   initial_capital: number;
   position_size_pct: number;
   max_open_positions: number;
+  breadth_exit_threshold: number | null;
   status: BacktestStatus;
   error_message: string | null;
   created_at: string;

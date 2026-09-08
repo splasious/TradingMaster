@@ -327,6 +327,112 @@ def test_buy_signal_while_short_covers_via_automatic_reversal():
     assert output.trades[0].exit_price == 115
 
 
+def test_breadth_exit_force_closes_longs_when_basket_turns_bearish():
+    """All three go long while the whole basket is still rising (breadth
+    bullish -- entries are allowed). Then two of the three reverse into a
+    real decline -- once the basket-wide trailing-momentum majority turns
+    negative, every open long is force-closed, including the one
+    instrument still individually trending up, since this is a basket-
+    wide switch, not a per-instrument one. None of the three ever gets an
+    explicit exit signal of its own."""
+    up, down_a, down_b = FakeInstrument("UP"), FakeInstrument("DOWNA"), FakeInstrument("DOWNB")
+    n = 70
+    flip_bar = 25
+
+    def make_candles(flip_to_down: bool) -> list[OhlcvCandle]:
+        candles = []
+        price = 100.0
+        for i in range(n):
+            candles.append(_candle(i, price, price + 1, price - 1, price))
+            pct = -1.0 if (flip_to_down and i >= flip_bar) else 1.0
+            price *= 1 + pct / 100
+        return candles
+
+    up_candles = make_candles(flip_to_down=False)
+    down_a_candles = make_candles(flip_to_down=True)
+    down_b_candles = make_candles(flip_to_down=True)
+
+    # All three go long on bar 20, while the basket is still uniformly
+    # rising -- none ever gets an explicit exit signal.
+    entry = [False] * 20 + [True] + [False] * (n - 21)
+    no_exit = [False] * n
+    candles_by = {str(up.id): up_candles, str(down_a.id): down_a_candles, str(down_b.id): down_b_candles}
+    signals = {
+        str(up.id): BarSignals(entry=entry, exit=no_exit),
+        str(down_a.id): BarSignals(entry=entry, exit=no_exit),
+        str(down_b.id): BarSignals(entry=entry, exit=no_exit),
+    }
+    sizing = PortfolioSizing(position_size_pct=20.0, max_open_positions=10)
+
+    without_breadth_exit = simulate_portfolio([up, down_a, down_b], candles_by, signals, 100000, sizing, NO_RISK, NO_COSTS)
+    with_breadth_exit = simulate_portfolio([up, down_a, down_b], candles_by, signals, 100000, sizing, NO_RISK, NO_COSTS, breadth_exit_threshold=1.0)
+
+    # Without the switch, all three entered (breadth was bullish at entry
+    # time) and ride to end-of-data (still open) -- no exit signal ever fired.
+    assert len(without_breadth_exit.trades) == 3
+    assert all(t.status == "open" for t in without_breadth_exit.trades)
+
+    # With it, all three still entered the same way, but once down_a/down_b's
+    # decline makes the basket-wide majority bearish, every long -- including
+    # the still-rising UP instrument -- gets force-closed.
+    assert len(with_breadth_exit.trades) == 3
+    assert all(t.exit_reason == "breadth_exit" for t in with_breadth_exit.trades)
+    assert all(t.status == "closed" for t in with_breadth_exit.trades)
+
+
+def test_breadth_exit_blocks_new_long_entries_while_bearish():
+    """down_a/down_b decline from the start (no entry signal of their own
+    -- present purely to establish a decliner majority once the trailing-
+    momentum lookback is satisfied). would_enter tries to go long only
+    after that point -- its entry must never fill at all."""
+    down_a, down_b, would_enter = FakeInstrument("DOWNA"), FakeInstrument("DOWNB"), FakeInstrument("WOULDENTER")
+    n = 30
+
+    def make_declining_candles() -> list[OhlcvCandle]:
+        candles = []
+        price = 100.0
+        for i in range(n):
+            candles.append(_candle(i, price, price + 1, price - 1, price))
+            price *= 0.99
+        return candles
+
+    down_a_candles = make_declining_candles()
+    down_b_candles = make_declining_candles()
+    would_enter_candles = make_declining_candles()
+
+    no_signal = [False] * n
+    # would_enter's own setup fires on bar 22 -- well after bar 20, the
+    # first bar with enough history for breadth to have gone bearish.
+    late_entry = [False] * 22 + [True] + [False] * (n - 23)
+    candles_by = {str(down_a.id): down_a_candles, str(down_b.id): down_b_candles, str(would_enter.id): would_enter_candles}
+    signals = {
+        str(down_a.id): BarSignals(entry=no_signal, exit=no_signal),
+        str(down_b.id): BarSignals(entry=no_signal, exit=no_signal),
+        str(would_enter.id): BarSignals(entry=late_entry, exit=no_signal),
+    }
+    sizing = PortfolioSizing(position_size_pct=20.0, max_open_positions=10)
+
+    output = simulate_portfolio(
+        [down_a, down_b, would_enter], candles_by, signals, 100000, sizing, NO_RISK, NO_COSTS, breadth_exit_threshold=1.0,
+    )
+
+    assert output.trades == []
+
+
+def test_breadth_exit_disabled_by_default_matches_prior_behavior():
+    a = FakeInstrument("AAA")
+    candles = [_candle(i, 100, 101, 99, 100) for i in range(30)]
+    signals = {str(a.id): BarSignals(entry=[False] * 25 + [True] + [False] * 4, exit=[False] * 30)}
+
+    default_output = simulate_portfolio([a], {str(a.id): candles}, signals, 100000, DEFAULT_SIZING, NO_RISK, NO_COSTS)
+    explicit_none_output = simulate_portfolio(
+        [a], {str(a.id): candles}, signals, 100000, DEFAULT_SIZING, NO_RISK, NO_COSTS, breadth_exit_threshold=None,
+    )
+
+    assert len(default_output.trades) == len(explicit_none_output.trades) == 1
+    assert default_output.final_equity == explicit_none_output.final_equity
+
+
 def test_as_metrics_input_handles_open_short_without_crashing():
     a = FakeInstrument("AAA")
     candles = [_candle(i, 100, 101, 99, 95) for i in range(4)]  # price fell -> unrealized profit on the short
