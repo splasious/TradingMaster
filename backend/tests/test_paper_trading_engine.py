@@ -366,3 +366,82 @@ async def test_no_price_data_skips_evaluation(db_session: AsyncSession):
 
     outcome = await evaluate_deployment(db_session, ctx["deployment"])
     assert outcome.action == "skipped"
+
+
+async def test_percent_capital_sizing_uses_pool_equity_not_shrinking_cash(db_session: AsyncSession):
+    """percent_capital sizing must size off the whole pool's current net
+    worth (cash + mark-to-market of already-open positions), matching the
+    portfolio backtest engine's equity_now (portfolio_engine.py's
+    per-candidate `allocation = min(equity_now * pct/100, cash)`) -- not
+    off remaining cash alone. Sizing off cash alone made every successive
+    fill in the same burst smaller than the last even though net worth
+    hadn't shrunk, just moved from cash into stock."""
+    role = Role(name="trader_sizing", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"sizing_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="Sizing User")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+
+    n = 30
+    base = datetime.now(timezone.utc) - timedelta(days=n)
+
+    async def make_instrument(symbol: str) -> Instrument:
+        instrument = Instrument(
+            exchange="DELTA", symbol=symbol, name=symbol, instrument_type="perpetual_future",
+            data_source="delta_exchange", external_ref=symbol,
+        )
+        db_session.add(instrument)
+        await db_session.flush()
+        for i in range(n):
+            db_session.add(
+                OhlcvCandle(instrument_id=instrument.id, timeframe="1d", ts=base + timedelta(days=i), open=99.5, high=101, low=99, close=100, volume=1000, source="test")
+            )
+        return instrument
+
+    first = await make_instrument("SIZEFIRSTUSD")
+    second = await make_instrument("SIZESECONDUSD")
+    await db_session.commit()
+
+    strategy = Strategy(name="Sizing Strategy", owner_id=user.id, code_type="visual")
+    db_session.add(strategy)
+    await db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe="1d", instrument_ids=[str(first.id), str(second.id)],
+        parameters={}, entry_rules=ALWAYS_BUY, exit_rules=NEVER, python_code=None,
+        position_sizing={"type": "percent_capital", "value": 20.0}, risk_rules={},
+    )
+    db_session.add(version)
+    await db_session.flush()
+
+    portfolio = PaperPortfolio(user_id=user.id, cash=100000.0, initial_capital=100000.0)
+    db_session.add(portfolio)
+    await db_session.flush()
+
+    first_deployment = PaperDeployment(
+        portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=first.id,
+        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+    )
+    second_deployment = PaperDeployment(
+        portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=second.id,
+        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+    )
+    db_session.add_all([first_deployment, second_deployment])
+    await db_session.commit()
+
+    tick_engine._last_price.pop(first.id, None)
+    tick_engine._last_price.pop(second.id, None)
+
+    first_outcome = await evaluate_deployment(db_session, first_deployment)
+    assert first_outcome.action == "entered"
+    first_position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == first_deployment.id))).scalar_one()
+    assert first_position.quantity == 200.0  # 20% of 100,000 pool equity / 100 price
+
+    second_outcome = await evaluate_deployment(db_session, second_deployment)
+    assert second_outcome.action == "entered"
+    second_position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == second_deployment.id))).scalar_one()
+    # Pool equity is still ~100,000 (cash 80,000 + first position's 20,000
+    # mark-to-market) even though cash alone dropped to 80,000 -- sizing off
+    # cash alone would give floor(80,000 * 0.20 / 100) = 160 here instead.
+    assert second_position.quantity == 200.0

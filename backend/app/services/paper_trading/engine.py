@@ -8,6 +8,7 @@ can call it directly and deterministically, the same pattern already used
 for backfill/backtest jobs.
 """
 
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -183,12 +184,40 @@ async def exit_deployment_now(db: AsyncSession, deployment: PaperDeployment) -> 
     return await _exit_position(db, deployment, portfolio, position, current_price, datetime.now(timezone.utc), "manual")
 
 
+async def _pool_equity(db: AsyncSession, portfolio: PaperPortfolio) -> float:
+    """Cash plus the current mark-to-market value of every open position
+    across the whole pool -- matches the portfolio backtest engine's "% of
+    current total equity" sizing (portfolio_engine.py's equity_now), so a
+    percent_capital position keeps sizing to roughly the same fraction of
+    net worth regardless of how much of the pool's capital other
+    deployments have already put to work. Cash alone shrinks with every
+    fill even though net worth hasn't -- sizing off cash would make each
+    successive entry in the same burst smaller than the last for no
+    economic reason."""
+    rows = (
+        await db.execute(
+            select(PaperPosition, PaperDeployment.instrument_id)
+            .join(PaperDeployment, PaperDeployment.id == PaperPosition.deployment_id)
+            .where(PaperDeployment.portfolio_id == portfolio.id)
+        )
+    ).all()
+    if not rows:
+        return portfolio.cash
+    position_value = sum(position.quantity * (tick_engine.get_current_price(inst_id) or position.avg_entry_price) for position, inst_id in rows)
+    return portfolio.cash + position_value
+
+
 async def _try_enter(
     db: AsyncSession, deployment: PaperDeployment, portfolio: PaperPortfolio, version: StrategyVersion,
     price: float, now: datetime,
 ) -> EvaluationOutcome:
     sizing = PositionSizing(**version.position_sizing)
-    quantity = quantity_for(portfolio.cash, price, sizing)
+    if sizing.type == "percent_capital" and price > 0:
+        equity_now = await _pool_equity(db, portfolio)
+        allocation = min(equity_now * (sizing.value / 100), portfolio.cash)
+        quantity = float(math.floor(max(0.0, allocation / price)))
+    else:
+        quantity = quantity_for(portfolio.cash, price, sizing)
     if quantity <= 0:
         # Rejections are never persisted as orders -- the Orders/Trades UI
         # is meant to reflect real activity only. The audit log is the
