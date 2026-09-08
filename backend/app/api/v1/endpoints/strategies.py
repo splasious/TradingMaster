@@ -14,7 +14,7 @@ from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import PaperDeployment
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
-from app.schemas.strategy import StrategyCreate, StrategyOut, StrategyVersionCreate, StrategyVersionOut, ValidateResult
+from app.schemas.strategy import StrategyCreate, StrategyOut, StrategyRename, StrategyVersionCreate, StrategyVersionOut, ValidateResult
 from app.services.audit import write_audit_log
 from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
@@ -127,6 +127,25 @@ async def get_strategy(
     strategy = await _load_strategy(db, strategy_id)
     if strategy.owner_id != user.id and "administrator" not in user.role_names:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
+    return _strategy_out(strategy)
+
+
+@router.patch("/{strategy_id}", response_model=StrategyOut)
+async def rename_strategy(
+    strategy_id: str, payload: StrategyRename, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> StrategyOut:
+    strategy = await _load_strategy(db, strategy_id)
+    _assert_can_edit(strategy, user)
+
+    previous_name = strategy.name
+    strategy.name = payload.name
+
+    await write_audit_log(
+        db, user_id=user.id, action="STRATEGY_RENAMED", object_type="strategy", object_id=str(strategy.id),
+        previous_value={"name": previous_name}, new_value={"name": strategy.name},
+    )
+    await db.commit()
+    await db.refresh(strategy, attribute_names=["versions", "updated_at"])
     return _strategy_out(strategy)
 
 

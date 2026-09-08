@@ -111,6 +111,47 @@ async def test_non_owner_cannot_edit_strategy(client: AsyncClient, seeded_admin:
     assert resp.status_code == 403
 
 
+async def test_rename_strategy(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Old Name", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = create_resp.json()["id"]
+
+    resp = await client.patch(f"/api/v1/strategies/{strategy_id}", json={"name": "New Name"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "New Name"
+
+    get_resp = await client.get(f"/api/v1/strategies/{strategy_id}", headers=headers)
+    assert get_resp.json()["name"] == "New Name"
+
+
+async def test_non_owner_cannot_rename_strategy(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()
+    password = "TraderPass123!"
+    other = User(email="trader3@tradingmaster.internal", hashed_password=hash_password(password), full_name="Trader Three")
+    other.user_roles = [UserRole(role=trader_role)]
+    db_session.add(other)
+    await db_session.commit()
+
+    admin_token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Admin Owned Rename", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    strategy_id = create_resp.json()["id"]
+
+    other_token = await _login(client, "trader3@tradingmaster.internal", password)
+    resp = await client.patch(
+        f"/api/v1/strategies/{strategy_id}", json={"name": "Hijacked"}, headers={"Authorization": f"Bearer {other_token}"}
+    )
+    assert resp.status_code == 403
+
+
 async def test_new_version_resets_status_to_draft(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     create_resp = await client.post(

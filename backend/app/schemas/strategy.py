@@ -45,6 +45,10 @@ class StrategyCreate(BaseModel):
     version: StrategyVersionCreate
 
 
+class StrategyRename(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+
+
 class StrategyVersionOut(BaseModel):
     id: str
     version_number: int
