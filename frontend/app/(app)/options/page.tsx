@@ -1,0 +1,240 @@
+"use client";
+
+import { useMemo, useState } from "react";
+
+import type { OverlayLine } from "@/components/charts/price-chart";
+import { OscillatorChart } from "@/components/charts/oscillator-chart";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
+import { Select } from "@/components/ui/select";
+import { ConnectionStatusBadge } from "@/components/ui/status-badge";
+import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
+import { useOptionChain, useOptionExpiries, useOptionPcr, useOptionUnderlyings } from "@/lib/hooks";
+import type { ChainRowOut, OptionLegOut } from "@/lib/types";
+import { useMarketDataSocket } from "@/lib/ws";
+
+const PCR_TIMEFRAMES = ["5m", "15m", "1h", "1d"];
+
+function fmt(n: number | null | undefined, digits = 2): string {
+  return n == null ? "--" : n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function ChangeCell({ value }: { value: number | null | undefined }) {
+  if (value == null) return <span className="text-text-muted">--</span>;
+  return (
+    <span className={value >= 0 ? "text-positive" : "text-negative"}>
+      {value >= 0 ? "+" : ""}
+      {fmt(value, 0)}
+    </span>
+  );
+}
+
+/** One leg's live-merged view: the snapshot's day-open baseline (ltp -
+ * ltp_change / oi - oi_change) stays fixed for the page's lifetime, while
+ * ltp/oi themselves are overridden by a live WS tick as soon as one
+ * arrives -- so "change" tracks the live value against the same baseline
+ * rather than freezing at the last poll. */
+function useLiveLeg(leg: OptionLegOut | null, live: { price: number; open_interest: number | null } | undefined) {
+  return useMemo(() => {
+    if (!leg) return null;
+    const dayOpenLtp = leg.ltp_change == null || leg.ltp == null ? null : leg.ltp - leg.ltp_change;
+    const dayOpenOi = leg.open_interest_change == null || leg.open_interest == null ? null : leg.open_interest - leg.open_interest_change;
+    const ltp = live?.price ?? leg.ltp;
+    const oi = live?.open_interest ?? leg.open_interest;
+    return {
+      ...leg,
+      ltp,
+      ltp_change: ltp != null && dayOpenLtp != null ? ltp - dayOpenLtp : leg.ltp_change,
+      open_interest: oi,
+      open_interest_change: oi != null && dayOpenOi != null ? oi - dayOpenOi : leg.open_interest_change,
+    };
+  }, [leg, live?.price, live?.open_interest]);
+}
+
+function ChainRow({ row, maxOi, prices }: { row: ChainRowOut; maxOi: number; prices: Record<string, { price: number; open_interest: number | null }> }) {
+  const call = useLiveLeg(row.call, row.call ? prices[row.call.instrument_id] : undefined);
+  const put = useLiveLeg(row.put, row.put ? prices[row.put.instrument_id] : undefined);
+  const callPct = call?.open_interest && maxOi > 0 ? (call.open_interest / maxOi) * 100 : 0;
+  const putPct = put?.open_interest && maxOi > 0 ? (put.open_interest / maxOi) * 100 : 0;
+  const pcr = call?.open_interest && put?.open_interest && call.open_interest > 0 ? put.open_interest / call.open_interest : null;
+
+  return (
+    <tr>
+      <Td className="text-right">
+        <div className="flex items-center justify-end gap-1.5">
+          <div className="h-1.5 w-10 overflow-hidden rounded-full bg-surface-elevated">
+            <div className="h-full bg-positive/60" style={{ width: `${callPct}%` }} />
+          </div>
+          {fmt(call?.open_interest, 0)}
+        </div>
+      </Td>
+      <Td className="text-right"><ChangeCell value={call?.open_interest_change} /></Td>
+      <Td className="text-right"><ChangeCell value={call?.ltp_change} /></Td>
+      <Td className="text-right font-financial font-medium">{fmt(call?.ltp)}</Td>
+      <Td className="bg-surface-elevated text-center font-financial font-semibold text-text-primary">{fmt(row.strike, 0)}</Td>
+      <Td className="text-right font-financial font-medium">{fmt(put?.ltp)}</Td>
+      <Td className="text-right"><ChangeCell value={put?.ltp_change} /></Td>
+      <Td className="text-right"><ChangeCell value={put?.open_interest_change} /></Td>
+      <Td className="text-right">
+        <div className="flex items-center gap-1.5">
+          {fmt(put?.open_interest, 0)}
+          <div className="h-1.5 w-10 overflow-hidden rounded-full bg-surface-elevated">
+            <div className="h-full bg-negative/60" style={{ width: `${putPct}%` }} />
+          </div>
+        </div>
+      </Td>
+      <Td className="text-right text-text-secondary">{pcr != null ? pcr.toFixed(2) : "--"}</Td>
+    </tr>
+  );
+}
+
+export default function OptionsPage() {
+  const { data: underlyings, isLoading: underlyingsLoading, isError: underlyingsError } = useOptionUnderlyings();
+  // No sync-into-state effect: an explicit selection always wins once made,
+  // otherwise this just derives to the first underlying/expiry available --
+  // same pattern as ChartsPage's deep-link resolution.
+  const [explicitUnderlyingId, setExplicitUnderlyingId] = useState<string | null>(null);
+  const underlyingId = explicitUnderlyingId ?? underlyings?.[0]?.instrument_id ?? "";
+
+  const { data: expiries } = useOptionExpiries(underlyingId || null);
+  const optionExpiries = useMemo(() => (expiries ?? []).filter((e) => e.option_count > 0), [expiries]);
+  const [explicitExpiry, setExplicitExpiry] = useState<string | null>(null);
+  const expiry = optionExpiries.some((e) => e.expiry === explicitExpiry) ? (explicitExpiry as string) : (optionExpiries[0]?.expiry ?? "");
+
+  const [timeframe, setTimeframe] = useState("15m");
+
+  const { data: chain, isLoading: chainLoading, isError: chainError } = useOptionChain(underlyingId || null, expiry || null);
+  const { data: pcrSeries } = useOptionPcr(underlyingId || null, expiry || null, timeframe);
+
+  const instrumentIds = useMemo(
+    () => (chain ?? []).flatMap((r) => [r.call?.instrument_id, r.put?.instrument_id]).filter((id): id is string => !!id),
+    [chain],
+  );
+  const { status, prices } = useMarketDataSocket(instrumentIds);
+
+  const maxOi = useMemo(
+    () => Math.max(1, ...(chain ?? []).flatMap((r) => [r.call?.open_interest ?? 0, r.put?.open_interest ?? 0])),
+    [chain],
+  );
+
+  const pcrLines: OverlayLine[] = useMemo(
+    () => [
+      {
+        id: "PCR",
+        color: "#3b6bf5",
+        points: (pcrSeries ?? []).map((p) => ({ ts: p.ts, value: p.pcr })),
+      },
+    ],
+    [pcrSeries],
+  );
+  const oiChangeLines: OverlayLine[] = useMemo(
+    () => [
+      { id: "Call OI Chg", color: "#15803d", points: (pcrSeries ?? []).map((p) => ({ ts: p.ts, value: p.call_oi_change })) },
+      { id: "Put OI Chg", color: "#b91c1c", points: (pcrSeries ?? []).map((p) => ({ ts: p.ts, value: p.put_oi_change })) },
+    ],
+    [pcrSeries],
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-text-primary">Options Dashboard</h1>
+          <p className="text-sm text-text-muted">NFO option chain, PCR, and open interest -- live via Kite WebSocket where connected.</p>
+        </div>
+        <ConnectionStatusBadge status={status} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Select value={underlyingId} onChange={(e) => { setExplicitUnderlyingId(e.target.value); setExplicitExpiry(null); }} className="w-48">
+          {!underlyings?.length && <option value="">No underlyings</option>}
+          {underlyings?.map((u) => (
+            <option key={u.instrument_id} value={u.instrument_id}>{u.symbol}</option>
+          ))}
+        </Select>
+        <Select value={expiry} onChange={(e) => setExplicitExpiry(e.target.value)} className="w-40" disabled={!optionExpiries.length}>
+          {!optionExpiries.length && <option value="">No expiries</option>}
+          {optionExpiries.map((e) => (
+            <option key={e.expiry} value={e.expiry}>{e.expiry} ({e.option_count})</option>
+          ))}
+        </Select>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Option Chain</CardTitle>
+        </CardHeader>
+        <CardContent className="overflow-x-auto p-0">
+          {underlyingsLoading || chainLoading ? (
+            <LoadingState />
+          ) : underlyingsError || chainError ? (
+            <ErrorState description="Could not load the option chain." />
+          ) : !underlyingId || !expiry ? (
+            <EmptyState title="No NFO underlying yet" description="Backfill NIFTY/BANKNIFTY option contracts first." />
+          ) : !chain?.length ? (
+            <EmptyState title="No strikes for this expiry" description="This expiry has no backfilled option contracts." />
+          ) : (
+            <Table>
+              <Thead>
+                <tr>
+                  <Th className="text-right">Call OI</Th>
+                  <Th className="text-right">Chg</Th>
+                  <Th className="text-right">LTP Chg</Th>
+                  <Th className="text-right">LTP</Th>
+                  <Th className="text-center">Strike</Th>
+                  <Th className="text-right">LTP</Th>
+                  <Th className="text-right">LTP Chg</Th>
+                  <Th className="text-right">Chg</Th>
+                  <Th className="text-right">Put OI</Th>
+                  <Th className="text-right">PCR</Th>
+                </tr>
+              </Thead>
+              <Tbody>
+                {chain.map((row) => (
+                  <ChainRow key={row.strike} row={row} maxOi={maxOi} prices={prices} />
+                ))}
+              </Tbody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="flex-wrap gap-3">
+            <CardTitle>Put-Call Ratio</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge tone="neutral">Sum(Put OI) / Sum(Call OI)</Badge>
+              <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
+                {PCR_TIMEFRAMES.map((tf) => (
+                  <option key={tf} value={tf}>{tf}</option>
+                ))}
+              </Select>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {!pcrSeries?.length ? (
+              <EmptyState title="No PCR data" description="No candles stored at this timeframe for this expiry yet." />
+            ) : (
+              <OscillatorChart lines={pcrLines} height={240} />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Change in Open Interest</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!pcrSeries?.length ? (
+              <EmptyState title="No OI data" description="No candles stored at this timeframe for this expiry yet." />
+            ) : (
+              <OscillatorChart lines={oiChangeLines} height={240} />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}

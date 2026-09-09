@@ -58,3 +58,14 @@ async def test_options_dashboard_endpoints_end_to_end(client: AsyncClient, seede
     assert points[0]["total_call_oi"] == 1000
     assert points[0]["total_put_oi"] == 2000
     assert points[0]["pcr"] == 2.0
+
+    chain_resp = await client.get(f"/api/v1/options/{underlying.id}/chain", params={"expiry": "2026-09-15"}, headers=headers)
+    assert chain_resp.status_code == 200
+    rows = chain_resp.json()
+    assert len(rows) == 1
+    assert rows[0]["strike"] == 23000
+    assert rows[0]["call"]["ltp"] == 100
+    assert rows[0]["call"]["open_interest"] == 1000
+    assert rows[0]["call"]["ltp_change"] == 0  # only one candle -- day-open == latest
+    assert rows[0]["put"]["ltp"] == 50
+    assert rows[0]["put"]["open_interest"] == 2000

@@ -17,7 +17,9 @@ import type {
   BrokerOut,
   CandleOut,
   CatalogSyncSchedulerStatusOut,
+  ChainRowOut,
   CompletenessOut,
+  ExpiryOut,
   IndicatorPoint,
   IndicatorSpecOut,
   InstrumentOut,
@@ -31,6 +33,7 @@ import type {
   PaperOrderOut,
   PaperPortfolioOut,
   PaperTradeOut,
+  PcrPointOut,
   PortfolioBacktestJobOut,
   PortfolioBacktestResultOut,
   PortfolioBacktestTradeOut,
@@ -46,6 +49,7 @@ import type {
   SystemMonitorOut,
   TimeframeOptionOut,
   TradeRowOut,
+  UnderlyingOut,
   UnreadCountOut,
   UserOut,
 } from "./types";
@@ -650,5 +654,42 @@ export function useCatalogSyncStatus() {
     queryKey: ["catalog-sync-status"],
     queryFn: () => apiFetch<CatalogSyncSchedulerStatusOut>("/api/v1/backfill-platform/catalog-sync/status"),
     refetchInterval: 30_000,
+  });
+}
+
+export function useOptionUnderlyings() {
+  return useQuery({
+    queryKey: ["option-underlyings"],
+    queryFn: () => apiFetch<UnderlyingOut[]>("/api/v1/options/underlyings"),
+  });
+}
+
+export function useOptionExpiries(underlyingInstrumentId: string | null) {
+  return useQuery({
+    queryKey: ["option-expiries", underlyingInstrumentId],
+    queryFn: () => apiFetch<ExpiryOut[]>(`/api/v1/options/${underlyingInstrumentId}/expiries`),
+    enabled: !!underlyingInstrumentId,
+  });
+}
+
+/** Snapshot seed for the option chain table -- refetched on an interval as
+ * a fallback in case the live WS tick stream (layered on top by the page
+ * itself) hasn't covered a given leg yet, not the primary update path. */
+export function useOptionChain(underlyingInstrumentId: string | null, expiry: string | null) {
+  return useQuery({
+    queryKey: ["option-chain", underlyingInstrumentId, expiry],
+    queryFn: () => apiFetch<ChainRowOut[]>(`/api/v1/options/${underlyingInstrumentId}/chain?expiry=${expiry}`),
+    enabled: !!underlyingInstrumentId && !!expiry,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useOptionPcr(underlyingInstrumentId: string | null, expiry: string | null, timeframe: string) {
+  return useQuery({
+    queryKey: ["option-pcr", underlyingInstrumentId, expiry, timeframe],
+    queryFn: () =>
+      apiFetch<PcrPointOut[]>(`/api/v1/options/${underlyingInstrumentId}/pcr?expiry=${expiry}&timeframe=${timeframe}`),
+    enabled: !!underlyingInstrumentId && !!expiry,
+    refetchInterval: 60_000,
   });
 }

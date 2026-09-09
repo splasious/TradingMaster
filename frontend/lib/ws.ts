@@ -12,6 +12,7 @@ const RECONNECT_DELAY_MS = 2000;
 
 interface PriceState {
   price: number;
+  open_interest: number | null;
   ts: string;
   source: MarketTick["source"];
 }
@@ -68,7 +69,10 @@ export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketSt
         const message = JSON.parse(event.data);
         if (message.type === "tick") {
           const tick = message as MarketTick;
-          setPrices((prev) => ({ ...prev, [tick.instrument_id]: { price: tick.price, ts: tick.ts, source: tick.source } }));
+          setPrices((prev) => ({
+            ...prev,
+            [tick.instrument_id]: { price: tick.price, open_interest: tick.open_interest, ts: tick.ts, source: tick.source },
+          }));
         } else if (message.type === "heartbeat") {
           setLatencyMs(Math.max(0, Date.now() - new Date(message.ts).getTime()));
         }

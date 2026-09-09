@@ -131,8 +131,9 @@ export interface MarketTick {
   type: "tick";
   instrument_id: string;
   price: number;
+  open_interest: number | null;
   ts: string;
-  source: "delta" | "simulated";
+  source: "delta" | "simulated" | "kite";
 }
 
 export interface IndicatorSpecOut {
@@ -761,4 +762,40 @@ export interface LiveSyncStatusOut {
   last_sync_at: string | null;
   last_synced_count: number;
   last_error: string | null;
+}
+
+export interface UnderlyingOut {
+  instrument_id: string;
+  symbol: string;
+}
+
+export interface ExpiryOut {
+  expiry: string;
+  future_count: number;
+  option_count: number;
+}
+
+export interface PcrPointOut {
+  ts: string;
+  total_call_oi: number;
+  total_put_oi: number;
+  pcr: number | null;
+  call_oi_change: number | null;
+  put_oi_change: number | null;
+}
+
+export interface OptionLegOut {
+  instrument_id: string;
+  symbol: string;
+  ltp: number | null;
+  ltp_change: number | null;
+  open_interest: number | null;
+  open_interest_change: number | null;
+  as_of: string;
+}
+
+export interface ChainRowOut {
+  strike: number;
+  call: OptionLegOut | null;
+  put: OptionLegOut | null;
 }

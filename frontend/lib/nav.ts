@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   LineChart,
   ListOrdered,
+  Layers,
   Radio,
   ShieldAlert,
   TrendingUp,
@@ -38,6 +39,7 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: "Markets", href: "/markets", icon: Radio },
       { label: "Charts", href: "/charts", icon: LineChart },
+      { label: "Options", href: "/options", icon: Layers },
       { label: "Scanner", href: "/scanner", icon: Filter },
       { label: "Market Data", href: "/market-data", icon: BarChart3 },
     ],

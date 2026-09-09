@@ -9,7 +9,8 @@ from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.user import User
-from app.schemas.options import ExpiryOut, PcrPointOut, UnderlyingOut
+from app.schemas.options import ChainRowOut, ExpiryOut, PcrPointOut, UnderlyingOut
+from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.pcr import compute_pcr_series
 
 router = APIRouter()
@@ -40,6 +41,17 @@ async def list_expiries(
         ExpiryOut(expiry=exp, future_count=counts["future"], option_count=counts["option"])
         for exp, counts in sorted(by_expiry.items())
     ]
+
+
+@router.get("/{underlying_instrument_id}/chain", response_model=list[ChainRowOut])
+async def get_chain(
+    underlying_instrument_id: str, expiry: date = Query(...),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+) -> list[ChainRowOut]:
+    """Snapshot seed for the option chain table -- the frontend layers live
+    WS ticks on top of this for real-time LTP/OI (see options/chain.py)."""
+    rows = await get_option_chain_snapshot(db, uuid.UUID(underlying_instrument_id), expiry)
+    return [ChainRowOut(**row) for row in rows]
 
 
 @router.get("/{underlying_instrument_id}/pcr", response_model=list[PcrPointOut])
