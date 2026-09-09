@@ -292,6 +292,10 @@ class ZerodhaKiteBroker(BrokerInterface):
         end = end or datetime.now(timezone.utc)
         start = start or (end - timedelta(days=60 if interval != "day" else 2000))
         params = {"from": start.strftime("%Y-%m-%d %H:%M:%S"), "to": end.strftime("%Y-%m-%d %H:%M:%S")}
+        if segment == "NFO":
+            # Kite only returns open interest as a 7th column when asked --
+            # meaningless for NSE equities/indices, only requested for F&O.
+            params["oi"] = "1"
         data = await self._request("GET", f"/instruments/historical/{token}/{interval}", params=params)
         candles = data.get("candles", []) if data else []
 
@@ -300,7 +304,11 @@ class ZerodhaKiteBroker(BrokerInterface):
             ts = datetime.fromisoformat(row[0])
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
-            bars.append({"ts": ts, "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5] if len(row) > 5 else None})
+            bars.append({
+                "ts": ts, "open": row[1], "high": row[2], "low": row[3], "close": row[4],
+                "volume": row[5] if len(row) > 5 else None,
+                "open_interest": row[6] if len(row) > 6 else None,
+            })
         return bars
 
     async def subscribe_market_data(self, symbols: list[str]) -> None:

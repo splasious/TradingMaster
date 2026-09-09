@@ -68,7 +68,8 @@ async def load_candles(
         return []
 
     bars = [
-        {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+        {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume,
+         "open_interest": c.open_interest}
         for c in base_candles
     ]
     try:
@@ -84,7 +85,7 @@ async def load_candles(
         OhlcvCandle(
             instrument_id=instrument_id, timeframe=timeframe, ts=bar["ts"],
             open=bar["open"], high=bar["high"], low=bar["low"], close=bar["close"], volume=bar["volume"],
-            source="resampled",
+            open_interest=bar.get("open_interest"), source="resampled",
         )
         for bar in resampled
     ]

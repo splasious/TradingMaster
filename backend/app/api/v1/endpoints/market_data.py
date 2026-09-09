@@ -173,7 +173,8 @@ async def get_resampled_candles(
     period as if it were closed -- see resample.py."""
     candles = await _load_candles(db, instrument_id, base_timeframe)
     bars = [
-        {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+        {"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume,
+         "open_interest": c.open_interest}
         for c in candles
     ]
     try:

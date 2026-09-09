@@ -8,7 +8,7 @@ the Data Backfill Platform instead.
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 
 class Bar(TypedDict):
@@ -18,6 +18,9 @@ class Bar(TypedDict):
     low: float
     close: float
     volume: float | None
+    # F&O only (NFO options/futures via oi=1) -- absent/None for every
+    # other source, which have no open interest concept.
+    open_interest: NotRequired[float | None]
 
 
 class MarketDataSourceError(Exception):

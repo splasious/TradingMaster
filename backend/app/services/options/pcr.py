@@ -1,0 +1,75 @@
+"""Put-Call Ratio and open-interest-change computation for the Options
+Dashboard.
+
+Aggregates real per-strike open interest (see zerodha_broker.py's oi=1
+request during NFO backfill) across every option contract of one
+underlying + expiry, at each bar timestamp they share -- PCR at time t is
+sum(all PE open_interest at t) / sum(all CE open_interest at t), the
+standard market-breadth definition, computed here rather than trusted from
+any third-party source since it's a straightforward roll-up of data this
+app already owns.
+
+"Change in OI" is not a separate Kite field -- it's simply this bar's
+total OI minus the previous bar's, computed here per side (call/put)
+since that's what a change-in-OI chart plots.
+"""
+
+import uuid
+from collections import defaultdict
+from datetime import date, datetime
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.instrument import Instrument
+from app.models.market_data import OhlcvCandle
+
+
+async def compute_pcr_series(
+    db: AsyncSession, underlying_instrument_id: uuid.UUID, expiry: date, timeframe: str,
+) -> list[dict]:
+    option_rows = (
+        await db.execute(
+            select(Instrument.id, Instrument.option_type).where(
+                Instrument.underlying_instrument_id == underlying_instrument_id,
+                Instrument.expiry == expiry,
+                Instrument.instrument_type == "option",
+            )
+        )
+    ).all()
+    if not option_rows:
+        return []
+    ce_ids = {i for i, ot in option_rows if ot == "CE"}
+    pe_ids = {i for i, ot in option_rows if ot == "PE"}
+
+    candle_rows = (
+        await db.execute(
+            select(OhlcvCandle.instrument_id, OhlcvCandle.ts, OhlcvCandle.open_interest)
+            .where(OhlcvCandle.instrument_id.in_(ce_ids | pe_ids), OhlcvCandle.timeframe == timeframe)
+            .order_by(OhlcvCandle.ts)
+        )
+    ).all()
+
+    by_ts: dict[datetime, dict[str, float]] = defaultdict(lambda: {"call": 0.0, "put": 0.0})
+    for inst_id, ts, oi in candle_rows:
+        if oi is None:
+            continue
+        side = "call" if inst_id in ce_ids else "put"
+        by_ts[ts][side] += oi
+
+    series: list[dict] = []
+    prev_call: float | None = None
+    prev_put: float | None = None
+    for ts in sorted(by_ts):
+        call_oi = by_ts[ts]["call"]
+        put_oi = by_ts[ts]["put"]
+        series.append({
+            "ts": ts,
+            "total_call_oi": call_oi,
+            "total_put_oi": put_oi,
+            "pcr": (put_oi / call_oi) if call_oi > 0 else None,
+            "call_oi_change": (call_oi - prev_call) if prev_call is not None else None,
+            "put_oi_change": (put_oi - prev_put) if prev_put is not None else None,
+        })
+        prev_call, prev_put = call_oi, put_oi
+    return series

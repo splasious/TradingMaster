@@ -32,6 +32,11 @@ class OhlcvCandle(Base):
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[float | None] = mapped_column(Float)
+    # F&O only (NFO options/futures) -- always null for equity/index/crypto,
+    # which have no open interest concept. Kite only returns this when the
+    # historical-candle request explicitly asks for it (oi=1); see
+    # zerodha_broker.py's get_historical_data.
+    open_interest: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

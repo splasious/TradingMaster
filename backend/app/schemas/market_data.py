@@ -31,6 +31,7 @@ class CandleOut(BaseModel):
     low: float
     close: float
     volume: float | None
+    open_interest: float | None = None
 
     model_config = {"from_attributes": True}
 

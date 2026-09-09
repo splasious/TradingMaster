@@ -148,7 +148,7 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
             OhlcvCandle(
                 instrument_id=instrument.id, timeframe=bar.timeframe, ts=bar.ts,
                 open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume,
-                source=f"bf_{bf_symbol.source}",
+                open_interest=bar.open_interest, source=f"bf_{bf_symbol.source}",
             )
         )
         existing.add(key)

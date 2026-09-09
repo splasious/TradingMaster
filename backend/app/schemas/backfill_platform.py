@@ -161,6 +161,7 @@ class ResampledCandleOut(BaseModel):
     low: float
     close: float
     volume: float | None
+    open_interest: float | None = None
 
 
 class BulkBackfillResult(BaseModel):

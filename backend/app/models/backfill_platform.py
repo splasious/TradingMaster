@@ -86,6 +86,7 @@ class BfOhlcvBar(Base):
     low: Mapped[float] = mapped_column(Float, nullable=False)
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[float | None] = mapped_column(Float)
+    open_interest: Mapped[float | None] = mapped_column(Float)  # F&O only, see OhlcvCandle's own field
 
     symbol: Mapped["BfSymbol"] = relationship(back_populates="bars")
 

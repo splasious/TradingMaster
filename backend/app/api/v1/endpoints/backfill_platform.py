@@ -164,7 +164,11 @@ async def get_resampled_candles(
             select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol_row.id, BfOhlcvBar.timeframe == "1d").order_by(BfOhlcvBar.ts)
         )
     ).scalars().all()
-    bars = [{"ts": b.ts, "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume} for b in daily_bars]
+    bars = [
+        {"ts": b.ts, "open": b.open, "high": b.high, "low": b.low, "close": b.close, "volume": b.volume,
+         "open_interest": b.open_interest}
+        for b in daily_bars
+    ]
     try:
         resampled = resample_candles(bars, target_timeframe)
     except ValueError as exc:

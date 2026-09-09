@@ -109,6 +109,7 @@ async def run_bf_backfill_job(job_id: uuid.UUID) -> None:
                 BfOhlcvBar(
                     symbol_id=symbol_row.id, timeframe=job.timeframe, ts=bar_ts,
                     open=bar["open"], high=bar["high"], low=bar["low"], close=bar["close"], volume=bar.get("volume"),
+                    open_interest=bar.get("open_interest"),
                 )
             )
             existing_ts.add(bar_ts)

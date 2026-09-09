@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     market_data,
     market_data_ws,
     optimization,
+    options,
     paper_trading,
     portfolio_backtests,
     portfolio_optimization,
@@ -44,3 +45,4 @@ api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(backup.router, prefix="/backup", tags=["backup"])
 api_router.include_router(backfill_platform.router, prefix="/backfill-platform", tags=["backfill-platform"])
+api_router.include_router(options.router, prefix="/options", tags=["options"])

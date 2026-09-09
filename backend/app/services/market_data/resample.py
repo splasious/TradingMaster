@@ -53,11 +53,15 @@ def resample_candles(
     df["volume"] = df["volume"].fillna(0.0)
     df = df.set_index(pd.DatetimeIndex(df["ts"]))
 
-    resampled = (
-        df.resample(freq)
-        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
-        .dropna(subset=["open"])
-    )
+    # open_interest is a point-in-time snapshot (like close), never additive
+    # like volume -- only present at all for F&O bars, so only aggregated
+    # when the column actually exists (equity/crypto bars never carry it).
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    has_oi = "open_interest" in df.columns
+    if has_oi:
+        agg["open_interest"] = "last"
+
+    resampled = df.resample(freq).agg(agg).dropna(subset=["open"])
 
     if only_closed and len(resampled):
         effective_now = now or datetime.now(timezone.utc)
@@ -71,6 +75,9 @@ def resample_candles(
                 resampled = resampled.iloc[:-1]
 
     return [
-        Bar(ts=ts.to_pydatetime(), open=row.open, high=row.high, low=row.low, close=row.close, volume=row.volume)
+        Bar(
+            ts=ts.to_pydatetime(), open=row.open, high=row.high, low=row.low, close=row.close, volume=row.volume,
+            **({"open_interest": row.open_interest} if has_oi else {}),
+        )
         for ts, row in resampled.iterrows()
     ]
