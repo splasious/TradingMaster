@@ -291,26 +291,41 @@ export default function OptionsPage() {
 
       <HistoryDepthCard underlyingId={underlyingId} expiry={expiry} />
 
-      <Card>
-        <CardHeader className="flex-wrap gap-3">
-          <CardTitle>Put-Call Ratio</CardTitle>
-          <div className="flex items-center gap-2">
-            <Badge tone="neutral">Sum(Put OI) / Sum(Call OI)</Badge>
-            <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
-              {PCR_TIMEFRAMES.map((tf) => (
-                <option key={tf} value={tf}>{tf}</option>
-              ))}
-            </Select>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {!pcrSeries?.length ? (
-            <EmptyState title="No PCR data" description="No candles stored at this timeframe for this expiry yet." />
-          ) : (
-            <OscillatorChart lines={pcrLines} height={240} />
-          )}
-        </CardContent>
-      </Card>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader className="flex-wrap gap-3">
+            <CardTitle>Put-Call Ratio</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge tone="neutral">Sum(Put OI) / Sum(Call OI)</Badge>
+              <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
+                {PCR_TIMEFRAMES.map((tf) => (
+                  <option key={tf} value={tf}>{tf}</option>
+                ))}
+              </Select>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {!pcrSeries?.length ? (
+              <EmptyState title="No PCR data" description="No candles stored at this timeframe for this expiry yet." />
+            ) : (
+              <OscillatorChart lines={pcrLines} height={240} />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Change in Open Interest</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!pcrSeries?.length ? (
+              <EmptyState title="No OI data" description="No candles stored at this timeframe for this expiry yet." />
+            ) : (
+              <OscillatorChart lines={oiChangeLines} height={240} />
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
       <Card>
         <CardHeader className="flex-wrap gap-3">
@@ -352,19 +367,6 @@ export default function OptionsPage() {
                 ))}
               </Tbody>
             </Table>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Change in Open Interest</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!pcrSeries?.length ? (
-            <EmptyState title="No OI data" description="No candles stored at this timeframe for this expiry yet." />
-          ) : (
-            <OscillatorChart lines={oiChangeLines} height={240} />
           )}
         </CardContent>
       </Card>
