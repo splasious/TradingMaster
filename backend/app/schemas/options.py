@@ -41,3 +41,18 @@ class ChainRowOut(BaseModel):
     strike: float
     call: OptionLegOut | None
     put: OptionLegOut | None
+
+
+class HistoryDepthOut(BaseModel):
+    symbol: str | None
+    # What THIS app has already backfilled into ohlcv_candles.
+    our_earliest: datetime | None
+    our_latest: datetime | None
+    our_candle_count: int
+    # What Kite's own historical API actually reports right now, queried
+    # live through the connected Zerodha session -- None if no account is
+    # connected or the live probe itself failed (see `error`).
+    kite_earliest: datetime | None
+    kite_latest: datetime | None
+    kite_candle_count: int | None
+    error: str | None

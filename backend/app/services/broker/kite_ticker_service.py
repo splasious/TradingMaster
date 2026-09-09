@@ -1,12 +1,20 @@
-"""Live Kite WebSocket ticker for NFO price + open interest -- feeds
-`TickEngine` with genuine streaming data instead of Zerodha's simulated
-random-walk fallback (see tick_engine.py's own docstring). Mirrors
-real_price_feed.py's role for Delta, but push-streaming instead of
-REST-polled, since Kite -- unlike Delta in this codebase -- has a real
-ticker (`kiteconnect.KiteTicker`, the official SDK's tested binary-
+"""Live Kite WebSocket ticker for NFO price + open interest, and NSE equity/
+index prices -- feeds `TickEngine` with genuine streaming data instead of
+Zerodha's simulated random-walk fallback (see tick_engine.py's own
+docstring). Mirrors real_price_feed.py's role for Delta, but push-streaming
+instead of REST-polled, since Kite -- unlike Delta in this codebase -- has
+a real ticker (`kiteconnect.KiteTicker`, the official SDK's tested binary-
 protocol client; hand-rolling that parser ourselves was considered and
 rejected, see the design plan this was built from -- OI's byte offset is
 exactly the kind of detail we'd rather not get subtly wrong).
+
+Subscribes two segments in the same connection: NFO (options/futures,
+MODE_FULL -- the only mode that carries open interest) and NSE (equities/
+indices, MODE_LTP -- cheaper, and equities have no OI to carry here
+anyway). Kite's own per-connection subscription cap (documented at 3000
+instruments) is enforced with NFO given priority, since OI/F&O is this
+service's original purpose -- NSE equities fill whatever budget remains
+rather than failing the whole connection outright (see MAX_SUBSCRIBE_TOKENS).
 
 `KiteTicker` runs on Twisted's reactor, a process-wide singleton that can
 only ever be started once per process: `connect(threaded=True)` starts it
@@ -54,16 +62,30 @@ from app.services.market_data.tick_engine import TickEngine, tick_engine
 logger = logging.getLogger(__name__)
 
 # How often to check for a fresher access_token (the day's "Login with
-# Zerodha") and re-resolve the NFO instrument set (a newly-backfilled
-# contract) -- not how often ticks arrive, that's push-driven by Kite
-# itself and can be many times a second.
+# Zerodha") and re-resolve the NFO/NSE instrument set (a newly-backfilled
+# contract or equity) -- not how often ticks arrive, that's push-driven by
+# Kite itself and can be many times a second.
 REFRESH_INTERVAL_SECONDS = 300
 
+# The segments this service subscribes to in one WS connection, and the
+# order in which they're prioritized when trimming to fit Kite's
+# per-connection subscription cap (NFO first -- see MAX_SUBSCRIBE_TOKENS).
+KITE_SUBSCRIBED_EXCHANGES = ("NFO", "NSE")
 
-async def _find_connected_credentials(db) -> dict | None:
+# Kite's documented per-WebSocket-connection subscription ceiling. NFO
+# (OI, this service's original purpose) always gets priority within this
+# budget; NSE equities fill whatever's left rather than the whole
+# connection failing outright once the combined catalog grows past it.
+MAX_SUBSCRIBE_TOKENS = 3000
+
+
+async def find_connected_zerodha_credentials(db) -> dict | None:
     """Decrypted credentials for the current CONNECTED zerodha_kite
     account, or None if none is connected -- the exact account-selection
-    query KiteSessionMonitorScheduler already uses (kite_session_monitor.py)."""
+    query KiteSessionMonitorScheduler already uses (kite_session_monitor.py).
+    Shared (not module-private) since app/services/options/history_depth.py
+    also needs it, to query Kite's own historical API directly through the
+    same already-connected session, without a second copy of this lookup."""
     result = await db.execute(
         select(BrokerAccount)
         .join(Broker, Broker.id == BrokerAccount.broker_id)
@@ -80,33 +102,50 @@ async def _find_connected_credentials(db) -> dict | None:
     return creds
 
 
-async def _resolve_nfo_token_map(db, api_key: str) -> dict[int, uuid.UUID]:
-    """Kite numeric instrument_token -> this app's Instrument.id, for
-    every currently-backfilled NFO contract. Re-resolved on every refresh
-    cycle so a newly-backfilled contract is picked up automatically.
+async def _resolve_kite_token_map(db, api_key: str) -> dict[str, dict[int, uuid.UUID]]:
+    """Kite numeric instrument_token -> this app's Instrument.id, grouped by
+    segment ("NFO", "NSE") since each is subscribed in a different WS mode
+    (NFO -> MODE_FULL, the only mode carrying OI; NSE equities -> MODE_LTP,
+    cheaper and sufficient since equities carry no OI here). Re-resolved on
+    every refresh cycle so a newly-backfilled contract or equity is picked
+    up automatically.
 
     Only needs api_key, not a full authenticated session: Kite's
     instrument-dump endpoint is public catalog data (confirmed live
     earlier this session, and in zerodha_broker.py's own module
     docstring) -- no /user/profile round-trip needed just to list
-    tradingsymbol -> instrument_token."""
-    result = await db.execute(select(Instrument.id, Instrument.external_ref).where(Instrument.exchange == "NFO"))
+    tradingsymbol -> instrument_token. Scoped to data_source ==
+    "zerodha_kite" -- an NSE row synced from a retired source (e.g. the
+    old "yahoo_nse" adapter) has a tradingsymbol format Kite's own dump
+    would never match anyway."""
+    result = await db.execute(
+        select(Instrument.id, Instrument.external_ref, Instrument.exchange).where(
+            Instrument.exchange.in_(KITE_SUBSCRIBED_EXCHANGES), Instrument.data_source == "zerodha_kite"
+        )
+    )
     rows = result.all()
     if not rows:
         return {}
+
     broker = ZerodhaKiteBroker()
     broker._api_key = api_key
-    try:
-        nfo_rows = await broker.get_instruments("NFO")
-    except KiteAPIError:
-        logger.exception("Could not fetch Kite's NFO instrument dump for token resolution")
-        return {}
-    token_by_symbol = {row["tradingsymbol"]: int(row["instrument_token"]) for row in nfo_rows if row.get("instrument_token")}
-    return {
-        token_by_symbol[external_ref]: instrument_id
-        for instrument_id, external_ref in rows
-        if external_ref in token_by_symbol
-    }
+    token_maps: dict[str, dict[int, uuid.UUID]] = {}
+    for segment in KITE_SUBSCRIBED_EXCHANGES:
+        segment_rows = [(instrument_id, external_ref) for instrument_id, external_ref, exchange in rows if exchange == segment]
+        if not segment_rows:
+            continue
+        try:
+            dump = await broker.get_instruments(segment)
+        except KiteAPIError:
+            logger.exception("Could not fetch Kite's %s instrument dump for token resolution", segment)
+            continue
+        token_by_symbol = {row["tradingsymbol"]: int(row["instrument_token"]) for row in dump if row.get("instrument_token")}
+        token_maps[segment] = {
+            token_by_symbol[external_ref]: instrument_id
+            for instrument_id, external_ref in segment_rows
+            if external_ref in token_by_symbol
+        }
+    return token_maps
 
 
 class KiteTickerService:
@@ -148,24 +187,37 @@ class KiteTickerService:
 
     async def _refresh(self) -> None:
         async with AsyncSessionLocal() as db:
-            creds = await _find_connected_credentials(db)
+            creds = await find_connected_zerodha_credentials(db)
             if creds is None:
                 self.last_error = "No connected Zerodha account"
                 return
             access_token = creds["access_token"]
             if access_token == self._current_access_token and self._ticker is not None:
                 return  # already streaming with the current token, nothing to do
-            token_map = await _resolve_nfo_token_map(db, creds["api_key"])
+            token_maps = await _resolve_kite_token_map(db, creds["api_key"])
 
-        if not token_map:
-            self.last_error = "No NFO instruments to subscribe to (backfill one first)"
+        nfo_map = token_maps.get("NFO", {})
+        nse_map = token_maps.get("NSE", {})
+        if not nfo_map and not nse_map:
+            self.last_error = "No NFO/NSE instruments to subscribe to (backfill one first)"
             return
 
+        nse_items = list(nse_map.items())
+        budget = max(0, MAX_SUBSCRIBE_TOKENS - len(nfo_map))
+        if len(nse_items) > budget:
+            logger.warning(
+                "NSE token count (%d) exceeds the remaining subscription budget (%d of Kite's %d-token cap, "
+                "after %d NFO) -- subscribing to the first %d only",
+                len(nse_items), budget, MAX_SUBSCRIBE_TOKENS, len(nfo_map), budget,
+            )
+            nse_items = nse_items[:budget]
+        nse_map = dict(nse_items)
+
         old_ticker = self._ticker
-        self._token_map = token_map
+        self._token_map = {**nfo_map, **nse_map}
         new_ticker = KiteTicker(creds["api_key"], access_token)
         new_ticker.on_ticks = self._on_ticks
-        new_ticker.on_connect = self._make_on_connect(list(token_map.keys()))
+        new_ticker.on_connect = self._make_on_connect(list(nfo_map.keys()), list(nse_map.keys()))
         new_ticker.on_close = self._on_close
         new_ticker.on_error = self._on_error
         new_ticker.connect(threaded=True)
@@ -175,10 +227,15 @@ class KiteTickerService:
         if old_ticker is not None:
             old_ticker.close()
 
-    def _make_on_connect(self, tokens: list[int]):
+    def _make_on_connect(self, nfo_tokens: list[int], nse_tokens: list[int]):
         def _on_connect(ws, response) -> None:
-            ws.subscribe(tokens)
-            ws.set_mode(ws.MODE_FULL, tokens)  # Full mode is what carries OI for F&O
+            all_tokens = nfo_tokens + nse_tokens
+            if all_tokens:
+                ws.subscribe(all_tokens)
+            if nfo_tokens:
+                ws.set_mode(ws.MODE_FULL, nfo_tokens)  # Full mode is what carries OI for F&O
+            if nse_tokens:
+                ws.set_mode(ws.MODE_LTP, nse_tokens)  # Equities: last price only, no OI to carry
             self.last_connected_at = datetime.now(timezone.utc)
             self.last_error = None
 

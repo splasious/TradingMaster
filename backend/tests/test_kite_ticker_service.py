@@ -73,17 +73,17 @@ async def _seed_connected_account(db_session: AsyncSession, *, connected: bool =
 
 
 async def test_find_connected_credentials_returns_none_without_a_connected_account(db_session: AsyncSession):
-    assert await svc._find_connected_credentials(db_session) is None
+    assert await svc.find_connected_zerodha_credentials(db_session) is None
 
 
 async def test_find_connected_credentials_ignores_disconnected_account(db_session: AsyncSession):
     await _seed_connected_account(db_session, connected=False)
-    assert await svc._find_connected_credentials(db_session) is None
+    assert await svc.find_connected_zerodha_credentials(db_session) is None
 
 
 async def test_find_connected_credentials_returns_decrypted_creds(db_session: AsyncSession):
     await _seed_connected_account(db_session, connected=True, access_token="real_token")
-    creds = await svc._find_connected_credentials(db_session)
+    creds = await svc.find_connected_zerodha_credentials(db_session)
     assert creds is not None
     assert creds["api_key"] == "kitekey"
     assert creds["access_token"] == "real_token"
@@ -94,33 +94,36 @@ async def test_find_connected_credentials_none_when_no_access_token_yet(db_sessi
     stored, interactive login not completed) has no access_token -- must
     not be treated as ready to stream."""
     await _seed_connected_account(db_session, connected=True, access_token=None)
-    assert await svc._find_connected_credentials(db_session) is None
+    assert await svc.find_connected_zerodha_credentials(db_session) is None
 
 
-async def test_resolve_nfo_token_map_matches_by_tradingsymbol(db_session: AsyncSession, monkeypatch):
+async def test_resolve_kite_token_map_matches_by_tradingsymbol_per_segment(db_session: AsyncSession, monkeypatch):
     inst = Instrument(
         exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
         data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
     )
-    other = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
-    db_session.add_all([inst, other])
+    equity = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
+    stale = Instrument(exchange="NSE", symbol="TCS", name="TCS", instrument_type="equity", data_source="yahoo_nse", external_ref="TCS.NS")
+    db_session.add_all([inst, equity, stale])
     await db_session.commit()
 
     async def fake_get_instruments(self, segment="NSE"):
-        assert segment == "NFO"
-        return [
-            {"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "111"},
-            {"tradingsymbol": "SOMETHING_ELSE", "instrument_token": "222"},
-        ]
+        if segment == "NFO":
+            return [
+                {"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "111"},
+                {"tradingsymbol": "SOMETHING_ELSE", "instrument_token": "222"},
+            ]
+        assert segment == "NSE"
+        return [{"tradingsymbol": "INFY", "instrument_token": "333"}]
 
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
 
-    token_map = await svc._resolve_nfo_token_map(db_session, "kitekey")
-    assert token_map == {111: inst.id}  # NSE instrument never considered; unmatched NFO row ignored
+    token_maps = await svc._resolve_kite_token_map(db_session, "kitekey")
+    assert token_maps == {"NFO": {111: inst.id}, "NSE": {333: equity.id}}  # unmatched NFO row and stale-source NSE row both ignored
 
 
-async def test_resolve_nfo_token_map_empty_when_no_nfo_instruments(db_session: AsyncSession):
-    assert await svc._resolve_nfo_token_map(db_session, "kitekey") == {}
+async def test_resolve_kite_token_map_empty_when_no_instruments(db_session: AsyncSession):
+    assert await svc._resolve_kite_token_map(db_session, "kitekey") == {}
 
 
 def test_on_ticks_updates_price_and_oi_for_mapped_instruments():
@@ -166,6 +169,7 @@ class _FakeTicker:
     does with it without touching Twisted, a thread, or the network."""
 
     MODE_FULL = "full"
+    MODE_LTP = "ltp"
     instances: list["_FakeTicker"] = []
 
     def __init__(self, api_key, access_token):
@@ -178,7 +182,7 @@ class _FakeTicker:
         self.connected = False
         self.closed = False
         self.subscribed = None
-        self.mode_set = None
+        self.mode_calls: list[tuple[str, list[int]]] = []
         _FakeTicker.instances.append(self)
 
     def connect(self, threaded=False):
@@ -190,7 +194,7 @@ class _FakeTicker:
         self.subscribed = list(tokens)
 
     def set_mode(self, mode, tokens):
-        self.mode_set = (mode, list(tokens))
+        self.mode_calls.append((mode, list(tokens)))
 
     def close(self):
         self.closed = True
@@ -222,7 +226,7 @@ async def test_refresh_builds_ticker_and_subscribes_resolved_tokens(db_session: 
     assert ticker.access_token == "tok_a"
     assert ticker.connected is True
     assert ticker.subscribed == [555]
-    assert ticker.mode_set == ("full", [555])
+    assert ticker.mode_calls == [("full", [555])]
     assert service.last_connected_at is not None
 
     # A live tick now updates the engine through the real _on_ticks path.
@@ -295,6 +299,81 @@ async def test_refresh_rebuilds_and_closes_old_ticker_on_new_token(db_session: A
     assert len(_FakeTicker.instances) == 2
     assert first_ticker.closed is True
     assert _FakeTicker.instances[1].access_token == "tok_2"
+
+
+async def test_refresh_subscribes_nfo_and_nse_in_different_modes(db_session: AsyncSession, monkeypatch):
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    option = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    equity = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
+    db_session.add_all([option, equity])
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        if segment == "NFO":
+            return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+        return [{"tradingsymbol": "INFY", "instrument_token": "777"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+
+    ticker = _FakeTicker.instances[0]
+    assert sorted(ticker.subscribed) == [555, 777]
+    assert ("full", [555]) in ticker.mode_calls
+    assert ("ltp", [777]) in ticker.mode_calls
+
+    # A live NSE tick (no "oi" field at all -- LTP mode) updates price only.
+    ticker.on_ticks(ticker, [{"instrument_token": 777, "last_price": 1500.0}])
+    assert engine.get_current_price(equity.id) == 1500.0
+    assert engine.get_current_oi(equity.id) is None
+
+
+async def test_refresh_trims_nse_tokens_to_fit_subscription_cap_after_nfo(db_session: AsyncSession, monkeypatch):
+    """NFO always gets priority within Kite's per-connection subscription
+    cap -- NSE equities fill whatever budget remains instead of the whole
+    connection failing outright once the combined catalog grows past it."""
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 2)
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    option = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    equity_a = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
+    equity_b = Instrument(exchange="NSE", symbol="TCS", name="TCS", instrument_type="equity", data_source="zerodha_kite", external_ref="TCS")
+    db_session.add_all([option, equity_a, equity_b])
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        if segment == "NFO":
+            return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+        return [
+            {"tradingsymbol": "INFY", "instrument_token": "777"},
+            {"tradingsymbol": "TCS", "instrument_token": "888"},
+        ]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+
+    ticker = _FakeTicker.instances[0]
+    # Budget is MAX_SUBSCRIBE_TOKENS(2) - len(nfo)(1) = 1 NSE slot only.
+    assert len(ticker.subscribed) == 2
+    assert 555 in ticker.subscribed
+    nse_subscribed = [t for t in ticker.subscribed if t != 555]
+    assert len(nse_subscribed) == 1
 
 
 async def test_refresh_no_error_when_nothing_connected(db_session: AsyncSession, monkeypatch):

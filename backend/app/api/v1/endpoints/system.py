@@ -49,9 +49,9 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
         components["market_data_delta"] = "unreachable"
 
     # Non-core, same as market_data_delta above -- the platform is fine
-    # without a live NFO stream (F&O just has no live price/OI until the
-    # next reconnect cycle finds a connected account), so this never
-    # drives the overall rollup.
+    # without a live NFO/NSE stream (F&O/equities just fall back to
+    # simulated prices until the next reconnect cycle finds a connected
+    # account), so this never drives the overall rollup.
     if kite_ticker_service._ticker is not None and kite_ticker_service._ticker.is_connected():
         components["kite_ticker"] = "connected"
     elif kite_ticker_service.last_error:

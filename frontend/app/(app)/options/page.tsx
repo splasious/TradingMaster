@@ -5,12 +5,13 @@ import { useMemo, useState } from "react";
 import type { OverlayLine } from "@/components/charts/price-chart";
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
-import { useOptionChain, useOptionExpiries, useOptionPcr, useOptionUnderlyings } from "@/lib/hooks";
+import { useOptionChain, useOptionExpiries, useOptionHistoryDepth, useOptionPcr, useOptionUnderlyings } from "@/lib/hooks";
 import type { OptionLegOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useMarketDataSocket } from "@/lib/ws";
@@ -71,6 +72,67 @@ function mergeLeg(leg: OptionLegOut | null | undefined, live: { price: number; o
     open_interest: oi,
     open_interest_change: oi != null && dayOpenOi != null ? oi - dayOpenOi : leg.open_interest_change,
   };
+}
+
+function fmtDate(ts: string | null): string {
+  return ts ? new Date(ts).toLocaleDateString() : "--";
+}
+
+/** Answers "how much historical data is really there" by asking Kite's
+ * own API directly, live, through the already-connected Zerodha session --
+ * not just what this app happens to have backfilled (our_*). Not
+ * auto-fetched (see useOptionHistoryDepth): it's a live broker API call,
+ * so it only runs when explicitly requested. */
+function HistoryDepthCard({ underlyingId, expiry }: { underlyingId: string; expiry: string }) {
+  const { data, isFetching, isError, refetch, isFetched } = useOptionHistoryDepth(underlyingId || null, expiry || null);
+
+  return (
+    <Card>
+      <CardHeader className="flex-wrap gap-3">
+        <CardTitle>Data Coverage</CardTitle>
+        <Button size="sm" variant="secondary" onClick={() => refetch()} disabled={!underlyingId || !expiry || isFetching}>
+          {isFetching ? "Checking..." : "Check Kite's real depth"}
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {!isFetched && !isFetching ? (
+          <p className="text-sm text-text-muted">
+            An option contract only trades from its own listing date to its own expiry -- typically a few weeks to a
+            few months, far less than an equity or index&apos;s history. Click the button to ask Kite&apos;s API directly,
+            live, how much data it actually has for this expiry (through the connected Zerodha session), alongside
+            what this app has already backfilled.
+          </p>
+        ) : isError ? (
+          <ErrorState description="Could not run the history-depth check." />
+        ) : data ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-text-muted">Backfilled in this app</div>
+              <div className="text-sm text-text-primary">
+                {data.our_candle_count} candles
+                {data.our_earliest && data.our_latest && (
+                  <span className="text-text-secondary"> ({fmtDate(data.our_earliest)} -- {fmtDate(data.our_latest)})</span>
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-text-muted">Kite&apos;s live API (right now)</div>
+              {data.error ? (
+                <div className="text-sm text-text-muted">{data.error}</div>
+              ) : (
+                <div className="text-sm text-text-primary">
+                  {data.kite_candle_count} candles
+                  {data.kite_earliest && data.kite_latest && (
+                    <span className="text-text-secondary"> ({fmtDate(data.kite_earliest)} -- {fmtDate(data.kite_latest)})</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
 }
 
 function ChainRow({
@@ -226,6 +288,8 @@ export default function OptionsPage() {
           ))}
         </Select>
       </div>
+
+      <HistoryDepthCard underlyingId={underlyingId} expiry={expiry} />
 
       <Card>
         <CardHeader className="flex-wrap gap-3">

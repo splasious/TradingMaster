@@ -20,6 +20,7 @@ import type {
   ChainRowOut,
   CompletenessOut,
   ExpiryOut,
+  HistoryDepthOut,
   IndicatorPoint,
   IndicatorSpecOut,
   InstrumentOut,
@@ -691,5 +692,17 @@ export function useOptionPcr(underlyingInstrumentId: string | null, expiry: stri
       apiFetch<PcrPointOut[]>(`/api/v1/options/${underlyingInstrumentId}/pcr?expiry=${expiry}&timeframe=${timeframe}`),
     enabled: !!underlyingInstrumentId && !!expiry,
     refetchInterval: 60_000,
+  });
+}
+
+/** Not auto-fetched (no refetchInterval, starts disabled) -- this makes a
+ * live Kite API call server-side every time, so it only runs when the
+ * user explicitly asks "how much history is really there" via refetch(),
+ * not on a polling cadence like the rest of this dashboard. */
+export function useOptionHistoryDepth(underlyingInstrumentId: string | null, expiry: string | null) {
+  return useQuery({
+    queryKey: ["option-history-depth", underlyingInstrumentId, expiry],
+    queryFn: () => apiFetch<HistoryDepthOut>(`/api/v1/options/${underlyingInstrumentId}/history-depth?expiry=${expiry}`),
+    enabled: false,
   });
 }

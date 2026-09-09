@@ -1,10 +1,17 @@
+import json
+import uuid
 from datetime import date, datetime, timezone
 
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.encryption import encrypt_payload
+from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
+from app.models.user import Role, User, UserRole
+from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 
 EXPIRY = date(2026, 9, 15)
 
@@ -69,3 +76,59 @@ async def test_options_dashboard_endpoints_end_to_end(client: AsyncClient, seede
     assert rows[0]["call"]["ltp_change"] == 0  # only one candle -- day-open == latest
     assert rows[0]["put"]["ltp"] == 50
     assert rows[0]["put"]["open_interest"] == 2000
+
+
+async def test_history_depth_without_connected_account_reports_our_data_only(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    underlying = await _seed(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = await client.get(f"/api/v1/options/{underlying.id}/history-depth", params={"expiry": "2026-09-15"}, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "NIFTY26SEP23000CE"
+    assert body["our_candle_count"] == 1
+    assert body["kite_candle_count"] is None
+    assert "No connected Zerodha account" in body["error"]
+
+
+async def test_history_depth_queries_kite_live_through_connected_session(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession, monkeypatch):
+    underlying = await _seed(db_session)
+
+    role = Role(id=uuid.uuid4(), name=f"role_{uuid.uuid4().hex[:6]}", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"history_depth_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="History Depth Test")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+    # seeded_admin (above) already seeded the zerodha_kite Broker row --
+    # reuse it rather than inserting a duplicate (Broker.code is unique).
+    broker_row = (await db_session.execute(select(Broker).where(Broker.code == "zerodha_kite"))).scalar_one()
+    account = BrokerAccount(user_id=user.id, broker_id=broker_row.id, account_label="History Depth Test", environment="paper")
+    db_session.add(account)
+    await db_session.flush()
+    creds = {"api_key": "kitekey", "api_secret": "kitesecret", "access_token": "real_token"}
+    db_session.add(BrokerCredential(broker_account_id=account.id, encrypted_payload=encrypt_payload(json.dumps(creds))))
+    db_session.add(BrokerConnection(broker_account_id=account.id, status=ConnectionStatus.CONNECTED.value))
+    await db_session.commit()
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        assert symbol == "NIFTY26SEP23000CE"
+        assert segment == "NFO"
+        return [
+            {"ts": datetime(2026, 8, 20, tzinfo=timezone.utc), "open": 90, "high": 95, "low": 88, "close": 92, "volume": 5, "open_interest": 500},
+            {"ts": datetime(2026, 9, 1, tzinfo=timezone.utc), "open": 100, "high": 101, "low": 99, "close": 100, "volume": 10, "open_interest": 1000},
+        ]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get(f"/api/v1/options/{underlying.id}/history-depth", params={"expiry": "2026-09-15"}, headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["error"] is None
+    assert body["kite_candle_count"] == 2
+    assert datetime.fromisoformat(body["kite_earliest"].replace("Z", "+00:00")) == datetime(2026, 8, 20, tzinfo=timezone.utc)
+    assert datetime.fromisoformat(body["kite_latest"].replace("Z", "+00:00")) == datetime(2026, 9, 1, tzinfo=timezone.utc)

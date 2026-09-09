@@ -9,8 +9,9 @@ from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.user import User
-from app.schemas.options import ChainRowOut, ExpiryOut, PcrPointOut, UnderlyingOut
+from app.schemas.options import ChainRowOut, ExpiryOut, HistoryDepthOut, PcrPointOut, UnderlyingOut
 from app.services.options.chain import get_option_chain_snapshot
+from app.services.options.history_depth import get_history_depth
 from app.services.options.pcr import compute_pcr_series
 
 router = APIRouter()
@@ -52,6 +53,19 @@ async def get_chain(
     WS ticks on top of this for real-time LTP/OI (see options/chain.py)."""
     rows = await get_option_chain_snapshot(db, uuid.UUID(underlying_instrument_id), expiry)
     return [ChainRowOut(**row) for row in rows]
+
+
+@router.get("/{underlying_instrument_id}/history-depth", response_model=HistoryDepthOut)
+async def get_history_depth_endpoint(
+    underlying_instrument_id: str, expiry: date = Query(...),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+) -> HistoryDepthOut:
+    """How much historical data actually exists for this expiry -- both
+    what this app has backfilled (our_*) and what Kite's own API reports
+    live right now (kite_*), queried through the connected Zerodha session
+    (see options/history_depth.py)."""
+    result = await get_history_depth(db, uuid.UUID(underlying_instrument_id), expiry)
+    return HistoryDepthOut(**result)
 
 
 @router.get("/{underlying_instrument_id}/pcr", response_model=list[PcrPointOut])

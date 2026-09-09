@@ -799,3 +799,14 @@ export interface ChainRowOut {
   call: OptionLegOut | null;
   put: OptionLegOut | null;
 }
+
+export interface HistoryDepthOut {
+  symbol: string | null;
+  our_earliest: string | null;
+  our_latest: string | null;
+  our_candle_count: number;
+  kite_earliest: string | null;
+  kite_latest: string | null;
+  kite_candle_count: number | null;
+  error: string | null;
+}
