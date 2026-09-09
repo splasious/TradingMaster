@@ -155,6 +155,99 @@ function LoginWithZerodhaButton({ accountId }: { accountId: string }) {
   );
 }
 
+function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOut | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [label, setLabel] = useState(account?.account_label ?? "");
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed the label whenever a different row is opened for editing --
+  // the modal instance is shared across rows, only mounted while one is open.
+  const [openedFor, setOpenedFor] = useState<string | null>(null);
+  if (account && account.id !== openedFor) {
+    setOpenedFor(account.id);
+    setLabel(account.account_label);
+    setApiKey("");
+    setApiSecret("");
+    setError(null);
+  }
+
+  const updateMutation = useMutation({
+    mutationFn: () => {
+      const body: Record<string, unknown> = { account_label: label };
+      // Both fields required together -- a partial credential update would
+      // silently corrupt the stored pair (e.g. new key with the old secret).
+      if (apiKey || apiSecret) body.credentials = { api_key: apiKey, api_secret: apiSecret };
+      return apiFetch(`/api/v1/brokers/accounts/${account!.id}`, { method: "PATCH", body: JSON.stringify(body) });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["broker-accounts"] });
+      onClose();
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to update account"),
+  });
+
+  if (!account) return null;
+
+  return (
+    <Modal open={!!account} onClose={onClose} title={`Edit ${account.account_label}`}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          if (apiKey.trim() !== apiKey || apiSecret.trim() !== apiSecret) {
+            setError("API key/secret has leading or trailing whitespace -- remove it before saving.");
+            return;
+          }
+          if ((apiKey && !apiSecret) || (!apiKey && apiSecret)) {
+            setError("Enter both API key and API secret together, or leave both blank to keep the current ones.");
+            return;
+          }
+          updateMutation.mutate();
+        }}
+        className="space-y-4"
+      >
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Broker</label>
+          <p className="text-sm text-text-primary">{account.broker.name} ({account.environment})</p>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Account label</label>
+          <Input required value={label} onChange={(e) => setLabel(e.target.value)} />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">API key</label>
+          <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Leave blank to keep current" />
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">API secret</label>
+          <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Leave blank to keep current" />
+        </div>
+
+        <p className="text-xs text-text-muted">
+          Only fill in API key/secret if you actually need to correct them -- for Kite&apos;s ordinary daily re-login
+          (session expiry, credentials unchanged), close this and use &quot;Login with Zerodha&quot; on the row instead.
+        </p>
+
+        {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={updateMutation.isPending}>
+            {updateMutation.isPending ? "Saving..." : "Save"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function KiteSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }) {
   const expired = accounts.filter((a) => a.broker.code === "zerodha_kite" && a.connection_status === "error");
   if (!expired.length) return null;
@@ -178,6 +271,7 @@ export default function BrokersSettingsPage() {
   const { data: accounts, isLoading, isError } = useBrokerAccounts();
   const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<BrokerAccountOut | null>(null);
   const canManage = hasRole("administrator", "trader");
 
   const disconnectMutation = useMutation({
@@ -252,6 +346,9 @@ export default function BrokersSettingsPage() {
                           {account.broker.code === "zerodha_kite" && account.connection_status !== "connected" && (
                             <LoginWithZerodhaButton accountId={account.id} />
                           )}
+                          <Button variant="ghost" size="sm" onClick={() => setEditingAccount(account)}>
+                            Edit
+                          </Button>
                           <Button
                             variant="ghost"
                             size="sm"
@@ -284,6 +381,7 @@ export default function BrokersSettingsPage() {
       </Card>
 
       <ConnectBrokerModal open={modalOpen} onClose={() => setModalOpen(false)} accounts={accounts ?? []} />
+      <EditBrokerAccountModal account={editingAccount} onClose={() => setEditingAccount(null)} />
     </div>
   );
 }
