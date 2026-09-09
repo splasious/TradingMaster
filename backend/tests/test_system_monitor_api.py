@@ -7,6 +7,15 @@ async def _login(client: AsyncClient, email: str, password: str) -> str:
     return resp.json()["access_token"]
 
 
+async def test_health_reports_kite_ticker_status_without_gating_overall(client: AsyncClient):
+    resp = await client.get("/api/v1/system/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "kite_ticker" in body["components"]
+    # Non-core, like market_data_delta -- never blocks "healthy" on its own.
+    assert body["components"]["kite_ticker"] in ("connecting", "connected") or body["components"]["kite_ticker"].startswith("error:")
+
+
 async def test_system_monitor_returns_real_metrics(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

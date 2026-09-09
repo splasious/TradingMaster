@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
+from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.broker.registry import get_broker_adapter
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 
@@ -46,6 +47,17 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
         components["market_data_delta"] = "healthy" if resp.status_code == 200 else "unreachable"
     except Exception:
         components["market_data_delta"] = "unreachable"
+
+    # Non-core, same as market_data_delta above -- the platform is fine
+    # without a live NFO stream (F&O just has no live price/OI until the
+    # next reconnect cycle finds a connected account), so this never
+    # drives the overall rollup.
+    if kite_ticker_service._ticker is not None and kite_ticker_service._ticker.is_connected():
+        components["kite_ticker"] = "connected"
+    elif kite_ticker_service.last_error:
+        components["kite_ticker"] = f"error: {kite_ticker_service.last_error}"
+    else:
+        components["kite_ticker"] = "connecting"
 
     overall = "healthy" if all(components[c] == "healthy" for c in CORE_COMPONENTS) else "degraded"
 
