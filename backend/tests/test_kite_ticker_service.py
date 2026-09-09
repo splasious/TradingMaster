@@ -1,0 +1,319 @@
+import json
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.encryption import encrypt_payload
+from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
+from app.models.instrument import Instrument
+from app.services.broker import kite_ticker_service as svc
+from app.services.broker.zerodha_broker import ZerodhaKiteBroker
+from app.services.market_data.tick_engine import TickEngine
+
+
+class db_session_cm:
+    """kite_ticker_service opens its own `async with AsyncSessionLocal()`
+    internally (same as real_price_feed.py) -- this redirects that to the
+    test's isolated db_session instead of the app's real configured DB,
+    matching tests/test_real_price_feed.py's identical pattern."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> AsyncSession:
+        return self._session
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+
+def test_tick_engine_oi_channel_has_no_simulated_fallback():
+    engine = TickEngine()
+    iid = uuid.uuid4()
+    engine.subscribe(iid, seed_price=100.0)
+
+    assert engine.get_current_oi(iid) is None
+    msg = engine._next_tick_message(iid, "t1")
+    assert msg["open_interest"] is None
+
+    engine.set_real_oi(iid, 12345.0)
+    assert engine.get_current_oi(iid) == 12345.0
+    msg2 = engine._next_tick_message(iid, "t2")
+    assert msg2["open_interest"] == 12345.0
+
+
+async def _seed_connected_account(db_session: AsyncSession, *, connected: bool = True, access_token: str | None = "tok_xyz") -> None:
+    role_id = uuid.uuid4()
+    from app.models.user import Role, User, UserRole
+
+    role = Role(id=role_id, name=f"role_{uuid.uuid4().hex[:6]}", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"kite_ticker_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="Kite Ticker Test")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+
+    broker = Broker(code="zerodha_kite", name="Zerodha Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    account = BrokerAccount(user_id=user.id, broker_id=broker.id, account_label="Kite Ticker Test", environment="paper")
+    db_session.add(account)
+    await db_session.flush()
+    creds = {"api_key": "kitekey", "api_secret": "kitesecret"}
+    if access_token is not None:
+        creds["access_token"] = access_token
+    db_session.add(BrokerCredential(broker_account_id=account.id, encrypted_payload=encrypt_payload(json.dumps(creds))))
+    db_session.add(BrokerConnection(
+        broker_account_id=account.id,
+        status=ConnectionStatus.CONNECTED.value if connected else ConnectionStatus.ERROR.value,
+    ))
+    await db_session.commit()
+
+
+async def test_find_connected_credentials_returns_none_without_a_connected_account(db_session: AsyncSession):
+    assert await svc._find_connected_credentials(db_session) is None
+
+
+async def test_find_connected_credentials_ignores_disconnected_account(db_session: AsyncSession):
+    await _seed_connected_account(db_session, connected=False)
+    assert await svc._find_connected_credentials(db_session) is None
+
+
+async def test_find_connected_credentials_returns_decrypted_creds(db_session: AsyncSession):
+    await _seed_connected_account(db_session, connected=True, access_token="real_token")
+    creds = await svc._find_connected_credentials(db_session)
+    assert creds is not None
+    assert creds["api_key"] == "kitekey"
+    assert creds["access_token"] == "real_token"
+
+
+async def test_find_connected_credentials_none_when_no_access_token_yet(db_session: AsyncSession):
+    """A connected-but-not-logged-in-yet Kite account (api_key/secret
+    stored, interactive login not completed) has no access_token -- must
+    not be treated as ready to stream."""
+    await _seed_connected_account(db_session, connected=True, access_token=None)
+    assert await svc._find_connected_credentials(db_session) is None
+
+
+async def test_resolve_nfo_token_map_matches_by_tradingsymbol(db_session: AsyncSession, monkeypatch):
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    other = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
+    db_session.add_all([inst, other])
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        assert segment == "NFO"
+        return [
+            {"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "111"},
+            {"tradingsymbol": "SOMETHING_ELSE", "instrument_token": "222"},
+        ]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    token_map = await svc._resolve_nfo_token_map(db_session, "kitekey")
+    assert token_map == {111: inst.id}  # NSE instrument never considered; unmatched NFO row ignored
+
+
+async def test_resolve_nfo_token_map_empty_when_no_nfo_instruments(db_session: AsyncSession):
+    assert await svc._resolve_nfo_token_map(db_session, "kitekey") == {}
+
+
+def test_on_ticks_updates_price_and_oi_for_mapped_instruments():
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    iid = uuid.uuid4()
+    service._token_map = {738561: iid}
+
+    service._on_ticks(None, [{"instrument_token": 738561, "last_price": 4084.0, "oi": 21845}])
+
+    assert engine.get_current_price(iid) == 4084.0
+    assert engine.get_current_oi(iid) == 21845
+
+
+def test_on_ticks_ignores_unmapped_instrument_tokens():
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    service._token_map = {}
+
+    # Must not raise, must not touch the engine for a token it doesn't know.
+    service._on_ticks(None, [{"instrument_token": 999999, "last_price": 100.0, "oi": 5}])
+
+    assert engine.get_current_price(uuid.uuid4()) is None
+
+
+def test_on_ticks_skips_oi_when_absent_ltp_mode():
+    """LTP-mode ticks (no OI field at all) must not clobber a previously
+    known OI value with None."""
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    iid = uuid.uuid4()
+    service._token_map = {1: iid}
+    engine.set_real_oi(iid, 500.0)
+
+    service._on_ticks(None, [{"instrument_token": 1, "last_price": 10.0}])  # no "oi" key
+
+    assert engine.get_current_oi(iid) == 500.0  # untouched
+    assert engine.get_current_price(iid) == 10.0
+
+
+class _FakeTicker:
+    """Stands in for kiteconnect.KiteTicker -- records what the service
+    does with it without touching Twisted, a thread, or the network."""
+
+    MODE_FULL = "full"
+    instances: list["_FakeTicker"] = []
+
+    def __init__(self, api_key, access_token):
+        self.api_key = api_key
+        self.access_token = access_token
+        self.on_ticks = None
+        self.on_connect = None
+        self.on_close = None
+        self.on_error = None
+        self.connected = False
+        self.closed = False
+        self.subscribed = None
+        self.mode_set = None
+        _FakeTicker.instances.append(self)
+
+    def connect(self, threaded=False):
+        self.connected = True
+        if self.on_connect:
+            self.on_connect(self, {})
+
+    def subscribe(self, tokens):
+        self.subscribed = list(tokens)
+
+    def set_mode(self, mode, tokens):
+        self.mode_set = (mode, list(tokens))
+
+    def close(self):
+        self.closed = True
+
+
+async def test_refresh_builds_ticker_and_subscribes_resolved_tokens(db_session: AsyncSession, monkeypatch):
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add(inst)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+
+    assert len(_FakeTicker.instances) == 1
+    ticker = _FakeTicker.instances[0]
+    assert ticker.access_token == "tok_a"
+    assert ticker.connected is True
+    assert ticker.subscribed == [555]
+    assert ticker.mode_set == ("full", [555])
+    assert service.last_connected_at is not None
+
+    # A live tick now updates the engine through the real _on_ticks path.
+    ticker.on_ticks(ticker, [{"instrument_token": 555, "last_price": 120.5, "oi": 900}])
+    assert engine.get_current_price(inst.id) == 120.5
+    assert engine.get_current_oi(inst.id) == 900
+
+
+async def test_refresh_skips_rebuild_when_token_unchanged(db_session: AsyncSession, monkeypatch):
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_stable")
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add(inst)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+    assert len(_FakeTicker.instances) == 1
+
+    await service._refresh()  # same token still connected -> no new ticker, no old one closed
+    assert len(_FakeTicker.instances) == 1
+    assert _FakeTicker.instances[0].closed is False
+
+
+async def test_refresh_rebuilds_and_closes_old_ticker_on_new_token(db_session: AsyncSession, monkeypatch):
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_1")
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add(inst)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+    first_ticker = _FakeTicker.instances[0]
+
+    # Simulate the next day's fresh "Login with Zerodha" -- a new access_token.
+    from sqlalchemy import select
+    result = await db_session.execute(select(BrokerCredential))
+    credential = result.scalar_one()
+    from app.core.encryption import decrypt_payload
+    creds = json.loads(decrypt_payload(credential.encrypted_payload))
+    creds["access_token"] = "tok_2"
+    credential.encrypted_payload = encrypt_payload(json.dumps(creds))
+    await db_session.commit()
+
+    await service._refresh()
+
+    assert len(_FakeTicker.instances) == 2
+    assert first_ticker.closed is True
+    assert _FakeTicker.instances[1].access_token == "tok_2"
+
+
+async def test_refresh_no_error_when_nothing_connected(db_session: AsyncSession, monkeypatch):
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()  # must not raise
+    assert service.last_error == "No connected Zerodha account"
+
+
+def test_stop_closes_ticker_but_never_calls_stop():
+    """Confirms the module never calls KiteTicker.stop() (which would
+    kill the shared Twisted reactor for the whole process) -- only
+    .close(), per the module's own documented constraint."""
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    fake = _FakeTicker("k", "t")
+    service._ticker = fake
+    assert not hasattr(_FakeTicker, "stop")  # the fake doesn't even define one -- would AttributeError if called
+    service.stop()
+    assert fake.closed is True

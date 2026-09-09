@@ -7,14 +7,19 @@ transparency -- never let the frontend mistake one for the other):
 
   - Real: `app.services.market_data.real_price_feed.RealPriceFeed` polls
     Delta Exchange's real public APIs on a periodic cycle and calls
-    `set_real_price()` here. Once an instrument has a real price on file,
-    this engine always serves that value (held flat between polls, never
-    faked) tagged with its real source ("delta") -- it never reverts to the
-    random walk just because a poll is briefly late.
-  - Simulated: for instruments with no real source mapped (e.g. Zerodha, or
-    anything RealPriceFeed hasn't covered yet), this engine falls back to a
-    random walk seeded from the instrument's last known close, tagged
-    "simulated" so it is never presented as real market data.
+    `set_real_price()` here; `app.services.broker.kite_ticker_service`
+    pushes genuine Kite WebSocket ticks (NFO instruments) the same way,
+    tagged source "kite". Once an instrument has a real price on file,
+    this engine always serves that value (held flat between updates, never
+    faked) -- it never reverts to the random walk just because an update
+    is briefly late.
+  - Simulated: for instruments with no real source mapped (equities, or
+    anything neither feed covers), this engine falls back to a random walk
+    seeded from the instrument's last known close, tagged "simulated" so
+    it is never presented as real market data.
+
+Open interest (F&O only, via kite_ticker_service) is a separate channel
+with no simulated fallback -- see set_real_oi/get_current_oi.
 """
 
 import asyncio
@@ -43,6 +48,9 @@ class TickEngine:
         self._last_price: dict[uuid.UUID, float] = {}
         self._real_price: dict[uuid.UUID, float] = {}
         self._real_price_source: dict[uuid.UUID, str] = {}
+        # Open interest -- F&O only, no simulated fallback (unlike price,
+        # an instrument with no real OI on file just has none, ever).
+        self._real_oi: dict[uuid.UUID, float] = {}
         self._subscriber_counts: dict[uuid.UUID, int] = {}
         self._queues: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
@@ -87,6 +95,16 @@ class TickEngine:
         self._real_price_source[instrument_id] = source
         self._last_price[instrument_id] = price
 
+    def set_real_oi(self, instrument_id: uuid.UUID, open_interest: float) -> None:
+        """Called by the Kite ticker service with genuine open interest --
+        F&O only. No simulated fallback exists (see get_current_oi):
+        an instrument with nothing on file here just has no OI, not a
+        faked one, unlike price's random-walk placeholder."""
+        self._real_oi[instrument_id] = open_interest
+
+    def get_current_oi(self, instrument_id: uuid.UUID) -> float | None:
+        return self._real_oi.get(instrument_id)
+
     def _next_tick_message(self, instrument_id: uuid.UUID, now_iso: str) -> dict:
         if instrument_id in self._real_price:
             price = self._real_price[instrument_id]
@@ -102,6 +120,7 @@ class TickEngine:
             "price": round(price, 4),
             "ts": now_iso,
             "source": source,
+            "open_interest": self._real_oi.get(instrument_id),
         }
 
     async def _run(self) -> None:
