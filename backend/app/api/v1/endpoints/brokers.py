@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,8 +11,9 @@ from app.core.deps import get_current_user, require_role
 from app.core.encryption import decrypt_payload, encrypt_payload
 from app.db.session import get_db
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
+from app.models.live_trading import LiveDeployment
 from app.models.user import User
-from app.schemas.broker import BrokerAccountCreate, BrokerAccountOut, BrokerOut, KiteCallbackIn, KiteLoginUrlOut
+from app.schemas.broker import BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerOut, KiteCallbackIn, KiteLoginUrlOut
 from app.services.audit import write_audit_log
 from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
@@ -58,6 +59,36 @@ async def list_broker_accounts(
     return [_account_out(a) for a in result.scalars().all()]
 
 
+async def _authenticate_and_set_status(connection: BrokerConnection, broker_code: str, credentials: dict) -> None:
+    """Shared by connect (new account) and update (credentials changed on
+    an existing one) -- same rule either way: an adapter needing an
+    interactive browser login (Kite) can't finish here, everything else
+    authenticates in one shot."""
+    if requires_interactive_auth(broker_code):
+        # Can't finish authenticating yet -- api_key/api_secret are stored,
+        # but Kite Connect needs a real browser login before a
+        # request_token exists to exchange for an access_token. Left
+        # disconnected (not ERROR -- this isn't a failure) until the
+        # frontend completes /kite/login-url -> /kite/callback.
+        connection.status = ConnectionStatus.DISCONNECTED.value
+        connection.last_error = "Awaiting Zerodha login -- use 'Login with Zerodha' to finish connecting."
+        return
+    adapter = get_broker_adapter(broker_code)
+    try:
+        authenticated = await adapter.authenticate(credentials)
+        if authenticated:
+            await adapter.connect()
+            connection.status = ConnectionStatus.CONNECTED.value
+            connection.last_heartbeat_at = datetime.now(timezone.utc)
+            connection.last_error = None
+        else:
+            connection.status = ConnectionStatus.ERROR.value
+            connection.last_error = "Authentication rejected by broker"
+    except Exception as exc:  # adapter failures must surface as ERROR, never crash the request
+        connection.status = ConnectionStatus.ERROR.value
+        connection.last_error = str(exc)
+
+
 @router.post("/accounts", response_model=BrokerAccountOut, status_code=status.HTTP_201_CREATED)
 async def connect_broker_account(
     payload: BrokerAccountCreate,
@@ -83,29 +114,7 @@ async def connect_broker_account(
     db.add(connection)
     await db.flush()
 
-    if requires_interactive_auth(broker.code):
-        # Can't finish authenticating yet -- api_key/api_secret are stored,
-        # but Kite Connect needs a real browser login before a
-        # request_token exists to exchange for an access_token. Left
-        # disconnected (not ERROR -- this isn't a failure) until the
-        # frontend completes /kite/login-url -> /kite/callback.
-        connection.status = ConnectionStatus.DISCONNECTED.value
-        connection.last_error = "Awaiting Zerodha login -- use 'Login with Zerodha' to finish connecting."
-    else:
-        adapter = get_broker_adapter(broker.code)
-        try:
-            authenticated = await adapter.authenticate(payload.credentials)
-            if authenticated:
-                await adapter.connect()
-                connection.status = ConnectionStatus.CONNECTED.value
-                connection.last_heartbeat_at = datetime.now(timezone.utc)
-                connection.last_error = None
-            else:
-                connection.status = ConnectionStatus.ERROR.value
-                connection.last_error = "Authentication rejected by broker"
-        except Exception as exc:  # adapter failures must surface as ERROR, never crash the request
-            connection.status = ConnectionStatus.ERROR.value
-            connection.last_error = str(exc)
+    await _authenticate_and_set_status(connection, broker.code, payload.credentials)
 
     await write_audit_log(
         db,
@@ -114,6 +123,67 @@ async def connect_broker_account(
         object_type="broker_account",
         object_id=str(account.id),
         new_value={"broker_code": broker.code, "environment": payload.environment, "status": connection.status},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection))
+        .where(BrokerAccount.id == account.id)
+    )
+    return _account_out(result.scalar_one())
+
+
+@router.patch("/accounts/{account_id}", response_model=BrokerAccountOut)
+async def update_broker_account(
+    account_id: str,
+    payload: BrokerAccountUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("administrator", "trader")),
+) -> BrokerAccountOut:
+    """Edits an existing account in place -- account_label and/or
+    credentials -- instead of forcing a brand-new row every time a wrong
+    api_key/api_secret needs correcting (the previous only options were
+    "create another account" or "disconnect", neither of which could fix a
+    bad credential on the same row)."""
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection), selectinload(BrokerAccount.credential))
+        .where(BrokerAccount.id == uuid.UUID(account_id), BrokerAccount.user_id == user.id)
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
+
+    if payload.account_label is not None:
+        account.account_label = payload.account_label
+
+    credentials_changed = bool(payload.credentials)
+    if credentials_changed:
+        if account.credential is None:
+            account.credential = BrokerCredential(broker_account_id=account.id, encrypted_payload=encrypt_payload(json.dumps(payload.credentials)))
+            db.add(account.credential)
+        else:
+            account.credential.encrypted_payload = encrypt_payload(json.dumps(payload.credentials))
+
+        # A changed credential invalidates whatever the old connection state
+        # meant (e.g. a Kite access_token tied to the OLD api_key/secret
+        # pair) -- always re-derive status from scratch, same rule as a
+        # fresh connect.
+        if account.connection is None:
+            account.connection = BrokerConnection(broker_account_id=account.id)
+            db.add(account.connection)
+        await _authenticate_and_set_status(account.connection, account.broker.code, payload.credentials)
+
+    await write_audit_log(
+        db,
+        user_id=user.id,
+        action="BROKER_ACCOUNT_UPDATED",
+        object_type="broker_account",
+        object_id=str(account.id),
+        new_value={"account_label": account.account_label, "credentials_changed": credentials_changed},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()
@@ -237,3 +307,41 @@ async def kite_callback(
         .where(BrokerAccount.id == account.id)
     )
     return _account_out(result.scalar_one())
+
+
+@router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_broker_account(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("administrator", "trader")),
+) -> None:
+    """Removes the row entirely -- for cleaning up duplicate/dead accounts
+    (e.g. from before update_broker_account existed, when the only way to
+    fix or refresh a connection was "Connect Broker" again). Refuses if a
+    still-active LiveDeployment depends on it, since that FK cascades on
+    delete and would silently take the deployment down with it."""
+    result = await db.execute(select(BrokerAccount).where(BrokerAccount.id == uuid.UUID(account_id), BrokerAccount.user_id == user.id))
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
+
+    active_count = (
+        await db.execute(
+            select(func.count()).select_from(LiveDeployment)
+            .where(LiveDeployment.broker_account_id == account.id, LiveDeployment.status == "active")
+        )
+    ).scalar_one()
+    if active_count:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{active_count} active live deployment(s) still use this account -- stop them first.",
+        )
+
+    await write_audit_log(
+        db, user_id=user.id, action="BROKER_ACCOUNT_DELETED", object_type="broker_account", object_id=str(account.id),
+        previous_value={"account_label": account.account_label, "environment": account.environment},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.delete(account)
+    await db.commit()

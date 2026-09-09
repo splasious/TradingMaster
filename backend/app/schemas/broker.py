@@ -32,6 +32,14 @@ class BrokerAccountCreate(BaseModel):
     credentials: dict[str, Any] = Field(default_factory=dict)
 
 
+class BrokerAccountUpdate(BaseModel):
+    account_label: str | None = None
+    # Omit or {} to leave credentials untouched; a non-empty dict replaces
+    # them wholesale (never merged -- a stale leftover field from an old
+    # credential shape should never silently survive an edit).
+    credentials: dict[str, Any] | None = None
+
+
 class KiteLoginUrlOut(BaseModel):
     login_url: str
 

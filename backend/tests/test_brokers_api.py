@@ -1,5 +1,6 @@
 import hashlib
 import json
+import uuid
 
 import httpx
 from httpx import AsyncClient
@@ -110,6 +111,121 @@ async def test_kite_endpoints_reject_non_kite_account(client: AsyncClient, seede
     account = await _connect(client, headers, "delta_exchange", {"api_key": "k", "api_secret": "s"})
 
     resp = await client.get(f"/api/v1/brokers/accounts/{account['id']}/kite/login-url", headers=headers)
+    assert resp.status_code == 400
+
+
+async def test_update_broker_account_credentials_reuses_same_row(client: AsyncClient, seeded_admin: dict):
+    """Fixing a wrong api_secret must update the existing account, not
+    require a brand-new "Connect Broker" row -- the bug this endpoint
+    exists to fix."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "wrongkey", "api_secret": "wrongsecret"})
+    account_id = account["id"]
+
+    resp = await client.patch(
+        f"/api/v1/brokers/accounts/{account_id}",
+        json={"credentials": {"api_key": "kitekey", "api_secret": "kitesecret"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == account_id  # same row, not a new one
+    assert body["connection_status"] == "disconnected"  # Kite still needs the interactive login step
+
+    # The updated api_key is what the login URL now reflects -- proof the
+    # credential really changed, not just the label.
+    login_resp = await client.get(f"/api/v1/brokers/accounts/{account_id}/kite/login-url", headers=headers)
+    assert login_resp.json()["login_url"] == "https://kite.zerodha.com/connect/login?v=3&api_key=kitekey"
+
+
+async def test_update_broker_account_label_only_leaves_credentials_untouched(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    _patch_delta_ok(monkeypatch)
+    account = await _connect(client, headers, "delta_exchange", {"api_key": "k", "api_secret": "s"})
+
+    resp = await client.patch(
+        f"/api/v1/brokers/accounts/{account['id']}", json={"account_label": "Renamed"}, headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["account_label"] == "Renamed"
+    assert body["connection_status"] == "connected"  # untouched, not reset by a label-only edit
+
+
+async def test_update_broker_account_rejects_other_users_account(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    from sqlalchemy import select
+
+    from app.core.security import hash_password
+    from app.models.user import Role, User, UserRole
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "kitekey", "api_secret": "kitesecret"})
+
+    trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()
+    other = User(email="other_broker@tradingmaster.internal", hashed_password=hash_password("OtherPass123!"), full_name="Other")
+    other.user_roles = [UserRole(role=trader_role)]
+    db_session.add(other)
+    await db_session.commit()
+
+    other_token = await _login(client, "other_broker@tradingmaster.internal", "OtherPass123!")
+    resp = await client.patch(
+        f"/api/v1/brokers/accounts/{account['id']}",
+        json={"account_label": "Hijacked"},
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_delete_broker_account_removes_it(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "kitekey", "api_secret": "kitesecret"})
+
+    resp = await client.delete(f"/api/v1/brokers/accounts/{account['id']}", headers=headers)
+    assert resp.status_code == 204
+
+    list_resp = await client.get("/api/v1/brokers/accounts", headers=headers)
+    assert account["id"] not in [a["id"] for a in list_resp.json()]
+
+
+async def test_delete_broker_account_blocked_by_active_live_deployment(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    from app.models.instrument import Instrument
+    from app.models.live_trading import LiveDeployment
+    from app.models.strategy import Strategy, StrategyVersion
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "kitekey", "api_secret": "kitesecret"})
+
+    from sqlalchemy import select
+
+    from app.core.security import hash_password  # noqa: F401 (keeps import style consistent with other tests)
+    from app.models.user import User
+
+    admin_user = (await db_session.execute(select(User).where(User.email == seeded_admin["email"]))).scalar_one()
+    instrument = Instrument(exchange="NSE", symbol="TESTBROKERDEL", name="Test", instrument_type="equity", data_source="zerodha_kite", external_ref="TESTBROKERDEL")
+    db_session.add(instrument)
+    await db_session.flush()
+    strategy = Strategy(name="Del Test Strategy", owner_id=admin_user.id, code_type="python")
+    db_session.add(strategy)
+    await db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe="1d", instrument_ids=[str(instrument.id)], parameters={},
+        python_code='def generate_signal(c,p):\n    return "HOLD"', position_sizing={"type": "fixed_quantity", "value": 1}, risk_rules={},
+    )
+    db_session.add(version)
+    await db_session.flush()
+    deployment = LiveDeployment(
+        owner_id=admin_user.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
+        broker_account_id=uuid.UUID(account["id"]), timeframe="1d", status="active",
+    )
+    db_session.add(deployment)
+    await db_session.commit()
+
+    resp = await client.delete(f"/api/v1/brokers/accounts/{account['id']}", headers=headers)
     assert resp.status_code == 400
 
 

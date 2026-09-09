@@ -19,7 +19,7 @@ import type { BrokerAccountOut, KiteLoginUrlOut } from "@/lib/types";
 
 const PENDING_ACCOUNT_KEY = "tm_kite_pending_account_id";
 
-function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClose: () => void; accounts: BrokerAccountOut[] }) {
   const { data: brokers } = useBrokers();
   const queryClient = useQueryClient();
   const [brokerCode, setBrokerCode] = useState("");
@@ -28,6 +28,14 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false);
+
+  const existing = accounts.filter((a) => a.broker.code === brokerCode && a.environment === environment);
+  // Kite's daily-expiry re-login only needs the SAME account's "Login with
+  // Zerodha" button -- creating another "Connect Broker" row every day (the
+  // exact bug this warning exists to stop) just piles up duplicates that
+  // all use the identical, still-correct api_key/api_secret.
+  const wouldDuplicate = brokerCode !== "" && existing.length > 0 && !confirmDuplicate;
 
   const connectMutation = useMutation({
     mutationFn: () =>
@@ -59,7 +67,7 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
       >
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Broker</label>
-          <Select required value={brokerCode} onChange={(e) => setBrokerCode(e.target.value)}>
+          <Select required value={brokerCode} onChange={(e) => { setBrokerCode(e.target.value); setConfirmDuplicate(false); }}>
             <option value="" disabled>
               Select a broker
             </option>
@@ -78,11 +86,27 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Environment</label>
-          <Select value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+          <Select value={environment} onChange={(e) => { setEnvironment(e.target.value); setConfirmDuplicate(false); }}>
             <option value="paper">Paper</option>
             <option value="live">Live</option>
           </Select>
         </div>
+
+        {existing.length > 0 && (
+          <div className="space-y-2 rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning">
+            <p>
+              You already have {existing.length === 1 ? "an account" : `${existing.length} accounts`} connected for this
+              broker + environment ({existing.map((a) => a.account_label).join(", ")}). If this is Kite&apos;s daily
+              re-login (session expires ~6am IST, same api_key/api_secret), close this and use{" "}
+              <span className="font-medium">&quot;Login with Zerodha&quot;</span> on that existing row instead --
+              creating another one here just adds a duplicate with identical credentials.
+            </p>
+            <label className="flex items-center gap-1.5 text-xs">
+              <input type="checkbox" checked={confirmDuplicate} onChange={(e) => setConfirmDuplicate(e.target.checked)} />
+              This is genuinely a separate account (e.g. a different Zerodha client ID) -- connect anyway
+            </label>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">API key</label>
@@ -106,7 +130,7 @@ function ConnectBrokerModal({ open, onClose }: { open: boolean; onClose: () => v
           <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" disabled={connectMutation.isPending}>
+          <Button type="submit" disabled={connectMutation.isPending || wouldDuplicate}>
             {connectMutation.isPending ? "Connecting..." : "Connect"}
           </Button>
         </div>
@@ -162,6 +186,16 @@ export default function BrokersSettingsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["broker-accounts"] }),
   });
 
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteMutation = useMutation({
+    mutationFn: (accountId: string) => apiFetch(`/api/v1/brokers/accounts/${accountId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ["broker-accounts"] });
+    },
+    onError: (err) => setDeleteError(err instanceof ApiError ? err.message : "Failed to delete account"),
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -176,6 +210,7 @@ export default function BrokersSettingsPage() {
       </div>
 
       {accounts && <KiteSessionExpiredBanner accounts={accounts} />}
+      {deleteError && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{deleteError}</div>}
 
       <Card>
         <CardHeader>
@@ -225,6 +260,18 @@ export default function BrokersSettingsPage() {
                           >
                             Disconnect
                           </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={deleteMutation.isPending}
+                            onClick={() => {
+                              if (window.confirm(`Delete "${account.account_label}" (${account.broker.name}, ${account.environment})? This cannot be undone.`)) {
+                                deleteMutation.mutate(account.id);
+                              }
+                            }}
+                          >
+                            Delete
+                          </Button>
                         </div>
                       </Td>
                     )}
@@ -236,7 +283,7 @@ export default function BrokersSettingsPage() {
         </CardContent>
       </Card>
 
-      <ConnectBrokerModal open={modalOpen} onClose={() => setModalOpen(false)} />
+      <ConnectBrokerModal open={modalOpen} onClose={() => setModalOpen(false)} accounts={accounts ?? []} />
     </div>
   );
 }
