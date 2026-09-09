@@ -159,20 +159,29 @@ class ZerodhaKiteBroker(BrokerInterface):
         access_token = credentials.get("access_token")
         request_token = credentials.get("request_token")
 
-        if access_token:
-            self._access_token = access_token
-            # A real authenticated call, not just "did we get a token" --
-            # confirms the stored session is actually still valid (Kite
-            # sessions expire daily; this is what catches that).
-            await self._request("GET", "/user/profile")
-            return True
-
+        # request_token must win when both are present: it only ever shows
+        # up here as the one-time code from a JUST-COMPLETED interactive
+        # login (kite_callback merges it into the stored credential dict,
+        # which by then already carries the PREVIOUS day's access_token --
+        # see that endpoint's docstring). Checking access_token first would
+        # silently re-validate that stale, already-expired token instead of
+        # exchanging the fresh one the user just obtained, permanently
+        # breaking every reconnect after the very first successful login
+        # (a real bug this ordering fixes, not a hypothetical).
         if request_token:
             checksum = self._checksum(api_key, request_token, api_secret)
             data = await self._request(
                 "POST", "/session/token", data={"api_key": api_key, "request_token": request_token, "checksum": checksum}
             )
             self._access_token = data["access_token"]
+            return True
+
+        if access_token:
+            self._access_token = access_token
+            # A real authenticated call, not just "did we get a token" --
+            # confirms the stored session is actually still valid (Kite
+            # sessions expire daily; this is what catches that).
+            await self._request("GET", "/user/profile")
             return True
 
         raise KiteLoginRequired(

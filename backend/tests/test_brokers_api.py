@@ -93,6 +93,56 @@ async def test_kite_callback_completes_connection(client: AsyncClient, seeded_ad
     assert resp.json()["connection_status"] == "connected"
 
 
+async def test_kite_callback_reconnect_uses_fresh_request_token_not_stale_access_token(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    """Regression test for a real production bug: after the first
+    successful login, the stored credential permanently carries that day's
+    access_token. A second callback (the very next day's mandatory
+    re-login, same account) merges a NEW request_token in alongside that
+    now-stale access_token -- authenticate() must exchange the fresh
+    request_token via /session/token, not silently re-validate the dead
+    access_token via /user/profile (which is what actually happened before
+    this was fixed, permanently locking every account out after its first
+    successful connection)."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "kitekey", "api_secret": "kitesecret"})
+
+    call_log: list[str] = []
+
+    def make_fake(session_token_value: str):
+        async def fake_request(client_self, method, url, headers=None, params=None, data=None, **kwargs):
+            if httpx.URL(str(url)).host != _KITE_HOST:
+                return await _original_request(client_self, method, url, headers=headers, params=params, data=data, **kwargs)
+            path = httpx.URL(str(url)).path
+            call_log.append(path)
+            if path == "/session/token":
+                assert data["checksum"] == hashlib.sha256(f"{data['api_key']}{data['request_token']}kitesecret".encode()).hexdigest()
+                return httpx.Response(200, json={"status": "success", "data": {"access_token": session_token_value, "user_id": "AB1234"}}, request=httpx.Request(method, str(url)))
+            if path == "/user/profile":
+                # Simulates the OLD access_token being genuinely expired (Kite's
+                # daily session expiry) -- if the code wrongly tries this branch
+                # instead of exchanging the fresh request_token, it must fail.
+                return httpx.Response(403, json={"status": "error", "error_type": "TokenException", "message": "Incorrect `api_key` or `access_token`."}, request=httpx.Request(method, str(url)))
+            raise AssertionError(f"Unexpected Kite call: {method} {path}")
+        return fake_request
+
+    # First login -- account has no access_token yet, so this legitimately
+    # goes through /session/token regardless of the bug.
+    monkeypatch.setattr(httpx.AsyncClient, "request", make_fake("day1_access_token"))
+    first = await client.post(f"/api/v1/brokers/accounts/{account['id']}/kite/callback", json={"request_token": "req_tok_day1"}, headers=headers)
+    assert first.json()["connection_status"] == "connected"
+
+    # Second login (next day) -- the stored credential now carries
+    # "day1_access_token" (stale/expired) AND this new request_token. This
+    # is exactly the scenario the bug broke.
+    call_log.clear()
+    monkeypatch.setattr(httpx.AsyncClient, "request", make_fake("day2_access_token"))
+    second = await client.post(f"/api/v1/brokers/accounts/{account['id']}/kite/callback", json={"request_token": "req_tok_day2"}, headers=headers)
+    assert second.json()["connection_status"] == "connected"
+    assert "/session/token" in call_log
+    assert "/user/profile" not in call_log
+
+
 async def test_kite_callback_surfaces_broker_error(client: AsyncClient, seeded_admin: dict, monkeypatch):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
