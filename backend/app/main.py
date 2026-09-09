@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.services.backfill_platform.catalog_sync_scheduler import catalog_sync_scheduler
 from app.services.backfill_platform.jobs import fail_orphaned_jobs_on_startup
 from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
+from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
     paper_trading_scheduler.start()
     bf_live_sync_scheduler.start()
     catalog_sync_scheduler.start()
+    nfo_expiry_rotation_scheduler.start()
     active_timeframe_sync_scheduler.start()
     kite_session_monitor_scheduler.start()
     kite_ticker_service.start()
@@ -37,6 +39,7 @@ async def lifespan(app: FastAPI):
     kite_ticker_service.stop()
     kite_session_monitor_scheduler.stop()
     active_timeframe_sync_scheduler.stop()
+    nfo_expiry_rotation_scheduler.stop()
     catalog_sync_scheduler.stop()
     bf_live_sync_scheduler.stop()
     paper_trading_scheduler.stop()

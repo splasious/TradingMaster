@@ -79,13 +79,16 @@ KITE_SUBSCRIBED_EXCHANGES = ("NFO", "NSE")
 MAX_SUBSCRIBE_TOKENS = 3000
 
 
-async def find_connected_zerodha_credentials(db) -> dict | None:
-    """Decrypted credentials for the current CONNECTED zerodha_kite
-    account, or None if none is connected -- the exact account-selection
-    query KiteSessionMonitorScheduler already uses (kite_session_monitor.py).
-    Shared (not module-private) since app/services/options/history_depth.py
-    also needs it, to query Kite's own historical API directly through the
-    same already-connected session, without a second copy of this lookup."""
+async def find_connected_zerodha_account(db) -> BrokerAccount | None:
+    """The current CONNECTED zerodha_kite BrokerAccount (with its
+    credential relationship loaded), or None if none is connected -- the
+    exact account-selection query KiteSessionMonitorScheduler already uses
+    (kite_session_monitor.py). Shared (not module-private) since both
+    app/services/options/history_depth.py and
+    app/services/backfill_platform/nfo_expiry_rotation.py also need it --
+    the latter for `.user_id` too (BfBackfillJob.requested_by), not just
+    credentials, since it queues real backfill jobs rather than just
+    reading candles directly."""
     result = await db.execute(
         select(BrokerAccount)
         .join(Broker, Broker.id == BrokerAccount.broker_id)
@@ -93,7 +96,13 @@ async def find_connected_zerodha_credentials(db) -> dict | None:
         .options(selectinload(BrokerAccount.credential))
         .where(Broker.code == "zerodha_kite", BrokerConnection.status == ConnectionStatus.CONNECTED.value)
     )
-    account = result.scalars().first()
+    return result.scalars().first()
+
+
+async def find_connected_zerodha_credentials(db) -> dict | None:
+    """Decrypted credentials for the current CONNECTED zerodha_kite
+    account, or None if none is connected/has no usable credential yet."""
+    account = await find_connected_zerodha_account(db)
     if account is None or account.credential is None:
         return None
     creds = json.loads(decrypt_payload(account.credential.encrypted_payload))

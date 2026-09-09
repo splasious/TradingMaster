@@ -26,7 +26,9 @@ _SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite", 
 # seeded index Instrument's own symbol verbatim (Kite: "NIFTY", this app's
 # seeded row: "NIFTY 50") -- best-effort resolution only, see
 # _resolve_underlying's docstring for what happens when nothing matches.
-_UNDERLYING_NAME_ALIASES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
+# Shared (not module-private) since nfo_expiry_rotation.py also needs it,
+# in reverse, to go from our Instrument.symbol back to Kite's own "name".
+UNDERLYING_NAME_ALIASES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
 
 
 class CatalogSyncError(Exception):
@@ -54,7 +56,7 @@ async def _resolve_underlying(db: AsyncSession, kite_name: str | None) -> uuid.U
     for this reason, not a hard dependency ordering."""
     if not kite_name:
         return None
-    candidates = [kite_name, _UNDERLYING_NAME_ALIASES.get(kite_name, kite_name)]
+    candidates = [kite_name, UNDERLYING_NAME_ALIASES.get(kite_name, kite_name)]
     for candidate in candidates:
         match = (
             await db.execute(select(Instrument.id).where(Instrument.exchange == "NSE", Instrument.symbol == candidate))
