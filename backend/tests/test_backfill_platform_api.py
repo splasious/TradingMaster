@@ -100,6 +100,33 @@ async def test_backfill_job_surfaces_source_error(client: AsyncClient, seeded_ad
     assert status_resp.json()["error_message"]
 
 
+async def test_create_nfo_backfill_job_stores_fo_metadata(client: AsyncClient, seeded_admin: dict):
+    """Covers a real production bug: source="zerodha_nfo" (11 chars) was
+    rejected by Postgres -- bf_symbols.source/bf_backfill_jobs.source were
+    VARCHAR(10), one character short. NOTE: this test alone can't catch a
+    regression of that specific bug, since the test suite runs on SQLite,
+    which doesn't enforce VARCHAR length limits the way Postgres does (the
+    real bug only ever surfaced in production) -- it still verifies the
+    endpoint accepts the source and the F&O metadata round-trips
+    correctly. The actual column-width fix was verified against a real
+    local Postgres instance via `alembic upgrade head` + `alembic check`."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    create_resp = await client.post(
+        "/api/v1/backfill-platform/jobs",
+        json={
+            "source": "zerodha_nfo", "symbol": "NIFTY26SEP23500CE", "display_name": "NIFTY26SEP23500CE", "timeframe": "15m",
+            "expiry": "2026-09-29", "strike": 23500.0, "option_type": "CE", "lot_size": 65, "underlying_symbol": "NIFTY",
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 202
+    body = create_resp.json()
+    assert body["source"] == "zerodha_nfo"
+    assert body["symbol"] == "NIFTY26SEP23500CE"
+
+
 async def test_watchlist_crud_and_items(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

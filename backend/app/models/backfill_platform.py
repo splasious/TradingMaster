@@ -51,7 +51,7 @@ class BfSymbol(Base):
     __tablename__ = "bf_symbols"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)  # source-native format
     display_name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -97,7 +97,7 @@ class BfBackfillJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     symbol_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bf_symbols.id", ondelete="CASCADE"), nullable=False)
-    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
     start_date: Mapped[date | None] = mapped_column(Date)
     end_date: Mapped[date | None] = mapped_column(Date)
