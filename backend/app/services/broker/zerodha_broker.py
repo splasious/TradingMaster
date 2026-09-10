@@ -65,6 +65,10 @@ KITE_INTERVAL_MAP = {
     "1d": "day",
 }
 
+# Kite Connect's historical-candle `from`/`to` params are IST (UTC+5:30)
+# wall-clock, always -- see get_historical_data's own comment.
+IST = timezone(timedelta(hours=5, minutes=30))
+
 
 class KiteAPIError(Exception):
     pass
@@ -291,7 +295,19 @@ class ZerodhaKiteBroker(BrokerInterface):
 
         end = end or datetime.now(timezone.utc)
         start = start or (end - timedelta(days=60 if interval != "day" else 2000))
-        params = {"from": start.strftime("%Y-%m-%d %H:%M:%S"), "to": end.strftime("%Y-%m-%d %H:%M:%S")}
+        # Kite's historical API takes `from`/`to` as bare "yyyy-mm-dd hh:mm:ss"
+        # with no timezone marker -- and interprets them as IST (UTC+5:30)
+        # wall-clock time, not UTC. Sending a UTC-aware datetime's raw digits
+        # here (as this used to) silently mislabels them as IST, shifting the
+        # requested window 5.5 hours earlier than intended -- invisible for a
+        # wide multi-day backfill, but for a narrow "give me the last couple
+        # of days" window (active_timeframe_sync_scheduler.py) it can land
+        # before today's market open in Kite's interpretation, making
+        # "today's" candles silently never appear even though they exist.
+        params = {
+            "from": start.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S"),
+            "to": end.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        }
         if segment == "NFO":
             # Kite only returns open interest as a 7th column when asked --
             # meaningless for NSE equities/indices, only requested for F&O.

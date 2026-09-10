@@ -201,6 +201,42 @@ async def test_get_historical_data_looks_up_token_and_parses_candles(monkeypatch
     assert bars[0]["volume"] == 10000
 
 
+async def test_get_historical_data_sends_from_to_as_ist_not_utc(monkeypatch):
+    """Kite's historical API takes `from`/`to` as bare IST (UTC+5:30)
+    wall-clock strings with no timezone marker -- sending a UTC-aware
+    datetime's raw digits mislabels them as IST, shifting the requested
+    window 5.5 hours earlier than intended. Invisible for a wide backfill,
+    but for active_timeframe_sync_scheduler.py's narrow "last couple of
+    days" window it can land before today's market open in Kite's own
+    interpretation, making today's real candles silently never appear."""
+    csv_body = "instrument_token,tradingsymbol,name,exchange\n408065,INFY,INFOSYS,NSE\n"
+
+    async def fake_get(self, url, headers=None):
+        return httpx.Response(200, content=csv_body.encode(), request=httpx.Request("GET", url))
+
+    captured_params = {}
+
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        captured_params.update(params)
+        return _mock_response(200, {"status": "success", "data": {"candles": []}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    from datetime import datetime, timezone
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    # 2026-09-10 08:15:00 UTC == 2026-09-10 13:45:00 IST -- well after NSE's
+    # 09:15 IST open, but before it in UTC's raw digits.
+    start = datetime(2026, 9, 8, 8, 15, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 10, 8, 15, 0, tzinfo=timezone.utc)
+    await broker.get_historical_data("INFY", "1d", start, end)
+
+    assert captured_params["from"] == "2026-09-08 13:45:00"
+    assert captured_params["to"] == "2026-09-10 13:45:00"
+
+
 async def test_get_historical_data_rejects_unsupported_timeframe():
     from datetime import datetime, timezone
 
