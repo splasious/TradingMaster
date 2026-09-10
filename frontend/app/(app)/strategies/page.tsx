@@ -91,12 +91,25 @@ function StrategyPerformance({ strategyId }: { strategyId: string }) {
 function StrategyCard({
   strategy,
   canEdit,
+  canApprove,
   onDelete,
 }: {
   strategy: StrategyOut;
   canEdit: boolean;
+  canApprove: boolean;
   onDelete: () => void;
 }) {
+  const queryClient = useQueryClient();
+  const markValidatedMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/strategies/${strategy.id}/mark-validated`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategies"] }),
+  });
+  const approveMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/strategies/${strategy.id}/approve`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategies"] }),
+  });
+  const activeError = markValidatedMutation.error ?? approveMutation.error;
+
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-2">
@@ -117,9 +130,35 @@ function StrategyCard({
         <StrategyPerformance strategyId={strategy.id} />
       </div>
 
-      <div className="mt-auto flex items-center justify-between border-t border-border pt-3 text-xs text-text-muted">
+      {activeError && (
+        <div className="rounded-md bg-negative-soft px-2 py-1 text-xs text-negative">
+          {activeError instanceof ApiError ? activeError.message : "Action failed"}
+        </div>
+      )}
+
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-text-muted">
         <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
         <div className="flex items-center gap-1">
+          {strategy.status === "paper_trading" && canEdit && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => markValidatedMutation.mutate()}
+              disabled={markValidatedMutation.isPending}
+            >
+              {markValidatedMutation.isPending ? "Marking..." : "Mark Validated"}
+            </Button>
+          )}
+          {strategy.status === "validated" && canApprove && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => approveMutation.mutate()}
+              disabled={approveMutation.isPending}
+            >
+              {approveMutation.isPending ? "Approving..." : "Approve"}
+            </Button>
+          )}
           {canEdit ? (
             <Link href={`/strategy-builder?id=${strategy.id}`}>
               <Button variant="ghost" size="sm">
@@ -156,6 +195,7 @@ function StrategyGrid({
   onDelete: (s: StrategyOut) => void;
 }) {
   if (!strategies.length) return null;
+  const canApprove = hasRole("administrator", "trader");
   return (
     <div className="space-y-3">
       <div>
@@ -168,6 +208,7 @@ function StrategyGrid({
             key={s.id}
             strategy={s}
             canEdit={s.owner_id === user?.id || hasRole("administrator")}
+            canApprove={canApprove}
             onDelete={() => onDelete(s)}
           />
         ))}
