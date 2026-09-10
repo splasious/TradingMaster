@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# --no-deps: neo_api_client's own setup.py hard-pins asyncio==3.4.3 (fails
+# to install on Python 3.12) among other stale exact versions -- its real
+# dependencies are already satisfied by requirements.txt above instead.
+RUN pip install --no-cache-dir --no-deps "neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2"
 
 COPY . .
 
