@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.services.broker.kite_ticker_service import kite_ticker_service
+from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
+from app.services.broker.kite_ticker_service import diagnose_zerodha_connection, kite_ticker_service
 from app.services.broker.registry import get_broker_adapter
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 
@@ -61,7 +62,20 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
 
     overall = "healthy" if all(components[c] == "healthy" for c in CORE_COMPONENTS) else "degraded"
 
-    return {"status": overall, "components": components}
+    # Secret-free breakdown of exactly which step is failing when Settings
+    # shows a connected Zerodha account but the ticker/rotation schedulers
+    # still report "No connected Zerodha account" -- see
+    # diagnose_zerodha_connection's own docstring for why this exists.
+    # Counts and booleans only, never a credential value -- safe on this
+    # public, unauthenticated endpoint.
+    kite_diagnostic = await diagnose_zerodha_connection(db)
+    kite_diagnostic["nfo_expiry_rotation_last_run_at"] = (
+        nfo_expiry_rotation_scheduler.last_run_at.isoformat() if nfo_expiry_rotation_scheduler.last_run_at else None
+    )
+    kite_diagnostic["nfo_expiry_rotation_last_error"] = nfo_expiry_rotation_scheduler.last_error
+    kite_diagnostic["nfo_expiry_rotation_last_added_count"] = nfo_expiry_rotation_scheduler.last_added_count
+
+    return {"status": overall, "components": components, "kite_diagnostic": kite_diagnostic}
 
 
 @router.get("/monitor")

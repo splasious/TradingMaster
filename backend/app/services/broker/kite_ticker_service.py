@@ -111,6 +111,41 @@ async def find_connected_zerodha_credentials(db) -> dict | None:
     return creds
 
 
+async def diagnose_zerodha_connection(db) -> dict:
+    """Safe, secret-free breakdown of exactly which step of
+    find_connected_zerodha_credentials is failing -- counts and booleans
+    only, never a credential value, so this is safe to expose on the
+    public /system/health endpoint. Exists because "No connected Zerodha
+    account" is set from a single branch covering three different real
+    causes (no CONNECTED BrokerConnection row at all, a connected account
+    with no credential row, or a credential whose payload is missing
+    api_key/access_token) -- indistinguishable from the outside without
+    this, which made a real "shows Connected in Settings but the ticker
+    still says disconnected" report impossible to root-cause without
+    direct DB access."""
+    result = await db.execute(
+        select(BrokerAccount)
+        .join(Broker, Broker.id == BrokerAccount.broker_id)
+        .join(BrokerConnection, BrokerConnection.broker_account_id == BrokerAccount.id)
+        .options(selectinload(BrokerAccount.credential))
+        .where(Broker.code == "zerodha_kite", BrokerConnection.status == ConnectionStatus.CONNECTED.value)
+    )
+    accounts = result.scalars().all()
+    if not accounts:
+        return {"connected_accounts": 0}
+
+    account = accounts[0]
+    diagnosis: dict = {"connected_accounts": len(accounts), "has_credential": account.credential is not None}
+    if account.credential is not None:
+        try:
+            creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+            diagnosis["has_api_key"] = bool(creds.get("api_key"))
+            diagnosis["has_access_token"] = bool(creds.get("access_token"))
+        except Exception as exc:
+            diagnosis["decrypt_error"] = type(exc).__name__
+    return diagnosis
+
+
 async def _resolve_kite_token_map(db, api_key: str) -> dict[str, dict[int, uuid.UUID]]:
     """Kite numeric instrument_token -> this app's Instrument.id, grouped by
     segment ("NFO", "NSE") since each is subscribed in a different WS mode
