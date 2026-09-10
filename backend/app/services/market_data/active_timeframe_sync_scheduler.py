@@ -107,7 +107,8 @@ async def diagnose_active_pairs(db: AsyncSession) -> list[dict]:
             )
         ).scalar_one_or_none()
         rows.append({
-            "symbol": instrument.symbol, "timeframe": timeframe, "data_source": instrument.data_source,
+            "symbol": instrument.symbol, "external_ref": instrument.external_ref, "exchange": instrument.exchange,
+            "timeframe": timeframe, "data_source": instrument.data_source,
             "latest_candle_ts": as_aware_utc(latest_ts).isoformat() if latest_ts else None,
         })
     return rows
