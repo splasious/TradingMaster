@@ -59,7 +59,9 @@ async def _deployment_out(db: AsyncSession, deployment: LiveDeployment) -> LiveD
         instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
         broker_account_id=str(deployment.broker_account_id), timeframe=deployment.timeframe, status=deployment.status,
         allocated_capital=deployment.allocated_capital, currency=deployment.currency,
-        last_evaluated_at=deployment.last_evaluated_at, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
+        last_evaluated_at=deployment.last_evaluated_at,
+        last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
+        created_at=deployment.created_at, stopped_at=deployment.stopped_at,
         open_position=(
             LivePositionOut(
                 instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,

@@ -407,7 +407,25 @@ function DeploymentRow({ deployment }: { deployment: LiveDeploymentOut }) {
             <span className="text-text-muted">flat</span>
           )}
         </Td>
-        <Td className="text-xs text-text-muted">{lastEval ? `${lastEval.action} (${lastEval.signal ?? "-"})` : "--"}</Td>
+        <Td className="max-w-xs text-xs text-text-muted">
+          {lastEval ? (
+            // A just-clicked "Evaluate Now" result, shown immediately.
+            <span className="block truncate" title={lastEval.reason ?? undefined}>
+              {lastEval.action} ({lastEval.signal ?? "-"})
+            </span>
+          ) : deployment.last_signal ? (
+            // The server's own persisted last_signal -- set by the
+            // auto-evaluation scheduler on every tick regardless of
+            // outcome (live_trading/oms.py), so this reflects real state
+            // without anyone having to click anything.
+            <span className="block truncate" title={deployment.last_signal_reason ?? undefined}>
+              {deployment.last_signal}
+              {deployment.last_signal_reason ? `: ${deployment.last_signal_reason}` : ""}
+            </span>
+          ) : (
+            "--"
+          )}
+        </Td>
         <Td className="text-right" onClick={(e) => e.stopPropagation()}>
           {deployment.status === "active" && (
             <div className="flex justify-end gap-1">

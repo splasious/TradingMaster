@@ -137,6 +137,9 @@ async def test_entry_places_real_order_and_confirms_status(db_session: AsyncSess
     assert position.quantity == 2
     assert position.avg_entry_price == 150.0
 
+    await db_session.refresh(ctx["deployment"])
+    assert ctx["deployment"].last_signal == "BUY"  # the outcome's signal, not the "entered" action word
+
 
 async def test_kill_switch_blocks_evaluation_entirely(db_session: AsyncSession, monkeypatch):
     from app.services.live_trading.kill_switch import activate
@@ -236,3 +239,5 @@ async def test_stale_candle_data_blocks_trading_and_raises_critical_alert(db_ses
 
     await db_session.refresh(ctx["deployment"])
     assert ctx["deployment"].last_evaluated_at is not None  # a blocked tick still counts as "the scheduler reached this deployment"
+    assert ctx["deployment"].last_signal == "BLOCKED"
+    assert ctx["deployment"].last_signal_reason == "latest candle is way too old"

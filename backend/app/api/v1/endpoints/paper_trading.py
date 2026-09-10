@@ -129,6 +129,7 @@ async def _deployment_out(db: AsyncSession, deployment: PaperDeployment) -> Depl
         instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
         portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
         timeframe=deployment.timeframe, status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
+        last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
         created_at=deployment.created_at, stopped_at=deployment.stopped_at, open_position=position_out,
     )
 
@@ -175,6 +176,7 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperDeploy
                 instrument_id=str(deployment.instrument_id), instrument_symbol=instrument.symbol,
                 portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
                 timeframe=deployment.timeframe, status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
+                last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
                 created_at=deployment.created_at, stopped_at=deployment.stopped_at, open_position=position_out,
             )
         )

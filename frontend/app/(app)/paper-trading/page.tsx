@@ -499,6 +499,9 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
         </Td>
         <Td className="max-w-xs text-xs text-text-muted">
           {lastEval ? (
+            // A just-clicked "Evaluate Now" result, shown immediately --
+            // fresher than whatever the next background refetch would
+            // otherwise show for a moment.
             <span
               className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`}
               title={lastEval.reason ?? undefined}
@@ -506,6 +509,18 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
               {lastEval.action}
               {lastEval.signal ? ` (${lastEval.signal})` : ""}
               {lastEval.reason ? `: ${lastEval.reason}` : ""}
+            </span>
+          ) : deployment.last_signal ? (
+            // The server's own persisted last_signal -- set by the
+            // auto-evaluation scheduler on every tick regardless of
+            // outcome (paper_trading/engine.py), so this reflects real
+            // state without anyone having to click anything.
+            <span
+              className={`block truncate ${deployment.last_signal === "ERROR" ? "text-negative" : ""}`}
+              title={deployment.last_signal_reason ?? undefined}
+            >
+              {deployment.last_signal}
+              {deployment.last_signal_reason ? `: ${deployment.last_signal_reason}` : ""}
             </span>
           ) : (
             "--"

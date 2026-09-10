@@ -63,6 +63,27 @@ def _bar_dict(candle: OhlcvCandle | None, synthetic_close: float) -> dict:
 
 
 async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> EvaluationOutcome:
+    """Thin wrapper around _evaluate_deployment: persists last_signal/
+    last_signal_reason from whatever outcome came back, regardless of
+    which of _evaluate_deployment's many return paths produced it --
+    one place, rather than touching every early return. Without this,
+    the frontend's "Last Signal" column stayed blank forever for any
+    deployment that only ever got skipped/blocked (never a computed
+    BUY/SELL/HOLD), indistinguishable from a deployment nobody has ever
+    looked at. expire_on_commit=False (db/session.py) makes the extra
+    commit here safe even though _evaluate_deployment already committed
+    internally on most paths."""
+    outcome = await _evaluate_deployment(db, deployment)
+    label = (outcome.signal or outcome.action.upper())[:20]
+    reason = outcome.reason[:500] if outcome.reason else None
+    if deployment.last_signal != label or deployment.last_signal_reason != reason:
+        deployment.last_signal = label
+        deployment.last_signal_reason = reason
+        await db.commit()
+    return outcome
+
+
+async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> EvaluationOutcome:
     version = await db.get(StrategyVersion, deployment.strategy_version_id)
     instrument = await db.get(Instrument, deployment.instrument_id)
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)

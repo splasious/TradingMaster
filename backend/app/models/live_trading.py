@@ -35,6 +35,10 @@ class LiveDeployment(Base):
     # effect on non-Zerodha brokers.
     product_override: Mapped[str | None] = mapped_column(String(10))
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # See PaperDeployment's identical fields' own comment -- same reasoning,
+    # set from oms.py's evaluate_live_deployment on every attempt.
+    last_signal: Mapped[str | None] = mapped_column(String(20))
+    last_signal_reason: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

@@ -84,6 +84,27 @@ async def test_entry_signal_opens_position_and_debits_cash(db_session: AsyncSess
     assert order.status == "filled"
     assert order.side == "buy"
 
+    await db_session.refresh(ctx["deployment"])
+    assert ctx["deployment"].last_signal == "BUY"  # the outcome's signal, not the "entered" action word
+
+
+async def test_last_signal_persists_the_action_word_when_no_signal_is_computed(db_session: AsyncSession):
+    """A "hold" outcome carries a real signal (HOLD/BUY/SELL) -- that's
+    what gets stamped. But some outcomes (e.g. an outright config error)
+    never compute a signal at all, so last_signal falls back to the
+    outcome's own action word -- either way, this column must never sit
+    blank while last_evaluated_at is advancing (see the wrapper's own
+    docstring in engine.py)."""
+    ctx = await _setup(db_session, entry_rules=NEVER, exit_rules=NEVER)
+    tick_engine._last_price.pop(ctx["instrument"].id, None)
+
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "hold"
+    assert outcome.signal == "HOLD"
+
+    await db_session.refresh(ctx["deployment"])
+    assert ctx["deployment"].last_signal == "HOLD"
+
 
 async def test_exit_signal_closes_position_and_records_trade(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
@@ -487,6 +508,8 @@ async def test_stale_candle_data_skips_and_raises_data_disconnected_alert(db_ses
 
     await db_session.refresh(ctx["deployment"])
     assert ctx["deployment"].last_evaluated_at is not None  # a skipped tick still counts as "the scheduler reached this deployment"
+    assert ctx["deployment"].last_signal == "SKIPPED"  # no BUY/SELL/HOLD was computed -- falls back to the action word
+    assert ctx["deployment"].last_signal_reason == "latest candle is way too old"
 
 
 async def test_stale_data_alert_is_throttled_by_cooldown(db_session: AsyncSession, monkeypatch):

@@ -54,6 +54,15 @@ class PaperDeployment(Base):
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="1d")
     status: Mapped[str] = mapped_column(String(20), default=DeploymentStatus.ACTIVE.value, nullable=False)
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The outcome of the most recent evaluation -- "BUY"/"SELL"/"HOLD" when
+    # a signal was actually computed, else the EvaluationOutcome's own
+    # action word ("skipped", "error", ...) so this never sits blank while
+    # last_evaluated_at is advancing; set from engine.py's evaluate_deployment
+    # on every attempt, not just a successful signal. last_signal_reason
+    # carries the human-readable detail (e.g. why it was skipped) for the
+    # same evaluation.
+    last_signal: Mapped[str | None] = mapped_column(String(20))
+    last_signal_reason: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

@@ -106,6 +106,22 @@ async def _get_live_price_and_context(
 
 
 async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment) -> LiveOutcome:
+    """Thin wrapper around _evaluate_live_deployment: persists last_signal/
+    last_signal_reason from whatever outcome came back, regardless of
+    which of _evaluate_live_deployment's many return paths produced it --
+    see paper_trading/engine.py's evaluate_deployment for the identical
+    reasoning (same "Last Signal" column, same gap)."""
+    outcome = await _evaluate_live_deployment(db, deployment)
+    label = (outcome.signal or outcome.action.upper())[:20]
+    reason = outcome.reason[:500] if outcome.reason else None
+    if deployment.last_signal != label or deployment.last_signal_reason != reason:
+        deployment.last_signal = label
+        deployment.last_signal_reason = reason
+        await db.commit()
+    return outcome
+
+
+async def _evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment) -> LiveOutcome:
     kill_switch = await get_kill_switch(db)
     if kill_switch.active:
         return LiveOutcome(action="blocked", reason=f"Kill switch active: {kill_switch.reason or 'no reason given'}")

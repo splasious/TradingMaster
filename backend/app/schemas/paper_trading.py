@@ -23,6 +23,8 @@ class DeploymentOut(BaseModel):
     timeframe: str
     status: str
     last_evaluated_at: datetime | None
+    last_signal: str | None = None
+    last_signal_reason: str | None = None
     created_at: datetime
     stopped_at: datetime | None
     open_position: "PositionOut | None" = None

@@ -40,6 +40,8 @@ class LiveDeploymentOut(BaseModel):
     allocated_capital: float | None
     currency: str | None
     last_evaluated_at: datetime | None
+    last_signal: str | None = None
+    last_signal_reason: str | None = None
     created_at: datetime
     stopped_at: datetime | None
     open_position: LivePositionOut | None = None

@@ -377,6 +377,8 @@ export interface PaperDeploymentOut {
   timeframe: string;
   status: "active" | "stopped";
   last_evaluated_at: string | null;
+  last_signal: string | null;
+  last_signal_reason: string | null;
   created_at: string;
   stopped_at: string | null;
   open_position: PaperPositionOut | null;
@@ -450,6 +452,8 @@ export interface LiveDeploymentOut {
   allocated_capital: number | null;
   currency: string | null;
   last_evaluated_at: string | null;
+  last_signal: string | null;
+  last_signal_reason: string | null;
   created_at: string;
   stopped_at: string | null;
   open_position: LivePositionOut | null;
