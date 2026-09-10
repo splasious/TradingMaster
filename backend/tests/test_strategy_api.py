@@ -212,6 +212,69 @@ async def test_cannot_approve_before_validated(client: AsyncClient, seeded_admin
     assert resp.status_code == 400
 
 
+async def test_force_approve_bypasses_paper_trading_and_validation(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Force Approvable", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = create_resp.json()["id"]
+
+    strategy = await db_session.get(Strategy, uuid.UUID(strategy_id))
+    strategy.status = StrategyStatus.BACKTESTED.value
+    await db_session.commit()
+
+    resp = await client.post(f"/api/v1/strategies/{strategy_id}/force-approve", headers=headers)
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["status"] == "approved"
+
+
+async def test_force_approve_rejects_draft_and_requires_admin(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Still Draft", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers=headers,
+    )
+    strategy_id = create_resp.json()["id"]
+
+    resp = await client.post(f"/api/v1/strategies/{strategy_id}/force-approve", headers=headers)
+    assert resp.status_code == 400
+
+
+async def test_force_approve_rejects_non_administrator(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    admin_token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    create_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Trader Cannot Force", "version": {"python_code": 'def generate_signal(c,p):\n    return "HOLD"'}},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    strategy_id = create_resp.json()["id"]
+    strategy = await db_session.get(Strategy, uuid.UUID(strategy_id))
+    strategy.status = StrategyStatus.BACKTESTED.value
+    await db_session.commit()
+
+    trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()
+    password = "TraderPass123!"
+    trader = User(email="trader-force@tradingmaster.internal", hashed_password=hash_password(password), full_name="Trader")
+    trader.user_roles = [UserRole(role=trader_role)]
+    db_session.add(trader)
+    await db_session.commit()
+
+    trader_token = await _login(client, "trader-force@tradingmaster.internal", password)
+    resp = await client.post(
+        f"/api/v1/strategies/{strategy_id}/force-approve", headers={"Authorization": f"Bearer {trader_token}"}
+    )
+    assert resp.status_code == 403
+
+
 async def test_validate_python_strategy(client: AsyncClient, seeded_admin: dict):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     create_resp = await client.post(

@@ -327,3 +327,36 @@ async def approve_strategy(
     strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader"))
 ) -> StrategyOut:
     return await _transition_strategy(strategy_id, StrategyStatus.APPROVED, "STRATEGY_APPROVED", db, user)
+
+
+@router.post("/{strategy_id}/force-approve", response_model=StrategyOut)
+async def force_approve_strategy(
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator"))
+) -> StrategyOut:
+    """Deliberate bypass of the normal PAPER_TRADING -> VALIDATED -> APPROVED
+    pipeline (PRD section 25), for an administrator who explicitly wants to
+    skip paper-trading validation and make a strategy live-eligible straight
+    after a backtest. Unlike _transition_strategy, this ignores
+    can_transition entirely -- the whole point is bypassing the state
+    machine's normal gate, restricted to administrator (stricter than plain
+    /approve) and always logged as a distinct, clearly-labeled audit action
+    so the bypass is traceable."""
+    strategy = await _load_strategy(db, strategy_id)
+    _assert_can_edit(strategy, user)
+
+    current = StrategyStatus(strategy.status)
+    if current in (StrategyStatus.DRAFT, StrategyStatus.LIVE):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot force-approve from '{current.value}' -- needs at least one completed backtest first.",
+        )
+
+    previous = strategy.status
+    strategy.status = StrategyStatus.APPROVED.value
+    await write_audit_log(
+        db, user_id=user.id, action="STRATEGY_FORCE_APPROVED", object_type="strategy", object_id=str(strategy.id),
+        previous_value={"status": previous}, new_value={"status": StrategyStatus.APPROVED.value, "bypass": True},
+    )
+    await db.commit()
+    await db.refresh(strategy, attribute_names=["versions", "updated_at", "status"])
+    return _strategy_out(strategy)

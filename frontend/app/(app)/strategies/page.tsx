@@ -63,6 +63,44 @@ function DeleteStrategyModal({ strategy, onClose }: { strategy: StrategyOut; onC
   );
 }
 
+function ForceApproveModal({ strategy, onClose }: { strategy: StrategyOut; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const forceApproveMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/strategies/${strategy.id}/force-approve`, { method: "POST" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategies"] });
+      onClose();
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Force Approve: ${strategy.name}`}>
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          This skips paper trading and validation entirely and makes this strategy immediately selectable for{" "}
+          <strong>live trading with real capital</strong>, based only on its backtest result. Use only when you
+          deliberately want to bypass that safety pipeline for this strategy.
+        </p>
+
+        {forceApproveMutation.isError && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {forceApproveMutation.error instanceof ApiError ? forceApproveMutation.error.message : "Failed to force-approve strategy"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="secondary" onClick={onClose} disabled={forceApproveMutation.isPending}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => forceApproveMutation.mutate()} disabled={forceApproveMutation.isPending}>
+            {forceApproveMutation.isPending ? "Approving..." : "Bypass and Approve"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function StrategyPerformance({ strategyId }: { strategyId: string }) {
   const { data: jobs } = useBacktestsForStrategy(strategyId);
   const latestCompleted = jobs?.find((j) => j.status === "completed") ?? null;
@@ -92,13 +130,16 @@ function StrategyCard({
   strategy,
   canEdit,
   canApprove,
+  canForceApprove,
   onDelete,
 }: {
   strategy: StrategyOut;
   canEdit: boolean;
   canApprove: boolean;
+  canForceApprove: boolean;
   onDelete: () => void;
 }) {
+  const [showForceApprove, setShowForceApprove] = useState(false);
   const queryClient = useQueryClient();
   const markValidatedMutation = useMutation({
     mutationFn: () => apiFetch(`/api/v1/strategies/${strategy.id}/mark-validated`, { method: "POST" }),
@@ -159,6 +200,11 @@ function StrategyCard({
               {approveMutation.isPending ? "Approving..." : "Approve"}
             </Button>
           )}
+          {canForceApprove && !["draft", "live", "approved"].includes(strategy.status) && (
+            <Button variant="ghost" size="sm" onClick={() => setShowForceApprove(true)} title="Skip paper trading and validation">
+              Force Approve
+            </Button>
+          )}
           {canEdit ? (
             <Link href={`/strategy-builder?id=${strategy.id}`}>
               <Button variant="ghost" size="sm">
@@ -175,6 +221,8 @@ function StrategyCard({
           )}
         </div>
       </div>
+
+      {showForceApprove && <ForceApproveModal strategy={strategy} onClose={() => setShowForceApprove(false)} />}
     </Card>
   );
 }
@@ -196,6 +244,7 @@ function StrategyGrid({
 }) {
   if (!strategies.length) return null;
   const canApprove = hasRole("administrator", "trader");
+  const canForceApprove = hasRole("administrator");
   return (
     <div className="space-y-3">
       <div>
@@ -209,6 +258,7 @@ function StrategyGrid({
             strategy={s}
             canEdit={s.owner_id === user?.id || hasRole("administrator")}
             canApprove={canApprove}
+            canForceApprove={canForceApprove}
             onDelete={() => onDelete(s)}
           />
         ))}
