@@ -233,3 +233,6 @@ async def test_stale_candle_data_blocks_trading_and_raises_critical_alert(db_ses
     alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
     assert len(alerts) == 1
     assert alerts[0].severity == AlertSeverity.CRITICAL.value
+
+    await db_session.refresh(ctx["deployment"])
+    assert ctx["deployment"].last_evaluated_at is not None  # a blocked tick still counts as "the scheduler reached this deployment"

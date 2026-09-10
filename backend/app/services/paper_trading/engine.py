@@ -69,6 +69,16 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
     if version is None or instrument is None or portfolio is None:
         return EvaluationOutcome(action="error", reason="deployment references missing data")
 
+    now = datetime.now(timezone.utc)
+    # Set on every genuine evaluation attempt, regardless of outcome --
+    # this is what the frontend's staleness indicator
+    # (lastEvaluatedDataStatus) reads to show "is this deployment
+    # actually being watched". Setting it only on a successful signal
+    # (as this used to) meant a deployment stuck skipping (stale candle
+    # data, no price) froze here forever -- indistinguishable in the UI
+    # from the scheduler never reaching it at all.
+    deployment.last_evaluated_at = now
+
     position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
 
@@ -84,9 +94,8 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
     if current_price is None:
         current_price = candles[-1].close if candles else None
     if current_price is None:
+        await db.commit()
         return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
-
-    now = datetime.now(timezone.utc)
 
     # Standing stop-loss/take-profit checks take priority over the signal,
     # same as the backtest engine's convention.
@@ -125,7 +134,7 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
                 title="Paper deployment data is stale", message=staleness_reason,
                 object_type="paper_deployment", object_id=str(deployment.id),
             )
-            await db.commit()
+        await db.commit()  # persists last_evaluated_at above even when the alert itself was throttled
         return EvaluationOutcome(action="skipped", reason=staleness_reason)
 
     if version.python_code:
@@ -167,14 +176,13 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
             )
         sandbox_result = await run_python_strategy(version.python_code, bars_dicts, sandbox_params)
         if sandbox_result.error:
+            await db.commit()  # persists last_evaluated_at even on a sandbox error
             return EvaluationOutcome(action="error", reason=sandbox_result.error)
         signal = sandbox_result.signal
     else:
         entry_met = evaluate_rule_node(candles, version.entry_rules)
         exit_met = evaluate_rule_node(candles, version.exit_rules)
         signal = "BUY" if entry_met else ("SELL" if exit_met else "HOLD")
-
-    deployment.last_evaluated_at = now
 
     if signal == "BUY" and position is None:
         return await _try_enter(db, deployment, portfolio, version, current_price, now, instrument.lot_size)

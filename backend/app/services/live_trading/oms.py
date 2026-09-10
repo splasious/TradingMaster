@@ -116,6 +116,16 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     if version is None or instrument is None or broker_account is None:
         return LiveOutcome(action="error", reason="deployment references missing data")
 
+    now = datetime.now(timezone.utc)
+    # Set on every genuine evaluation attempt, regardless of outcome --
+    # this is what the frontend's staleness indicator
+    # (lastEvaluatedDataStatus) reads to show "is this deployment
+    # actually being watched". Setting it only on a successful signal
+    # (as this used to) meant a deployment stuck erroring/skipping (auth
+    # failure, no live price, stale candle data) froze here forever --
+    # indistinguishable in the UI from the scheduler never reaching it.
+    deployment.last_evaluated_at = now
+
     position_result = await db.execute(select(LivePosition).where(LivePosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
 
@@ -123,6 +133,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     try:
         broker = await _get_authenticated_broker(db, broker_account)
     except Exception as exc:
+        await db.commit()
         return LiveOutcome(action="error", reason=f"Could not authenticate with broker: {exc}")
 
     try:
@@ -130,6 +141,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
             broker_row.code, broker, instrument, deployment.product_override
         )
     except MarketDataSourceError as exc:
+        await db.commit()
         return LiveOutcome(action="error", reason=f"Could not fetch live price: {exc}")
 
     # load_candles falls back to resampling the finest stored base
@@ -139,8 +151,6 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     # fresh instead) -- same trusted path backtesting already uses,
     # rather than a raw query that silently returns nothing for those.
     candles = (await load_candles(db, instrument.id, deployment.timeframe))[-LOOKBACK_BARS:]
-
-    now = datetime.now(timezone.utc)
 
     if position is not None:
         stop_pct = version.risk_rules.get("stop_loss_pct")
@@ -179,7 +189,7 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
                 title="LIVE deployment data is stale -- trading blocked", message=staleness_reason,
                 object_type="live_deployment", object_id=str(deployment.id),
             )
-            await db.commit()
+        await db.commit()  # persists last_evaluated_at above even when the alert itself was throttled
         return LiveOutcome(action="blocked", reason=staleness_reason)
 
     if version.python_code:
@@ -198,14 +208,13 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
         bars_dicts = [{"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in candles]
         sandbox_result = await run_python_strategy(version.python_code, bars_dicts, version.parameters)
         if sandbox_result.error:
+            await db.commit()  # persists last_evaluated_at even on a sandbox error
             return LiveOutcome(action="error", reason=sandbox_result.error)
         signal = sandbox_result.signal
     else:
         entry_met = evaluate_rule_node(candles, version.entry_rules)
         exit_met = evaluate_rule_node(candles, version.exit_rules)
         signal = "BUY" if entry_met else ("SELL" if exit_met else "HOLD")
-
-    deployment.last_evaluated_at = now
 
     if signal == "BUY" and position is None:
         return await _try_enter(db, deployment, broker, broker_row.code, version, current_price, order_context, now, instrument.lot_size)

@@ -582,6 +582,64 @@ function DeploymentsTable({ deployments, onDelete }: { deployments: PaperDeploym
   );
 }
 
+/** A bulk-deployed strategy (e.g. one rotation basket attached to
+ * hundreds of NSE stocks) used to dump every one of those instruments
+ * into a single flat table -- 680 rows deep with no way to tell one
+ * strategy's block from another's at a glance. Grouping by strategy_id
+ * (already on every PaperDeploymentOut, no extra fetch) turns that into
+ * one collapsible block per strategy instead. */
+function groupByStrategy(deployments: PaperDeploymentOut[]): { strategyId: string; strategyName: string; deployments: PaperDeploymentOut[] }[] {
+  const groups = new Map<string, { strategyId: string; strategyName: string; deployments: PaperDeploymentOut[] }>();
+  for (const d of deployments) {
+    const existing = groups.get(d.strategy_id);
+    if (existing) existing.deployments.push(d);
+    else groups.set(d.strategy_id, { strategyId: d.strategy_id, strategyName: d.strategy_name, deployments: [d] });
+  }
+  return [...groups.values()].sort((a, b) => a.strategyName.localeCompare(b.strategyName));
+}
+
+function StrategyGroup({
+  strategyName, deployments, onDelete, defaultOpen = false,
+}: {
+  strategyName: string; deployments: PaperDeploymentOut[]; onDelete: (d: PaperDeploymentOut) => void; defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border-b border-border last:border-b-0">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between px-5 py-3 text-left hover:bg-surface-elevated"
+      >
+        <span className="flex items-center gap-2 text-sm font-medium text-text-primary">
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          {strategyName}
+        </span>
+        <Badge tone="neutral">{deployments.length}</Badge>
+      </button>
+      {open && <DeploymentsTable deployments={deployments} onDelete={onDelete} />}
+    </div>
+  );
+}
+
+function GroupedDeploymentsTable({
+  deployments, onDelete, defaultOpen = false,
+}: {
+  deployments: PaperDeploymentOut[]; onDelete: (d: PaperDeploymentOut) => void; defaultOpen?: boolean;
+}) {
+  const groups = groupByStrategy(deployments);
+  // A single strategy's block -- grouping would just add an extra click
+  // to see the exact same rows, so skip straight to the flat table.
+  if (groups.length <= 1) return <DeploymentsTable deployments={deployments} onDelete={onDelete} />;
+  return (
+    <div>
+      {groups.map((g) => (
+        <StrategyGroup key={g.strategyId} strategyName={g.strategyName} deployments={g.deployments} onDelete={onDelete} defaultOpen={defaultOpen} />
+      ))}
+    </div>
+  );
+}
+
 /** A stock only counts as "running" while it's actually holding a
  * position -- for a rotation basket like RS Scalper, most of the 30
  * attached instruments sit flat waiting to rank in at any given moment,
@@ -907,17 +965,17 @@ export default function PaperTradingPage() {
               description="Active deployments are still evaluating in the background -- see Watching below."
             />
           ) : (
-            <DeploymentsTable deployments={inTrade} onDelete={setToDelete} />
+            <GroupedDeploymentsTable deployments={inTrade} onDelete={setToDelete} defaultOpen />
           )}
         </CardContent>
       </Card>
 
       <CollapsibleSection title="Watching (active, not currently in a trade)" count={watching.length}>
-        <DeploymentsTable deployments={watching} onDelete={setToDelete} />
+        <GroupedDeploymentsTable deployments={watching} onDelete={setToDelete} />
       </CollapsibleSection>
 
       <CollapsibleSection title="Stopped" count={stopped.length}>
-        <DeploymentsTable deployments={stopped} onDelete={setToDelete} />
+        <GroupedDeploymentsTable deployments={stopped} onDelete={setToDelete} />
       </CollapsibleSection>
 
       <ClosedTradesPanel />

@@ -485,6 +485,9 @@ async def test_stale_candle_data_skips_and_raises_data_disconnected_alert(db_ses
     alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
     assert len(alerts) == 1
 
+    await db_session.refresh(ctx["deployment"])
+    assert ctx["deployment"].last_evaluated_at is not None  # a skipped tick still counts as "the scheduler reached this deployment"
+
 
 async def test_stale_data_alert_is_throttled_by_cooldown(db_session: AsyncSession, monkeypatch):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
@@ -493,9 +496,21 @@ async def test_stale_data_alert_is_throttled_by_cooldown(db_session: AsyncSessio
     import app.services.paper_trading.engine as engine_module
     monkeypatch.setattr(engine_module, "check_freshness", lambda candles, timeframe, now: "stale")
 
+    from app.core.time import as_aware_utc
+
     await evaluate_deployment(db_session, ctx["deployment"])
+    await db_session.refresh(ctx["deployment"])
+    first_evaluated_at = as_aware_utc(ctx["deployment"].last_evaluated_at)
     await evaluate_deployment(db_session, ctx["deployment"])  # second tick, same cooldown window
 
     from app.models.alert import Alert, AlertType
     alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
     assert len(alerts) == 1  # throttled, not duplicated per tick
+
+    await db_session.refresh(ctx["deployment"])
+    # last_evaluated_at must still advance on the second tick even though
+    # the alert itself was throttled -- a deployment repeatedly hitting
+    # this branch must not look frozen/unreached in the UI.
+    second_evaluated_at = as_aware_utc(ctx["deployment"].last_evaluated_at)
+    assert second_evaluated_at is not None
+    assert second_evaluated_at >= first_evaluated_at
