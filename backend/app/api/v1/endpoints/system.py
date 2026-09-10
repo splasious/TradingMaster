@@ -12,6 +12,7 @@ from app.models.user import User
 from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
 from app.services.broker.kite_ticker_service import diagnose_zerodha_connection, kite_ticker_service
 from app.services.broker.registry import get_broker_adapter
+from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler, diagnose_active_pairs
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 
 router = APIRouter()
@@ -74,6 +75,16 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     )
     kite_diagnostic["nfo_expiry_rotation_last_error"] = nfo_expiry_rotation_scheduler.last_error
     kite_diagnostic["nfo_expiry_rotation_last_added_count"] = nfo_expiry_rotation_scheduler.last_added_count
+    kite_diagnostic["active_timeframe_sync_last_sync_at"] = (
+        active_timeframe_sync_scheduler.last_sync_at.isoformat() if active_timeframe_sync_scheduler.last_sync_at else None
+    )
+    kite_diagnostic["active_timeframe_sync_last_synced_count"] = active_timeframe_sync_scheduler.last_synced_count
+    kite_diagnostic["active_timeframe_sync_last_error"] = active_timeframe_sync_scheduler.last_error
+    # Every (instrument, timeframe) an active paper/live deployment is
+    # actually using, and how stale its stored candles are -- not secret
+    # (just symbol names and timestamps), and directly answers "why isn't
+    # my chart showing today's candle" without needing DB access.
+    kite_diagnostic["active_pairs"] = await diagnose_active_pairs(db)
 
     return {"status": overall, "components": components, "kite_diagnostic": kite_diagnostic}
 

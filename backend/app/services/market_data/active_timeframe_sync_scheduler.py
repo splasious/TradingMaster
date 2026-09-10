@@ -54,6 +54,65 @@ SYNC_INTERVAL_SECONDS = 60
 LOOKBACK = timedelta(days=2)
 
 
+async def _active_pairs_with_instruments(db: AsyncSession) -> tuple[set[tuple], dict]:
+    """Every (instrument_id, timeframe) an ACTIVE paper or live deployment
+    currently uses, plus the Instrument rows themselves -- shared between
+    sync() and diagnose_active_pairs() so there's one query, not two
+    near-duplicates."""
+    paper_pairs = (
+        await db.execute(
+            select(PaperDeployment.instrument_id, PaperDeployment.timeframe)
+            .where(PaperDeployment.status == DeploymentStatus.ACTIVE.value)
+            .distinct()
+        )
+    ).all()
+    live_pairs = (
+        await db.execute(
+            select(LiveDeployment.instrument_id, LiveDeployment.timeframe)
+            .where(LiveDeployment.status == "active")
+            .distinct()
+        )
+    ).all()
+    pairs = {(instrument_id, timeframe) for instrument_id, timeframe in [*paper_pairs, *live_pairs]}
+    if not pairs:
+        return pairs, {}
+
+    instrument_ids = {instrument_id for instrument_id, _ in pairs}
+    instruments = {
+        i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))).scalars()
+    }
+    return pairs, instruments
+
+
+async def diagnose_active_pairs(db: AsyncSession) -> list[dict]:
+    """For every (instrument, timeframe) an active deployment is actually
+    using: the symbol, data source, and the most recent stored candle's
+    timestamp for that exact pair -- read-only, no live broker calls.
+    Exists so "why isn't my chart showing today's candle" is answerable
+    directly (is this pair even one the scheduler is supposed to be
+    covering, and how stale is what's actually stored) rather than
+    guessing from outside."""
+    pairs, instruments = await _active_pairs_with_instruments(db)
+    rows: list[dict] = []
+    for instrument_id, timeframe in pairs:
+        instrument = instruments.get(instrument_id)
+        if instrument is None:
+            continue
+        latest_ts = (
+            await db.execute(
+                select(OhlcvCandle.ts)
+                .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.timeframe == timeframe)
+                .order_by(OhlcvCandle.ts.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        rows.append({
+            "symbol": instrument.symbol, "timeframe": timeframe, "data_source": instrument.data_source,
+            "latest_candle_ts": as_aware_utc(latest_ts).isoformat() if latest_ts else None,
+        })
+    return rows
+
+
 class ActiveTimeframeSyncScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -95,28 +154,9 @@ class ActiveTimeframeSyncScheduler:
         """The syncable core, taking an explicit session -- split out from
         sync_once() so tests can exercise it against their own isolated
         session instead of the module-level AsyncSessionLocal."""
-        paper_pairs = (
-            await db.execute(
-                select(PaperDeployment.instrument_id, PaperDeployment.timeframe)
-                .where(PaperDeployment.status == DeploymentStatus.ACTIVE.value)
-                .distinct()
-            )
-        ).all()
-        live_pairs = (
-            await db.execute(
-                select(LiveDeployment.instrument_id, LiveDeployment.timeframe)
-                .where(LiveDeployment.status == "active")
-                .distinct()
-            )
-        ).all()
-        pairs = {(instrument_id, timeframe) for instrument_id, timeframe in [*paper_pairs, *live_pairs]}
+        pairs, instruments = await _active_pairs_with_instruments(db)
         if not pairs:
             return 0
-
-        instrument_ids = {instrument_id for instrument_id, _ in pairs}
-        instruments = {
-            i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))).scalars()
-        }
 
         # Resolved once per tick, not once per pair -- same construction
         # pattern nfo_expiry_rotation.py/history_depth.py already use
