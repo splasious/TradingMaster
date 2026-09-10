@@ -2,6 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# git is required by pip to install neo_api_client (Kotak Neo's broker
+# SDK, requirements.txt) from its GitHub repo -- it has no PyPI release,
+# and python:3.12-slim doesn't include git by default.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
