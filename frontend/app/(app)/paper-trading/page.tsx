@@ -585,15 +585,21 @@ function DeploymentsTable({ deployments, onDelete }: { deployments: PaperDeploym
 /** A bulk-deployed strategy (e.g. one rotation basket attached to
  * hundreds of NSE stocks) used to dump every one of those instruments
  * into a single flat table -- 680 rows deep with no way to tell one
- * strategy's block from another's at a glance. Grouping by strategy_id
- * (already on every PaperDeploymentOut, no extra fetch) turns that into
- * one collapsible block per strategy instead. */
-function groupByStrategy(deployments: PaperDeploymentOut[]): { strategyId: string; strategyName: string; deployments: PaperDeploymentOut[] }[] {
-  const groups = new Map<string, { strategyId: string; strategyName: string; deployments: PaperDeploymentOut[] }>();
+ * strategy's block from another's at a glance.
+ *
+ * Grouped by strategy_name, not strategy_id: a bulk-deploy wizard can
+ * create either one Strategy shared across every instrument (one real
+ * strategy_id) or a separate Strategy row per instrument that all happen
+ * to share the same display name -- grouping by id would silently
+ * produce hundreds of one-row "groups" in the latter case, which looks
+ * identical to no grouping at all. Grouping by the name the user actually
+ * sees collapses correctly either way. */
+function groupByStrategy(deployments: PaperDeploymentOut[]): { strategyName: string; deployments: PaperDeploymentOut[] }[] {
+  const groups = new Map<string, { strategyName: string; deployments: PaperDeploymentOut[] }>();
   for (const d of deployments) {
-    const existing = groups.get(d.strategy_id);
+    const existing = groups.get(d.strategy_name);
     if (existing) existing.deployments.push(d);
-    else groups.set(d.strategy_id, { strategyId: d.strategy_id, strategyName: d.strategy_name, deployments: [d] });
+    else groups.set(d.strategy_name, { strategyName: d.strategy_name, deployments: [d] });
   }
   return [...groups.values()].sort((a, b) => a.strategyName.localeCompare(b.strategyName));
 }
@@ -634,7 +640,7 @@ function GroupedDeploymentsTable({
   return (
     <div>
       {groups.map((g) => (
-        <StrategyGroup key={g.strategyId} strategyName={g.strategyName} deployments={g.deployments} onDelete={onDelete} defaultOpen={defaultOpen} />
+        <StrategyGroup key={g.strategyName} strategyName={g.strategyName} deployments={g.deployments} onDelete={onDelete} defaultOpen={defaultOpen} />
       ))}
     </div>
   );

@@ -14,6 +14,7 @@ from app.services.broker.kite_ticker_service import diagnose_zerodha_connection,
 from app.services.broker.registry import get_broker_adapter
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler, diagnose_active_pairs
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
+from app.services.paper_trading.scheduler import diagnose_evaluation_freshness, paper_trading_scheduler
 
 router = APIRouter()
 
@@ -86,7 +87,25 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     # my chart showing today's candle" without needing DB access.
     kite_diagnostic["active_pairs"] = await diagnose_active_pairs(db)
 
-    return {"status": overall, "components": components, "kite_diagnostic": kite_diagnostic}
+    # Proves the paper trading scheduler is genuinely reaching every
+    # active deployment on its own (no manual "Evaluate Now" needed) --
+    # with a large deployment count, one 10s-interval tick can take
+    # longer than 10s to work through all of them sequentially, which
+    # this distinguishes from "stuck, nothing's running at all".
+    paper_trading_diagnostic = await diagnose_evaluation_freshness(db)
+    paper_trading_diagnostic["scheduler_running"] = paper_trading_scheduler._task is not None
+    paper_trading_diagnostic["last_tick_started_at"] = (
+        paper_trading_scheduler.last_tick_started_at.isoformat() if paper_trading_scheduler.last_tick_started_at else None
+    )
+    paper_trading_diagnostic["last_tick_completed_at"] = (
+        paper_trading_scheduler.last_tick_completed_at.isoformat() if paper_trading_scheduler.last_tick_completed_at else None
+    )
+    paper_trading_diagnostic["last_tick_evaluated_count"] = paper_trading_scheduler.last_tick_evaluated_count
+
+    return {
+        "status": overall, "components": components, "kite_diagnostic": kite_diagnostic,
+        "paper_trading_diagnostic": paper_trading_diagnostic,
+    }
 
 
 @router.get("/monitor")
