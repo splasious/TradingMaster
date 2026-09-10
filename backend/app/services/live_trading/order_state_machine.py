@@ -60,9 +60,36 @@ KITE_STATE_MAP = {
     "REJECTED": LiveOrderStatus.REJECTED,
 }
 
+# Kotak Neo's order status vocabulary (`ordSt` field in order_report(),
+# see broker/kotak_neo_broker.py) -- confirmed via the SDK's own
+# order-verification logic (neo_api_client/api/order_api.py), which checks
+# for exactly these lowercase values before allowing a cancel.
+KOTAK_NEO_STATE_MAP = {
+    "rejected": LiveOrderStatus.REJECTED,
+    "cancelled": LiveOrderStatus.CANCELLED,
+    "open": LiveOrderStatus.OPEN,
+    "complete": LiveOrderStatus.FILLED,
+    "traded": LiveOrderStatus.FILLED,
+}
+
+# HDFC Securities' order statuses -- NOT confirmed against real docs (see
+# hdfc_securities_broker.py's module docstring). Both common Indian-
+# broker-API casings (Kite's own convention is uppercase, e.g. "COMPLETE";
+# Kotak Neo's is lowercase) are listed since which one HDFC actually uses
+# is unverified -- verify against a real account before relying on this.
+HDFC_STATE_MAP = {
+    "open": LiveOrderStatus.OPEN, "OPEN": LiveOrderStatus.OPEN,
+    "pending": LiveOrderStatus.SUBMITTED, "PENDING": LiveOrderStatus.SUBMITTED,
+    "complete": LiveOrderStatus.FILLED, "COMPLETE": LiveOrderStatus.FILLED,
+    "cancelled": LiveOrderStatus.CANCELLED, "CANCELLED": LiveOrderStatus.CANCELLED,
+    "rejected": LiveOrderStatus.REJECTED, "REJECTED": LiveOrderStatus.REJECTED,
+}
+
 STATE_MAPS: dict[str, dict[str, LiveOrderStatus]] = {
     "delta_exchange": DELTA_STATE_MAP,
     "zerodha_kite": KITE_STATE_MAP,
+    "kotak_neo": KOTAK_NEO_STATE_MAP,
+    "hdfc_securities": HDFC_STATE_MAP,
 }
 
 TERMINAL_STATUSES = {LiveOrderStatus.FILLED, LiveOrderStatus.CANCELLED, LiveOrderStatus.REJECTED, LiveOrderStatus.EXPIRED}

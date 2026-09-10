@@ -46,3 +46,11 @@ class KiteLoginUrlOut(BaseModel):
 
 class KiteCallbackIn(BaseModel):
     request_token: str
+
+
+class HDFCLoginUrlOut(BaseModel):
+    login_url: str
+
+
+class HDFCCallbackIn(BaseModel):
+    auth_code: str

@@ -13,8 +13,12 @@ from app.db.session import get_db
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.models.live_trading import LiveDeployment
 from app.models.user import User
-from app.schemas.broker import BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerOut, KiteCallbackIn, KiteLoginUrlOut
+from app.schemas.broker import (
+    BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerOut,
+    HDFCCallbackIn, HDFCLoginUrlOut, KiteCallbackIn, KiteLoginUrlOut,
+)
 from app.services.audit import write_audit_log
+from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
 from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 
@@ -233,7 +237,12 @@ async def disconnect_broker_account(
     return _account_out(account)
 
 
-async def _get_owned_kite_account(db: AsyncSession, account_id: str, user: User) -> BrokerAccount:
+async def _get_owned_interactive_account(db: AsyncSession, account_id: str, user: User, broker_code: str, broker_label: str) -> BrokerAccount:
+    """Shared by Kite and HDFC's login-url/callback endpoints -- both are
+    interactive-auth brokers (registry.py's _INTERACTIVE_AUTH_BROKERS)
+    needing the exact same "is this account really this broker, and does
+    it have stored credentials to build a login URL / exchange a token
+    from" check before either step can proceed."""
     result = await db.execute(
         select(BrokerAccount)
         .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection), selectinload(BrokerAccount.credential))
@@ -242,11 +251,19 @@ async def _get_owned_kite_account(db: AsyncSession, account_id: str, user: User)
     account = result.scalar_one_or_none()
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
-    if account.broker.code != "zerodha_kite":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This account is not a Zerodha Kite account")
+    if account.broker.code != broker_code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"This account is not a {broker_label} account")
     if account.credential is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials stored for this account")
     return account
+
+
+async def _get_owned_kite_account(db: AsyncSession, account_id: str, user: User) -> BrokerAccount:
+    return await _get_owned_interactive_account(db, account_id, user, "zerodha_kite", "Zerodha Kite")
+
+
+async def _get_owned_hdfc_account(db: AsyncSession, account_id: str, user: User) -> BrokerAccount:
+    return await _get_owned_interactive_account(db, account_id, user, "hdfc_securities", "HDFC Securities")
 
 
 @router.get("/accounts/{account_id}/kite/login-url", response_model=KiteLoginUrlOut)
@@ -297,6 +314,67 @@ async def kite_callback(
     await write_audit_log(
         db, user_id=user.id, action="BROKER_CONNECTED", object_type="broker_account", object_id=str(account.id),
         new_value={"broker_code": "zerodha_kite", "status": account.connection.status},
+        ip_address=request.client.host if request.client else None,
+    )
+    await db.commit()
+
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.connection))
+        .where(BrokerAccount.id == account.id)
+    )
+    return _account_out(result.scalar_one())
+
+
+@router.get("/accounts/{account_id}/hdfc/login-url", response_model=HDFCLoginUrlOut)
+async def hdfc_login_url(
+    account_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader"))
+) -> HDFCLoginUrlOut:
+    account = await _get_owned_hdfc_account(db, account_id, user)
+    creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+    api_key = creds.get("api_key")
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No api_key stored for this account")
+    return HDFCLoginUrlOut(login_url=HDFCSecuritiesBroker.build_login_url(api_key))
+
+
+@router.post("/accounts/{account_id}/hdfc/callback", response_model=BrokerAccountOut)
+async def hdfc_callback(
+    account_id: str,
+    payload: HDFCCallbackIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("administrator", "trader")),
+) -> BrokerAccountOut:
+    """Completes the interactive HDFC Securities login: exchanges the
+    one-time auth_code HDFC hands back after the user logs in for a
+    session access_token, then re-encrypts the credentials to include it
+    -- mirrors kite_callback exactly (see its docstring); see
+    hdfc_securities_broker.py's module docstring for this adapter's
+    confirmed-vs-inferred confidence level before relying on it."""
+    account = await _get_owned_hdfc_account(db, account_id, user)
+    creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+
+    adapter: HDFCSecuritiesBroker = get_broker_adapter("hdfc_securities")  # type: ignore[assignment]
+    try:
+        await adapter.authenticate({**creds, "auth_code": payload.auth_code})
+        await adapter.connect()
+        creds["access_token"] = adapter.access_token
+        account.credential.encrypted_payload = encrypt_payload(json.dumps(creds))
+        if account.connection is None:
+            account.connection = BrokerConnection(broker_account_id=account.id)
+        account.connection.status = ConnectionStatus.CONNECTED.value
+        account.connection.last_heartbeat_at = datetime.now(timezone.utc)
+        account.connection.last_error = None
+    except Exception as exc:
+        if account.connection is None:
+            account.connection = BrokerConnection(broker_account_id=account.id)
+        account.connection.status = ConnectionStatus.ERROR.value
+        account.connection.last_error = str(exc)
+
+    await write_audit_log(
+        db, user_id=user.id, action="BROKER_CONNECTED", object_type="broker_account", object_id=str(account.id),
+        new_value={"broker_code": "hdfc_securities", "status": account.connection.status},
         ip_address=request.client.host if request.client else None,
     )
     await db.commit()

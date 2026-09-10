@@ -33,7 +33,9 @@ import type { InstrumentOut, LiveDeploymentOut, LiveEvaluationOut, StrategyOut }
 // A broker deals in exactly one settlement currency -- this mirrors the
 // backend's broker-code -> currency map (app/api/v1/endpoints/live_trading.py)
 // purely for display before a deployment exists to read `currency` back from.
-const BROKER_CURRENCY: Record<string, string> = { delta_exchange: "USD", zerodha_kite: "INR" };
+const BROKER_CURRENCY: Record<string, string> = {
+  delta_exchange: "USD", zerodha_kite: "INR", hdfc_securities: "INR", kotak_neo: "INR",
+};
 
 function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
   if (!lastEvaluatedAt) return undefined;

@@ -15,9 +15,21 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBrokerAccounts, useBrokers } from "@/lib/hooks";
-import type { BrokerAccountOut, KiteLoginUrlOut } from "@/lib/types";
+import type { BrokerAccountOut, HDFCLoginUrlOut, KiteLoginUrlOut } from "@/lib/types";
 
-const PENDING_ACCOUNT_KEY = "tm_kite_pending_account_id";
+const KITE_PENDING_ACCOUNT_KEY = "tm_kite_pending_account_id";
+const HDFC_PENDING_ACCOUNT_KEY = "tm_hdfc_pending_account_id";
+
+// Brokers whose auth needs an interactive browser login after the initial
+// api_key/api_secret connect step (registry.py's _INTERACTIVE_AUTH_BROKERS,
+// mirrored here) -- Kotak Neo is NOT here: its TOTP+MPIN credentials
+// authenticate in a single step, same as Delta.
+const INTERACTIVE_AUTH_BROKERS = new Set(["zerodha_kite", "hdfc_securities"]);
+
+const BROKER_LABELS: Record<string, string> = {
+  zerodha_kite: "Zerodha",
+  hdfc_securities: "HDFC Securities",
+};
 
 function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClose: () => void; accounts: BrokerAccountOut[] }) {
   const { data: brokers } = useBrokers();
@@ -27,9 +39,15 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
   const [environment, setEnvironment] = useState("paper");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
+  const [consumerKey, setConsumerKey] = useState("");
+  const [mobileNumber, setMobileNumber] = useState("");
+  const [ucc, setUcc] = useState("");
+  const [totpSecret, setTotpSecret] = useState("");
+  const [mpin, setMpin] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
 
+  const isKotakNeo = brokerCode === "kotak_neo";
   const existing = accounts.filter((a) => a.broker.code === brokerCode && a.environment === environment);
   // Kite's daily-expiry re-login only needs the SAME account's "Login with
   // Zerodha" button -- creating another "Connect Broker" row every day (the
@@ -45,7 +63,9 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
           broker_code: brokerCode,
           account_label: label,
           environment,
-          credentials: { api_key: apiKey, api_secret: apiSecret },
+          credentials: isKotakNeo
+            ? { consumer_key: consumerKey, mobile_number: mobileNumber, ucc, totp_secret: totpSecret, mpin }
+            : { api_key: apiKey, api_secret: apiSecret },
         }),
       }),
     onSuccess: () => {
@@ -96,9 +116,9 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
           <div className="space-y-2 rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning">
             <p>
               You already have {existing.length === 1 ? "an account" : `${existing.length} accounts`} connected for this
-              broker + environment ({existing.map((a) => a.account_label).join(", ")}). If this is Kite&apos;s daily
-              re-login (session expires ~6am IST, same api_key/api_secret), close this and use{" "}
-              <span className="font-medium">&quot;Login with Zerodha&quot;</span> on that existing row instead --
+              broker + environment ({existing.map((a) => a.account_label).join(", ")}). If this is a daily session
+              re-login (Kite/HDFC sessions expire daily, same api_key/api_secret), close this and use{" "}
+              <span className="font-medium">&quot;Login with...&quot;</span> on that existing row instead --
               creating another one here just adds a duplicate with identical credentials.
             </p>
             <label className="flex items-center gap-1.5 text-xs">
@@ -108,20 +128,49 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
           </div>
         )}
 
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">API key</label>
-          <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Kite Connect app api_key" />
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">API secret</label>
-          <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} />
-        </div>
+        {isKotakNeo ? (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Consumer key</label>
+              <Input value={consumerKey} onChange={(e) => setConsumerKey(e.target.value)} placeholder="From Kotak Neo app/web: Invest > Trade API" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Mobile number</label>
+              <Input value={mobileNumber} onChange={(e) => setMobileNumber(e.target.value)} placeholder="Registered mobile, with country code" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">UCC</label>
+              <Input value={ucc} onChange={(e) => setUcc(e.target.value.toUpperCase())} placeholder="Unique Client Code (Profile section)" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">TOTP secret</label>
+              <Input type="password" value={totpSecret} onChange={(e) => setTotpSecret(e.target.value)} placeholder="From TOTP registration on Kotak Neo's site" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">MPIN</label>
+              <Input type="password" value={mpin} onChange={(e) => setMpin(e.target.value)} />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">API key</label>
+              <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="App api_key" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">API secret</label>
+              <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} />
+            </div>
+          </>
+        )}
 
         <p className="text-xs text-text-muted">
-          Both brokers use real adapters -- real API credentials are required. Delta Exchange authenticates immediately.
-          Zerodha Kite needs one more step after this: an interactive browser login (Kite Connect doesn&apos;t support
-          key/secret-only auth) -- you&apos;ll get a &quot;Login with Zerodha&quot; button for the account once it&apos;s created.
+          All four brokers use real adapters -- real API credentials are required. Delta Exchange and Kotak Neo
+          authenticate immediately. Zerodha Kite and HDFC Securities need one more step after this: an interactive
+          browser login (neither supports key/secret-only auth) -- you&apos;ll get a &quot;Login with...&quot; button
+          for the account once it&apos;s created. Kotak Neo needs TOTP registration completed on their own site first
+          (one-time, scan a QR code into an authenticator app) -- the TOTP secret above is that same registration
+          secret, not a live 6-digit code.
         </p>
 
         {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
@@ -139,18 +188,23 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
   );
 }
 
-function LoginWithZerodhaButton({ accountId }: { accountId: string }) {
+function InteractiveLoginButton({ accountId, brokerCode }: { accountId: string; brokerCode: string }) {
+  const isKite = brokerCode === "zerodha_kite";
+  const pendingKey = isKite ? KITE_PENDING_ACCOUNT_KEY : HDFC_PENDING_ACCOUNT_KEY;
+  const loginUrlPath = isKite ? "kite/login-url" : "hdfc/login-url";
+  const label = `Login with ${BROKER_LABELS[brokerCode] ?? brokerCode}`;
+
   const loginMutation = useMutation({
-    mutationFn: () => apiFetch<KiteLoginUrlOut>(`/api/v1/brokers/accounts/${accountId}/kite/login-url`),
+    mutationFn: () => apiFetch<KiteLoginUrlOut | HDFCLoginUrlOut>(`/api/v1/brokers/accounts/${accountId}/${loginUrlPath}`),
     onSuccess: (data) => {
-      localStorage.setItem(PENDING_ACCOUNT_KEY, accountId);
+      localStorage.setItem(pendingKey, accountId);
       window.open(data.login_url, "_blank", "noopener,noreferrer");
     },
   });
 
   return (
     <Button variant="secondary" size="sm" onClick={() => loginMutation.mutate()} disabled={loginMutation.isPending}>
-      <LogIn className="h-3.5 w-3.5" /> {loginMutation.isPending ? "Opening..." : "Login with Zerodha"}
+      <LogIn className="h-3.5 w-3.5" /> {loginMutation.isPending ? "Opening..." : label}
     </Button>
   );
 }
@@ -160,7 +214,14 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
   const [label, setLabel] = useState(account?.account_label ?? "");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
+  const [consumerKey, setConsumerKey] = useState("");
+  const [mobileNumber, setMobileNumber] = useState("");
+  const [ucc, setUcc] = useState("");
+  const [totpSecret, setTotpSecret] = useState("");
+  const [mpin, setMpin] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const isKotakNeo = account?.broker.code === "kotak_neo";
 
   // Re-seed the label whenever a different row is opened for editing --
   // the modal instance is shared across rows, only mounted while one is open.
@@ -170,15 +231,27 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
     setLabel(account.account_label);
     setApiKey("");
     setApiSecret("");
+    setConsumerKey("");
+    setMobileNumber("");
+    setUcc("");
+    setTotpSecret("");
+    setMpin("");
     setError(null);
   }
+
+  const kotakFieldsTouched = consumerKey || mobileNumber || ucc || totpSecret || mpin;
 
   const updateMutation = useMutation({
     mutationFn: () => {
       const body: Record<string, unknown> = { account_label: label };
-      // Both fields required together -- a partial credential update would
-      // silently corrupt the stored pair (e.g. new key with the old secret).
-      if (apiKey || apiSecret) body.credentials = { api_key: apiKey, api_secret: apiSecret };
+      // All fields for a broker required together -- a partial credential
+      // update would silently corrupt the stored set (e.g. new key with
+      // the old secret).
+      if (isKotakNeo) {
+        if (kotakFieldsTouched) body.credentials = { consumer_key: consumerKey, mobile_number: mobileNumber, ucc, totp_secret: totpSecret, mpin };
+      } else if (apiKey || apiSecret) {
+        body.credentials = { api_key: apiKey, api_secret: apiSecret };
+      }
       return apiFetch(`/api/v1/brokers/accounts/${account!.id}`, { method: "PATCH", body: JSON.stringify(body) });
     },
     onSuccess: () => {
@@ -196,13 +269,20 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
         onSubmit={(e) => {
           e.preventDefault();
           setError(null);
-          if (apiKey.trim() !== apiKey || apiSecret.trim() !== apiSecret) {
-            setError("API key/secret has leading or trailing whitespace -- remove it before saving.");
-            return;
-          }
-          if ((apiKey && !apiSecret) || (!apiKey && apiSecret)) {
-            setError("Enter both API key and API secret together, or leave both blank to keep the current ones.");
-            return;
+          if (isKotakNeo) {
+            if (kotakFieldsTouched && !(consumerKey && mobileNumber && ucc && totpSecret && mpin)) {
+              setError("Fill in all five fields together, or leave all blank to keep the current ones.");
+              return;
+            }
+          } else {
+            if (apiKey.trim() !== apiKey || apiSecret.trim() !== apiSecret) {
+              setError("API key/secret has leading or trailing whitespace -- remove it before saving.");
+              return;
+            }
+            if ((apiKey && !apiSecret) || (!apiKey && apiSecret)) {
+              setError("Enter both API key and API secret together, or leave both blank to keep the current ones.");
+              return;
+            }
           }
           updateMutation.mutate();
         }}
@@ -218,20 +298,49 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
           <Input required value={label} onChange={(e) => setLabel(e.target.value)} />
         </div>
 
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">API key</label>
-          <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Leave blank to keep current" />
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">API secret</label>
-          <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Leave blank to keep current" />
-        </div>
-
-        <p className="text-xs text-text-muted">
-          Only fill in API key/secret if you actually need to correct them -- for Kite&apos;s ordinary daily re-login
-          (session expiry, credentials unchanged), close this and use &quot;Login with Zerodha&quot; on the row instead.
-        </p>
+        {isKotakNeo ? (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Consumer key</label>
+              <Input value={consumerKey} onChange={(e) => setConsumerKey(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Mobile number</label>
+              <Input value={mobileNumber} onChange={(e) => setMobileNumber(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">UCC</label>
+              <Input value={ucc} onChange={(e) => setUcc(e.target.value.toUpperCase())} placeholder="Leave blank to keep current" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">TOTP secret</label>
+              <Input type="password" value={totpSecret} onChange={(e) => setTotpSecret(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">MPIN</label>
+              <Input type="password" value={mpin} onChange={(e) => setMpin(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <p className="text-xs text-text-muted">
+              Only fill these in if you actually need to correct them -- all five must be provided together, or leave
+              all blank to keep the current ones. Kotak Neo has no separate daily re-login step.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">API key</label>
+              <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">API secret</label>
+              <Input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Leave blank to keep current" />
+            </div>
+            <p className="text-xs text-text-muted">
+              Only fill in API key/secret if you actually need to correct them -- for the ordinary daily re-login
+              (session expiry, credentials unchanged), close this and use &quot;Login with...&quot; on the row instead.
+            </p>
+          </>
+        )}
 
         {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
 
@@ -248,8 +357,8 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
   );
 }
 
-function KiteSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }) {
-  const expired = accounts.filter((a) => a.broker.code === "zerodha_kite" && a.connection_status === "error");
+function InteractiveSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }) {
+  const expired = accounts.filter((a) => INTERACTIVE_AUTH_BROKERS.has(a.broker.code) && a.connection_status === "error");
   if (!expired.length) return null;
   return (
     <div className="flex items-start gap-3 rounded-md border border-negative/30 bg-negative-soft px-4 py-3 text-sm text-negative">
@@ -257,8 +366,8 @@ function KiteSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }
       <div className="space-y-1">
         {expired.map((a) => (
           <p key={a.id}>
-            <span className="font-medium">{a.account_label}</span>: {a.connection_last_error || "Zerodha Kite session lost."} Kite&apos;s
-            daily session expires every day (~6am IST, no refresh token) -- use &quot;Login with Zerodha&quot; below to reconnect.
+            <span className="font-medium">{a.account_label}</span>: {a.connection_last_error || "Broker session lost."} These
+            brokers&apos; sessions expire daily (no refresh token) -- use &quot;Login with {BROKER_LABELS[a.broker.code] ?? a.broker.name}&quot; below to reconnect.
           </p>
         ))}
       </div>
@@ -296,14 +405,14 @@ export default function BrokersSettingsPage() {
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
           <p className="text-sm text-text-muted">
-            Zerodha Kite and Delta Exchange both use real adapters -- HMAC-signed for Delta, session-token auth via
-            interactive login for Kite.
+            Zerodha Kite, Delta Exchange, HDFC Securities, and Kotak Neo all use real adapters -- HMAC-signed for
+            Delta, session-token auth via interactive login for Kite and HDFC, TOTP+MPIN for Kotak Neo.
           </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
       </div>
 
-      {accounts && <KiteSessionExpiredBanner accounts={accounts} />}
+      {accounts && <InteractiveSessionExpiredBanner accounts={accounts} />}
       {deleteError && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{deleteError}</div>}
 
       <Card>
@@ -343,8 +452,8 @@ export default function BrokersSettingsPage() {
                     {canManage && (
                       <Td className="text-right">
                         <div className="flex justify-end gap-1">
-                          {account.broker.code === "zerodha_kite" && account.connection_status !== "connected" && (
-                            <LoginWithZerodhaButton accountId={account.id} />
+                          {INTERACTIVE_AUTH_BROKERS.has(account.broker.code) && account.connection_status !== "connected" && (
+                            <InteractiveLoginButton accountId={account.id} brokerCode={account.broker.code} />
                           )}
                           <Button variant="ghost" size="sm" onClick={() => setEditingAccount(account)}>
                             Edit

@@ -38,7 +38,7 @@ router = APIRouter()
 # label derived from the chosen broker account -- not a user choice, and
 # not a real FX conversion. New broker codes without an entry here simply
 # get no currency label.
-_BROKER_CURRENCY = {"delta_exchange": "USD", "zerodha_kite": "INR"}
+_BROKER_CURRENCY = {"delta_exchange": "USD", "zerodha_kite": "INR", "hdfc_securities": "INR", "kotak_neo": "INR"}
 
 
 async def _latest_version(db: AsyncSession, strategy_id: uuid.UUID) -> StrategyVersion | None:

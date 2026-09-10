@@ -96,7 +96,12 @@ async def _get_live_price_and_context(
     if broker_code == "delta_exchange":
         ticker = await DeltaExchangeDataSource().get_ticker(instrument.external_ref)
         return ticker["price"], {"product_id": ticker["product_id"]}
-    if broker_code == "zerodha_kite":
+    if broker_code in ("zerodha_kite", "kotak_neo", "hdfc_securities"):
+        # All three NSE-equity brokers share the same order vocabulary
+        # this module already normalizes to (tradingsymbol/exchange/
+        # product) -- each adapter's place_order() does its own
+        # broker-specific translation from there (see kotak_neo_broker.py
+        # and hdfc_securities_broker.py's place_order).
         is_fno = instrument.instrument_type in _FNO_TYPES
         exchange = "NFO" if is_fno else "NSE"
         product = product_override or ("MIS" if is_fno else "CNC")

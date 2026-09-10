@@ -1,5 +1,7 @@
 import hashlib
 import json
+import sys
+import types
 import uuid
 
 import httpx
@@ -9,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _original_request = httpx.AsyncClient.request
 _DELTA_HOST = "api.india.delta.exchange"
 _KITE_HOST = "api.kite.trade"
+_HDFC_HOST = "developer.hdfcsec.com"
 
 
 async def _login(client: AsyncClient, email: str, password: str) -> str:
@@ -43,6 +46,34 @@ def _patch_kite(monkeypatch, *, session_status: int = 200, session_payload: dict
         return httpx.Response(200, json={"status": "success", "data": {"user_id": "AB1234"}}, request=httpx.Request(method, str(url)))
 
     monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+
+def _patch_hdfc(monkeypatch, *, token_status: int = 200, token_payload: dict | None = None):
+    token_payload = token_payload or {"data": {"access_token": "sess_tok_xyz"}}
+
+    async def fake_request(client_self, method, url, headers=None, params=None, json=None, **kwargs):
+        if httpx.URL(str(url)).host != _HDFC_HOST:
+            return await _original_request(client_self, method, url, headers=headers, params=params, json=json, **kwargs)
+        if str(url).endswith("/access-token"):
+            return httpx.Response(token_status, json=token_payload, request=httpx.Request(method, str(url)))
+        return httpx.Response(200, json={"client_id": "C123"}, request=httpx.Request(method, str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+
+def _patch_kotak_neo_sdk(monkeypatch):
+    class _FakeNeoAPI:
+        def __init__(self, environment=None, access_token=None, neo_fin_key=None, consumer_key=None):
+            pass
+
+        def totp_login(self, mobile_number=None, ucc=None, totp=None):
+            return {"data": {"token": "view_tok"}}
+
+        def totp_validate(self, mpin=None):
+            return {"data": {"token": "trade_tok"}}
+
+    monkeypatch.setitem(sys.modules, "neo_api_client", types.SimpleNamespace(NeoAPI=_FakeNeoAPI))
+    monkeypatch.setitem(sys.modules, "pyotp", types.SimpleNamespace(TOTP=lambda secret: types.SimpleNamespace(now=lambda: "123456")))
 
 
 async def _connect(client: AsyncClient, headers: dict, broker_code: str, credentials: dict) -> dict:
@@ -161,6 +192,72 @@ async def test_kite_endpoints_reject_non_kite_account(client: AsyncClient, seede
     account = await _connect(client, headers, "delta_exchange", {"api_key": "k", "api_secret": "s"})
 
     resp = await client.get(f"/api/v1/brokers/accounts/{account['id']}/kite/login-url", headers=headers)
+    assert resp.status_code == 400
+
+
+async def test_connect_kotak_neo_account_authenticates_immediately(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    """Unlike Zerodha/HDFC's OAuth-redirect flow, Kotak Neo's TOTP+MPIN
+    auth completes in a single authenticate() call (see registry.py's
+    _INTERACTIVE_AUTH_BROKERS) -- connecting an account should reach
+    "connected" immediately, the same as Delta."""
+    _patch_kotak_neo_sdk(monkeypatch)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    account = await _connect(client, headers, "kotak_neo", {
+        "consumer_key": "ck", "mobile_number": "+919999999999", "ucc": "ABC123",
+        "totp_secret": "JBSWY3DPEHPK3PXP", "mpin": "123456",
+    })
+    assert account["connection_status"] == "connected"
+
+
+async def test_connect_hdfc_account_is_disconnected_pending_login(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    account = await _connect(client, headers, "hdfc_securities", {"api_key": "hdfckey", "api_secret": "hdfcsecret"})
+    assert account["connection_status"] == "disconnected"
+
+
+async def test_hdfc_login_url_reflects_stored_api_key(client: AsyncClient, seeded_admin: dict):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    account = await _connect(client, headers, "hdfc_securities", {"api_key": "hdfckey", "api_secret": "hdfcsecret"})
+    resp = await client.get(f"/api/v1/brokers/accounts/{account['id']}/hdfc/login-url", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["login_url"] == "https://developer.hdfcsec.com/oapi/v1/login?api_key=hdfckey"
+
+
+async def test_hdfc_callback_completes_connection(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "hdfc_securities", {"api_key": "hdfckey", "api_secret": "hdfcsecret"})
+
+    _patch_hdfc(monkeypatch)
+    resp = await client.post(f"/api/v1/brokers/accounts/{account['id']}/hdfc/callback", json={"auth_code": "auth_abc"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["connection_status"] == "connected"
+
+
+async def test_hdfc_callback_surfaces_broker_error(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "hdfc_securities", {"api_key": "hdfckey", "api_secret": "hdfcsecret"})
+
+    _patch_hdfc(monkeypatch, token_status=400, token_payload={"status": "error", "message": "Invalid auth_code"})
+    resp = await client.post(f"/api/v1/brokers/accounts/{account['id']}/hdfc/callback", json={"auth_code": "bad"}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["connection_status"] == "error"
+
+
+async def test_hdfc_endpoints_reject_non_hdfc_account(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    _patch_delta_ok(monkeypatch)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "delta_exchange", {"api_key": "k", "api_secret": "s"})
+
+    resp = await client.get(f"/api/v1/brokers/accounts/{account['id']}/hdfc/login-url", headers=headers)
     assert resp.status_code == 400
 
 

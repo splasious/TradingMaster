@@ -21,5 +21,7 @@ RestrictedPython>=8.5
 psutil>=7.0
 openpyxl>=3.1
 kiteconnect>=5.0
+pyotp>=2.9
+neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2
 pytest>=8.3
 pytest-asyncio>=0.24

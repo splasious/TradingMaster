@@ -96,6 +96,8 @@ async def seeded_admin(db_session: AsyncSession) -> dict:
         [
             Broker(code="zerodha_kite", name="Zerodha Kite", is_enabled=True),
             Broker(code="delta_exchange", name="Delta Exchange", is_enabled=True),
+            Broker(code="hdfc_securities", name="HDFC Securities", is_enabled=True),
+            Broker(code="kotak_neo", name="Kotak Neo", is_enabled=True),
         ]
     )
 

@@ -22,6 +22,8 @@ ROLES = ["administrator", "trader", "analyst", "viewer"]
 BROKERS = [
     ("zerodha_kite", "Zerodha Kite"),
     ("delta_exchange", "Delta Exchange"),
+    ("hdfc_securities", "HDFC Securities"),
+    ("kotak_neo", "Kotak Neo"),
 ]
 
 # A curated starter catalog so the app is useful without first running
