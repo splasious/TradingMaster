@@ -1,15 +1,18 @@
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.encryption import encrypt_payload
+from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperDeployment, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
+from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 from app.services.market_data.active_timeframe_sync_scheduler import ActiveTimeframeSyncScheduler
 
 
@@ -55,6 +58,61 @@ async def _active_deployment(db: AsyncSession, *, timeframe: str) -> tuple[Instr
     db.add(deployment)
     await db.commit()
     return instrument, deployment
+
+
+async def _active_zerodha_deployment(db: AsyncSession, *, timeframe: str) -> tuple[Instrument, PaperDeployment]:
+    instrument = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE", expiry=date(2026, 9, 24), strike=23000, option_type="CE",
+    )
+    db.add(instrument)
+    await db.flush()
+
+    owner_id = uuid.uuid4()
+    strategy = Strategy(name="ATS Zerodha Test Strategy", owner_id=owner_id, code_type="python")
+    db.add(strategy)
+    await db.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe=timeframe,
+        entry_rules={"all": []}, exit_rules={"all": []}, risk_rules={}, position_sizing={"type": "fixed_quantity", "value": 1},
+        instrument_ids=[str(instrument.id)],
+    )
+    db.add(version)
+    await db.flush()
+
+    portfolio = PaperPortfolio(user_id=owner_id, name="ATS Zerodha Pool", currency="INR", cash=10000.0, initial_capital=10000.0)
+    db.add(portfolio)
+    await db.flush()
+
+    deployment = PaperDeployment(
+        strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
+        portfolio_id=portfolio.id, timeframe=timeframe, status=DeploymentStatus.ACTIVE.value,
+    )
+    db.add(deployment)
+    await db.commit()
+    return instrument, deployment
+
+
+async def _seed_connected_zerodha_account(db: AsyncSession) -> None:
+    from app.models.user import Role, User, UserRole
+
+    role = Role(id=uuid.uuid4(), name=f"role_{uuid.uuid4().hex[:6]}", description="x")
+    db.add(role)
+    await db.flush()
+    user = User(email=f"ats_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="ATS Test")
+    user.user_roles = [UserRole(role=role)]
+    db.add(user)
+    await db.flush()
+    broker = Broker(code="zerodha_kite", name="Zerodha Kite", is_enabled=True)
+    db.add(broker)
+    await db.flush()
+    account = BrokerAccount(user_id=user.id, broker_id=broker.id, account_label="ATS Test", environment="paper")
+    db.add(account)
+    await db.flush()
+    creds = {"api_key": "kitekey", "api_secret": "kitesecret", "access_token": "tok"}
+    db.add(BrokerCredential(broker_account_id=account.id, encrypted_payload=encrypt_payload(json.dumps(creds))))
+    db.add(BrokerConnection(broker_account_id=account.id, status=ConnectionStatus.CONNECTED.value))
+    await db.commit()
 
 
 async def test_sync_fetches_the_timeframe_an_active_deployment_actually_uses(db_session: AsyncSession, monkeypatch):
@@ -143,6 +201,49 @@ async def test_sync_ignores_stopped_deployments(db_session: AsyncSession, monkey
         return _delta_response([{"ts": datetime.now(timezone.utc), "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}])
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    synced = await scheduler.sync(db_session)
+    assert synced == 0
+
+
+async def test_sync_fetches_zerodha_sourced_pairs_including_open_interest(db_session: AsyncSession, monkeypatch):
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="15m")
+    await _seed_connected_zerodha_account(db_session)
+    bar_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    captured_segment = []
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        captured_segment.append(segment)
+        assert symbol == "NIFTY26SEP23000CE"
+        return [{"ts": bar_ts, "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 10, "open_interest": 5000}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    synced = await scheduler.sync(db_session)
+    assert synced == 1
+    assert captured_segment == ["NFO"]  # from instrument.exchange, not guessed
+
+    candles = (
+        await db_session.execute(
+            select(OhlcvCandle).where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == "15m")
+        )
+    ).scalars().all()
+    assert len(candles) == 1
+    assert candles[0].close == 100.5
+    assert candles[0].open_interest == 5000
+
+
+async def test_sync_skips_zerodha_pairs_without_a_connected_account(db_session: AsyncSession, monkeypatch):
+    await _active_zerodha_deployment(db_session, timeframe="15m")
+    # No connected Zerodha account seeded this time.
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        raise AssertionError("get_historical_data must not be called with no connected Zerodha account")
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
     synced = await scheduler.sync(db_session)
