@@ -20,6 +20,24 @@ export interface OverlayLine {
   points: { ts: string; value: number | null }[];
 }
 
+// lightweight-charts formats every displayed time/date label using UTC
+// internally, with no per-chart timezone option (TradingView's own
+// documented default). This app's candle data is NSE/IST-centric -- a
+// daily NSE candle is genuinely timestamped midnight IST (e.g.
+// "2026-09-10T00:00:00+05:30" for THAT day's bar), which is
+// "2026-09-09T18:30:00Z" in true UTC. Without shifting, the chart showed
+// that same, perfectly fresh candle labeled "Sep 9" instead of the
+// correct "Sep 10" -- indistinguishable on screen from a genuinely stale
+// sync, even though the data itself was current. The standard fix for
+// libraries with no timezone option: shift the UTC instant by the target
+// timezone's offset before handing it to the chart, so its own UTC-based
+// formatting ends up displaying that timezone's wall-clock time instead.
+const IST_OFFSET_SECONDS = 5.5 * 60 * 60;
+
+function toDisplaySeconds(ts: string): UTCTimestamp {
+  return (Math.floor(new Date(ts).getTime() / 1000) + IST_OFFSET_SECONDS) as UTCTimestamp;
+}
+
 /** Converts to lightweight-charts' own point shape, preserving every point
  * -- including an indicator's leading warmup-period nulls -- as
  * "whitespace" (a time slot with no plotted value) rather than dropping
@@ -33,7 +51,7 @@ export interface OverlayLine {
  * the sync correct, not just the subscription plumbing in chart-sync.ts. */
 export function toSeriesPoints(points: { ts: string; value: number | null }[]): ({ time: UTCTimestamp; value: number } | { time: UTCTimestamp })[] {
   return points.map((p) => {
-    const time = Math.floor(new Date(p.ts).getTime() / 1000) as UTCTimestamp;
+    const time = toDisplaySeconds(p.ts);
     return p.value === null ? { time } : { time, value: p.value };
   });
 }
@@ -43,10 +61,6 @@ interface PriceChartProps {
   overlays?: OverlayLine[];
   height?: number;
   onChartReady?: (chart: IChartApi | null) => void;
-}
-
-function toUnixSeconds(ts: string): UTCTimestamp {
-  return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
 }
 
 export function PriceChart({ candles, overlays = [], height = 420, onChartReady }: PriceChartProps) {
@@ -115,7 +129,7 @@ export function PriceChart({ candles, overlays = [], height = 420, onChartReady 
 
     candleSeriesRef.current.setData(
       candles.map((c) => ({
-        time: toUnixSeconds(c.ts),
+        time: toDisplaySeconds(c.ts),
         open: c.open,
         high: c.high,
         low: c.low,
@@ -124,7 +138,7 @@ export function PriceChart({ candles, overlays = [], height = 420, onChartReady 
     );
     volumeSeriesRef.current.setData(
       candles.map((c) => ({
-        time: toUnixSeconds(c.ts),
+        time: toDisplaySeconds(c.ts),
         value: c.volume ?? 0,
         color: c.close >= c.open ? "rgba(21,128,61,0.4)" : "rgba(185,28,28,0.4)",
       })),
