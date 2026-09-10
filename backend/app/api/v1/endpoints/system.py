@@ -3,11 +3,13 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user
 from app.db.session import get_db
+from app.models.audit import AuditLog
+from app.models.strategy import Strategy
 from app.models.user import User
 from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
 from app.services.broker.kite_ticker_service import diagnose_zerodha_connection, kite_ticker_service
@@ -17,6 +19,27 @@ from app.services.monitoring.service import get_application_metrics, get_infra_m
 from app.services.paper_trading.scheduler import diagnose_evaluation_freshness, paper_trading_scheduler
 
 router = APIRouter()
+
+
+async def _diagnose_strategy_statuses(db: AsyncSession) -> dict[str, Any]:
+    """Counts and audit-log-only breakdown of strategy status transitions --
+    proves whether a mark-validated/approve click actually persisted,
+    without needing DB/login access. No strategy names, just counts, UUIDs
+    (not secret) and timestamps, safe on this public endpoint."""
+    counts_result = await db.execute(select(Strategy.status, func.count()).group_by(Strategy.status))
+    counts_by_status = {status: count for status, count in counts_result.all()}
+
+    recent_result = await db.execute(
+        select(AuditLog.action, AuditLog.object_id, AuditLog.created_at)
+        .where(AuditLog.action.in_(["STRATEGY_MARKED_VALIDATED", "STRATEGY_APPROVED"]))
+        .order_by(AuditLog.created_at.desc())
+        .limit(10)
+    )
+    recent_validation_actions = [
+        {"action": action, "strategy_id": str(object_id), "at": created_at.isoformat()}
+        for action, object_id, created_at in recent_result.all()
+    ]
+    return {"counts_by_status": counts_by_status, "recent_validation_actions": recent_validation_actions}
 
 # Core components: an error here means TradingMaster itself is unhealthy and
 # drives the overall status. Optional external data sources are reported
@@ -102,9 +125,11 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     )
     paper_trading_diagnostic["last_tick_evaluated_count"] = paper_trading_scheduler.last_tick_evaluated_count
 
+    strategy_diagnostic = await _diagnose_strategy_statuses(db)
+
     return {
         "status": overall, "components": components, "kite_diagnostic": kite_diagnostic,
-        "paper_trading_diagnostic": paper_trading_diagnostic,
+        "paper_trading_diagnostic": paper_trading_diagnostic, "strategy_diagnostic": strategy_diagnostic,
     }
 
 
