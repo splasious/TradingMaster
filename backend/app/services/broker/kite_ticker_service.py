@@ -56,7 +56,7 @@ from app.core.encryption import decrypt_payload
 from app.db.session import AsyncSessionLocal
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, ConnectionStatus
 from app.models.instrument import Instrument
-from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker, resolve_tradingsymbol_with_be_fallback
 from app.services.market_data.tick_engine import TickEngine, tick_engine
 
 logger = logging.getLogger(__name__)
@@ -184,11 +184,16 @@ async def _resolve_kite_token_map(db, api_key: str) -> dict[str, dict[int, uuid.
             logger.exception("Could not fetch Kite's %s instrument dump for token resolution", segment)
             continue
         token_by_symbol = {row["tradingsymbol"]: int(row["instrument_token"]) for row in dump if row.get("instrument_token")}
-        token_maps[segment] = {
-            token_by_symbol[external_ref]: instrument_id
-            for instrument_id, external_ref in segment_rows
-            if external_ref in token_by_symbol
-        }
+        segment_map: dict[int, uuid.UUID] = {}
+        for instrument_id, external_ref in segment_rows:
+            # Shared with zerodha_broker.get_historical_data's identical
+            # -BE fallback -- a surveillance-moved stock (e.g. HEG, HFCL)
+            # would otherwise silently lose live ticks here even though
+            # its historical candles resolve fine.
+            token = resolve_tradingsymbol_with_be_fallback(token_by_symbol, external_ref)
+            if token is not None:
+                segment_map[token] = instrument_id
+        token_maps[segment] = segment_map
     return token_maps
 
 

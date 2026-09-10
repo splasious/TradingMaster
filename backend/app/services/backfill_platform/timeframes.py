@@ -28,8 +28,10 @@ _NATIVE: dict[str, list[str]] = {
 }
 
 # Available everywhere as a resample of stored daily bars, even where not
-# native to the source itself.
-_DERIVABLE_FROM_DAILY = ["1wk", "1mo"]
+# native to the source itself. Shared (not module-private) since
+# active_timeframe_sync_scheduler.py also needs it, to know when to
+# fetch/store "1d" in place of a source's unsupported "1wk"/"1mo" pair.
+DERIVABLE_FROM_DAILY = ["1wk", "1mo"]
 
 
 @dataclass
@@ -42,7 +44,7 @@ def timeframes_for_source(source: str) -> list[TimeframeOption]:
     native = _NATIVE.get(source, [])
     options = [TimeframeOption(value=tf, native=True) for tf in native]
     native_set = set(native)
-    for tf in _DERIVABLE_FROM_DAILY:
+    for tf in DERIVABLE_FROM_DAILY:
         if tf not in native_set:
             options.append(TimeframeOption(value=tf, native=False))
     order = {"1m": 0, "5m": 1, "15m": 2, "30m": 3, "60m": 4, "4h": 5, "1d": 6, "1wk": 7, "1mo": 8}

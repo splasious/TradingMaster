@@ -63,7 +63,7 @@ class FakeDeltaTransport:
         monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
 
 
-async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None, python_code=None, risk_rules=None):
+async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None, python_code=None, risk_rules=None, timeframe: str = "1d"):
     role = Role(name=f"role_{uuid.uuid4().hex[:6]}", description="x")
     db_session.add(role)
     await db_session.flush()
@@ -94,7 +94,7 @@ async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None,
     db_session.add(strategy)
     await db_session.flush()
     version = StrategyVersion(
-        strategy_id=strategy.id, version_number=1, timeframe="1d", instrument_ids=[str(instrument.id)], parameters={},
+        strategy_id=strategy.id, version_number=1, timeframe=timeframe, instrument_ids=[str(instrument.id)], parameters={},
         entry_rules=entry_rules, exit_rules=exit_rules, python_code=python_code,
         position_sizing={"type": "fixed_quantity", "value": 2}, risk_rules=risk_rules or {"stop_loss_pct": 5.0},
     )
@@ -103,7 +103,7 @@ async def _setup(db_session: AsyncSession, *, entry_rules=None, exit_rules=None,
 
     deployment = LiveDeployment(
         owner_id=user.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
-        broker_account_id=broker_account.id, timeframe="1d", status="active",
+        broker_account_id=broker_account.id, timeframe=timeframe, status="active",
     )
     db_session.add(deployment)
     await db_session.commit()
@@ -193,3 +193,43 @@ async def test_stop_loss_exits_before_checking_signal(db_session: AsyncSession, 
     outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
     assert outcome.action == "exited"
     assert outcome.reason == "stop_loss"
+
+
+async def test_1wk_deployment_derives_signal_from_stored_daily_candles(db_session: AsyncSession, monkeypatch):
+    """Kite/Delta have no native weekly interval for every source -- a
+    "1wk" live deployment must not just silently see zero candles forever.
+    load_candles' resample fallback derives real weekly bars from the
+    "1d" candles _setup seeds."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, timeframe="1wk")
+    fake = FakeDeltaTransport(ticker_price=150.0)
+    fake.patch(monkeypatch)
+
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+    assert outcome.signal == "BUY"
+
+
+async def test_stale_candle_data_blocks_trading_and_raises_critical_alert(db_session: AsyncSession, monkeypatch):
+    """check_freshness itself is unit-tested directly in
+    test_market_data_freshness.py -- this only confirms
+    evaluate_live_deployment actually calls it and refuses to place a real
+    order on stale data (CRITICAL severity, unlike paper trading's
+    WARNING -- real money is what's at risk). Mocked at the
+    check_freshness boundary rather than depending on real wall-clock NSE
+    market hours."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
+    fake = FakeDeltaTransport(ticker_price=150.0)
+    fake.patch(monkeypatch)
+
+    import app.services.live_trading.oms as oms_module
+    monkeypatch.setattr(oms_module, "check_freshness", lambda candles, timeframe, now: "latest candle is way too old")
+
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "blocked"
+    assert outcome.reason == "latest candle is way too old"
+    assert len(fake.placed_orders) == 0  # never reached order placement
+
+    from app.models.alert import Alert, AlertSeverity, AlertType
+    alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
+    assert len(alerts) == 1
+    assert alerts[0].severity == AlertSeverity.CRITICAL.value

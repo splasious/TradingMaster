@@ -45,7 +45,7 @@ from app.services.backfill_platform.catalog_sync import UNDERLYING_NAME_ALIASES
 from app.services.backfill_platform.jobs import run_bf_backfill_job
 from app.services.backfill_platform.symbols import get_or_create_symbol
 from app.services.broker.kite_ticker_service import find_connected_zerodha_account, find_connected_zerodha_credentials
-from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.broker.zerodha_broker import IST, KiteAPIError, ZerodhaKiteBroker
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,11 @@ async def _ensure_underlying_expiries(
     contracts were queued (0 when everything's already covered)."""
     nfo_rows = await broker.get_instruments("NFO")
     kite_name = _kite_name_for(underlying.symbol)
-    targets = _target_expiries(nfo_rows, kite_name, date.today(), EXPIRIES_TO_MAINTAIN)
+    # IST calendar date, not the server's raw UTC one -- NSE expiries are
+    # an IST concept, and the server's UTC "today" runs ~5.5h behind IST
+    # every day between UTC 18:30 and 24:00 (00:00-05:30 IST).
+    today_ist = datetime.now(timezone.utc).astimezone(IST).date()
+    targets = _target_expiries(nfo_rows, kite_name, today_ist, EXPIRIES_TO_MAINTAIN)
     if not targets:
         return 0
 

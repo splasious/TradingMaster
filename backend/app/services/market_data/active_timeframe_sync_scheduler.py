@@ -34,7 +34,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import as_aware_utc
@@ -43,6 +43,7 @@ from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperDeployment
+from app.services.backfill_platform.timeframes import DERIVABLE_FROM_DAILY
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
 from app.services.market_data.base import MarketDataSourceError
@@ -52,6 +53,18 @@ logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
 LOOKBACK = timedelta(days=2)
+
+# Kite has no native weekly/monthly interval at all (KITE_INTERVAL_MAP has
+# no "1wk"/"1mo" entry) -- a "1wk"/"1mo" Zerodha pair fetches/stores "1d"
+# instead; load_candles' resample-on-read (paper/live trading engines,
+# Charts) derives the real weekly/monthly bars from that at read time.
+_DAILY_BACKFILL_LOOKBACK = timedelta(days=400)
+# Below this many stored daily bars, a derived-timeframe pair hasn't got
+# enough underlying history to produce a real weekly/monthly bar yet (60
+# weekly bars, the trading engines' own LOOKBACK_BARS, needs roughly this
+# many trading days) -- pull the wide one-time window instead of the
+# normal 2-day incremental one until it does.
+_MIN_DAILY_BARS_FOR_DERIVED_TIMEFRAME = 90
 
 
 async def _active_pairs_with_instruments(db: AsyncSession) -> tuple[set[tuple], dict]:
@@ -98,17 +111,21 @@ async def diagnose_active_pairs(db: AsyncSession) -> list[dict]:
         instrument = instruments.get(instrument_id)
         if instrument is None:
             continue
+        # A Zerodha "1wk"/"1mo" pair is actually stored under "1d" (see
+        # sync()'s own comment) -- check that, or this would always show
+        # null even once the pair is genuinely covered via resample-on-read.
+        stored_timeframe = "1d" if instrument.data_source == "zerodha_kite" and timeframe in DERIVABLE_FROM_DAILY else timeframe
         latest_ts = (
             await db.execute(
                 select(OhlcvCandle.ts)
-                .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.timeframe == timeframe)
+                .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.timeframe == stored_timeframe)
                 .order_by(OhlcvCandle.ts.desc())
                 .limit(1)
             )
         ).scalar_one_or_none()
         rows.append({
             "symbol": instrument.symbol, "external_ref": instrument.external_ref, "exchange": instrument.exchange,
-            "timeframe": timeframe, "data_source": instrument.data_source,
+            "timeframe": timeframe, "stored_as_timeframe": stored_timeframe, "data_source": instrument.data_source,
             "latest_candle_ts": as_aware_utc(latest_ts).isoformat() if latest_ts else None,
         })
     return rows
@@ -174,36 +191,69 @@ class ActiveTimeframeSyncScheduler:
         now = datetime.now(timezone.utc)
         synced = 0
         skipped_zerodha = 0
+        seen_zerodha_fetches: set[tuple] = set()
         for instrument_id, timeframe in pairs:
             instrument = instruments.get(instrument_id)
             if instrument is None:
                 continue
 
+            is_zerodha = instrument.data_source == "zerodha_kite"
+            # Kite has no native weekly/monthly interval at all -- fetch
+            # and store "1d" instead; load_candles' resample-on-read
+            # (paper/live trading engines, Charts) derives the actual
+            # 1wk/1mo bars from that at read time.
+            fetch_timeframe = "1d" if is_zerodha and timeframe in DERIVABLE_FROM_DAILY else timeframe
+
             try:
-                if instrument.data_source == "zerodha_kite":
+                if is_zerodha:
                     if zerodha_broker is None:
                         skipped_zerodha += 1
                         continue
+                    fetch_key = (instrument.id, fetch_timeframe)
+                    if fetch_key in seen_zerodha_fetches:
+                        # Both a "1wk" and a "1mo" pair on the same
+                        # instrument both map to "1d" -- already fetched
+                        # and stored it once this tick.
+                        continue
+                    seen_zerodha_fetches.add(fetch_key)
+
+                    lookback = LOOKBACK
+                    if fetch_timeframe != timeframe:
+                        # A derived pair needs real underlying daily
+                        # history before load_candles can produce a
+                        # meaningful weekly/monthly bar -- pull the wide,
+                        # one-time window until there's enough, then fall
+                        # back to the normal incremental one.
+                        existing_daily_count = (
+                            await db.execute(
+                                select(func.count()).select_from(OhlcvCandle).where(
+                                    OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == "1d"
+                                )
+                            )
+                        ).scalar_one()
+                        if existing_daily_count < _MIN_DAILY_BARS_FOR_DERIVED_TIMEFRAME:
+                            lookback = _DAILY_BACKFILL_LOOKBACK
+
                     # Segment ("NFO" vs "NSE") comes straight from the
                     # instrument's own exchange -- correctly covers the
                     # index itself (NSE) and any NFO option/future alike.
                     bars = await zerodha_broker.get_historical_data(
-                        instrument.external_ref, timeframe, now - LOOKBACK, now, instrument.exchange
+                        instrument.external_ref, fetch_timeframe, now - lookback, now, instrument.exchange
                     )
                 else:
                     source = get_market_data_source(instrument.data_source)
-                    bars = await source.get_historical_data(instrument.external_ref, timeframe, now - LOOKBACK, now)
+                    bars = await source.get_historical_data(instrument.external_ref, fetch_timeframe, now - LOOKBACK, now)
             except (MarketDataSourceError, KiteAPIError):
                 continue
             except Exception:
-                logger.exception("Active timeframe sync failed for %s:%s", instrument.symbol, timeframe)
+                logger.exception("Active timeframe sync failed for %s:%s", instrument.symbol, fetch_timeframe)
                 continue
             if not bars:
                 continue
 
             existing_result = await db.execute(
                 select(OhlcvCandle.ts).where(
-                    OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == timeframe
+                    OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == fetch_timeframe
                 )
             )
             existing_ts = {as_aware_utc(ts) for ts in existing_result.scalars().all()}
@@ -213,7 +263,7 @@ class ActiveTimeframeSyncScheduler:
                     continue
                 db.add(
                     OhlcvCandle(
-                        instrument_id=instrument.id, timeframe=timeframe, ts=bar_ts,
+                        instrument_id=instrument.id, timeframe=fetch_timeframe, ts=bar_ts,
                         open=bar["open"], high=bar["high"], low=bar["low"], close=bar["close"],
                         volume=bar.get("volume"), open_interest=bar.get("open_interest"),
                         source=instrument.data_source,

@@ -60,14 +60,7 @@ async def _active_deployment(db: AsyncSession, *, timeframe: str) -> tuple[Instr
     return instrument, deployment
 
 
-async def _active_zerodha_deployment(db: AsyncSession, *, timeframe: str) -> tuple[Instrument, PaperDeployment]:
-    instrument = Instrument(
-        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
-        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE", expiry=date(2026, 9, 24), strike=23000, option_type="CE",
-    )
-    db.add(instrument)
-    await db.flush()
-
+async def _active_zerodha_deployment_on(db: AsyncSession, instrument: Instrument, *, timeframe: str) -> PaperDeployment:
     owner_id = uuid.uuid4()
     strategy = Strategy(name="ATS Zerodha Test Strategy", owner_id=owner_id, code_type="python")
     db.add(strategy)
@@ -90,6 +83,17 @@ async def _active_zerodha_deployment(db: AsyncSession, *, timeframe: str) -> tup
     )
     db.add(deployment)
     await db.commit()
+    return deployment
+
+
+async def _active_zerodha_deployment(db: AsyncSession, *, timeframe: str) -> tuple[Instrument, PaperDeployment]:
+    instrument = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE", expiry=date(2026, 9, 24), strike=23000, option_type="CE",
+    )
+    db.add(instrument)
+    await db.flush()
+    deployment = await _active_zerodha_deployment_on(db, instrument, timeframe=timeframe)
     return instrument, deployment
 
 
@@ -248,3 +252,78 @@ async def test_sync_skips_zerodha_pairs_without_a_connected_account(db_session: 
     scheduler = ActiveTimeframeSyncScheduler()
     synced = await scheduler.sync(db_session)
     assert synced == 0
+
+
+async def test_sync_fetches_1wk_zerodha_pair_as_1d_with_wide_backfill_window(db_session: AsyncSession, monkeypatch):
+    """Kite has no native weekly interval -- a "1wk" pair must fetch and
+    store "1d" instead, and (with zero existing daily history) use the
+    wide one-time backfill window, not the normal 2-day incremental one."""
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="1wk")
+    await _seed_connected_zerodha_account(db_session)
+    bar_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    captured = {}
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        captured["timeframe"] = timeframe
+        captured["window_days"] = (end - start).days
+        return [{"ts": bar_ts, "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 10}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    synced = await scheduler.sync(db_session)
+    assert synced == 1
+    assert captured["timeframe"] == "1d"  # not "1wk" -- Kite doesn't support it
+    assert captured["window_days"] > 300  # wide one-time backfill, not the normal 2-day window
+
+    candles = (
+        await db_session.execute(
+            select(OhlcvCandle).where(OhlcvCandle.instrument_id == instrument.id)
+        )
+    ).scalars().all()
+    assert len(candles) == 1
+    assert candles[0].timeframe == "1d"  # stored as "1d", not "1wk"
+
+
+async def test_sync_uses_narrow_lookback_once_enough_1d_bars_exist(db_session: AsyncSession, monkeypatch):
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="1wk")
+    await _seed_connected_zerodha_account(db_session)
+    base_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for i in range(95):
+        db_session.add(OhlcvCandle(
+            instrument_id=instrument.id, timeframe="1d", ts=base_ts + timedelta(days=i),
+            open=1, high=1, low=1, close=1, volume=1, source="zerodha_kite",
+        ))
+    await db_session.commit()
+
+    captured = {}
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        captured["window_days"] = (end - start).days
+        return []
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    await scheduler.sync(db_session)
+    assert captured["window_days"] <= 2  # enough daily history already -- back to the normal incremental window
+
+
+async def test_sync_dedupes_1wk_and_1mo_fetches_for_the_same_instrument(db_session: AsyncSession, monkeypatch):
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="1wk")
+    await _active_zerodha_deployment_on(db_session, instrument, timeframe="1mo")
+    await _seed_connected_zerodha_account(db_session)
+
+    call_count = {"n": 0}
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        call_count["n"] += 1
+        return [{"ts": datetime(2026, 1, 1, tzinfo=timezone.utc), "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    synced = await scheduler.sync(db_session)
+    assert call_count["n"] == 1  # both "1wk" and "1mo" map to the same "1d" fetch -- only done once
+    assert synced == 1

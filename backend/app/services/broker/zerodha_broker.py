@@ -42,6 +42,7 @@ arrive via authenticate() from the Fernet-encrypted broker_credentials
 table, the same mechanism every broker in this codebase uses.
 """
 
+import asyncio
 import csv
 import hashlib
 import io
@@ -65,6 +66,10 @@ KITE_INTERVAL_MAP = {
     "1d": "day",
 }
 
+# _request()'s bounded 429 retry -- see its own comment for why.
+_MAX_429_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = 1.0
+
 # Kite Connect's historical-candle `from`/`to` params are IST (UTC+5:30)
 # wall-clock, always -- see get_historical_data's own comment.
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -76,6 +81,22 @@ class KiteAPIError(Exception):
 
 _INSTRUMENTS_CACHE: dict[str, dict[str, Any]] = {}  # segment -> {"rows": ..., "fetched_at": ...}
 _INSTRUMENTS_CACHE_TTL = timedelta(minutes=30)
+
+
+def resolve_tradingsymbol_with_be_fallback(by_symbol: dict, symbol: str):
+    """NSE periodically moves a stock into its "BE" (trade-to-trade)
+    settlement series for surveillance reasons -- Kite then lists it under
+    "<SYMBOL>-BE" rather than the plain tradingsymbol. Confirmed live: HEG
+    and HFCL, both real, actively-traded NSE equities, only appear in
+    Kite's dump as "HEG-BE"/"HFCL-BE". Generic over `by_symbol`'s value
+    type (a full instrument-dump row, or just a resolved token) so it's
+    shared by get_historical_data (needs the row) and
+    kite_ticker_service._resolve_kite_token_map (needs only the token) --
+    one fallback rule, not two, so a surveillance-moved stock can't lose
+    live ticks while its historical candles keep working, or vice versa."""
+    if symbol in by_symbol:
+        return by_symbol[symbol]
+    return by_symbol.get(f"{symbol}-BE")
 
 
 class KiteLoginRequired(KiteAPIError):
@@ -122,16 +143,34 @@ class ZerodhaKiteBroker(BrokerInterface):
         if self._access_token:
             headers["Authorization"] = f"token {self._api_key}:{self._access_token}"
 
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                # Kite's API takes form-encoded bodies, not JSON, for every
-                # write endpoint -- confirmed in their docs, unlike Delta's
-                # JSON API.
-                resp = await client.request(method, f"{self.BASE_URL}{path}", headers=headers, params=params, data=data)
-        except httpx.ConnectError as exc:
-            raise KiteAPIError("Could not reach Zerodha Kite's API.") from exc
-        except httpx.TimeoutException as exc:
-            raise KiteAPIError("Zerodha Kite API request timed out.") from exc
+        attempt = 0
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    # Kite's API takes form-encoded bodies, not JSON, for
+                    # every write endpoint -- confirmed in their docs,
+                    # unlike Delta's JSON API.
+                    resp = await client.request(method, f"{self.BASE_URL}{path}", headers=headers, params=params, data=data)
+            except httpx.ConnectError as exc:
+                raise KiteAPIError("Could not reach Zerodha Kite's API.") from exc
+            except httpx.TimeoutException as exc:
+                raise KiteAPIError("Zerodha Kite API request timed out.") from exc
+
+            # Only 429 is retried -- everything else keeps today's
+            # behavior exactly (raise, caller decides). This codebase has
+            # no retry/backoff dependency installed; a small bounded loop
+            # here doesn't need one. active_timeframe_sync_scheduler.py
+            # makes hundreds of sequential calls per tick as the deployed
+            # pair count grows -- without this, a single 429 mid-cycle
+            # used to just fail that pair outright with no chance to
+            # recover on the very next call.
+            if resp.status_code == 429 and attempt < _MAX_429_RETRIES:
+                attempt += 1
+                retry_after = resp.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else _RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                await asyncio.sleep(delay)
+                continue
+            break
 
         try:
             body = resp.json()
@@ -281,14 +320,8 @@ class ZerodhaKiteBroker(BrokerInterface):
             raise KiteAPIError(f"Zerodha Kite does not support timeframe '{timeframe}' via this adapter (supported: {sorted(KITE_INTERVAL_MAP)})")
 
         instruments = await self.get_instruments(segment)
-        match = next((row for row in instruments if row.get("tradingsymbol") == symbol), None)
-        if match is None:
-            # NSE periodically moves a stock into its "BE" (trade-to-trade)
-            # settlement series for surveillance reasons -- Kite then lists
-            # it under "<SYMBOL>-BE" rather than the plain tradingsymbol.
-            # Confirmed live: HEG and HFCL, both real, actively-traded NSE
-            # equities, only appear in Kite's dump as "HEG-BE"/"HFCL-BE".
-            match = next((row for row in instruments if row.get("tradingsymbol") == f"{symbol}-BE"), None)
+        by_symbol = {row["tradingsymbol"]: row for row in instruments if row.get("tradingsymbol")}
+        match = resolve_tradingsymbol_with_be_fallback(by_symbol, symbol)
         if match is None:
             raise KiteAPIError(f"'{symbol}' not found in Kite's {segment} instrument list")
         token = match["instrument_token"]

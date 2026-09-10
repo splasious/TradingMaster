@@ -79,6 +79,64 @@ async def test_authenticate_surfaces_kite_error_clearly(monkeypatch):
         await broker.authenticate({"api_key": "key123", "api_secret": "secret456", "request_token": "bad"})
 
 
+def test_resolve_tradingsymbol_with_be_fallback_matches_plain_symbol():
+    from app.services.broker.zerodha_broker import resolve_tradingsymbol_with_be_fallback
+    by_symbol = {"INFY": {"instrument_token": "1"}, "HEG-BE": {"instrument_token": "2"}}
+    assert resolve_tradingsymbol_with_be_fallback(by_symbol, "INFY") == {"instrument_token": "1"}
+
+
+def test_resolve_tradingsymbol_with_be_fallback_falls_back_to_be_suffix():
+    from app.services.broker.zerodha_broker import resolve_tradingsymbol_with_be_fallback
+    by_symbol = {"HEG-BE": {"instrument_token": "2"}}
+    assert resolve_tradingsymbol_with_be_fallback(by_symbol, "HEG") == {"instrument_token": "2"}
+
+
+def test_resolve_tradingsymbol_with_be_fallback_none_when_neither_matches():
+    from app.services.broker.zerodha_broker import resolve_tradingsymbol_with_be_fallback
+    assert resolve_tradingsymbol_with_be_fallback({}, "NOTAREALSYMBOL") is None
+
+
+async def test_request_retries_on_429_then_succeeds(monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", lambda *a, **k: _noop())
+    calls = {"n": 0}
+
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, json={}, request=httpx.Request("GET", url))
+        return _mock_response(200, {"status": "success", "data": {"user_id": "AB1234"}})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    result = await broker.get_profile()
+    assert result == {"user_id": "AB1234"}
+    assert calls["n"] == 3  # 2 x 429, then success -- no more retries than needed
+
+
+async def test_request_gives_up_after_max_429_retries(monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", lambda *a, **k: _noop())
+    calls = {"n": 0}
+
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        calls["n"] += 1
+        return httpx.Response(429, json={"status": "error", "error_type": "TooManyRequests", "message": "rate limited"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    with pytest.raises(KiteAPIError, match="rate limited"):
+        await broker.get_profile()
+    from app.services.broker.zerodha_broker import _MAX_429_RETRIES
+    assert calls["n"] == _MAX_429_RETRIES + 1  # the original attempt plus every retry, then give up
+
+
+async def _noop():
+    return None
+
+
 async def test_get_balance_parses_equity_margins(monkeypatch):
     async def fake_request(self, method, url, headers=None, params=None, data=None):
         return _mock_response(200, {

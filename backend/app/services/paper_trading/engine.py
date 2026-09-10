@@ -23,7 +23,9 @@ from app.models.paper_trading import OrderStatus, PaperDeployment, PaperOrder, P
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
+from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import PositionSizing, quantity_for
+from app.services.market_data.freshness import check_freshness
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.ranking import basket_breadth, get_universe_ranks
 from app.services.risk.engine import evaluate_entry, evaluate_exit
@@ -37,7 +39,9 @@ LOOKBACK_BARS = 60
 # 10-second evaluation tick (paper_trading/scheduler.py's
 # EVALUATION_INTERVAL_SECONDS) for as long as it persists is spam, not
 # signal. Still recorded as a rejected PaperOrder every tick (real audit
-# trail of every attempt); only the user-facing Alert is throttled.
+# trail of every attempt); only the user-facing Alert is throttled. Also
+# reused for the DATA_DISCONNECTED staleness alert below -- same
+# "don't spam an ongoing condition" reasoning applies identically there.
 REJECTION_ALERT_COOLDOWN = timedelta(minutes=30)
 
 
@@ -68,13 +72,13 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
     position_result = await db.execute(select(PaperPosition).where(PaperPosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
 
-    candles_result = await db.execute(
-        select(OhlcvCandle)
-        .where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == deployment.timeframe)
-        .order_by(OhlcvCandle.ts.desc())
-        .limit(LOOKBACK_BARS)
-    )
-    candles = list(reversed(candles_result.scalars().all()))
+    # load_candles falls back to resampling the finest stored base
+    # timeframe when the deployment's own timeframe isn't directly stored
+    # (e.g. "1wk"/"1mo", which Kite has no native interval for at all --
+    # active_timeframe_sync_scheduler.py keeps the underlying "1d" bars
+    # fresh instead) -- same trusted path backtesting already uses,
+    # rather than a raw query that silently returns nothing for those.
+    candles = (await load_candles(db, instrument.id, deployment.timeframe))[-LOOKBACK_BARS:]
 
     current_price = tick_engine.get_current_price(instrument.id)
     if current_price is None:
@@ -95,6 +99,34 @@ async def evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) -> 
             return await _exit_position(db, deployment, portfolio, position, stop_price, now, "stop_loss")
         if target_price is not None and current_price >= target_price:
             return await _exit_position(db, deployment, portfolio, position, target_price, now, "take_profit")
+
+    # Stale/missing candle data must not silently drive a real BUY/SELL
+    # decision -- protective stop-loss/take-profit above stays fully
+    # responsive either way (it runs against the live tick, not candles).
+    # Only enforced while NSE is actually open (see check_freshness); a
+    # normal after-hours gap is never mistaken for a broken sync.
+    staleness_reason = check_freshness(candles, deployment.timeframe, now)
+    if staleness_reason is not None:
+        recent_same_alert = (
+            await db.execute(
+                select(Alert.id)
+                .where(
+                    Alert.object_type == "paper_deployment",
+                    Alert.object_id == str(deployment.id),
+                    Alert.alert_type == AlertType.DATA_DISCONNECTED.value,
+                    Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if recent_same_alert is None:
+            await create_alert(
+                db, user_id=portfolio.user_id, alert_type=AlertType.DATA_DISCONNECTED.value, severity=AlertSeverity.WARNING,
+                title="Paper deployment data is stale", message=staleness_reason,
+                object_type="paper_deployment", object_id=str(deployment.id),
+            )
+            await db.commit()
+        return EvaluationOutcome(action="skipped", reason=staleness_reason)
 
     if version.python_code:
         # Signal evaluation deliberately uses only real, closed candles --

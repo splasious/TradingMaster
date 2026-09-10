@@ -126,6 +126,24 @@ async def test_resolve_kite_token_map_empty_when_no_instruments(db_session: Asyn
     assert await svc._resolve_kite_token_map(db_session, "kitekey") == {}
 
 
+async def test_resolve_kite_token_map_falls_back_to_be_suffix(db_session: AsyncSession, monkeypatch):
+    """A stock NSE moved to its "BE" surveillance series (e.g. HEG, HFCL --
+    see zerodha_broker.py) must still resolve to a live-tick token, not
+    silently drop out of the subscription map."""
+    heg = Instrument(exchange="NSE", symbol="HEG", name="HEG", instrument_type="equity", data_source="zerodha_kite", external_ref="HEG")
+    db_session.add(heg)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        assert segment == "NSE"
+        return [{"tradingsymbol": "HEG-BE", "instrument_token": "444"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    token_maps = await svc._resolve_kite_token_map(db_session, "kitekey")
+    assert token_maps == {"NSE": {444: heg.id}}
+
+
 def test_on_ticks_updates_price_and_oi_for_mapped_instruments():
     engine = TickEngine()
     service = svc.KiteTickerService(engine)

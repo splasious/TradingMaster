@@ -28,15 +28,16 @@ from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.broker import Broker, BrokerAccount, BrokerCredential
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition, LiveTrade
-from app.models.market_data import OhlcvCandle
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
+from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.live_trading.kill_switch import get_kill_switch
 from app.services.live_trading.order_state_machine import STATE_MAPS, LiveOrderStatus
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
+from app.services.market_data.freshness import check_freshness
 from app.services.risk.engine import evaluate_entry, evaluate_exit
 from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_strategy
@@ -131,13 +132,13 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
     except MarketDataSourceError as exc:
         return LiveOutcome(action="error", reason=f"Could not fetch live price: {exc}")
 
-    candles_result = await db.execute(
-        select(OhlcvCandle)
-        .where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == deployment.timeframe)
-        .order_by(OhlcvCandle.ts.desc())
-        .limit(LOOKBACK_BARS)
-    )
-    candles = list(reversed(candles_result.scalars().all()))
+    # load_candles falls back to resampling the finest stored base
+    # timeframe when the deployment's own timeframe isn't directly stored
+    # (e.g. "1wk"/"1mo", which Kite has no native interval for at all --
+    # active_timeframe_sync_scheduler.py keeps the underlying "1d" bars
+    # fresh instead) -- same trusted path backtesting already uses,
+    # rather than a raw query that silently returns nothing for those.
+    candles = (await load_candles(db, instrument.id, deployment.timeframe))[-LOOKBACK_BARS:]
 
     now = datetime.now(timezone.utc)
 
@@ -150,6 +151,36 @@ async def evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment)
             return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "stop_loss", stop_price)
         if target_price is not None and current_price >= target_price:
             return await _exit_position(db, deployment, broker, broker_row.code, position, order_context, now, "take_profit", target_price)
+
+    # Stale/missing candle data must never silently drive a REAL BUY/SELL
+    # decision -- protective stop-loss/take-profit above stays fully
+    # responsive either way (it runs against the live quote, not candles).
+    # Only enforced while NSE is actually open (see check_freshness); a
+    # normal after-hours gap is never mistaken for a broken sync. This is
+    # the actual safety gate real capital depends on -- CRITICAL severity,
+    # unlike paper trading's WARNING, since a real order is what's at risk.
+    staleness_reason = check_freshness(candles, deployment.timeframe, now)
+    if staleness_reason is not None:
+        recent_same_alert = (
+            await db.execute(
+                select(Alert.id)
+                .where(
+                    Alert.object_type == "live_deployment",
+                    Alert.object_id == str(deployment.id),
+                    Alert.alert_type == AlertType.DATA_DISCONNECTED.value,
+                    Alert.created_at >= now - REJECTION_ALERT_COOLDOWN,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if recent_same_alert is None:
+            await create_alert(
+                db, user_id=deployment.owner_id, alert_type=AlertType.DATA_DISCONNECTED.value, severity=AlertSeverity.CRITICAL,
+                title="LIVE deployment data is stale -- trading blocked", message=staleness_reason,
+                object_type="live_deployment", object_id=str(deployment.id),
+            )
+            await db.commit()
+        return LiveOutcome(action="blocked", reason=staleness_reason)
 
     if version.python_code:
         # Signal evaluation deliberately uses only real, closed candles --

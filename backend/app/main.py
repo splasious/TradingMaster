@@ -12,6 +12,7 @@ from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_sche
 from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import kite_ticker_service
+from app.services.live_trading.scheduler import live_trading_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     tick_engine.start()
     real_price_feed.start()
     paper_trading_scheduler.start()
+    live_trading_scheduler.start()
     bf_live_sync_scheduler.start()
     catalog_sync_scheduler.start()
     nfo_expiry_rotation_scheduler.start()
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
     nfo_expiry_rotation_scheduler.stop()
     catalog_sync_scheduler.stop()
     bf_live_sync_scheduler.stop()
+    live_trading_scheduler.stop()
     paper_trading_scheduler.stop()
     real_price_feed.stop()
     tick_engine.stop()

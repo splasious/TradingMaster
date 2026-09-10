@@ -14,7 +14,8 @@ from app.services.paper_trading.engine import evaluate_deployment
 
 
 async def _setup(
-    db_session: AsyncSession, *, entry_rules=None, exit_rules=None, python_code=None, risk_rules=None, cash=100000.0
+    db_session: AsyncSession, *, entry_rules=None, exit_rules=None, python_code=None, risk_rules=None, cash=100000.0,
+    timeframe: str = "1d",
 ):
     role = Role(name="trader_pt", description="x")
     db_session.add(role)
@@ -40,7 +41,7 @@ async def _setup(
     await db_session.flush()
 
     version = StrategyVersion(
-        strategy_id=strategy.id, version_number=1, timeframe="1d", instrument_ids=[str(instrument.id)],
+        strategy_id=strategy.id, version_number=1, timeframe=timeframe, instrument_ids=[str(instrument.id)],
         parameters={}, entry_rules=entry_rules, exit_rules=exit_rules, python_code=python_code,
         position_sizing={"type": "fixed_quantity", "value": 10}, risk_rules=risk_rules or {},
     )
@@ -53,7 +54,7 @@ async def _setup(
 
     deployment = PaperDeployment(
         portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=instrument.id,
-        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+        timeframe=timeframe, status=DeploymentStatus.ACTIVE.value,
     )
     db_session.add(deployment)
     await db_session.commit()
@@ -445,3 +446,56 @@ async def test_percent_capital_sizing_uses_pool_equity_not_shrinking_cash(db_ses
     # mark-to-market) even though cash alone dropped to 80,000 -- sizing off
     # cash alone would give floor(80,000 * 0.20 / 100) = 160 here instead.
     assert second_position.quantity == 200.0
+
+
+async def test_1wk_deployment_derives_signal_from_stored_daily_candles(db_session: AsyncSession):
+    """Kite has no native weekly interval -- a "1wk" deployment must not
+    just silently see zero candles forever. load_candles' resample
+    fallback derives real weekly bars from the "1d" candles _setup seeds,
+    the same underlying data active_timeframe_sync_scheduler.py now keeps
+    fresh for a "1wk"/"1mo" pair (see that module's own comment)."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, timeframe="1wk")
+    tick_engine._last_price.pop(ctx["instrument"].id, None)
+
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+    assert outcome.signal == "BUY"
+
+
+async def test_stale_candle_data_skips_and_raises_data_disconnected_alert(db_session: AsyncSession, monkeypatch):
+    """check_freshness itself is unit-tested directly in
+    test_market_data_freshness.py -- this only confirms evaluate_deployment
+    actually calls it and reacts correctly (skip, don't silently trade;
+    alert once, not every tick). Mocked at the check_freshness boundary
+    rather than depending on real wall-clock NSE market hours."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
+    tick_engine._last_price.pop(ctx["instrument"].id, None)
+
+    import app.services.paper_trading.engine as engine_module
+    monkeypatch.setattr(engine_module, "check_freshness", lambda candles, timeframe, now: "latest candle is way too old")
+
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "skipped"
+    assert outcome.reason == "latest candle is way too old"
+
+    position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one_or_none()
+    assert position is None  # never traded on the stale data
+
+    from app.models.alert import Alert, AlertType
+    alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
+    assert len(alerts) == 1
+
+
+async def test_stale_data_alert_is_throttled_by_cooldown(db_session: AsyncSession, monkeypatch):
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
+    tick_engine._last_price.pop(ctx["instrument"].id, None)
+
+    import app.services.paper_trading.engine as engine_module
+    monkeypatch.setattr(engine_module, "check_freshness", lambda candles, timeframe, now: "stale")
+
+    await evaluate_deployment(db_session, ctx["deployment"])
+    await evaluate_deployment(db_session, ctx["deployment"])  # second tick, same cooldown window
+
+    from app.models.alert import Alert, AlertType
+    alerts = (await db_session.execute(select(Alert).where(Alert.alert_type == AlertType.DATA_DISCONNECTED.value))).scalars().all()
+    assert len(alerts) == 1  # throttled, not duplicated per tick
