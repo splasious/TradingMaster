@@ -14,7 +14,7 @@ from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCre
 from app.models.live_trading import LiveDeployment
 from app.models.user import User
 from app.schemas.broker import (
-    BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerOut,
+    BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerBalanceOut, BrokerOut,
     HDFCCallbackIn, HDFCLoginUrlOut, KiteCallbackIn, KiteLoginUrlOut,
 )
 from app.services.audit import write_audit_log
@@ -235,6 +235,40 @@ async def disconnect_broker_account(
     await db.commit()
     await db.refresh(account, attribute_names=["connection"])
     return _account_out(account)
+
+
+@router.get("/accounts/{account_id}/balance", response_model=BrokerBalanceOut)
+async def get_broker_account_balance(
+    account_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader"))
+) -> BrokerBalanceOut:
+    """Real balance straight from the broker (adapter.get_balance()) --
+    the Portfolio page's only source for real capital figures, never a
+    locally-tracked number. Not polled/auto-refreshed anywhere -- called
+    on page-mount only, to respect broker rate limits (Zerodha's 429s
+    have already caused real problems elsewhere in this codebase)."""
+    result = await db.execute(
+        select(BrokerAccount)
+        .options(selectinload(BrokerAccount.broker), selectinload(BrokerAccount.credential))
+        .where(BrokerAccount.id == uuid.UUID(account_id), BrokerAccount.user_id == user.id)
+    )
+    account = result.scalar_one_or_none()
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
+    if account.credential is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No credentials stored for this account")
+
+    creds = json.loads(decrypt_payload(account.credential.encrypted_payload))
+    adapter = get_broker_adapter(account.broker.code)
+    try:
+        await adapter.authenticate(creds)
+        balance = await adapter.get_balance()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch balance: {exc}") from exc
+
+    return BrokerBalanceOut(
+        available_margin=balance.get("available_margin", 0.0), used_margin=balance.get("used_margin", 0.0),
+        currency=balance.get("currency", "INR"),
+    )
 
 
 async def _get_owned_interactive_account(db: AsyncSession, account_id: str, user: User, broker_code: str, broker_label: str) -> BrokerAccount:

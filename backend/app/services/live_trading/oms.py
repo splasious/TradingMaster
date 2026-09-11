@@ -44,6 +44,21 @@ from app.services.strategy.sandbox import run_python_strategy
 
 LOOKBACK_BARS = 60
 
+
+async def _realized_pnl_today(db: AsyncSession, deployment_id, now: datetime) -> float:
+    """Sum of this deployment's LiveTrade.pnl for round-trips that closed
+    today (UTC) -- mirrors paper_trading/engine.py's identical query
+    against PaperTrade, scoped to portfolio there vs. deployment here
+    (live trading has no shared-capital-pool concept the way a paper
+    portfolio does; each deployment's risk limits are already evaluated
+    against its own broker balance in _try_enter, so this stays
+    per-deployment too, not account-wide)."""
+    today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    result = await db.execute(
+        select(LiveTrade).where(LiveTrade.deployment_id == deployment_id, LiveTrade.exit_ts >= today_start)
+    )
+    return sum(t.pnl for t in result.scalars().all())
+
 # See paper_trading/engine.py's REJECTION_ALERT_COOLDOWN -- same reasoning:
 # a rejection reason like "max positions reached" is an ongoing, expected
 # state while a deployment stays fully allocated, not a new event on every
@@ -302,11 +317,12 @@ async def _try_enter(db, deployment, broker, broker_code, version, price, order_
     open_position_count = (
         await db.execute(select(LivePosition).join(LiveDeployment).where(LiveDeployment.owner_id == deployment.owner_id))
     ).scalars().all()
+    realized_pnl_today = await _realized_pnl_today(db, deployment.id, now)
 
     decision = evaluate_entry(
         available_cash=available_cash, notional=quantity * price,
         open_position_count=len(open_position_count), max_positions=version.risk_rules.get("max_positions"),
-        realized_pnl_today=0.0, initial_capital=available_cash or 1.0,
+        realized_pnl_today=realized_pnl_today, initial_capital=available_cash or 1.0,
         max_daily_loss_pct=version.risk_rules.get("max_daily_loss_pct"),
     )
     if not decision.approved:

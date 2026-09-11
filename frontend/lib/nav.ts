@@ -58,10 +58,10 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     items: [
       { label: "Paper Trading", href: "/paper-trading", icon: Activity },
       { label: "Live Trading", href: "/live-trading", icon: Radio },
-      { label: "Portfolio", href: "/portfolio", icon: Briefcase, unbuilt: true },
-      { label: "Orders", href: "/orders", icon: ListOrdered, unbuilt: true },
-      { label: "Positions", href: "/positions", icon: Wallet, unbuilt: true },
-      { label: "Risk Management", href: "/risk", icon: ShieldAlert, unbuilt: true },
+      { label: "Portfolio", href: "/portfolio", icon: Briefcase },
+      { label: "Orders", href: "/orders", icon: ListOrdered },
+      { label: "Positions", href: "/positions", icon: Wallet },
+      { label: "Risk Management", href: "/risk", icon: ShieldAlert },
     ],
   },
   {

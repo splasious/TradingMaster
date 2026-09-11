@@ -456,11 +456,16 @@ export interface LiveDeploymentOut {
   last_signal_reason: string | null;
   created_at: string;
   stopped_at: string | null;
+  risk_rules: RiskRules;
+  realized_pnl_today: number;
   open_position: LivePositionOut | null;
 }
 
 export interface LiveOrderOut {
   id: string;
+  deployment_id: string;
+  strategy_name: string;
+  instrument_symbol: string;
   client_order_id: string;
   broker_order_id: string | null;
   side: string;
@@ -471,11 +476,32 @@ export interface LiveOrderOut {
   confirmed_at: string | null;
 }
 
+export interface LiveTradeOut {
+  id: string;
+  deployment_id: string;
+  strategy_name: string;
+  instrument_symbol: string;
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+  exit_reason: string;
+}
+
 export interface LiveEvaluationOut {
   action: string;
   signal: string | null;
   price: number | null;
   reason: string | null;
+}
+
+export interface BrokerBalanceOut {
+  available_margin: number;
+  used_margin: number;
+  currency: string;
 }
 
 export interface KillSwitchOut {

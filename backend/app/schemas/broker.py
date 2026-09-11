@@ -54,3 +54,9 @@ class HDFCLoginUrlOut(BaseModel):
 
 class HDFCCallbackIn(BaseModel):
     auth_code: str
+
+
+class BrokerBalanceOut(BaseModel):
+    available_margin: float
+    used_margin: float
+    currency: str

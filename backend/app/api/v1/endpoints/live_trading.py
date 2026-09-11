@@ -10,7 +10,7 @@ from app.db.session import get_db
 from app.models.alert import AlertSeverity, AlertType
 from app.models.broker import Broker, BrokerAccount
 from app.models.instrument import Instrument
-from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition
+from app.models.live_trading import LiveDeployment, LiveOrder, LivePosition, LiveTrade
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.schemas.live_trading import (
@@ -21,13 +21,14 @@ from app.schemas.live_trading import (
     LiveDeploymentOut,
     LiveOrderOut,
     LivePositionOut,
+    LiveTradeOut,
     ReconciliationOut,
     SafetyCheckOut,
 )
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.live_trading import kill_switch as kill_switch_service
-from app.services.live_trading.oms import evaluate_live_deployment
+from app.services.live_trading.oms import _realized_pnl_today, evaluate_live_deployment
 from app.services.live_trading.reconciliation import reconcile_positions
 from app.services.live_trading.safety import check_live_trading_readiness
 from app.services.strategy.state_machine import StrategyStatus, can_transition
@@ -51,8 +52,10 @@ async def _latest_version(db: AsyncSession, strategy_id: uuid.UUID) -> StrategyV
 async def _deployment_out(db: AsyncSession, deployment: LiveDeployment) -> LiveDeploymentOut:
     strategy = await db.get(Strategy, deployment.strategy_id)
     instrument = await db.get(Instrument, deployment.instrument_id)
+    version = await db.get(StrategyVersion, deployment.strategy_version_id)
     position_result = await db.execute(select(LivePosition).where(LivePosition.deployment_id == deployment.id))
     position = position_result.scalar_one_or_none()
+    realized_pnl_today = await _realized_pnl_today(db, deployment.id, datetime.now(timezone.utc))
 
     return LiveDeploymentOut(
         id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
@@ -62,6 +65,8 @@ async def _deployment_out(db: AsyncSession, deployment: LiveDeployment) -> LiveD
         last_evaluated_at=deployment.last_evaluated_at,
         last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
         created_at=deployment.created_at, stopped_at=deployment.stopped_at,
+        risk_rules=(version.risk_rules if version else {}) or {},
+        realized_pnl_today=realized_pnl_today,
         open_position=(
             LivePositionOut(
                 instrument_symbol=instrument.symbol, quantity=position.quantity, avg_entry_price=position.avg_entry_price,
@@ -183,15 +188,64 @@ async def evaluate_live_deployment_now(deployment_id: str, db: AsyncSession = De
     return EvaluationOut(action=outcome.action, signal=outcome.signal, price=outcome.price, reason=outcome.reason)
 
 
+_LIST_LIMIT = 500
+
+
 @router.get("/orders", response_model=list[LiveOrderOut])
-async def list_live_orders(deployment_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[LiveOrderOut]:
-    result = await db.execute(select(LiveOrder).where(LiveOrder.deployment_id == uuid.UUID(deployment_id)).order_by(LiveOrder.created_at.desc()))
+async def list_live_orders(
+    deployment_id: str | None = None, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
+) -> list[LiveOrderOut]:
+    """deployment_id omitted -> every order across the caller's own live
+    deployments (admin sees all), for the cross-deployment Orders page.
+    Still deployment_id-scoped when given, for the Live Trading page's
+    existing per-deployment order history."""
+    stmt = (
+        select(LiveOrder, LiveDeployment, Strategy, Instrument)
+        .join(LiveDeployment, LiveDeployment.id == LiveOrder.deployment_id)
+        .join(Strategy, Strategy.id == LiveDeployment.strategy_id)
+        .join(Instrument, Instrument.id == LiveDeployment.instrument_id)
+    )
+    if deployment_id is not None:
+        stmt = stmt.where(LiveOrder.deployment_id == uuid.UUID(deployment_id))
+    elif "administrator" not in user.role_names:
+        stmt = stmt.where(LiveDeployment.owner_id == user.id)
+    stmt = stmt.order_by(LiveOrder.created_at.desc()).limit(_LIST_LIMIT)
+
+    result = await db.execute(stmt)
     return [
         LiveOrderOut(
-            id=str(o.id), client_order_id=o.client_order_id, broker_order_id=o.broker_order_id, side=o.side,
-            quantity=o.quantity, status=o.status, reason=o.reason, created_at=o.created_at, confirmed_at=o.confirmed_at,
+            id=str(o.id), deployment_id=str(o.deployment_id), strategy_name=strategy.name,
+            instrument_symbol=instrument.symbol, client_order_id=o.client_order_id, broker_order_id=o.broker_order_id,
+            side=o.side, quantity=o.quantity, status=o.status, reason=o.reason, created_at=o.created_at,
+            confirmed_at=o.confirmed_at,
         )
-        for o in result.scalars().all()
+        for o, _deployment, strategy, instrument in result.all()
+    ]
+
+
+@router.get("/trades", response_model=list[LiveTradeOut])
+async def list_live_trades(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[LiveTradeOut]:
+    """Realized P&L history (closed round-trips) across the caller's own
+    live deployments (admin sees all) -- backs the Portfolio page's
+    realized-P&L totals and mirrors GET /paper-trading/trades' shape."""
+    stmt = (
+        select(LiveTrade, LiveDeployment, Strategy, Instrument)
+        .join(LiveDeployment, LiveDeployment.id == LiveTrade.deployment_id)
+        .join(Strategy, Strategy.id == LiveDeployment.strategy_id)
+        .join(Instrument, Instrument.id == LiveDeployment.instrument_id)
+    )
+    if "administrator" not in user.role_names:
+        stmt = stmt.where(LiveDeployment.owner_id == user.id)
+    stmt = stmt.order_by(LiveTrade.exit_ts.desc()).limit(_LIST_LIMIT)
+
+    result = await db.execute(stmt)
+    return [
+        LiveTradeOut(
+            id=str(t.id), deployment_id=str(t.deployment_id), strategy_name=strategy.name,
+            instrument_symbol=instrument.symbol, entry_ts=t.entry_ts, entry_price=t.entry_price, exit_ts=t.exit_ts,
+            exit_price=t.exit_price, quantity=t.quantity, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+        )
+        for t, _deployment, strategy, instrument in result.all()
     ]
 
 

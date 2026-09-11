@@ -44,11 +44,19 @@ class LiveDeploymentOut(BaseModel):
     last_signal_reason: str | None = None
     created_at: datetime
     stopped_at: datetime | None
+    # Configured risk limits (stop_loss_pct/take_profit_pct/max_positions/
+    # max_daily_loss_pct) and today's real realized P&L against them --
+    # for the Risk Management page, at no extra round trip.
+    risk_rules: dict = {}
+    realized_pnl_today: float = 0.0
     open_position: LivePositionOut | None = None
 
 
 class LiveOrderOut(BaseModel):
     id: str
+    deployment_id: str
+    strategy_name: str
+    instrument_symbol: str
     client_order_id: str
     broker_order_id: str | None
     side: str
@@ -57,6 +65,21 @@ class LiveOrderOut(BaseModel):
     reason: str | None
     created_at: datetime
     confirmed_at: datetime | None
+
+
+class LiveTradeOut(BaseModel):
+    id: str
+    deployment_id: str
+    strategy_name: str
+    instrument_symbol: str
+    entry_ts: datetime
+    entry_price: float
+    exit_ts: datetime
+    exit_price: float
+    quantity: float
+    pnl: float
+    pnl_pct: float
+    exit_reason: str
 
 
 class EvaluationOut(BaseModel):

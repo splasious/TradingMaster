@@ -14,6 +14,7 @@ import type {
   BfWatchlistItemOut,
   BfWatchlistOut,
   BrokerAccountOut,
+  BrokerBalanceOut,
   BrokerOut,
   CandleOut,
   CatalogSyncSchedulerStatusOut,
@@ -28,6 +29,7 @@ import type {
   LiveDeploymentOut,
   LiveOrderOut,
   LiveSyncStatusOut,
+  LiveTradeOut,
   OptimizationJobOut,
   OptimizationResultOut,
   PaperDeploymentOut,
@@ -408,6 +410,31 @@ export function useLiveOrders(deploymentId: string | null) {
     queryKey: ["live-orders", deploymentId],
     queryFn: () => apiFetch<LiveOrderOut[]>(`/api/v1/live-trading/orders?deployment_id=${deploymentId}`),
     enabled: !!deploymentId,
+  });
+}
+
+export function useAllLiveOrders() {
+  return useQuery({
+    queryKey: ["live-orders", "all"],
+    queryFn: () => apiFetch<LiveOrderOut[]>("/api/v1/live-trading/orders"),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useAllLiveTrades() {
+  return useQuery({
+    queryKey: ["live-trades", "all"],
+    queryFn: () => apiFetch<LiveTradeOut[]>("/api/v1/live-trading/trades"),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useBrokerBalance(accountId: string | null) {
+  return useQuery({
+    queryKey: ["broker-balance", accountId],
+    queryFn: () => apiFetch<BrokerBalanceOut>(`/api/v1/brokers/accounts/${accountId}/balance`),
+    enabled: !!accountId,
+    retry: false, // a real broker API call -- don't hammer it on failure
   });
 }
 

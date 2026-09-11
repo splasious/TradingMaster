@@ -198,6 +198,38 @@ async def test_stop_loss_exits_before_checking_signal(db_session: AsyncSession, 
     assert outcome.reason == "stop_loss"
 
 
+async def test_daily_loss_limit_blocks_new_entry_after_a_real_loss(db_session: AsyncSession, monkeypatch):
+    """Regression test: _try_enter used to pass realized_pnl_today=0.0
+    (hardcoded), so max_daily_loss_pct could never actually trigger in
+    live trading no matter how much was lost. This drives a real losing
+    round-trip through evaluate_live_deployment (not a direct risk-engine
+    unit test) so it fails the same way the original bug did if the fix
+    regresses -- balance small enough (1000) that a 5% limit (50) is
+    breached by a real 100-unit loss on a 2-quantity, 50-point drop."""
+    ctx = await _setup(
+        db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, risk_rules={"max_daily_loss_pct": 5.0},
+    )
+    fake = FakeDeltaTransport(ticker_price=150.0, balance=1000.0)
+    fake.patch(monkeypatch)
+    await evaluate_live_deployment(db_session, ctx["deployment"])  # enters at 150, quantity 2
+
+    version = await db_session.get(StrategyVersion, ctx["deployment"].strategy_version_id)
+    version.entry_rules = NEVER
+    version.exit_rules = ALWAYS_BUY
+    await db_session.commit()
+    fake.ticker_price = 100.0  # exits at 100 -> pnl = (100-150)*2 = -100, breaching the 50 limit
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "exited"
+
+    version.entry_rules = ALWAYS_BUY
+    version.exit_rules = NEVER
+    await db_session.commit()
+    outcome = await evaluate_live_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "rejected"
+    assert "Daily loss limit breached" in outcome.reason
+    assert len(fake.placed_orders) == 2  # the entry + exit above -- no third (re-entry) order placed
+
+
 async def test_1wk_deployment_derives_signal_from_stored_daily_candles(db_session: AsyncSession, monkeypatch):
     """Kite/Delta have no native weekly interval for every source -- a
     "1wk" live deployment must not just silently see zero candles forever.

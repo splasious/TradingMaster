@@ -198,6 +198,85 @@ async def test_full_live_trading_flow_when_fully_ready(client: AsyncClient, seed
     assert stop_resp.json()["status"] == "stopped"
 
 
+async def test_orders_and_trades_and_deployment_risk_fields(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession, monkeypatch):
+    """Covers the new cross-deployment Orders/Trades endpoints and the
+    risk_rules/realized_pnl_today fields added to LiveDeploymentOut --
+    the data these back the Orders/Positions/Portfolio/Risk pages with."""
+    _patch_delta_ok(monkeypatch)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    admin = (await db_session.execute(select(User).where(User.email == seeded_admin["email"]))).scalar_one()
+    broker_account, instrument = await _seed_live_ready(db_session, admin)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Always Buy Strategy",
+            "version": {
+                "python_code": 'def generate_signal(c,p):\n    return "BUY"',
+                "risk_rules": {"stop_loss_pct": 5.0, "max_daily_loss_pct": 10.0},
+                "position_sizing": {"type": "fixed_quantity", "value": 1},
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    from app.models.strategy import Strategy
+    strategy = await db_session.get(Strategy, uuid.UUID(strategy_id))
+    strategy.status = "paper_trading"
+    await db_session.commit()
+    await client.post(f"/api/v1/strategies/{strategy_id}/mark-validated", headers=headers)
+    await client.post(f"/api/v1/strategies/{strategy_id}/approve", headers=headers)
+
+    deploy_resp = await client.post(
+        "/api/v1/live-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "broker_account_id": str(broker_account.id), "confirmed": True},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    eval_resp = await client.post(f"/api/v1/live-trading/deployments/{deployment_id}/evaluate", headers=headers)
+    assert eval_resp.json()["action"] == "entered"
+
+    # Deployment now carries its configured risk limits and today's real
+    # (zero so far -- nothing closed yet) realized P&L.
+    deployments = await client.get("/api/v1/live-trading/deployments", headers=headers)
+    dep = next(d for d in deployments.json() if d["id"] == deployment_id)
+    assert dep["risk_rules"]["stop_loss_pct"] == 5.0
+    assert dep["risk_rules"]["max_daily_loss_pct"] == 10.0
+    assert dep["realized_pnl_today"] == 0.0
+    assert dep["open_position"]["quantity"] == 1
+
+    # Cross-deployment orders listing (no deployment_id) finds it, with
+    # context fields a single-deployment view wouldn't need to repeat.
+    all_orders = await client.get("/api/v1/live-trading/orders", headers=headers)
+    assert all_orders.status_code == 200
+    matching = [o for o in all_orders.json() if o["deployment_id"] == deployment_id]
+    assert len(matching) == 1
+    assert matching[0]["strategy_name"] == "Always Buy Strategy"
+    assert matching[0]["instrument_symbol"] == "APIX"
+
+    # Trades listing is empty -- the position is still open, nothing has
+    # closed yet, so there's nothing to show as a realized round-trip.
+    trades = await client.get("/api/v1/live-trading/trades", headers=headers)
+    assert trades.status_code == 200
+    assert trades.json() == []
+
+
+async def test_broker_account_balance_endpoint(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession, monkeypatch):
+    _patch_delta_ok(monkeypatch)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    admin = (await db_session.execute(select(User).where(User.email == seeded_admin["email"]))).scalar_one()
+    broker_account, _instrument = await _seed_live_ready(db_session, admin)
+
+    resp = await client.get(f"/api/v1/brokers/accounts/{broker_account.id}/balance", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available_margin"] == 100000.0
+    assert body["currency"] == "USD"
+
+
 async def test_kill_switch_activate_stops_all_active_deployments(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession, monkeypatch):
     _patch_delta_ok(monkeypatch)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
