@@ -170,6 +170,27 @@ async def test_compute_effective_pcr_only_uses_nearest_expiries_beyond_limit(db_
     assert pcr == 1.0  # only the nearest 4 (100/100 each) counted, 5th's skew excluded
 
 
+async def test_compute_effective_pcr_default_timeframe_matches_real_oi_storage(db_session: AsyncSession):
+    """Regression test: the default timeframe must be "15m" -- confirmed
+    against the real production database that NFO option open-interest is
+    only ever stored at 15m, never "1d". A wrong default here silently
+    matches zero rows and always returns None, exactly the bug this test
+    guards against (found via a live DB check, not a hypothetical)."""
+    underlying = Instrument(exchange="NSE", symbol="NIFTY 50", name="Nifty 50 Index", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50")
+    db_session.add(underlying)
+    await db_session.flush()
+    ce = await _make_option(db_session, underlying.id, "NIFTY26SEP23000CE", "CE", 23000)
+    pe = await _make_option(db_session, underlying.id, "NIFTY26SEP23000PE", "PE", 23000)
+    t0 = datetime.now(timezone.utc)
+    db_session.add(OhlcvCandle(instrument_id=ce.id, timeframe="15m", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1000.0, source="test"))
+    db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="15m", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1300.0, source="test"))
+    await db_session.commit()
+
+    # Note: `ce`/`pe` above use EXPIRY (2026-09-15), fixed at module scope.
+    pcr = await compute_effective_pcr(db_session, underlying_symbol="NIFTY 50")  # no explicit timeframe -- uses the default
+    assert pcr == 1.3
+
+
 async def test_compute_effective_pcr_none_when_underlying_not_found(db_session: AsyncSession):
     pcr = await compute_effective_pcr(db_session, underlying_symbol="NOT_A_REAL_SYMBOL")
     assert pcr is None

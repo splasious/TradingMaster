@@ -409,9 +409,12 @@ async def test_pcr_strategy_gets_live_pcr_injected_into_sandbox_params(db_sessio
     db_session.add_all([ce, pe])
     await db_session.flush()
     t0 = datetime.now(timezone.utc)
-    # call OI 1000, put OI 1300 -> PCR = 1.3 -> above the >1.1 "bullish" band
-    db_session.add(OhlcvCandle(instrument_id=ce.id, timeframe="1d", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1000.0, source="test"))
-    db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="1d", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1300.0, source="test"))
+    # call OI 1000, put OI 1300 -> PCR = 1.3 -> above the >1.1 "bullish" band.
+    # timeframe="15m" -- compute_effective_pcr's real default, matching
+    # how NFO option OI is actually stored in production (confirmed via a
+    # live DB check: never "1d").
+    db_session.add(OhlcvCandle(instrument_id=ce.id, timeframe="15m", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1000.0, source="test"))
+    db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="15m", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1300.0, source="test"))
 
     traded = Instrument(exchange="NFO", symbol="NIFTYFUT", name="Nifty Future", instrument_type="future", data_source="zerodha_kite", external_ref="NIFTYFUT", expiry=expiry, lot_size=65)
     db_session.add(traded)

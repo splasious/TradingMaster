@@ -77,7 +77,7 @@ async def compute_pcr_series(
 
 
 async def compute_effective_pcr(
-    db: AsyncSession, underlying_symbol: str = "NIFTY 50", num_expiries: int = 4, timeframe: str = "1d",
+    db: AsyncSession, underlying_symbol: str = "NIFTY 50", num_expiries: int = 4, timeframe: str = "15m",
 ) -> float | None:
     """Single PCR number across the underlying's nearest `num_expiries`
     live option expiries -- put OI and call OI each summed across all of
@@ -87,7 +87,12 @@ async def compute_effective_pcr(
     Python strategy a single live number each evaluation tick -- the
     sandbox itself has no DB access to compute this on its own (PRD
     Rule: the sandbox subprocess boundary has no network/DB access by
-    design, see services/strategy/sandbox.py)."""
+    design, see services/strategy/sandbox.py).
+
+    Default timeframe is "15m", not "1d" -- confirmed against the real
+    production database (2026-09-12) that NFO option open-interest is
+    only ever backfilled/synced at 15m; a "1d" default here would have
+    silently matched zero rows and always returned None."""
     underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
     if underlying is None:
         return None
