@@ -37,10 +37,14 @@ jobs:
 
       - name: Redeploy on VPS
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: root
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: GHCR_TOKEN,GHCR_USER
           script: |
             # A registry/network hiccup mid-script must abort the deploy,
             # not silently fall through to "up -d" with no new image --
@@ -50,6 +54,16 @@ jobs:
             # error anywhere in the log. set -e plus explicit retry-then-
             # fail (not retry-then-continue) closes that gap here too.
             set -e
+
+            # Log in with the same short-lived token this workflow run
+            # already has (GITHUB_TOKEN, scoped only to this repo) --
+            # works whether ghcr.io/splasious/tradingmaster-api is public
+            # (today) or private (once the repo itself goes private,
+            # which normally makes its packages private too). No
+            # long-lived credential is stored on the VPS; a fresh token
+            # is used every deploy.
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
             cd /opt/tradingmaster
 
             for i in 1 2 3; do
