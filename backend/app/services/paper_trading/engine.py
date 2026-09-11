@@ -120,16 +120,26 @@ async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) ->
         return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
 
     # Standing stop-loss/take-profit checks take priority over the signal,
-    # same as the backtest engine's convention.
+    # same as the backtest engine's convention. A short's stop is a price
+    # *rise*, its target a price *fall* -- the exact mirror of a long's
+    # checks (see backtest/engine.py's identical short-side logic).
     if position is not None:
         stop_pct = version.risk_rules.get("stop_loss_pct")
         target_pct = version.risk_rules.get("take_profit_pct")
-        stop_price = position.avg_entry_price * (1 - stop_pct / 100) if stop_pct else None
-        target_price = position.avg_entry_price * (1 + target_pct / 100) if target_pct else None
-        if stop_price is not None and current_price <= stop_price:
-            return await _exit_position(db, deployment, portfolio, position, stop_price, now, "stop_loss")
-        if target_price is not None and current_price >= target_price:
-            return await _exit_position(db, deployment, portfolio, position, target_price, now, "take_profit")
+        if position.side == "short":
+            stop_price = position.avg_entry_price * (1 + stop_pct / 100) if stop_pct else None
+            target_price = position.avg_entry_price * (1 - target_pct / 100) if target_pct else None
+            if stop_price is not None and current_price >= stop_price:
+                return await _exit_position(db, deployment, portfolio, position, stop_price, now, "stop_loss")
+            if target_price is not None and current_price <= target_price:
+                return await _exit_position(db, deployment, portfolio, position, target_price, now, "take_profit")
+        else:
+            stop_price = position.avg_entry_price * (1 - stop_pct / 100) if stop_pct else None
+            target_price = position.avg_entry_price * (1 + target_pct / 100) if target_pct else None
+            if stop_price is not None and current_price <= stop_price:
+                return await _exit_position(db, deployment, portfolio, position, stop_price, now, "stop_loss")
+            if target_price is not None and current_price >= target_price:
+                return await _exit_position(db, deployment, portfolio, position, target_price, now, "take_profit")
 
     # Stale/missing candle data must not silently drive a real BUY/SELL
     # decision -- protective stop-loss/take-profit above stays fully
@@ -176,6 +186,14 @@ async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) ->
             {"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in candles
         ]
         sandbox_params = dict(version.parameters)
+        # A strategy that can open either a long OR a short (e.g. a
+        # PCR-band strategy that flips direction) has no other way to know
+        # which one -- if any -- is currently open: generate_signal only
+        # ever sees candles/params, never the deployment's own position
+        # row. Injected unconditionally (cheap, no query -- `position` is
+        # already loaded above), not just for PCR strategies.
+        sandbox_params["has_position"] = position is not None
+        sandbox_params["position_side"] = position.side if position is not None else None
         if sandbox_params.get("use_nifty_pcr"):
             # The sandbox subprocess has no DB access of its own (see
             # services/strategy/sandbox.py) -- a PCR-driven strategy can
@@ -214,8 +232,12 @@ async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) ->
         signal = "BUY" if entry_met else ("SELL" if exit_met else "HOLD")
 
     if signal == "BUY" and position is None:
-        return await _try_enter(db, deployment, portfolio, version, current_price, now, instrument.lot_size)
-    if signal == "SELL" and position is not None:
+        return await _try_enter(db, deployment, portfolio, version, current_price, now, instrument.lot_size, side="long")
+    if signal == "SHORT" and position is None:
+        return await _try_enter(db, deployment, portfolio, version, current_price, now, instrument.lot_size, side="short")
+    if signal == "SELL" and position is not None and position.side == "long":
+        return await _exit_position(db, deployment, portfolio, position, current_price, now, "signal")
+    if signal == "COVER" and position is not None and position.side == "short":
         return await _exit_position(db, deployment, portfolio, position, current_price, now, "signal")
 
     await db.commit()
@@ -272,13 +294,22 @@ async def _pool_equity(db: AsyncSession, portfolio: PaperPortfolio) -> float:
     ).all()
     if not rows:
         return portfolio.cash
-    position_value = sum(position.quantity * (tick_engine.get_current_price(inst_id) or position.avg_entry_price) for position, inst_id in rows)
+    # A short's unrealized value mirrors the backtest engine's identical
+    # convention: 2x entry (return of collateral, in economic terms) minus
+    # the current mark -- rises as price falls below entry, the opposite
+    # of a long's plain quantity * mark_price.
+    position_value = sum(
+        (position.quantity * (tick_engine.get_current_price(inst_id) or position.avg_entry_price))
+        if position.side == "long"
+        else (position.quantity * (2 * position.avg_entry_price - (tick_engine.get_current_price(inst_id) or position.avg_entry_price)))
+        for position, inst_id in rows
+    )
     return portfolio.cash + position_value
 
 
 async def _try_enter(
     db: AsyncSession, deployment: PaperDeployment, portfolio: PaperPortfolio, version: StrategyVersion,
-    price: float, now: datetime, lot_size: int | None = None,
+    price: float, now: datetime, lot_size: int | None = None, side: str = "long",
 ) -> EvaluationOutcome:
     sizing = PositionSizing(**version.position_sizing)
     if sizing.type == "percent_capital" and price > 0:
@@ -300,7 +331,7 @@ async def _try_enter(
             object_id=str(deployment.id), new_value={"reason": "Position sizing produced zero quantity"},
         )
         await db.commit()
-        return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason="zero quantity")
+        return EvaluationOutcome(action="rejected", signal=("BUY" if side == "long" else "SHORT"), price=price, reason="zero quantity")
 
     notional = quantity * price
     open_position_count = (
@@ -356,19 +387,24 @@ async def _try_enter(
                     object_type="paper_deployment", object_id=str(deployment.id),
                 )
         await db.commit()
-        return EvaluationOutcome(action="rejected", signal="BUY", price=price, reason=decision.reason)
+        return EvaluationOutcome(action="rejected", signal=("BUY" if side == "long" else "SHORT"), price=price, reason=decision.reason)
 
-    portfolio.cash -= notional
-    db.add(PaperPosition(deployment_id=deployment.id, quantity=quantity, avg_entry_price=price, opened_at=now))
-    db.add(PaperOrder(deployment_id=deployment.id, side="buy", quantity=quantity, price=price, status=OrderStatus.FILLED.value))
+    # A short-entry receives cash up front (selling to open), the exact
+    # opposite of a long-entry's debit -- mirrors the backtest engine's
+    # short economics, see _pool_equity's identical convention above.
+    portfolio.cash += notional if side == "short" else -notional
+    db.add(PaperPosition(deployment_id=deployment.id, quantity=quantity, avg_entry_price=price, opened_at=now, side=side))
+    order_side = "sell" if side == "short" else "buy"
+    db.add(PaperOrder(deployment_id=deployment.id, side=order_side, quantity=quantity, price=price, status=OrderStatus.FILLED.value))
     strategy = await db.get(Strategy, deployment.strategy_id)
+    verb = "sold short" if side == "short" else "bought"
     await create_alert(
         db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
-        title="Paper order filled", message=f"{strategy.name if strategy else 'Strategy'}: bought {quantity} @ {price:.2f}",
+        title="Paper order filled", message=f"{strategy.name if strategy else 'Strategy'}: {verb} {quantity} @ {price:.2f}",
         object_type="paper_deployment", object_id=str(deployment.id),
     )
     await db.commit()
-    return EvaluationOutcome(action="entered", signal="BUY", price=price)
+    return EvaluationOutcome(action="entered", signal=("BUY" if side == "long" else "SHORT"), price=price)
 
 
 async def _exit_position(
@@ -376,22 +412,31 @@ async def _exit_position(
     price: float, now: datetime, reason: str,
 ) -> EvaluationOutcome:
     evaluate_exit()  # exits are always approved; called for symmetry/auditability
+    is_short = position.side == "short"
     notional = position.quantity * price
-    pnl = (price - position.avg_entry_price) * position.quantity
-    pnl_pct = (price - position.avg_entry_price) / position.avg_entry_price * 100 if position.avg_entry_price else 0.0
+    # A short's P&L is the mirror of a long's: profit when price *falls*
+    # below entry, not rises above it (backtest engine's identical
+    # _close_short formula).
+    pnl = (position.avg_entry_price - price) * position.quantity if is_short else (price - position.avg_entry_price) * position.quantity
+    pnl_pct = (pnl / (position.avg_entry_price * position.quantity)) * 100 if position.avg_entry_price and position.quantity else 0.0
 
-    portfolio.cash += notional
+    # Covering a short costs cash (buying back what was sold to open);
+    # closing a long returns cash (selling what was bought) -- exact
+    # opposite of _try_enter's identical branch.
+    portfolio.cash += -notional if is_short else notional
     db.add(
         PaperTrade(
             deployment_id=deployment.id, entry_ts=position.opened_at, entry_price=position.avg_entry_price,
             exit_ts=now, exit_price=price, quantity=position.quantity, pnl=pnl, pnl_pct=pnl_pct, exit_reason=reason,
         )
     )
-    db.add(PaperOrder(deployment_id=deployment.id, side="sell", quantity=position.quantity, price=price, status=OrderStatus.FILLED.value, reason=reason))
+    order_side = "buy" if is_short else "sell"
+    db.add(PaperOrder(deployment_id=deployment.id, side=order_side, quantity=position.quantity, price=price, status=OrderStatus.FILLED.value, reason=reason))
     await db.delete(position)
 
     strategy = await db.get(Strategy, deployment.strategy_id)
     strategy_name = strategy.name if strategy else "Strategy"
+    verb = "covered" if is_short else "sold"
     if reason == "stop_loss":
         await create_alert(
             db, user_id=portfolio.user_id, alert_type=AlertType.STOP_LOSS_TRIGGERED.value, severity=AlertSeverity.WARNING,
@@ -407,9 +452,9 @@ async def _exit_position(
     else:
         await create_alert(
             db, user_id=portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
-            title="Paper position closed", message=f"{strategy_name}: sold at {price:.2f}, P&L {pnl:+.2f}",
+            title="Paper position closed", message=f"{strategy_name}: {verb} at {price:.2f}, P&L {pnl:+.2f}",
             object_type="paper_deployment", object_id=str(deployment.id),
         )
 
     await db.commit()
-    return EvaluationOutcome(action="exited", signal="SELL", price=price, reason=reason)
+    return EvaluationOutcome(action="exited", signal=("COVER" if is_short else "SELL"), price=price, reason=reason)

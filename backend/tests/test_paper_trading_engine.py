@@ -461,6 +461,116 @@ async def test_pcr_not_injected_when_flag_absent(db_session: AsyncSession):
     assert outcome.action == "entered"  # "pcr" key absent from params -> BUY branch
 
 
+SHORT_THEN_COVER_ON_STATE = (
+    'def generate_signal(candles, params):\n'
+    '    side = params.get("position_side")\n'
+    '    if side == "short":\n'
+    '        return "COVER"\n'
+    '    if side is None:\n'
+    '        return "SHORT"\n'
+    '    return "HOLD"\n'
+)
+
+
+async def test_short_entry_opens_position_with_short_side(db_session: AsyncSession):
+    ctx = await _setup(db_session, python_code=SHORT_THEN_COVER_ON_STATE, cash=100000.0)
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+    assert outcome.signal == "SHORT"
+
+    position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert position.side == "short"
+    assert position.quantity == 10  # fixed_quantity=10, from _setup's default position_sizing
+
+    portfolio = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.id == ctx["deployment"].portfolio_id))).scalar_one()
+    entry_price = position.avg_entry_price
+    # Selling to open credits cash, the opposite of a long buy.
+    assert portfolio.cash == 100000.0 + 10 * entry_price
+
+    order = (await db_session.execute(select(PaperOrder).where(PaperOrder.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert order.side == "sell"  # opening a short is economically a sell
+
+
+async def test_short_cover_with_profit_when_price_falls(db_session: AsyncSession):
+    ctx = await _setup(db_session, python_code=SHORT_THEN_COVER_ON_STATE, cash=100000.0)
+    enter_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    entry_price = enter_outcome.price
+
+    tick_engine._last_price[ctx["instrument"].id] = entry_price - 10.0  # price falls -> short profits
+    cover_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert cover_outcome.action == "exited"
+    assert cover_outcome.signal == "COVER"
+
+    position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one_or_none()
+    assert position is None
+
+    trade = (await db_session.execute(select(PaperTrade).where(PaperTrade.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert trade.pnl == 10 * 10.0  # 10 qty * $10 favorable move -- profit on a short from a price drop
+    assert trade.pnl > 0
+
+    portfolio = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.id == ctx["deployment"].portfolio_id))).scalar_one()
+    assert portfolio.cash == 100000.0 + trade.pnl  # back to a cash-only position, net up by the realized profit
+
+
+async def test_short_cover_with_loss_when_price_rises(db_session: AsyncSession):
+    ctx = await _setup(db_session, python_code=SHORT_THEN_COVER_ON_STATE, cash=100000.0)
+    enter_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    entry_price = enter_outcome.price
+
+    tick_engine._last_price[ctx["instrument"].id] = entry_price + 10.0  # price rises -> short loses
+    cover_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert cover_outcome.action == "exited"
+
+    trade = (await db_session.execute(select(PaperTrade).where(PaperTrade.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert trade.pnl == -10 * 10.0
+    assert trade.pnl < 0
+
+
+async def test_short_position_stop_loss_triggers_on_price_rise(db_session: AsyncSession):
+    """A short's stop-loss is a price RISE (the mirror of a long's price-
+    fall stop) -- this is the actual regression risk of porting long-only
+    stop math verbatim instead of mirroring it."""
+    ctx = await _setup(db_session, python_code=SHORT_THEN_COVER_ON_STATE, cash=100000.0, risk_rules={"stop_loss_pct": 5.0})
+    enter_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    entry_price = enter_outcome.price
+
+    tick_engine._last_price[ctx["instrument"].id] = entry_price * 1.06  # +6% breaches a 5% short stop
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "exited"
+    assert outcome.reason == "stop_loss"
+
+    trade = (await db_session.execute(select(PaperTrade).where(PaperTrade.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert trade.pnl < 0  # stopped out at a loss, as expected for a short on a price rise
+
+
+async def test_short_position_take_profit_triggers_on_price_fall(db_session: AsyncSession):
+    ctx = await _setup(db_session, python_code=SHORT_THEN_COVER_ON_STATE, cash=100000.0, risk_rules={"take_profit_pct": 5.0})
+    enter_outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    entry_price = enter_outcome.price
+
+    tick_engine._last_price[ctx["instrument"].id] = entry_price * 0.94  # -6% breaches a 5% short target
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "exited"
+    assert outcome.reason == "take_profit"
+
+    trade = (await db_session.execute(select(PaperTrade).where(PaperTrade.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert trade.pnl > 0  # took profit on a favorable price drop, as expected for a short
+
+
+async def test_long_entry_still_unaffected_by_side_aware_changes(db_session: AsyncSession):
+    """Regression guard: the default (long) path must behave identically
+    to before short-side support was added."""
+    ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER, cash=100000.0)
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"
+    assert outcome.signal == "BUY"
+
+    position = (await db_session.execute(select(PaperPosition).where(PaperPosition.deployment_id == ctx["deployment"].id))).scalar_one()
+    assert position.side == "long"
+    portfolio = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.id == ctx["deployment"].portfolio_id))).scalar_one()
+    assert portfolio.cash == 100000.0 - position.quantity * position.avg_entry_price
+
+
 async def test_no_price_data_skips_evaluation(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
     tick_engine._last_price.pop(ctx["instrument"].id, None)

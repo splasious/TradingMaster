@@ -80,6 +80,12 @@ class PaperPosition(Base):
     )
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     avg_entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    # "long" | "short" -- mirrors the backtest engine's position["side"]
+    # (services/backtest/engine.py), ported here so a Python strategy can
+    # actually open a short (sell-to-open), not just close a long. Default
+    # keeps every pre-existing row (all long, the only kind that could
+    # exist before this column did) unchanged.
+    side: Mapped[str] = mapped_column(String(10), nullable=False, default="long", server_default="long")
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
