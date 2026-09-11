@@ -377,6 +377,90 @@ async def test_basket_strategy_injects_advance_decline_ratio_into_sandbox(db_ses
         assert outcome.action == "entered", f"{symbol}: expected entry on basket-wide breadth, got {outcome.action} ({outcome.reason})"
 
 
+async def test_pcr_strategy_gets_live_pcr_injected_into_sandbox_params(db_session: AsyncSession):
+    """A strategy with parameters={"use_nifty_pcr": 1} gets a real
+    effective-PCR number computed server-side (services/options/pcr.py)
+    and handed into the sandbox as params["pcr"] -- the actual mechanism
+    that makes a PCR-driven Python strategy possible at all, since the
+    sandbox subprocess has no DB access to compute this itself."""
+    role = Role(name="trader_pcr", description="x")
+    db_session.add(role)
+    await db_session.flush()
+    user = User(email=f"pcr_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="PCR User")
+    user.user_roles = [UserRole(role=role)]
+    db_session.add(user)
+    await db_session.flush()
+
+    underlying = Instrument(exchange="NSE", symbol="NIFTY 50", name="Nifty 50 Index", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50")
+    db_session.add(underlying)
+    await db_session.flush()
+
+    expiry = (datetime.now(timezone.utc) + timedelta(days=7)).date()
+    ce = Instrument(
+        exchange="NFO", symbol="NIFTYPCRCE", name="NIFTYPCRCE", instrument_type="option", data_source="zerodha_kite",
+        external_ref="NIFTYPCRCE", expiry=expiry, strike=23000, option_type="CE", lot_size=65,
+        underlying_instrument_id=underlying.id,
+    )
+    pe = Instrument(
+        exchange="NFO", symbol="NIFTYPCRPE", name="NIFTYPCRPE", instrument_type="option", data_source="zerodha_kite",
+        external_ref="NIFTYPCRPE", expiry=expiry, strike=23000, option_type="PE", lot_size=65,
+        underlying_instrument_id=underlying.id,
+    )
+    db_session.add_all([ce, pe])
+    await db_session.flush()
+    t0 = datetime.now(timezone.utc)
+    # call OI 1000, put OI 1300 -> PCR = 1.3 -> above the >1.1 "bullish" band
+    db_session.add(OhlcvCandle(instrument_id=ce.id, timeframe="1d", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1000.0, source="test"))
+    db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="1d", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1300.0, source="test"))
+
+    traded = Instrument(exchange="NFO", symbol="NIFTYFUT", name="Nifty Future", instrument_type="future", data_source="zerodha_kite", external_ref="NIFTYFUT", expiry=expiry, lot_size=65)
+    db_session.add(traded)
+    await db_session.flush()
+    base = datetime.now(timezone.utc) - timedelta(days=30)
+    for i in range(30):
+        close = 23000 + i
+        db_session.add(OhlcvCandle(instrument_id=traded.id, timeframe="1d", ts=base + timedelta(days=i), open=close - 0.5, high=close + 1, low=close - 1, close=close, volume=1000, source="test"))
+
+    code = 'def generate_signal(candles, params):\n    pcr = params.get("pcr")\n    return "BUY" if pcr and pcr > 1.1 else "HOLD"'
+    strategy = Strategy(name="PCR Futures Strategy", owner_id=user.id, code_type="python")
+    db_session.add(strategy)
+    await db_session.flush()
+    version = StrategyVersion(
+        strategy_id=strategy.id, version_number=1, timeframe="1d", instrument_ids=[str(traded.id)],
+        parameters={"use_nifty_pcr": 1.0}, entry_rules=None, exit_rules=None, python_code=code,
+        position_sizing={"type": "lots", "value": 10}, risk_rules={},
+    )
+    db_session.add(version)
+    await db_session.flush()
+
+    # 10 lots x 65 lot_size x ~23029 price ~= 15M notional -- cash must
+    # comfortably cover that or the risk engine rejects for insufficient
+    # cash before the PCR-driven signal is even the deciding factor.
+    portfolio = PaperPortfolio(user_id=user.id, cash=50_000_000.0, initial_capital=50_000_000.0)
+    db_session.add(portfolio)
+    await db_session.flush()
+    deployment = PaperDeployment(
+        portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id, instrument_id=traded.id,
+        timeframe="1d", status=DeploymentStatus.ACTIVE.value,
+    )
+    db_session.add(deployment)
+    await db_session.commit()
+    tick_engine._last_price.pop(traded.id, None)
+
+    outcome = await evaluate_deployment(db_session, deployment)
+    assert outcome.action == "entered", outcome.reason  # PCR 1.3 > 1.1 -> the Python strategy's BUY branch fired
+
+
+async def test_pcr_not_injected_when_flag_absent(db_session: AsyncSession):
+    """A strategy that never sets use_nifty_pcr never triggers the PCR
+    computation at all -- no wasted DB queries for every ordinary
+    strategy that has nothing to do with options."""
+    code = 'def generate_signal(candles, params):\n    return "BUY" if "pcr" not in params else "SELL"'
+    ctx = await _setup(db_session, python_code=code)
+    outcome = await evaluate_deployment(db_session, ctx["deployment"])
+    assert outcome.action == "entered"  # "pcr" key absent from params -> BUY branch
+
+
 async def test_no_price_data_skips_evaluation(db_session: AsyncSession):
     ctx = await _setup(db_session, entry_rules=ALWAYS_BUY, exit_rules=NEVER)
     tick_engine._last_price.pop(ctx["instrument"].id, None)

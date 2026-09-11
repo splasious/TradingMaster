@@ -27,6 +27,7 @@ from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.market_data.freshness import check_freshness
 from app.services.market_data.tick_engine import tick_engine
+from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.ranking import basket_breadth, get_universe_ranks
 from app.services.risk.engine import evaluate_entry, evaluate_exit
 from app.services.strategy.rules import evaluate_rule_node
@@ -175,6 +176,13 @@ async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) ->
             {"open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume or 0.0} for c in candles
         ]
         sandbox_params = dict(version.parameters)
+        if sandbox_params.get("use_nifty_pcr"):
+            # The sandbox subprocess has no DB access of its own (see
+            # services/strategy/sandbox.py) -- a PCR-driven strategy can
+            # only see PCR if it's computed here and handed in, the same
+            # way rank/advance_decline_ratio already are for basket
+            # strategies just below.
+            sandbox_params["pcr"] = await compute_effective_pcr(db) or 0.0
         if len(version.instrument_ids) > 1:
             top_n = int(version.parameters.get("top_n", 10))
             ranks = await get_universe_ranks(
