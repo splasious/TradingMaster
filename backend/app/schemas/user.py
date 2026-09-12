@@ -18,6 +18,12 @@ class UserUpdateRoles(BaseModel):
     roles: list[str]
 
 
+class UserUpdate(BaseModel):
+    full_name: str | None = None
+    roles: list[str] | None = None
+    is_active: bool | None = None
+
+
 class UserApprove(BaseModel):
     roles: list[str] = Field(default_factory=lambda: ["viewer"])
 

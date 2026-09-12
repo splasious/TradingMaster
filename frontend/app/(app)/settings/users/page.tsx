@@ -131,6 +131,94 @@ function ResetPasswordModal({ user, onClose }: { user: UserOut | null; onClose: 
   );
 }
 
+function EditUserModal({ user, onClose }: { user: UserOut | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const { user: currentUser } = useAuth();
+  const [fullName, setFullName] = useState(user?.full_name ?? "");
+  const [role, setRole] = useState<string>(user?.roles[0] ?? "viewer");
+  const [isActive, setIsActive] = useState(user?.is_active ?? true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed fields whenever a different row is opened -- the modal
+  // instance is shared across rows, only mounted while one is open.
+  const [openedFor, setOpenedFor] = useState<string | null>(null);
+  if (user && user.id !== openedFor) {
+    setOpenedFor(user.id);
+    setFullName(user.full_name);
+    setRole(user.roles[0] ?? "viewer");
+    setIsActive(user.is_active);
+    setError(null);
+  }
+
+  const isSelf = user?.id === currentUser?.id;
+
+  const updateMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<UserOut>(`/api/v1/users/${user!.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ full_name: fullName, roles: [role], is_active: isActive }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      onClose();
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : "Failed to update user"),
+  });
+
+  if (!user) return null;
+
+  return (
+    <Modal open={!!user} onClose={onClose} title={`Edit User — ${user.full_name}`}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setError(null);
+          updateMutation.mutate();
+        }}
+        className="space-y-4"
+      >
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Full name</label>
+          <Input required value={fullName} onChange={(e) => setFullName(e.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Email</label>
+          <p className="text-sm text-text-muted">{user.email}</p>
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Role</label>
+          <Select value={role} onChange={(e) => setRole(e.target.value)} disabled={isSelf}>
+            {ROLES.map((r) => (
+              <option key={r} value={r} className="capitalize">
+                {r}
+              </option>
+            ))}
+          </Select>
+          {isSelf && <p className="text-xs text-text-muted">You cannot change your own role.</p>}
+        </div>
+        <div className="space-y-1.5">
+          <label className="flex items-center gap-2 text-sm text-text-secondary">
+            <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} disabled={isSelf} />
+            Active (unchecking blocks their login and revokes existing sessions)
+          </label>
+          {isSelf && <p className="text-xs text-text-muted">You cannot deactivate your own account.</p>}
+        </div>
+
+        {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{error}</div>}
+
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={updateMutation.isPending}>
+            {updateMutation.isPending ? "Saving..." : "Save changes"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [email, setEmail] = useState("");
@@ -201,10 +289,22 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
 }
 
 export default function UsersSettingsPage() {
-  const { hasRole } = useAuth();
+  const { hasRole, user: currentUser } = useAuth();
   const { data: users, isLoading, isError } = useUsers();
+  const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<UserOut | null>(null);
+  const [editTarget, setEditTarget] = useState<UserOut | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: (userId: string) => apiFetch(`/api/v1/users/${userId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+    },
+    onError: (err) => setDeleteError(err instanceof ApiError ? err.message : "Failed to delete user"),
+  });
 
   if (!hasRole("administrator")) {
     return (
@@ -257,6 +357,7 @@ export default function UsersSettingsPage() {
           <CardTitle>All Users</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
+          {deleteError && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{deleteError}</div>}
           {isLoading ? (
             <LoadingState />
           ) : isError ? (
@@ -293,9 +394,28 @@ export default function UsersSettingsPage() {
                       </div>
                     </Td>
                     <Td>
-                      <Button size="sm" variant="secondary" onClick={() => setResetTarget(u)}>
-                        Reset password
-                      </Button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Button size="sm" variant="secondary" onClick={() => setResetTarget(u)}>
+                          Reset password
+                        </Button>
+                        <Button size="sm" variant="secondary" onClick={() => setEditTarget(u)}>
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-text-muted hover:text-negative"
+                          disabled={u.id === currentUser?.id || deleteMutation.isPending}
+                          title={u.id === currentUser?.id ? "You cannot delete your own account" : "Delete user"}
+                          onClick={() => {
+                            if (window.confirm(`Delete "${u.full_name}" (${u.email})? This cannot be undone.`)) {
+                              deleteMutation.mutate(u.id);
+                            }
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     </Td>
                   </tr>
                 ))}
@@ -307,6 +427,7 @@ export default function UsersSettingsPage() {
 
       <CreateUserModal open={modalOpen} onClose={() => setModalOpen(false)} />
       <ResetPasswordModal user={resetTarget} onClose={() => setResetTarget(null)} />
+      <EditUserModal user={editTarget} onClose={() => setEditTarget(null)} />
     </div>
   );
 }
