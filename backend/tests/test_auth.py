@@ -20,6 +20,22 @@ async def test_login_wrong_password_rejected(client: AsyncClient, seeded_admin: 
     assert resp.status_code == 401
 
 
+async def test_login_is_case_insensitive_on_email(client: AsyncClient, seeded_admin: dict):
+    """Real production bug: a stored "admin@tradingmaster.internal" row
+    rejected a login attempt with "Admin@Tradingmaster.INTERNAL" (capital
+    letters, as browser autofill commonly produces) with the exact right
+    password -- Postgres text equality is case-sensitive. Fixed by
+    normalizing email in LoginRequest's own validator (schemas/auth.py),
+    not by changing the query, so every endpoint that accepts an email
+    gets the same fix."""
+    mixed_case_email = seeded_admin["email"].capitalize().replace("internal", "INTERNAL")
+    assert mixed_case_email != seeded_admin["email"]  # sanity: the test actually exercises a casing difference
+
+    resp = await client.post("/api/v1/auth/login", json={"email": mixed_case_email, "password": seeded_admin["password"]})
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["access_token"]
+
+
 async def test_login_writes_audit_log(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     await client.post("/api/v1/auth/login", json=seeded_admin)
     result = await db_session.execute(select(AuditLog).where(AuditLog.action == "LOGIN"))
@@ -140,8 +156,17 @@ async def test_forgot_password_flags_existing_user(client: AsyncClient, seeded_a
     resp = await client.post("/api/v1/auth/forgot-password", json={"email": seeded_admin["email"]})
     assert resp.status_code == 204
 
+    # The HTTP call above committed through the app's OWN db session, not
+    # this test's -- db_session already has this exact User object in its
+    # identity map from the seeded_admin fixture's own setup, so a plain
+    # select() returns that same (now-stale) cached instance rather than
+    # re-reading its attributes from the row the app just committed.
+    # refresh() forces a real reload; this was a stale test assertion, not
+    # a real app bug (confirmed by reading forgot_password's own code,
+    # which does set password_reset_requested = True before committing).
     result = await db_session.execute(select(User).where(User.email == seeded_admin["email"]))
     user = result.scalar_one()
+    await db_session.refresh(user)
     assert user.password_reset_requested is True
 
 

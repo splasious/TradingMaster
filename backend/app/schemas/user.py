@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class UserCreate(BaseModel):
@@ -7,11 +7,25 @@ class UserCreate(BaseModel):
     full_name: str
     roles: list[str] = Field(default_factory=lambda: ["viewer"])
 
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        # See LoginRequest's identical validator (schemas/auth.py) for why:
+        # normalizing every email-carrying schema the same way makes
+        # lookups case-insensitive by construction, not by patching each
+        # query individually.
+        return v.strip().lower()
+
 
 class UserRegister(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     full_name: str
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class UserUpdateRoles(BaseModel):
@@ -30,6 +44,11 @@ class UserApprove(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class AdminResetPassword(BaseModel):
