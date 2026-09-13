@@ -84,6 +84,50 @@ async def test_portfolio_optimization_ranks_combinations_across_the_basket(clien
     assert strategy_after["status"] == "backtested"
 
 
+async def test_portfolio_optimization_batches_signal_computation_across_many_instruments(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    """Regression test: portfolio_optimization_runner.py used to call
+    compute_python_signals (one subprocess spawn per instrument) once per
+    instrument for EVERY parameter combination -- for a large basket and a
+    multi-combo grid, that's combos x instruments spawns, far worse than
+    the single-backtest version of the "500 subprocess spawns" bug. This
+    only passes if compute_python_signals_for_portfolio's batching is
+    actually wired into the optimization path too, not just the plain
+    portfolio backtest path."""
+    from app.services.backtest.signals import PORTFOLIO_BATCH_SIZE
+
+    n_instruments = PORTFOLIO_BATCH_SIZE + 5  # spans two batches
+    instruments = [
+        await _seed_instrument_with_candles(db_session, f"OPTB{i:03d}", 100 + i) for i in range(n_instruments)
+    ]
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_id = await _make_python_strategy(client, headers, "Batched Optimization Strategy", THRESHOLD_CODE)
+
+    resp = await client.post(
+        "/api/v1/portfolio-optimization",
+        json={
+            "strategy_id": strategy_id, "instrument_ids": [str(i.id) for i in instruments], "timeframe": "1d",
+            "param_ranges": [{"name": "threshold", "min": 5, "max": 15, "step": 5}], "rank_metric": "net_profit",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["id"]
+
+    job = (await client.get(f"/api/v1/portfolio-optimization/{job_id}", headers=headers)).json()
+    assert job["status"] == "completed", job
+
+    result = (await client.get(f"/api/v1/portfolio-optimization/{job_id}/result", headers=headers)).json()
+    assert len(result["runs"]) == 3  # threshold 5, 10, 15
+    for run in result["runs"]:
+        # If any batch's results silently got dropped when merged back,
+        # this would be short of the full instrument count.
+        assert run["instrument_count"] == n_instruments
+        assert run["skipped_symbols"] == []
+
+
 async def test_portfolio_optimization_rejects_visual_strategy(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     inst_a = await _seed_instrument_with_candles(db_session, "POVA", 100)
     inst_b = await _seed_instrument_with_candles(db_session, "POVB", 200)

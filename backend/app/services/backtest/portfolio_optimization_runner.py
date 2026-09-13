@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -13,11 +14,16 @@ from app.services.backtest.engine import CostConfig, RiskRules
 from app.services.backtest.metrics import compute_metrics
 from app.services.backtest.optimization import GridTooLargeError, ParamRange, build_param_grid
 from app.services.backtest.portfolio_engine import PortfolioSizing, as_metrics_input, simulate_portfolio
-from app.services.backtest.signals import SignalComputationError, compute_python_signals
+from app.services.backtest.signals import SignalComputationError, compute_python_signals_for_portfolio
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 MAX_CANDLES = 3000  # per instrument -- same cap as portfolio_runner.py, same reason
 MIN_CANDLES = 30
+# Same outer safety net as portfolio_runner.py's JOB_MAX_SECONDS, wrapping
+# the whole grid search (every combo, not just one) -- a grid search over
+# MAX_COMBINATIONS=60 combos is effectively 60 portfolio backtests, so this
+# needs real headroom over a single backtest's budget.
+JOB_MAX_SECONDS = 3 * 60 * 60
 
 
 async def _run_one_combo(instruments, candles_by_instrument, python_code, params, sizing, risk, costs, initial_capital, timeframe):
@@ -26,21 +32,20 @@ async def _run_one_combo(instruments, candles_by_instrument, python_code, params
     isolation. Returns None if every instrument's signal computation
     failed for this particular combination (e.g. a parameter value the
     strategy code can't handle), so the caller can drop just this combo
-    rather than fail the whole grid search."""
-    signals_by_instrument: dict[str, object] = {}
-    combo_instruments = []
-    skipped_symbols: list[str] = []
+    rather than fail the whole grid search.
 
-    for instrument in instruments:
-        inst_id = str(instrument.id)
-        candles = candles_by_instrument[inst_id]
-        try:
-            signals = await compute_python_signals(candles, python_code, params)
-        except SignalComputationError:
-            skipped_symbols.append(instrument.symbol)
-            continue
-        combo_instruments.append(instrument)
-        signals_by_instrument[inst_id] = signals
+    Signal computation for the whole basket is one batched+concurrent call
+    (compute_python_signals_for_portfolio), not one subprocess spawn per
+    instrument -- with up to MAX_COMBINATIONS=60 combos each needing this,
+    the per-instrument version of this bug would be 60x worse than the
+    single-backtest case it was originally fixed for."""
+    signals_by_instrument, errors_by_instrument = await compute_python_signals_for_portfolio(
+        candles_by_instrument, python_code, params
+    )
+    skipped_symbols = [
+        instrument.symbol for instrument in instruments if str(instrument.id) in errors_by_instrument
+    ]
+    combo_instruments = [instrument for instrument in instruments if str(instrument.id) in signals_by_instrument]
 
     if not combo_instruments:
         return None
@@ -103,15 +108,25 @@ async def run_portfolio_optimization_job(job_id: uuid.UUID) -> None:
             )
             costs = CostConfig(brokerage_pct=job.brokerage_pct, slippage_pct=job.slippage_pct, tax_pct=job.tax_pct)
 
-            runs = []
-            for params in grid:
-                combo_result = await _run_one_combo(
-                    instruments, candles_by_instrument, version.python_code, params,
-                    sizing, risk, costs, job.initial_capital, job.timeframe,
+            async def _run_grid() -> list[dict]:
+                collected = []
+                for params in grid:
+                    combo_result = await _run_one_combo(
+                        instruments, candles_by_instrument, version.python_code, params,
+                        sizing, risk, costs, job.initial_capital, job.timeframe,
+                    )
+                    if combo_result is None:
+                        continue
+                    collected.append({"params": params, **combo_result})
+                return collected
+
+            try:
+                runs = await asyncio.wait_for(_run_grid(), timeout=JOB_MAX_SECONDS)
+            except asyncio.TimeoutError:
+                raise SignalComputationError(
+                    f"Optimization exceeded the maximum job runtime ({JOB_MAX_SECONDS // 60} minutes) -- "
+                    "try fewer parameter combinations or a smaller instrument selection."
                 )
-                if combo_result is None:
-                    continue
-                runs.append({"params": params, **combo_result})
 
             if not runs:
                 raise SignalComputationError(

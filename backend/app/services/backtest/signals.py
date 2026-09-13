@@ -16,6 +16,7 @@ updated O(n). Correct and simple; a real performance concern only past a
 few thousand bars, which is why the backtest API caps candle count.
 """
 
+import asyncio
 from dataclasses import dataclass
 
 from app.models.market_data import OhlcvCandle
@@ -23,6 +24,14 @@ from app.services.strategy.rules import evaluate_rule_node
 from app.services.strategy.sandbox import run_python_backtest_signals, run_python_portfolio_backtest_signals
 
 WARMUP_BARS = 20
+# Shared by every caller that needs signals for a whole basket of
+# instruments at once (portfolio_runner.py: one call per job;
+# portfolio_optimization_runner.py: one call per parameter combination --
+# where this matters even more, since a MAX_COMBINATIONS=60 grid search
+# without this batching would be 60x the single-backtest version of the
+# "500 subprocess spawns" bug this was built to fix).
+PORTFOLIO_BATCH_SIZE = 25
+MAX_CONCURRENT_BATCHES = 4
 
 
 @dataclass
@@ -110,4 +119,35 @@ async def compute_python_signals_batch(
             errors_by_instrument[inst_id] = r.error
         else:
             signals_by_instrument[inst_id] = _signal_strings_to_bar_signals(r.signals or [])
+    return signals_by_instrument, errors_by_instrument
+
+
+def _chunk(items: list, size: int) -> list[list]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+async def compute_python_signals_for_portfolio(
+    candles_by_instrument: dict[str, list[OhlcvCandle]], python_code: str, params: dict,
+) -> tuple[dict[str, BarSignals], dict[str, str]]:
+    """Chunks candles_by_instrument into PORTFOLIO_BATCH_SIZE-sized batches
+    and runs them through compute_python_signals_batch with bounded
+    concurrency (MAX_CONCURRENT_BATCHES) -- the actual fix for a large
+    portfolio's Python-strategy signal computation being extremely slow,
+    factored out so every caller that needs "signals for a whole basket"
+    (a single portfolio backtest, or one combo of a parameter grid search)
+    gets it, not just the first one that needed it."""
+    batches = _chunk(list(candles_by_instrument.items()), PORTFOLIO_BATCH_SIZE)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+
+    async def _run_batch(batch: list[tuple[str, list]]) -> tuple[dict, dict]:
+        async with semaphore:
+            return await compute_python_signals_batch(dict(batch), python_code, params)
+
+    batch_results = await asyncio.gather(*(_run_batch(b) for b in batches))
+
+    signals_by_instrument: dict[str, BarSignals] = {}
+    errors_by_instrument: dict[str, str] = {}
+    for batch_signals, batch_errors in batch_results:
+        signals_by_instrument.update(batch_signals)
+        errors_by_instrument.update(batch_errors)
     return signals_by_instrument, errors_by_instrument

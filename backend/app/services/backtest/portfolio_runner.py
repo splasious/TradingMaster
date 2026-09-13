@@ -16,7 +16,7 @@ from app.services.backtest.metrics import compute_metrics
 from app.services.backtest.portfolio_engine import PortfolioSizing, as_metrics_input, simulate_portfolio
 from app.services.backtest.signals import (
     SignalComputationError,
-    compute_python_signals_batch,
+    compute_python_signals_for_portfolio,
     compute_visual_signals,
 )
 from app.services.strategy.state_machine import StrategyStatus, can_transition
@@ -24,24 +24,12 @@ from app.services.strategy.state_machine import StrategyStatus, can_transition
 MAX_CANDLES = 3000  # per instrument -- bounds worst-case runtime of the O(n^2) visual-mode signal computation
 MIN_CANDLES = 30
 
-# A Python-strategy portfolio backtest used to spawn one subprocess (and
-# redundantly recompile identical code) per instrument, fully sequential --
-# 500 instruments meant 500 process spawns, confirmed live to take 24+
-# hours instead of the ~2 minutes the same workload took at a smaller
-# instrument count. Batching + bounded concurrency is the actual fix;
-# picked conservatively for the real (modest, shared) production VPS, not
-# tuned for a beefier box that isn't this one.
-PYTHON_BATCH_SIZE = 25
-MAX_CONCURRENT_BATCHES = 4
 # Outer safety net: whatever the cause, a job must never sit at "running"
-# indefinitely again the way today's two did -- this wraps the whole
-# signal-computation phase, on top of (not instead of) each batch's own
-# scaled per-call timeout (sandbox.py's run_python_portfolio_backtest_signals).
+# indefinitely again the way two production jobs did on 2026-09-12/13 --
+# this wraps the whole signal-computation phase, on top of (not instead
+# of) compute_python_signals_for_portfolio's own batching/concurrency and
+# each batch's scaled per-call timeout (sandbox.py).
 JOB_MAX_SECONDS = 45 * 60
-
-
-def _chunk(items: list, size: int) -> list[list]:
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
@@ -93,27 +81,20 @@ async def run_portfolio_backtest_job(job_id: uuid.UUID) -> None:
             # for its whole job (never mixed per-instrument), so this
             # branches once, not per instrument.
             if version.python_code and candles_needing_signals:
-                batches = _chunk(list(candles_needing_signals.items()), PYTHON_BATCH_SIZE)
-                semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
-
-                async def _run_batch(batch: list[tuple[str, list]]) -> tuple[dict, dict]:
-                    async with semaphore:
-                        return await compute_python_signals_batch(dict(batch), version.python_code, version.parameters)
-
                 try:
-                    batch_results = await asyncio.wait_for(
-                        asyncio.gather(*(_run_batch(b) for b in batches)), timeout=JOB_MAX_SECONDS,
+                    batch_signals, batch_errors = await asyncio.wait_for(
+                        compute_python_signals_for_portfolio(candles_needing_signals, version.python_code, version.parameters),
+                        timeout=JOB_MAX_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     raise SignalComputationError(
                         f"Signal computation exceeded the maximum job runtime ({JOB_MAX_SECONDS // 60} minutes) -- "
                         "try a smaller instrument selection."
                     )
-                for batch_signals, batch_errors in batch_results:
-                    signals_by_instrument.update(batch_signals)
-                    for inst_id, err in batch_errors.items():
-                        last_signal_error = err
-                        skipped_symbols.append(inst_by_id[inst_id].symbol)
+                signals_by_instrument.update(batch_signals)
+                for inst_id, err in batch_errors.items():
+                    last_signal_error = err
+                    skipped_symbols.append(inst_by_id[inst_id].symbol)
             elif candles_needing_signals:
                 for inst_id, candles in candles_needing_signals.items():
                     try:

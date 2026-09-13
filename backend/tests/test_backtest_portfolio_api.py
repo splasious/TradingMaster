@@ -205,9 +205,9 @@ async def test_portfolio_backtest_python_strategy_batches_across_many_instrument
     one PYTHON_BATCH_SIZE-sized subprocess call, so this only passes if
     results from every batch -- not just the first -- get merged back
     correctly (services/backtest/portfolio_runner.py)."""
-    from app.services.backtest.portfolio_runner import PYTHON_BATCH_SIZE
+    from app.services.backtest.signals import PORTFOLIO_BATCH_SIZE
 
-    n_instruments = PYTHON_BATCH_SIZE + 5  # spans two batches
+    n_instruments = PORTFOLIO_BATCH_SIZE + 5  # spans two batches
     instruments = [
         await _seed_instrument_with_candles(db_session, f"BATCH{i:03d}", 100 + i) for i in range(n_instruments)
     ]
