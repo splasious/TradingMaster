@@ -59,6 +59,26 @@ async def create_portfolio_backtest(
     if missing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Instrument(s) not found: {', '.join(str(m) for m in missing)}")
 
+    # Real production incident this guards against: starting a second
+    # large-basket backtest for the same strategy while the first is still
+    # running just makes both compete for the same CPU and slows both to
+    # a crawl (confirmed live -- two concurrent 500-instrument jobs, one
+    # stuck over 24h) instead of actually giving the user a faster result.
+    already_running = (
+        await db.execute(
+            select(PortfolioBacktestJob)
+            .where(PortfolioBacktestJob.strategy_id == strategy.id, PortfolioBacktestJob.status.in_(["pending", "running"]))
+            .order_by(PortfolioBacktestJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if already_running is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A backtest for this strategy is already {already_running.status} "
+            f"(started {already_running.started_at or already_running.created_at}) -- wait for it to finish first.",
+        )
+
     job = PortfolioBacktestJob(
         strategy_id=strategy.id, strategy_version_id=version.id, instrument_ids=payload.instrument_ids,
         timeframe=payload.timeframe, start_date=payload.start_date, end_date=payload.end_date,

@@ -5,6 +5,12 @@ from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 BACKTEST_TIMEOUT_SECONDS = 60.0
+# A portfolio-backtest batch call does BATCH_SIZE instruments' worth of work
+# in one subprocess -- scale its timeout with the batch instead of reusing
+# the flat single-instrument BACKTEST_TIMEOUT_SECONDS, which would falsely
+# time out a legitimately-busy large batch.
+PORTFOLIO_BATCH_TIMEOUT_PER_INSTRUMENT = 2.0
+PORTFOLIO_BATCH_MIN_TIMEOUT = 30.0
 
 
 @dataclass
@@ -17,6 +23,13 @@ class SandboxResult:
 @dataclass
 class SandboxBacktestResult:
     signals: list[str] | None
+    error: str | None
+    timed_out: bool = False
+
+
+@dataclass
+class SandboxPortfolioBacktestResult:
+    results: dict[str, SandboxBacktestResult] | None
     error: str | None
     timed_out: bool = False
 
@@ -78,3 +91,38 @@ async def run_python_backtest_signals(
     if error:
         return SandboxBacktestResult(signals=None, error=error, timed_out=timed_out)
     return SandboxBacktestResult(signals=result.get("signals"), error=result.get("error"))
+
+
+async def run_python_portfolio_backtest_signals(
+    code: str, instruments: dict[str, list[dict]], params: dict, warmup: int = 20,
+) -> SandboxPortfolioBacktestResult:
+    """Batched sibling of run_python_backtest_signals -- one subprocess call
+    computes signals for every instrument in `instruments`
+    ({instrument_id: candles}), compiling generate_signal once and reusing
+    it across all of them (sandbox_worker.py::run_portfolio_backtest_signals).
+    This is the actual fix for a large portfolio backtest spawning one
+    process (and recompiling identical code) per instrument -- see
+    services/backtest/portfolio_runner.py's call site for the batching/
+    concurrency this is designed to be called under."""
+    timeout = max(PORTFOLIO_BATCH_MIN_TIMEOUT, PORTFOLIO_BATCH_TIMEOUT_PER_INSTRUMENT * len(instruments))
+    payload_instruments = {inst_id: {"candles": candles} for inst_id, candles in instruments.items()}
+    result, error, timed_out = await _run_worker(
+        {"mode": "portfolio_backtest", "code": code, "instruments": payload_instruments, "params": params, "warmup": warmup},
+        timeout,
+    )
+    if error:
+        return SandboxPortfolioBacktestResult(results=None, error=error, timed_out=timed_out)
+
+    raw_results = result.get("results")
+    if raw_results is None:
+        # Whole-batch failure (e.g. the code failed to compile at all) --
+        # preserve None rather than collapsing it into an empty dict, the
+        # same "no results at all" vs. "zero instruments" distinction
+        # SandboxBacktestResult.signals already makes for one instrument.
+        return SandboxPortfolioBacktestResult(results=None, error=result.get("error"))
+
+    parsed = {
+        inst_id: SandboxBacktestResult(signals=r.get("signals"), error=r.get("error"))
+        for inst_id, r in raw_results.items()
+    }
+    return SandboxPortfolioBacktestResult(results=parsed, error=result.get("error"))

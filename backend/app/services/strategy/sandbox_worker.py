@@ -99,11 +99,12 @@ def run_signal(code: str, candles: list[dict], params: dict) -> dict:
     return {"signal": signal, "error": None}
 
 
-def run_backtest_signals(code: str, candles: list[dict], params: dict, warmup: int) -> dict:
-    fn, error = _load_generate_signal(code)
-    if error:
-        return {"signals": None, "error": error}
-
+def _run_backtest_bars(fn, candles: list[dict], params: dict, warmup: int) -> tuple[list[str] | None, str | None]:
+    """The actual per-bar prefix-slicing loop (candles[:i+1] each step, PRD
+    Rule: no look-ahead) -- shared by run_backtest_signals (one instrument)
+    and run_portfolio_backtest_signals (many instruments against the same
+    already-compiled fn) so there's one implementation of "no look-ahead",
+    not two that could quietly drift apart."""
     signals: list[str] = []
     for i in range(len(candles)):
         if i < warmup:
@@ -112,12 +113,40 @@ def run_backtest_signals(code: str, candles: list[dict], params: dict, warmup: i
         try:
             signal = fn(candles[: i + 1], params)
         except Exception as exc:
-            return {"signals": None, "error": f"{type(exc).__name__}: {exc} (at bar {i})"}
+            return None, f"{type(exc).__name__}: {exc} (at bar {i})"
         if signal not in ALLOWED_SIGNALS:
-            return {"signals": None, "error": f"generate_signal returned {signal!r} at bar {i}, expected {sorted(ALLOWED_SIGNALS)}"}
+            return None, f"generate_signal returned {signal!r} at bar {i}, expected {sorted(ALLOWED_SIGNALS)}"
         signals.append(signal)
+    return signals, None
 
-    return {"signals": signals, "error": None}
+
+def run_backtest_signals(code: str, candles: list[dict], params: dict, warmup: int) -> dict:
+    fn, error = _load_generate_signal(code)
+    if error:
+        return {"signals": None, "error": error}
+    signals, error = _run_backtest_bars(fn, candles, params, warmup)
+    return {"signals": signals, "error": error}
+
+
+def run_portfolio_backtest_signals(code: str, instruments: dict, params: dict, warmup: int) -> dict:
+    """Batched sibling of run_backtest_signals -- compiles generate_signal
+    ONCE (RestrictedPython compilation + this whole subprocess spawn are
+    the actual cost run_backtest_signals pays per instrument when called
+    500 times for one portfolio backtest) and reuses it across every
+    instrument in `instruments` ({instrument_id: {"candles": [...]}}).
+    A per-instrument error (bad return value, an exception at some bar)
+    only fails that one instrument's entry, not the whole batch -- a
+    strategy bug on one symbol shouldn't take down every other symbol's
+    already-computed result."""
+    fn, error = _load_generate_signal(code)
+    if error:
+        return {"results": None, "error": error}
+
+    results: dict[str, dict] = {}
+    for inst_id, data in instruments.items():
+        signals, inst_error = _run_backtest_bars(fn, data["candles"], params, warmup)
+        results[inst_id] = {"signals": signals, "error": inst_error}
+    return {"results": results, "error": None}
 
 
 def main() -> None:
@@ -125,6 +154,8 @@ def main() -> None:
     mode = payload.get("mode", "signal")
     if mode == "backtest":
         result = run_backtest_signals(payload["code"], payload["candles"], payload["params"], payload.get("warmup", 20))
+    elif mode == "portfolio_backtest":
+        result = run_portfolio_backtest_signals(payload["code"], payload["instruments"], payload["params"], payload.get("warmup", 20))
     else:
         result = run_signal(payload["code"], payload["candles"], payload["params"])
     sys.stdout.write(json.dumps(result))

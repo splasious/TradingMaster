@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from app.models.market_data import OhlcvCandle
 from app.services.strategy.rules import evaluate_rule_node
-from app.services.strategy.sandbox import run_python_backtest_signals
+from app.services.strategy.sandbox import run_python_backtest_signals, run_python_portfolio_backtest_signals
 
 WARMUP_BARS = 20
 
@@ -58,16 +58,56 @@ def compute_visual_signals(candles: list[OhlcvCandle], entry_rules: dict, exit_r
     return BarSignals(entry=entry, exit=exit_)
 
 
-async def compute_python_signals(candles: list[OhlcvCandle], python_code: str, params: dict) -> BarSignals:
-    bars = [
+def _candles_to_bars(candles: list[OhlcvCandle]) -> list[dict]:
+    return [
         {"ts": c.ts.isoformat(), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
         for c in candles
     ]
-    result = await run_python_backtest_signals(python_code, bars, params, warmup=WARMUP_BARS)
-    if result.error:
-        raise SignalComputationError(result.error)
-    signals = result.signals or []
+
+
+def _signal_strings_to_bar_signals(signals: list[str]) -> BarSignals:
     return BarSignals(
         entry=[s == "BUY" for s in signals], exit=[s == "SELL" for s in signals],
         short_entry=[s == "SHORT" for s in signals], short_exit=[s == "COVER" for s in signals],
     )
+
+
+async def compute_python_signals(candles: list[OhlcvCandle], python_code: str, params: dict) -> BarSignals:
+    result = await run_python_backtest_signals(python_code, _candles_to_bars(candles), params, warmup=WARMUP_BARS)
+    if result.error:
+        raise SignalComputationError(result.error)
+    return _signal_strings_to_bar_signals(result.signals or [])
+
+
+async def compute_python_signals_batch(
+    candles_by_instrument: dict[str, list[OhlcvCandle]], python_code: str, params: dict,
+) -> tuple[dict[str, BarSignals], dict[str, str]]:
+    """Batched sibling of compute_python_signals -- one subprocess call for
+    the whole batch (services/strategy/sandbox.py::run_python_portfolio_backtest_signals)
+    instead of one per instrument, the actual fix for a large portfolio
+    backtest being extremely slow (500 process spawns + 500 redundant
+    RestrictedPython compilations of identical code, sequentially).
+
+    Returns (signals_by_instrument, errors_by_instrument) rather than
+    raising -- a single instrument's own error (or a whole-batch error,
+    e.g. the code failed to compile at all) must not take down every
+    other instrument's already-computed result; the caller decides what
+    "skip this instrument" means for a portfolio backtest, same as
+    compute_python_signals' per-instrument SignalComputationError already
+    means for the non-batched path."""
+    bars_by_instrument = {inst_id: _candles_to_bars(candles) for inst_id, candles in candles_by_instrument.items()}
+    result = await run_python_portfolio_backtest_signals(python_code, bars_by_instrument, params, warmup=WARMUP_BARS)
+
+    if result.error:
+        # Whole-batch failure (e.g. a compile error) -- every instrument in
+        # this batch gets the same error, none get a signal.
+        return {}, {inst_id: result.error for inst_id in candles_by_instrument}
+
+    signals_by_instrument: dict[str, BarSignals] = {}
+    errors_by_instrument: dict[str, str] = {}
+    for inst_id, r in (result.results or {}).items():
+        if r.error:
+            errors_by_instrument[inst_id] = r.error
+        else:
+            signals_by_instrument[inst_id] = _signal_strings_to_bar_signals(r.signals or [])
+    return signals_by_instrument, errors_by_instrument

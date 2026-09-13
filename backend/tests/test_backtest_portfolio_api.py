@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from httpx import AsyncClient
@@ -5,8 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
+from app.models.backtest import PortfolioBacktestJob
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
+from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import Role, User, UserRole
 
 
@@ -192,6 +195,98 @@ async def test_non_owner_cannot_start_portfolio_backtest(client: AsyncClient, se
         headers={"Authorization": f"Bearer {other_token}"},
     )
     assert resp.status_code == 403
+
+
+async def test_portfolio_backtest_python_strategy_batches_across_many_instruments(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    """Exercises the actual batching path added to fix large-basket Python
+    strategy backtests being extremely slow: more instruments than fit in
+    one PYTHON_BATCH_SIZE-sized subprocess call, so this only passes if
+    results from every batch -- not just the first -- get merged back
+    correctly (services/backtest/portfolio_runner.py)."""
+    from app.services.backtest.portfolio_runner import PYTHON_BATCH_SIZE
+
+    n_instruments = PYTHON_BATCH_SIZE + 5  # spans two batches
+    instruments = [
+        await _seed_instrument_with_candles(db_session, f"BATCH{i:03d}", 100 + i) for i in range(n_instruments)
+    ]
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={
+            "name": "Batched Python Strategy",
+            "version": {
+                "python_code": (
+                    "def generate_signal(candles, params):\n"
+                    "    return 'BUY' if candles[-1]['close'] > candles[0]['close'] else 'HOLD'\n"
+                ),
+            },
+        },
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    resp = await client.post(
+        "/api/v1/portfolio-backtests",
+        json={
+            "strategy_id": strategy_id, "instrument_ids": [str(i.id) for i in instruments],
+            "timeframe": "1d", "initial_capital": 1000000, "position_size_pct": 2, "max_open_positions": n_instruments,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 202
+    job_id = resp.json()["id"]
+
+    job = (await client.get(f"/api/v1/portfolio-backtests/{job_id}", headers=headers)).json()
+    assert job["status"] == "completed", job
+
+    result = (await client.get(f"/api/v1/portfolio-backtests/{job_id}/result", headers=headers)).json()
+    assert result["instrument_count"] == n_instruments
+    assert result["skipped_symbols"] == []
+
+    trades = (await client.get(f"/api/v1/portfolio-backtests/{job_id}/trades", headers=headers)).json()
+    symbols_traded = {t["symbol"] for t in trades}
+    # Every instrument's uptrend triggers the same BUY signal -- if any
+    # batch's results silently got dropped when merged back, this set
+    # would be missing every instrument from that batch.
+    assert symbols_traded == {i.symbol for i in instruments}
+
+
+async def test_duplicate_portfolio_backtest_is_rejected_while_running(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
+):
+    """Guards against the exact pile-up that caused a real production
+    incident: starting a second large-basket backtest for the same strategy
+    while the first is still running just makes both compete for CPU and
+    slows both to a crawl instead of finishing faster."""
+    inst_a = await _seed_instrument_with_candles(db_session, "DUPA", 100)
+    inst_b = await _seed_instrument_with_candles(db_session, "DUPB", 200)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_id = await _make_strategy(client, headers, "Duplicate Guard Strategy")
+
+    strategy = await db_session.get(Strategy, uuid.UUID(strategy_id))
+    version = (
+        await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))
+    ).scalar_one()
+    existing = PortfolioBacktestJob(
+        strategy_id=strategy.id, strategy_version_id=version.id,
+        instrument_ids=[str(inst_a.id), str(inst_b.id)], timeframe="1d", status="running",
+        requested_by=strategy.owner_id,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/v1/portfolio-backtests",
+        json={"strategy_id": strategy_id, "instrument_ids": [str(inst_a.id), str(inst_b.id)], "timeframe": "1d"},
+        headers=headers,
+    )
+    assert resp.status_code == 409
+    assert "already running" in resp.json()["detail"]
 
 
 async def test_owner_can_delete_portfolio_backtest_job(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):

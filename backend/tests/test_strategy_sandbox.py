@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.strategy.sandbox import run_python_strategy
+from app.services.strategy.sandbox import run_python_portfolio_backtest_signals, run_python_strategy
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 SAMPLE_CANDLES = [{"open": 100 + i, "high": 101 + i, "low": 99 + i, "close": 100 + i, "volume": 1000.0} for i in range(20)]
@@ -87,6 +87,63 @@ async def test_sandbox_reports_syntax_errors_without_crashing():
     result = await run_python_strategy("def generate_signal(:\n  pass", SAMPLE_CANDLES, {})
     assert result.error is not None
     assert result.signal is None
+
+
+# --- batched portfolio backtest (one subprocess for many instruments) ---
+
+
+async def test_portfolio_backtest_batch_computes_signals_for_every_instrument():
+    code = """
+def generate_signal(candles, params):
+    return "BUY" if candles[-1]["close"] > 100 else "HOLD"
+"""
+    instruments = {
+        "above": [{"open": 99, "high": 101, "low": 99, "close": c, "volume": 10.0} for c in [95, 96, 105, 106]],
+        "below": [{"open": 99, "high": 101, "low": 99, "close": c, "volume": 10.0} for c in [50, 51, 52, 53]],
+    }
+    result = await run_python_portfolio_backtest_signals(code, instruments, {}, warmup=1)
+    assert result.error is None
+    assert result.results["above"].signals == ["HOLD", "HOLD", "BUY", "BUY"]
+    assert result.results["below"].signals == ["HOLD", "HOLD", "HOLD", "HOLD"]
+    assert result.results["above"].error is None
+    assert result.results["below"].error is None
+
+
+async def test_portfolio_backtest_batch_isolates_one_instruments_runtime_error():
+    """A strategy bug that only manifests for one instrument's data (e.g.
+    dividing by something that's zero only there) must not take down every
+    other instrument's already-computed result -- the actual behavior a
+    500-instrument batch depends on to be useful at all."""
+    code = """
+def generate_signal(candles, params):
+    return "BUY" if 100 / candles[-1]["close"] > 1 else "HOLD"
+"""
+    instruments = {
+        "fine": [{"open": 1, "high": 1, "low": 1, "close": 50.0, "volume": 10.0}],
+        "zero_close": [{"open": 1, "high": 1, "low": 1, "close": 0.0, "volume": 10.0}],
+    }
+    result = await run_python_portfolio_backtest_signals(code, instruments, {}, warmup=0)
+    assert result.error is None
+    assert result.results["fine"].error is None
+    assert result.results["fine"].signals == ["BUY"]
+    assert result.results["zero_close"].error is not None
+    assert "ZeroDivisionError" in result.results["zero_close"].error
+
+
+async def test_portfolio_backtest_batch_whole_batch_error_on_compile_failure():
+    result = await run_python_portfolio_backtest_signals(
+        "def generate_signal(:\n  pass", {"a": SAMPLE_CANDLES, "b": SAMPLE_CANDLES}, {}, warmup=1,
+    )
+    assert result.error is not None
+    assert result.results is None
+
+
+async def test_portfolio_backtest_batch_rejects_invalid_signal_value_per_instrument():
+    code = 'def generate_signal(candles, params):\n    return "MAYBE"'
+    result = await run_python_portfolio_backtest_signals(code, {"a": SAMPLE_CANDLES}, {}, warmup=1)
+    assert result.error is None
+    assert result.results["a"].signals is None
+    assert result.results["a"].error is not None
 
 
 # --- state machine (PRD section 25) ---
