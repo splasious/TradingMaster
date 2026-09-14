@@ -21,7 +21,11 @@ from dataclasses import dataclass
 
 from app.models.market_data import OhlcvCandle
 from app.services.strategy.rules import evaluate_rule_node
-from app.services.strategy.sandbox import run_python_backtest_signals, run_python_portfolio_backtest_signals
+from app.services.strategy.sandbox import (
+    run_python_backtest_signals,
+    run_python_portfolio_backtest_signals,
+    run_python_portfolio_signals,
+)
 
 WARMUP_BARS = 20
 # Shared by every caller that needs signals for a whole basket of
@@ -151,3 +155,52 @@ async def compute_python_signals_for_portfolio(
         signals_by_instrument.update(batch_signals)
         errors_by_instrument.update(batch_errors)
     return signals_by_instrument, errors_by_instrument
+
+
+async def compute_python_signal_batch(
+    candles_by_instrument: dict[str, list[OhlcvCandle]], python_code: str, params: dict,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Market-scanner sibling of compute_python_signals_batch -- one
+    subprocess call, one CURRENT signal per instrument (not a full
+    per-bar backtest series). Returns (signal_by_instrument,
+    errors_by_instrument), same never-raises contract as the backtest
+    batch helpers."""
+    bars_by_instrument = {inst_id: _candles_to_bars(candles) for inst_id, candles in candles_by_instrument.items()}
+    result = await run_python_portfolio_signals(python_code, bars_by_instrument, params)
+
+    if result.error:
+        return {}, {inst_id: result.error for inst_id in candles_by_instrument}
+
+    signal_by_instrument: dict[str, str] = {}
+    errors_by_instrument: dict[str, str] = {}
+    for inst_id, r in (result.results or {}).items():
+        if r.error:
+            errors_by_instrument[inst_id] = r.error
+        else:
+            signal_by_instrument[inst_id] = r.signal
+    return signal_by_instrument, errors_by_instrument
+
+
+async def compute_python_signal_for_portfolio(
+    candles_by_instrument: dict[str, list[OhlcvCandle]], python_code: str, params: dict,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Chunked + concurrent sibling of compute_python_signals_for_portfolio,
+    for the market scanner: one latest signal per instrument across
+    potentially thousands of instruments, batched the same way to avoid
+    one subprocess spawn per instrument (the same class of bug already
+    fixed for portfolio backtests and optimization)."""
+    batches = _chunk(list(candles_by_instrument.items()), PORTFOLIO_BATCH_SIZE)
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_BATCHES)
+
+    async def _run_batch(batch: list[tuple[str, list]]) -> tuple[dict, dict]:
+        async with semaphore:
+            return await compute_python_signal_batch(dict(batch), python_code, params)
+
+    batch_results = await asyncio.gather(*(_run_batch(b) for b in batches))
+
+    signal_by_instrument: dict[str, str] = {}
+    errors_by_instrument: dict[str, str] = {}
+    for batch_signals, batch_errors in batch_results:
+        signal_by_instrument.update(batch_signals)
+        errors_by_instrument.update(batch_errors)
+    return signal_by_instrument, errors_by_instrument

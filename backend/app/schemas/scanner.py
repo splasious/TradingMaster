@@ -44,3 +44,19 @@ class SavedScanOut(BaseModel):
     exchange: str | None
     timeframe: str
     conditions: list[ScanCondition]
+
+
+class StrategyScanRequest(BaseModel):
+    strategy_id: str
+    exchange: str | None = None
+
+
+class StrategySignalMatch(BaseModel):
+    instrument: InstrumentOut
+    signal: str
+
+
+class StrategyScanResponse(BaseModel):
+    matched: list[StrategySignalMatch]
+    scanned_count: int
+    skipped_symbols: list[str]

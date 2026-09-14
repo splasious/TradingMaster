@@ -128,6 +128,33 @@ def run_backtest_signals(code: str, candles: list[dict], params: dict, warmup: i
     return {"signals": signals, "error": error}
 
 
+def run_portfolio_signals(code: str, instruments: dict, params: dict) -> dict:
+    """Batched sibling of run_signal -- compiles generate_signal ONCE and
+    calls it a single time per instrument (the current candles list as-is,
+    not the per-bar candles[:i+1] loop run_backtest_signals uses) to get
+    just the latest signal for each one. This is what a market scanner
+    needs ("which instruments does this strategy say BUY/SELL/SHORT on
+    right now") -- much cheaper than a full backtest replay per
+    instrument, since it's one call, not one call per historical bar."""
+    fn, error = _load_generate_signal(code)
+    if error:
+        return {"results": None, "error": error}
+
+    results: dict[str, dict] = {}
+    for inst_id, data in instruments.items():
+        candles = data["candles"]
+        try:
+            signal = fn(candles, params)
+        except Exception as exc:
+            results[inst_id] = {"signal": None, "error": f"{type(exc).__name__}: {exc}"}
+            continue
+        if signal not in ALLOWED_SIGNALS:
+            results[inst_id] = {"signal": None, "error": f"generate_signal must return one of {sorted(ALLOWED_SIGNALS)}, got {signal!r}"}
+            continue
+        results[inst_id] = {"signal": signal, "error": None}
+    return {"results": results, "error": None}
+
+
 def run_portfolio_backtest_signals(code: str, instruments: dict, params: dict, warmup: int) -> dict:
     """Batched sibling of run_backtest_signals -- compiles generate_signal
     ONCE (RestrictedPython compilation + this whole subprocess spawn are
@@ -156,6 +183,8 @@ def main() -> None:
         result = run_backtest_signals(payload["code"], payload["candles"], payload["params"], payload.get("warmup", 20))
     elif mode == "portfolio_backtest":
         result = run_portfolio_backtest_signals(payload["code"], payload["instruments"], payload["params"], payload.get("warmup", 20))
+    elif mode == "portfolio_signal":
+        result = run_portfolio_signals(payload["code"], payload["instruments"], payload["params"])
     else:
         result = run_signal(payload["code"], payload["candles"], payload["params"])
     sys.stdout.write(json.dumps(result))

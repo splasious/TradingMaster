@@ -176,6 +176,17 @@ export interface SavedScanOut {
   conditions: ScanCondition[];
 }
 
+export interface StrategySignalMatch {
+  instrument: InstrumentOut;
+  signal: string;
+}
+
+export interface StrategyScanResponse {
+  matched: StrategySignalMatch[];
+  scanned_count: number;
+  skipped_symbols: string[];
+}
+
 export type RuleNode = { all: RuleNode[] } | { any: RuleNode[] } | ScanCondition;
 
 export interface PositionSizing {

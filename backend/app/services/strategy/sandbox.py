@@ -23,6 +23,13 @@ BACKTEST_TIMEOUT_SECONDS = 60.0
 # ~75-325s actually needed) and was killed before producing any signals.
 PORTFOLIO_BATCH_TIMEOUT_PER_INSTRUMENT = 15.0
 PORTFOLIO_BATCH_MIN_TIMEOUT = 30.0
+# A portfolio-SIGNAL batch (the market scanner: one generate_signal call
+# per instrument, not a full per-bar backtest replay) is far cheaper per
+# instrument than a portfolio-backtest batch -- O(n) once vs. O(n^2) --
+# so it gets its own, much smaller, per-instrument timeout budget rather
+# than reusing the backtest one.
+PORTFOLIO_SIGNAL_TIMEOUT_PER_INSTRUMENT = 1.0
+PORTFOLIO_SIGNAL_MIN_TIMEOUT = 15.0
 
 
 @dataclass
@@ -42,6 +49,13 @@ class SandboxBacktestResult:
 @dataclass
 class SandboxPortfolioBacktestResult:
     results: dict[str, SandboxBacktestResult] | None
+    error: str | None
+    timed_out: bool = False
+
+
+@dataclass
+class SandboxPortfolioSignalResult:
+    results: dict[str, SandboxResult] | None
     error: str | None
     timed_out: bool = False
 
@@ -138,3 +152,34 @@ async def run_python_portfolio_backtest_signals(
         for inst_id, r in raw_results.items()
     }
     return SandboxPortfolioBacktestResult(results=parsed, error=result.get("error"))
+
+
+async def run_python_portfolio_signals(
+    code: str, instruments: dict[str, list[dict]], params: dict,
+) -> SandboxPortfolioSignalResult:
+    """Batched sibling of run_python_strategy -- one subprocess call
+    computes ONE latest signal for every instrument in `instruments`
+    (compiling generate_signal once, calling it once per instrument, not
+    once per historical bar). This is what the market scanner uses to
+    answer "which instruments does this strategy say BUY/SELL/SHORT on
+    right now" across many instruments without spawning one subprocess
+    per instrument (the same class of bug already fixed for portfolio
+    backtests and optimization)."""
+    timeout = max(PORTFOLIO_SIGNAL_MIN_TIMEOUT, PORTFOLIO_SIGNAL_TIMEOUT_PER_INSTRUMENT * len(instruments))
+    payload_instruments = {inst_id: {"candles": candles} for inst_id, candles in instruments.items()}
+    result, error, timed_out = await _run_worker(
+        {"mode": "portfolio_signal", "code": code, "instruments": payload_instruments, "params": params},
+        timeout,
+    )
+    if error:
+        return SandboxPortfolioSignalResult(results=None, error=error, timed_out=timed_out)
+
+    raw_results = result.get("results")
+    if raw_results is None:
+        return SandboxPortfolioSignalResult(results=None, error=result.get("error"))
+
+    parsed = {
+        inst_id: SandboxResult(signal=r.get("signal"), error=r.get("error"))
+        for inst_id, r in raw_results.items()
+    }
+    return SandboxPortfolioSignalResult(results=parsed, error=result.get("error"))
