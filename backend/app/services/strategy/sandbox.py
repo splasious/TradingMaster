@@ -9,7 +9,19 @@ BACKTEST_TIMEOUT_SECONDS = 60.0
 # in one subprocess -- scale its timeout with the batch instead of reusing
 # the flat single-instrument BACKTEST_TIMEOUT_SECONDS, which would falsely
 # time out a legitimately-busy large batch.
-PORTFOLIO_BATCH_TIMEOUT_PER_INSTRUMENT = 2.0
+#
+# 2.0s/instrument was an initial guess tuned against simple test strategies
+# (an O(1)-per-bar threshold check) and turned out badly wrong for a real
+# indicator-heavy strategy: a ported RSI+Supertrend Python strategy, which
+# must replay its full indicator history from scratch on every bar (no
+# persisted state between generate_signal calls -- that's what makes
+# "no look-ahead" real rather than asserted), measured at ~3s/instrument
+# on ~1200-candle real production data and up to ~13s/instrument at the
+# MAX_CANDLES=3000 cap -- confirmed live when a production optimization
+# job failed every single parameter combination because every 25-instrument
+# batch silently exceeded the old 2.0s/instrument timeout (50s allowed vs.
+# ~75-325s actually needed) and was killed before producing any signals.
+PORTFOLIO_BATCH_TIMEOUT_PER_INSTRUMENT = 15.0
 PORTFOLIO_BATCH_MIN_TIMEOUT = 30.0
 
 
