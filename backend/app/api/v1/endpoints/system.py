@@ -15,6 +15,7 @@ from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotati
 from app.services.broker.kite_ticker_service import diagnose_zerodha_connection, kite_ticker_service
 from app.services.broker.registry import get_broker_adapter
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler, diagnose_active_pairs
+from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 from app.services.paper_trading.scheduler import diagnose_evaluation_freshness, paper_trading_scheduler
 
@@ -104,6 +105,18 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     )
     kite_diagnostic["active_timeframe_sync_last_synced_count"] = active_timeframe_sync_scheduler.last_synced_count
     kite_diagnostic["active_timeframe_sync_last_error"] = active_timeframe_sync_scheduler.last_error
+    # REST-polling fallback for NSE equity live prices (kite_rest_price_feed.py)
+    # -- runs regardless of kite_ticker's WebSocket health, so this having a
+    # recent last_run_at/updated_count is what actually answers "is paper
+    # trading's Live Value still moving right now", independent of whatever
+    # components["kite_ticker"] says about the WebSocket specifically (a
+    # 403-looping WebSocket with this still ticking means prices are fine,
+    # just via REST instead of push).
+    kite_diagnostic["kite_rest_fallback_last_run_at"] = (
+        kite_rest_price_feed.last_run_at.isoformat() if kite_rest_price_feed.last_run_at else None
+    )
+    kite_diagnostic["kite_rest_fallback_last_updated_count"] = kite_rest_price_feed.last_updated_count
+    kite_diagnostic["kite_rest_fallback_last_error"] = kite_rest_price_feed.last_error
     # Every (instrument, timeframe) an active paper/live deployment is
     # actually using, and how stale its stored candles are -- not secret
     # (just symbol names and timestamps), and directly answers "why isn't

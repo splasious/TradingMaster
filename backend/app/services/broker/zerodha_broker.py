@@ -135,7 +135,9 @@ class ZerodhaKiteBroker(BrokerInterface):
     def _checksum(api_key: str, request_token: str, api_secret: str) -> str:
         return hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode()).hexdigest()
 
-    async def _request(self, method: str, path: str, params: dict | None = None, data: dict | None = None) -> Any:
+    async def _request(
+        self, method: str, path: str, params: dict | list[tuple[str, str]] | None = None, data: dict | None = None
+    ) -> Any:
         if not self._api_key:
             raise KiteAPIError("Not authenticated: call authenticate() with api_key/api_secret first")
 
@@ -380,6 +382,25 @@ class ZerodhaKiteBroker(BrokerInterface):
         if quote is None:
             raise KiteAPIError(f"No quote returned for {instrument}")
         return {"price": float(quote["last_price"]), "instrument_token": quote.get("instrument_token")}
+
+    async def get_ltp_batch(self, instruments: list[str]) -> dict[str, float]:
+        """Batched sibling of get_ltp -- one /quote/ltp call for many
+        instruments at once (Kite's endpoint accepts repeated "i" query
+        params), instead of one call per instrument. Built for
+        kite_rest_price_feed.py's REST-polling fallback: NSE equities have
+        no push-streaming fallback of their own the way Delta does, so a
+        market's worth of instruments needs this to stay cheap -- a plain
+        one-call-per-instrument loop would both be slow and risk Kite's
+        rate limits. `instruments`: "EXCHANGE:TRADINGSYMBOL" strings.
+        Returns {instrument: price}, silently omitting any Kite didn't
+        return a quote for (an unresolvable symbol) rather than raising --
+        callers treat "no price for this one" as just data still missing,
+        same as get_ltp's single-instrument 404 case."""
+        if not instruments:
+            return {}
+        params = [("i", instrument) for instrument in instruments]
+        data = await self._request("GET", "/quote/ltp", params=params)
+        return {instrument: float(quote["last_price"]) for instrument, quote in (data or {}).items()}
 
     async def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
         variety = order.get("variety", "regular")

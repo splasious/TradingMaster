@@ -14,6 +14,7 @@ from app.services.broker.kite_session_monitor import kite_session_monitor_schedu
 from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.live_trading.scheduler import live_trading_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
+from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
 from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.scheduler import paper_trading_scheduler
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
         logger.warning("Marked %d backfill job(s) as failed -- orphaned by a previous server restart", orphaned_count)
     tick_engine.start()
     real_price_feed.start()
+    kite_rest_price_feed.start()
     paper_trading_scheduler.start()
     live_trading_scheduler.start()
     bf_live_sync_scheduler.start()
@@ -46,6 +48,7 @@ async def lifespan(app: FastAPI):
     bf_live_sync_scheduler.stop()
     live_trading_scheduler.stop()
     paper_trading_scheduler.stop()
+    kite_rest_price_feed.stop()
     real_price_feed.stop()
     tick_engine.stop()
 

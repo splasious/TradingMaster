@@ -214,6 +214,37 @@ async def test_get_ltp_parses_quote(monkeypatch):
     assert quote["instrument_token"] == 408065
 
 
+async def test_get_ltp_batch_sends_repeated_i_params_and_parses_all_quotes(monkeypatch):
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        assert params == [("i", "NSE:INFY"), ("i", "NSE:TCS")]
+        return _mock_response(
+            200,
+            {
+                "status": "success",
+                "data": {
+                    "NSE:INFY": {"last_price": 1502.35, "instrument_token": 408065},
+                    "NSE:TCS": {"last_price": 3900.1, "instrument_token": 2953217},
+                },
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    prices = await broker.get_ltp_batch(["NSE:INFY", "NSE:TCS"])
+    assert prices == {"NSE:INFY": 1502.35, "NSE:TCS": 3900.1}
+
+
+async def test_get_ltp_batch_empty_input_makes_no_request(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("should not make an HTTP request for an empty instrument list")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fail_if_called)
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    assert await broker.get_ltp_batch([]) == {}
+
+
 async def test_cancel_order_defaults_to_regular_variety(monkeypatch):
     async def fake_request(self, method, url, headers=None, params=None, data=None):
         assert method == "DELETE"
