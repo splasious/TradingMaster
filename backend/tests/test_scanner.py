@@ -142,7 +142,10 @@ async def test_strategy_scan_finds_matching_signal_across_many_instruments(
 
     strategy_resp = await client.post(
         "/api/v1/strategies",
-        json={"name": "Threshold Scan Strategy", "version": {"python_code": THRESHOLD_SCAN_CODE}},
+        json={
+            "name": "Threshold Scan Strategy",
+            "version": {"python_code": THRESHOLD_SCAN_CODE, "parameters": {"threshold": 150.0, "rsi_period": 14.0}},
+        },
         headers=headers,
     )
     strategy_id = strategy_resp.json()["id"]
@@ -157,6 +160,8 @@ async def test_strategy_scan_finds_matching_signal_across_many_instruments(
     matched_symbols = {m["instrument"]["symbol"] for m in body["matched"]}
     assert matched_symbols == {i.symbol for i in above}
     assert all(m["signal"] == "BUY" for m in body["matched"])
+    assert body["strategy_version_number"] == 1
+    assert body["parameters"] == {"threshold": 150.0, "rsi_period": 14.0}
     for inst in below:
         assert inst.symbol not in matched_symbols
 

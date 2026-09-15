@@ -185,6 +185,8 @@ export interface StrategyScanResponse {
   matched: StrategySignalMatch[];
   scanned_count: number;
   skipped_symbols: string[];
+  strategy_version_number: number;
+  parameters: Record<string, number>;
 }
 
 export type RuleNode = { all: RuleNode[] } | { any: RuleNode[] } | ScanCondition;

@@ -357,9 +357,25 @@ export default function ScannerPage() {
           {strategyResult && (
             <Card>
               <CardHeader>
-                <CardTitle>
-                  Results -- {strategyResult.matched.length} of {strategyResult.scanned_count} instruments have an active signal
-                </CardTitle>
+                <div className="space-y-2">
+                  <CardTitle>
+                    Results -- {strategyResult.matched.length} of {strategyResult.scanned_count} instruments have an active signal
+                  </CardTitle>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs text-text-muted">
+                      Version {strategyResult.strategy_version_number} params:
+                    </span>
+                    {Object.keys(strategyResult.parameters).length === 0 ? (
+                      <span className="text-xs text-text-muted">(none -- strategy uses its code&apos;s own defaults)</span>
+                    ) : (
+                      Object.entries(strategyResult.parameters).map(([name, value]) => (
+                        <Badge key={name} tone="neutral">
+                          {name}={value}
+                        </Badge>
+                      ))
+                    )}
+                  </div>
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 {!strategyResult.matched.length ? (

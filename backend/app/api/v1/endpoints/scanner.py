@@ -119,7 +119,10 @@ async def run_strategy_scan(
     ]
     matched.sort(key=lambda m: m.instrument.symbol)
 
-    return StrategyScanResponse(matched=matched, scanned_count=len(instruments), skipped_symbols=skipped_symbols)
+    return StrategyScanResponse(
+        matched=matched, scanned_count=len(instruments), skipped_symbols=skipped_symbols,
+        strategy_version_number=version.version_number, parameters=version.parameters,
+    )
 
 
 def _saved_out(scan: SavedScan) -> SavedScanOut:

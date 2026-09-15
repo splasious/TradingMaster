@@ -60,3 +60,9 @@ class StrategyScanResponse(BaseModel):
     matched: list[StrategySignalMatch]
     scanned_count: int
     skipped_symbols: list[str]
+    # The strategy version's own parameters (e.g. rsi_period, long_rsi_level)
+    # and the values actually used to compute every signal in `matched` --
+    # so the scan result is self-describing rather than making the viewer
+    # go check the Strategy Builder separately to know what was run.
+    strategy_version_number: int
+    parameters: dict[str, float]
