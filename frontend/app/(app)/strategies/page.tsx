@@ -275,6 +275,7 @@ export default function StrategiesPage() {
 
   const pythonStrategies = strategies?.filter((s) => s.code_type === "python") ?? [];
   const visualStrategies = strategies?.filter((s) => s.code_type === "visual") ?? [];
+  const nativeStrategies = strategies?.filter((s) => s.code_type === "native") ?? [];
 
   return (
     <div className="space-y-6">
@@ -317,6 +318,14 @@ export default function StrategiesPage() {
             title="Indicator-Based (Visual) Strategies"
             description="Built from field/operator/value entry and exit conditions."
             strategies={visualStrategies}
+            hasRole={hasRole}
+            user={user}
+            onDelete={setToDelete}
+          />
+          <StrategyGrid
+            title="Advanced Python Strategies"
+            description="Trusted, unsandboxed code -- no fixed instrument, real DB access, multi-leg positions. Deploys from Paper Trading's Advanced Strategy Deployments section, not backtestable through the normal engine."
+            strategies={nativeStrategies}
             hasRole={hasRole}
             user={user}
             onDelete={setToDelete}
