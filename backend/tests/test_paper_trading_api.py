@@ -443,6 +443,34 @@ async def test_non_owner_cannot_start_or_stop_deployment(client: AsyncClient, se
     assert resp.status_code == 403
 
 
+async def test_single_instrument_deployment_rejects_native_strategy(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """A native (Advanced Python) strategy picks its own instrument(s)
+    live -- it has no place in this single-instrument flow. Regression
+    test: the regular /paper-trading/deployments endpoint used to accept
+    one anyway (no code_type check at all), which would have handed it to
+    the single-instrument scheduler/sandbox engine, neither of which a
+    native strategy's code is written for."""
+    instrument = await _seed_instrument(db_session)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Native Rejection Test", "version": {"python_code": "async def evaluate(ctx):\n    pass\n", "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    assert strategy_resp.json()["code_type"] == "native"
+
+    resp = await client.post(
+        "/api/v1/paper-trading/deployments",
+        json={"strategy_id": strategy_id, "instrument_id": str(instrument.id), "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+
 async def test_rejected_order_is_not_persisted_but_audit_logged(
     client: AsyncClient, seeded_admin: dict, db_session: AsyncSession
 ):

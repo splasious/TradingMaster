@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
+from app.models.instrument import Instrument
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
@@ -14,13 +15,56 @@ from app.schemas.paper_trading import (
     NativeDeploymentCreate,
     NativeDeploymentOut,
     NativeEvaluationOut,
+    NativeLegOut,
+    NativePositionOut,
     NativeTradeOut,
 )
 from app.services.audit import write_audit_log
+from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
+
+
+async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePositionOut | None:
+    """Display-only reconstruction of the short/long-leg credit-spread
+    shape (see NativePositionOut's docstring) from a deployment's raw
+    state blob -- returns None for any state that isn't shaped this way
+    (flat, or a future native strategy with a different convention)
+    rather than guessing."""
+    position = (state or {}).get("position") if state else None
+    if not isinstance(position, dict) or "short" not in position or "long" not in position:
+        return None
+
+    legs_out: list[NativeLegOut] = []
+    prices: dict[str, float | None] = {}
+    for side in ("short", "long"):
+        leg = position[side]
+        instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+        if instrument is None:
+            return None
+        current_price = tick_engine.get_current_price(instrument.id)
+        prices[side] = current_price
+        legs_out.append(
+            NativeLegOut(
+                instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
+                side=side, quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
+            )
+        )
+
+    short_leg, long_leg = position["short"], position["long"]
+    trade_value = (short_leg["entry_price"] - long_leg["entry_price"]) * short_leg["quantity"]
+    live_value = None
+    unrealized_pnl = None
+    if prices["short"] is not None and prices["long"] is not None:
+        live_value = (prices["short"] - prices["long"]) * short_leg["quantity"]
+        unrealized_pnl = trade_value - live_value
+
+    return NativePositionOut(
+        bias=position.get("bias"), opened_at=datetime.fromisoformat(position["opened_at"]),
+        legs=legs_out, trade_value=trade_value, live_value=live_value, unrealized_pnl=unrealized_pnl,
+    )
 
 
 async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) -> PaperPortfolio:
@@ -45,12 +89,13 @@ async def _get_owned_native_deployment(db: AsyncSession, user: User, deployment_
 async def _deployment_out(db: AsyncSession, deployment: PaperNativeDeployment) -> NativeDeploymentOut:
     strategy = await db.get(Strategy, deployment.strategy_id)
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
+    position = await _build_position_out(db, deployment.state)
     return NativeDeploymentOut(
         id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
         portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
         status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
         last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
-        state=deployment.state, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
+        state=deployment.state, position=position, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
     )
 
 
@@ -61,16 +106,19 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     portfolio_ids = {d.portfolio_id for d in deployments}
     strategies = {s.id: s for s in (await db.execute(select(Strategy).where(Strategy.id.in_(strategy_ids)))).scalars()}
     portfolios = {p.id: p for p in (await db.execute(select(PaperPortfolio).where(PaperPortfolio.id.in_(portfolio_ids)))).scalars()}
-    return [
-        NativeDeploymentOut(
-            id=str(d.id), strategy_id=str(d.strategy_id), strategy_name=strategies[d.strategy_id].name,
-            portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
-            currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
-            last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
-            created_at=d.created_at, stopped_at=d.stopped_at,
+    out: list[NativeDeploymentOut] = []
+    for d in deployments:
+        position = await _build_position_out(db, d.state)
+        out.append(
+            NativeDeploymentOut(
+                id=str(d.id), strategy_id=str(d.strategy_id), strategy_name=strategies[d.strategy_id].name,
+                portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
+                currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
+                last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
+                position=position, created_at=d.created_at, stopped_at=d.stopped_at,
+            )
         )
-        for d in deployments
-    ]
+    return out
 
 
 @router.post("/native-deployments", response_model=NativeDeploymentOut, status_code=status.HTTP_201_CREATED)

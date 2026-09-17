@@ -110,6 +110,80 @@ async def test_native_strategy_validate_checks_for_evaluate_function(client: Asy
     assert "evaluate" in validate_bad.json()["error"]
 
 
+async def test_native_deployment_out_computes_spread_position(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test for the Paper Trading page's Advanced Strategy
+    Deployments table: given a deployment whose state has the short/long
+    credit-spread shape, the API response's `position` must reconstruct
+    trade_value (net credit at entry) and live_value/unrealized_pnl from
+    current tick prices -- the frontend has no direct TickEngine access,
+    so this has to happen server-side."""
+    from datetime import datetime, timezone
+
+    from app.models.instrument import Instrument
+    from app.services.market_data.tick_engine import tick_engine
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    short_inst = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23300PE", name="Nifty 23300 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23300PE", strike=23300.0, option_type="PE", lot_size=65,
+    )
+    long_inst = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23100PE", name="Nifty 23100 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23100PE", strike=23100.0, option_type="PE", lot_size=65,
+    )
+    db_session.add_all([short_inst, long_inst])
+    await db_session.commit()
+    tick_engine.set_real_price(short_inst.id, 100.0, "test")  # cheaper now than the 112.5 entry -- a winning spread
+    tick_engine.set_real_price(long_inst.id, 60.0, "test")
+
+    code = (
+        "async def evaluate(ctx):\n"
+        "    ctx.note('hold', reason='position seeded directly for this test')\n"
+    )
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Position Display Test", "version": {"python_code": code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    import uuid as uuid_mod
+
+    from app.models.paper_trading import PaperNativeDeployment
+
+    deployment = await db_session.get(PaperNativeDeployment, uuid_mod.UUID(deployment_id))
+    deployment.state = {
+        "position": {
+            "bias": "bullish", "pcr_at_entry": 1.4, "expiry": "2026-09-25",
+            "short": {"instrument_id": str(short_inst.id), "strike": 23300.0, "quantity": 130.0, "entry_price": 112.5},
+            "long": {"instrument_id": str(long_inst.id), "strike": 23100.0, "quantity": 130.0, "entry_price": 64.95},
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    await db_session.commit()
+
+    list_resp = await client.get("/api/v1/paper-trading/native-deployments", headers=headers)
+    deployment_out = next(d for d in list_resp.json() if d["id"] == deployment_id)
+    position = deployment_out["position"]
+    assert position is not None
+    assert position["bias"] == "bullish"
+    assert len(position["legs"]) == 2
+    trade_value = (112.5 - 64.95) * 130.0
+    live_value = (100.0 - 60.0) * 130.0
+    assert position["trade_value"] == trade_value
+    assert position["live_value"] == live_value
+    assert position["unrealized_pnl"] == trade_value - live_value
+
+
 async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

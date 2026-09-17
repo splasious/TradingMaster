@@ -272,6 +272,12 @@ async def start_deployment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
     if strategy.owner_id != user.id and "administrator" not in user.role_names:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
+    if strategy.code_type == "native":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Advanced Python strategies pick their own instrument(s) live -- "
+            "deploy from Paper Trading's Advanced Strategy Deployments section instead (no instrument to pick).",
+        )
 
     instrument = await db.get(Instrument, uuid.UUID(payload.instrument_id))
     if instrument is None:

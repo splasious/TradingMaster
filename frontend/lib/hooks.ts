@@ -389,6 +389,17 @@ export function useNativeTrades(deploymentId: string | null) {
   });
 }
 
+/** Every closed trade across all of the user's Advanced Python
+ * deployments, newest first -- the portfolio-wide log, as opposed to
+ * useNativeTrades' single-deployment scope. */
+export function useAllNativeTrades() {
+  return useQuery({
+    queryKey: ["native-trades", "all"],
+    queryFn: () => apiFetch<NativeTradeOut[]>("/api/v1/paper-trading/native-trades"),
+    refetchInterval: 10000,
+  });
+}
+
 export function usePaperOrders(deploymentId: string | null) {
   return useQuery({
     queryKey: ["paper-orders", deploymentId],

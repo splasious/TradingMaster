@@ -17,6 +17,7 @@ import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import {
+  useAllNativeTrades,
   useAllPaperTrades,
   useInstruments,
   useNativeDeployments,
@@ -32,6 +33,7 @@ import type {
   InstrumentOut,
   NativeDeploymentOut,
   NativeEvaluationOut,
+  NativePositionOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
   PaperPortfolioOut,
@@ -111,7 +113,11 @@ function CreatePoolModal({ onClose, onCreated }: { onClose: () => void; onCreate
 
 function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
   const queryClient = useQueryClient();
-  const { data: strategies } = useStrategies();
+  const { data: allStrategies } = useStrategies();
+  // Native (Advanced Python) strategies pick their own instrument(s) live --
+  // they don't belong in this single-instrument flow at all. They deploy
+  // from the Advanced Strategy Deployments section's own modal below.
+  const strategies = allStrategies?.filter((s) => s.code_type !== "native");
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
@@ -933,6 +939,53 @@ function ClosedTradesPanel() {
   );
 }
 
+function NativeClosedTradesPanel() {
+  const { data: trades, isLoading } = useAllNativeTrades();
+
+  return (
+    <CollapsibleSection title="Advanced Strategy Closed Trades" count={trades?.length ?? 0}>
+      {isLoading ? (
+        <LoadingState />
+      ) : (
+        <Table>
+          <Thead>
+            <tr>
+              <Th>Strategy</Th>
+              <Th>Opened</Th>
+              <Th>Closed</Th>
+              <Th className="text-right">P&amp;L</Th>
+              <Th className="text-right">P&amp;L %</Th>
+              <Th>Exit Reason</Th>
+              <Th>Legs</Th>
+            </tr>
+          </Thead>
+          <Tbody>
+            {trades?.map((t) => (
+              <tr key={t.id}>
+                <Td className="font-medium">{t.strategy_name ?? "--"}</Td>
+                <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleDateString()} {new Date(t.opened_at).toLocaleTimeString()}</Td>
+                <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleDateString()} {new Date(t.closed_at).toLocaleTimeString()}</Td>
+                <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
+                  {t.pnl >= 0 ? "+" : ""}
+                  {t.pnl.toFixed(2)}
+                </Td>
+                <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
+                  {t.pnl_pct >= 0 ? "+" : ""}
+                  {t.pnl_pct.toFixed(2)}%
+                </Td>
+                <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+                <Td className="text-xs text-text-muted">
+                  {t.legs.map((l) => `${l.side} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`).join(", ")}
+                </Td>
+              </tr>
+            ))}
+          </Tbody>
+        </Table>
+      )}
+    </CollapsibleSection>
+  );
+}
+
 function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
   const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
@@ -1031,15 +1084,28 @@ function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boole
   );
 }
 
+/** "23300 PE / 23100 PE" -- compact stand-in for the "Instrument" column,
+ * since a native deployment isn't pinned to one instrument the way a
+ * regular deployment is. */
+function legsLabel(position: NativePositionOut): string {
+  return position.legs.map((l) => `${l.strike ?? "?"}${l.option_type ?? ""}`).join(" / ");
+}
+
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
   const { data: trades } = useNativeTrades(deployment.id);
-  const position = (deployment.state?.position as Record<string, unknown> | null | undefined) ?? null;
+  const position = deployment.position;
 
   return (
     <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
       {position ? (
         <div className="text-xs text-text-secondary">
-          <span className="font-medium">Open position:</span> {JSON.stringify(position)}
+          <span className="font-medium">{position.bias ?? "position"}:</span>{" "}
+          {position.legs.map((l) => (
+            <span key={l.instrument_symbol} className="mr-3">
+              {l.side} {l.quantity} {l.instrument_symbol} @ {l.entry_price.toFixed(2)}
+              {l.current_price != null && <> (now {l.current_price.toFixed(2)})</>}
+            </span>
+          ))}
         </div>
       ) : (
         <div className="text-xs text-text-muted">Flat -- no open position.</div>
@@ -1086,7 +1152,7 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
-  const position = deployment.state?.position ?? null;
+  const position = deployment.position;
 
   const evaluateMutation = useMutation({
     mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/evaluate`, { method: "POST" }),
@@ -1094,7 +1160,7 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
       setLastEval(data);
       queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
       queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
-      queryClient.invalidateQueries({ queryKey: ["native-trades", deployment.id] });
+      queryClient.invalidateQueries({ queryKey: ["native-trades"] });
     },
   });
 
@@ -1109,7 +1175,7 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
       setLastEval(data);
       queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
       queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
-      queryClient.invalidateQueries({ queryKey: ["native-trades", deployment.id] });
+      queryClient.invalidateQueries({ queryKey: ["native-trades"] });
     },
   });
 
@@ -1122,13 +1188,51 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
     <>
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
         <Td className="font-medium">{deployment.strategy_name}</Td>
+        <Td>{position ? legsLabel(position) : <span className="text-text-muted">--</span>}</Td>
         <Td>
           <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
         </Td>
         <Td>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
         </Td>
-        <Td>{position ? <Badge tone="active">in a trade</Badge> : <span className="text-text-muted">flat</span>}</Td>
+        <Td>
+          {position ? (
+            <span className="font-financial capitalize">{position.bias ?? "in a trade"}</span>
+          ) : (
+            <span className="text-text-muted">flat</span>
+          )}
+        </Td>
+        <Td className="text-text-secondary">
+          {position ? (
+            <span className="font-financial text-xs" title={new Date(position.opened_at).toISOString()}>
+              {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
+        <Td className="text-right font-financial">
+          {position ? position.trade_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : <span className="text-text-muted">--</span>}
+        </Td>
+        <Td className="text-right font-financial">
+          {position && position.live_value != null ? (
+            position.live_value.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          ) : position ? (
+            <span className="text-[10px] uppercase text-text-muted">stale</span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
+        <Td className="text-right font-financial">
+          {position && position.unrealized_pnl != null ? (
+            <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
+              {position.unrealized_pnl >= 0 ? "+" : ""}
+              {position.unrealized_pnl.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
         <Td className="max-w-xs text-xs text-text-muted">
           {lastEval ? (
             <span className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`} title={lastEval.reason ?? undefined}>
@@ -1183,7 +1287,7 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} className="p-0">
+          <td colSpan={10} className="p-0">
             <NativeDeploymentDetail deployment={deployment} />
           </td>
         </tr>
@@ -1216,9 +1320,14 @@ function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
             <Thead>
               <tr>
                 <Th>Strategy</Th>
+                <Th>Instrument</Th>
                 <Th>Pool</Th>
                 <Th>Status</Th>
                 <Th>Position</Th>
+                <Th>Entered</Th>
+                <Th className="text-right">Trade Value</Th>
+                <Th className="text-right">Live Value</Th>
+                <Th className="text-right">P&amp;L</Th>
                 <Th>Last Signal</Th>
                 <Th />
               </tr>
@@ -1313,6 +1422,7 @@ export default function PaperTradingPage() {
       </CollapsibleSection>
 
       <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} />
+      <NativeClosedTradesPanel />
 
       <ClosedTradesPanel />
 

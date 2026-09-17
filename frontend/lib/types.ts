@@ -251,6 +251,25 @@ export interface StrategyVersionCreate {
   risk_rules: Partial<RiskRules>;
 }
 
+export interface NativeLegOut {
+  instrument_symbol: string;
+  strike: number | null;
+  option_type: string | null;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  current_price: number | null;
+}
+
+export interface NativePositionOut {
+  bias: string | null;
+  opened_at: string;
+  legs: NativeLegOut[];
+  trade_value: number;
+  live_value: number | null;
+  unrealized_pnl: number | null;
+}
+
 export interface NativeDeploymentOut {
   id: string;
   strategy_id: string;
@@ -263,6 +282,7 @@ export interface NativeDeploymentOut {
   last_signal: string | null;
   last_signal_reason: string | null;
   state: Record<string, unknown> | null;
+  position: NativePositionOut | null;
   created_at: string;
   stopped_at: string | null;
 }

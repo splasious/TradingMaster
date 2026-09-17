@@ -107,6 +107,35 @@ class NativeDeploymentCreate(BaseModel):
     # picks its own instrument(s) live (see native_runner.py).
 
 
+class NativeLegOut(BaseModel):
+    instrument_symbol: str
+    strike: float | None
+    option_type: str | None
+    side: str  # "short" | "long"
+    quantity: float
+    entry_price: float
+    current_price: float | None
+
+
+class NativePositionOut(BaseModel):
+    """Display-only summary of deployment.state["position"] for the
+    short/long-leg credit-spread convention native_strategies/
+    nifty_pcr_credit_spread.py uses -- not every native strategy's state
+    will look like this, but it's the one real shape that exists today
+    (see native_runner.py's docstring: state is otherwise a strategy-owned
+    blob, no fixed schema). trade_value is the net credit received at
+    entry, live_value the net debit it would cost to close right now --
+    unrealized_pnl = trade_value - live_value, the same formula the
+    strategy's own close_position() uses."""
+
+    bias: str | None
+    opened_at: datetime
+    legs: list[NativeLegOut]
+    trade_value: float
+    live_value: float | None
+    unrealized_pnl: float | None
+
+
 class NativeDeploymentOut(BaseModel):
     id: str
     strategy_id: str
@@ -119,6 +148,7 @@ class NativeDeploymentOut(BaseModel):
     last_signal: str | None = None
     last_signal_reason: str | None = None
     state: dict | None = None
+    position: NativePositionOut | None = None
     created_at: datetime
     stopped_at: datetime | None
 
