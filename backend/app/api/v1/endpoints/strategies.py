@@ -85,7 +85,7 @@ async def create_strategy(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> StrategyOut:
-    code_type = "python" if payload.version.python_code else "visual"
+    code_type = "native" if payload.version.is_native else ("python" if payload.version.python_code else "visual")
     strategy = Strategy(name=payload.name, description=payload.description, owner_id=user.id, code_type=code_type)
     db.add(strategy)
     await db.flush()
@@ -214,7 +214,7 @@ async def create_strategy_version(
         created_by=user.id,
     )
     db.add(version)
-    strategy.code_type = "python" if payload.python_code else "visual"
+    strategy.code_type = "native" if payload.is_native else ("python" if payload.python_code else "visual")
     # A code change invalidates any prior backtest/paper-trading progress
     # (PRD section 25's pipeline is a real pipeline).
     strategy.status = StrategyStatus.DRAFT.value
@@ -259,6 +259,22 @@ async def validate_strategy(
                 {"ts": c.ts.isoformat(), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
                 for c in candles
             ]
+
+    if strategy.code_type == "native":
+        # A native strategy has no candles-in/signal-out shape to dry-run
+        # against (it picks its own instruments, needs real DB access) --
+        # validation here is a lightweight compile + "does it define
+        # evaluate()" check only, deliberately not calling it (that would
+        # touch real cash/leg bookkeeping, which validate_strategy's own
+        # docstring promises never happens).
+        try:
+            module_ns: dict = {}
+            exec(compile(version.python_code or "", filename="<native-strategy-validate>", mode="exec"), module_ns)
+        except Exception as exc:
+            return ValidateResult(valid=False, error=f"{type(exc).__name__}: {exc}")
+        if not callable(module_ns.get("evaluate")):
+            return ValidateResult(valid=False, error="Native strategy code must define async def evaluate(ctx)")
+        return ValidateResult(valid=True, sample_signal=None)
 
     if version.python_code:
         sandbox_result = await run_python_strategy(version.python_code, sample, version.parameters)

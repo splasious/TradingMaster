@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     market_data_ws,
     optimization,
     options,
+    paper_native_trading,
     paper_trading,
     portfolio_backtests,
     portfolio_optimization,
@@ -40,6 +41,7 @@ api_router.include_router(portfolio_backtests.router, prefix="/portfolio-backtes
 api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
 api_router.include_router(portfolio_optimization.router, prefix="/portfolio-optimization", tags=["portfolio-optimization"])
 api_router.include_router(paper_trading.router, prefix="/paper-trading", tags=["paper-trading"])
+api_router.include_router(paper_native_trading.router, prefix="/paper-trading", tags=["paper-trading"])
 api_router.include_router(live_trading.router, prefix="/live-trading", tags=["live-trading"])
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])

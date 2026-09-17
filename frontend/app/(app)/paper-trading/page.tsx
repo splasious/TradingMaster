@@ -19,6 +19,8 @@ import { apiFetch, ApiError } from "@/lib/api";
 import {
   useAllPaperTrades,
   useInstruments,
+  useNativeDeployments,
+  useNativeTrades,
   usePaperDeployments,
   usePaperOrders,
   usePaperPortfolios,
@@ -26,7 +28,15 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
-import type { InstrumentOut, PaperDeploymentOut, PaperEvaluationOut, PaperPortfolioOut, StrategyOut } from "@/lib/types";
+import type {
+  InstrumentOut,
+  NativeDeploymentOut,
+  NativeEvaluationOut,
+  PaperDeploymentOut,
+  PaperEvaluationOut,
+  PaperPortfolioOut,
+  StrategyOut,
+} from "@/lib/types";
 
 function lastEvaluatedDataStatus(lastEvaluatedAt: string | null): DataStatus | undefined {
   if (!lastEvaluatedAt) return undefined;
@@ -923,10 +933,313 @@ function ClosedTradesPanel() {
   );
 }
 
+function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
+  const queryClient = useQueryClient();
+  const { data: strategies } = useStrategies();
+  const nativeStrategies = strategies?.filter((s) => s.code_type === "native") ?? [];
+  const [strategyId, setStrategyId] = useState("");
+  const [portfolioId, setPortfolioId] = useState("");
+
+  function reset() {
+    setStrategyId("");
+    setPortfolioId("");
+  }
+
+  const startMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<NativeDeploymentOut>("/api/v1/paper-trading/native-deployments", {
+        method: "POST",
+        body: JSON.stringify({ strategy_id: strategyId, portfolio_id: portfolioId }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      reset();
+      onClose();
+    },
+  });
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        reset();
+        onClose();
+      }}
+      title="Start Advanced Strategy Deployment"
+    >
+      <div className="space-y-4">
+        <p className="text-sm text-text-secondary">
+          Advanced Python strategies pick their own instrument(s) live -- no instrument or sizing to choose here, just
+          which strategy and which capital pool to run it against.
+        </p>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Strategy</label>
+          <Select value={strategyId} onChange={(e) => setStrategyId(e.target.value)}>
+            <option value="" disabled>
+              Select an Advanced Python strategy
+            </option>
+            {nativeStrategies.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </Select>
+          {!nativeStrategies.length && (
+            <p className="text-xs text-text-muted">
+              No Advanced Python strategies yet -- create one in the Strategy Builder&apos;s &quot;Advanced
+              Python&quot; tab first.
+            </p>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">Capital Pool</label>
+          <Select value={portfolioId} onChange={(e) => setPortfolioId(e.target.value)}>
+            <option value="" disabled>
+              Select a capital pool
+            </option>
+            {portfolios.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.currency} {p.cash.toFixed(0)} available)
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        {startMutation.error && (
+          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+            {startMutation.error instanceof ApiError ? startMutation.error.message : "Failed to start"}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+          >
+            Cancel
+          </Button>
+          <Button onClick={() => startMutation.mutate()} disabled={!strategyId || !portfolioId || startMutation.isPending}>
+            {startMutation.isPending ? "Starting..." : "Start"}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
+  const { data: trades } = useNativeTrades(deployment.id);
+  const position = (deployment.state?.position as Record<string, unknown> | null | undefined) ?? null;
+
+  return (
+    <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
+      {position ? (
+        <div className="text-xs text-text-secondary">
+          <span className="font-medium">Open position:</span> {JSON.stringify(position)}
+        </div>
+      ) : (
+        <div className="text-xs text-text-muted">Flat -- no open position.</div>
+      )}
+      {trades && trades.length > 0 ? (
+        <div>
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Closed Trades</h4>
+          <Table>
+            <Thead>
+              <tr>
+                <Th>Opened</Th>
+                <Th>Closed</Th>
+                <Th className="text-right">P&amp;L</Th>
+                <Th>Exit Reason</Th>
+                <Th>Legs</Th>
+              </tr>
+            </Thead>
+            <Tbody>
+              {trades.map((t) => (
+                <tr key={t.id}>
+                  <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleString()}</Td>
+                  <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleString()}</Td>
+                  <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
+                    {t.pnl >= 0 ? "+" : ""}
+                    {t.pnl.toFixed(2)}
+                  </Td>
+                  <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+                  <Td className="text-xs text-text-muted">
+                    {t.legs.map((l) => `${l.side} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`).join(", ")}
+                  </Td>
+                </tr>
+              ))}
+            </Tbody>
+          </Table>
+        </div>
+      ) : (
+        <EmptyState title="No closed trades yet" />
+      )}
+    </div>
+  );
+}
+
+function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }) {
+  const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState(false);
+  const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
+  const position = deployment.state?.position ?? null;
+
+  const evaluateMutation = useMutation({
+    mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/evaluate`, { method: "POST" }),
+    onSuccess: (data) => {
+      setLastEval(data);
+      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["native-trades", deployment.id] });
+    },
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}/stop`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+  });
+
+  const exitMutation = useMutation({
+    mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/exit`, { method: "POST" }),
+    onSuccess: (data) => {
+      setLastEval(data);
+      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["native-trades", deployment.id] });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+  });
+
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
+        <Td className="font-medium">{deployment.strategy_name}</Td>
+        <Td>
+          <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
+        </Td>
+        <Td>
+          <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
+        </Td>
+        <Td>{position ? <Badge tone="active">in a trade</Badge> : <span className="text-text-muted">flat</span>}</Td>
+        <Td className="max-w-xs text-xs text-text-muted">
+          {lastEval ? (
+            <span className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`} title={lastEval.reason ?? undefined}>
+              {lastEval.action}
+              {lastEval.signal ? ` (${lastEval.signal})` : ""}
+              {lastEval.reason ? `: ${lastEval.reason}` : ""}
+            </span>
+          ) : deployment.last_signal ? (
+            <span
+              className={`block truncate ${deployment.last_signal === "ERROR" ? "text-negative" : ""}`}
+              title={deployment.last_signal_reason ?? undefined}
+            >
+              {deployment.last_signal}
+              {deployment.last_signal_reason ? `: ${deployment.last_signal_reason}` : ""}
+            </span>
+          ) : (
+            "--"
+          )}
+        </Td>
+        <Td className="text-right" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-end gap-1">
+            {deployment.status === "active" ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
+                  <Zap className="h-3.5 w-3.5" /> Evaluate Now
+                </Button>
+                {position != null && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => exitMutation.mutate()}
+                    disabled={exitMutation.isPending}
+                    className="text-negative hover:text-negative"
+                  >
+                    <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
+                  </Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={() => stopMutation.mutate()} disabled={stopMutation.isPending}>
+                  <Square className="h-3.5 w-3.5" /> Stop
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="ghost" size="sm" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}
+                className="text-text-muted hover:text-negative"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete
+              </Button>
+            )}
+          </div>
+        </Td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={6} className="p-0">
+            <NativeDeploymentDetail deployment={deployment} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
+  const { data: deployments, isLoading } = useNativeDeployments();
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Advanced Strategy Deployments</CardTitle>
+        <Button variant="secondary" size="sm" onClick={onStart}>
+          <Play className="h-3.5 w-3.5" /> Start Advanced Deployment
+        </Button>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <LoadingState />
+        ) : !deployments?.length ? (
+          <EmptyState
+            title="No Advanced Python deployments yet"
+            description="For strategies that pick their own instruments live -- multi-leg options, PCR-driven spreads, and the like."
+          />
+        ) : (
+          <Table>
+            <Thead>
+              <tr>
+                <Th>Strategy</Th>
+                <Th>Pool</Th>
+                <Th>Status</Th>
+                <Th>Position</Th>
+                <Th>Last Signal</Th>
+                <Th />
+              </tr>
+            </Thead>
+            <Tbody>
+              {deployments.map((d) => (
+                <NativeDeploymentRow key={d.id} deployment={d} />
+              ))}
+            </Tbody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolios } = usePaperPortfolios();
   const [modalOpen, setModalOpen] = useState(false);
+  const [nativeModalOpen, setNativeModalOpen] = useState(false);
   const [creatingPool, setCreatingPool] = useState(false);
   const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
   const [editingPortfolio, setEditingPortfolio] = useState<PaperPortfolioOut | null>(null);
@@ -999,9 +1312,12 @@ export default function PaperTradingPage() {
         <GroupedDeploymentsTable deployments={stopped} onDelete={setToDelete} />
       </CollapsibleSection>
 
+      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} />
+
       <ClosedTradesPanel />
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} portfolios={portfolios ?? []} />
+      <StartNativeDeploymentModal open={nativeModalOpen} onClose={() => setNativeModalOpen(false)} portfolios={portfolios ?? []} />
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
       {editingPortfolio && <EditCapitalModal portfolio={editingPortfolio} onClose={() => setEditingPortfolio(null)} />}

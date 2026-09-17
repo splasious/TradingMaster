@@ -231,7 +231,7 @@ export interface StrategyOut {
   id: string;
   name: string;
   description: string | null;
-  code_type: "visual" | "python";
+  code_type: "visual" | "python" | "native";
   status: StrategyStatus;
   owner_id: string;
   created_at: string;
@@ -246,8 +246,51 @@ export interface StrategyVersionCreate {
   entry_rules: RuleNode | null;
   exit_rules: RuleNode | null;
   python_code: string | null;
+  is_native?: boolean;
   position_sizing: PositionSizing;
   risk_rules: Partial<RiskRules>;
+}
+
+export interface NativeDeploymentOut {
+  id: string;
+  strategy_id: string;
+  strategy_name: string;
+  portfolio_id: string;
+  portfolio_name: string;
+  currency: string;
+  status: string;
+  last_evaluated_at: string | null;
+  last_signal: string | null;
+  last_signal_reason: string | null;
+  state: Record<string, unknown> | null;
+  created_at: string;
+  stopped_at: string | null;
+}
+
+export interface NativeTradeLeg {
+  instrument_id: string;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  exit_price: number;
+}
+
+export interface NativeTradeOut {
+  id: string;
+  deployment_id: string;
+  strategy_name: string | null;
+  opened_at: string;
+  closed_at: string;
+  legs: NativeTradeLeg[];
+  pnl: number;
+  pnl_pct: number;
+  exit_reason: string;
+}
+
+export interface NativeEvaluationOut {
+  action: string;
+  signal: string | null;
+  reason: string | null;
 }
 
 export interface ValidateResult {

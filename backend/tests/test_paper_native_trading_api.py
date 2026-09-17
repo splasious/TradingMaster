@@ -1,0 +1,148 @@
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def _login(client: AsyncClient, email: str, password: str) -> str:
+    resp = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200
+    return resp.json()["access_token"]
+
+
+async def _default_portfolio_id(client: AsyncClient, headers: dict) -> str:
+    resp = await client.get("/api/v1/paper-trading/portfolios", headers=headers)
+    return resp.json()[0]["id"]
+
+
+TRIVIAL_NATIVE_CODE = (
+    "async def evaluate(ctx):\n"
+    "    ctx.state['calls'] = ctx.state.get('calls', 0) + 1\n"
+    "    ctx.note('hold', signal='TEST', reason='ok')\n"
+)
+
+
+async def _create_native_strategy(client: AsyncClient, headers: dict, name: str = "Native API Strategy") -> str:
+    resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": name, "version": {"python_code": TRIVIAL_NATIVE_CODE, "is_native": True}},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["code_type"] == "native"
+    return resp.json()["id"]
+
+
+async def test_full_native_paper_trading_flow_via_api(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+    strategy_id = await _create_native_strategy(client, headers)
+
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    assert deploy_resp.status_code == 201, deploy_resp.text
+    deployment_id = deploy_resp.json()["id"]
+    assert deploy_resp.json()["status"] == "active"
+    assert deploy_resp.json()["portfolio_id"] == portfolio_id
+
+    eval_resp = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+    assert eval_resp.status_code == 200
+    assert eval_resp.json()["action"] == "hold"
+    assert eval_resp.json()["signal"] == "TEST"
+
+    list_resp = await client.get("/api/v1/paper-trading/native-deployments", headers=headers)
+    assert any(d["id"] == deployment_id for d in list_resp.json())
+
+    strategy_after = await client.get(f"/api/v1/strategies/{strategy_id}", headers=headers)
+    assert strategy_after.json()["status"] == "paper_trading"
+
+    stop_resp = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/stop", headers=headers)
+    assert stop_resp.status_code == 200
+    assert stop_resp.json()["status"] == "stopped"
+
+    delete_resp = await client.delete(f"/api/v1/paper-trading/native-deployments/{deployment_id}", headers=headers)
+    assert delete_resp.status_code == 204
+
+    list_after = await client.get("/api/v1/paper-trading/native-deployments", headers=headers)
+    assert not any(d["id"] == deployment_id for d in list_after.json())
+
+
+async def test_native_deployment_rejects_non_native_strategy(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Plain Python Strategy", "version": {"python_code": "def generate_signal(candles, params):\n    return 'HOLD'\n"}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    assert strategy_resp.json()["code_type"] == "python"
+
+    resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+
+async def test_native_strategy_validate_checks_for_evaluate_function(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    strategy_id = await _create_native_strategy(client, headers, name="Validate Native OK")
+
+    resp = await client.post(f"/api/v1/strategies/{strategy_id}/validate", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is True
+
+    bad_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Validate Native Bad", "version": {"python_code": "x = 1\n", "is_native": True}},
+        headers=headers,
+    )
+    bad_strategy_id = bad_resp.json()["id"]
+    validate_bad = await client.post(f"/api/v1/strategies/{bad_strategy_id}/validate", headers=headers)
+    assert validate_bad.json()["valid"] is False
+    assert "evaluate" in validate_bad.json()["error"]
+
+
+async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    recording_code = (
+        "from datetime import datetime, timezone\n"
+        "async def evaluate(ctx):\n"
+        "    await ctx.record_trade(legs=[], pnl=42.0, pnl_pct=1.0, exit_reason='manual', opened_at=datetime.now(timezone.utc))\n"
+        "    ctx.note('exited', signal='COVER')\n"
+    )
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Recording Native Strategy", "version": {"python_code": recording_code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+
+    trades_resp = await client.get(f"/api/v1/paper-trading/native-trades?deployment_id={deployment_id}", headers=headers)
+    assert trades_resp.status_code == 200
+    trades = trades_resp.json()
+    assert len(trades) == 1
+    assert trades[0]["pnl"] == 42.0
+    assert trades[0]["exit_reason"] == "manual"
+
+    all_trades_resp = await client.get("/api/v1/paper-trading/native-trades", headers=headers)
+    assert any(t["deployment_id"] == deployment_id for t in all_trades_resp.json())

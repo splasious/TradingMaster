@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
-from app.models.paper_trading import DeploymentStatus, PaperDeployment
+from app.models.paper_trading import DeploymentStatus, PaperDeployment, PaperNativeDeployment
 from app.services.market_data.seed_price import get_seed_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.engine import evaluate_deployment
+from app.services.paper_trading.native_runner import run_native_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,16 @@ class PaperTradingScheduler:
                             evaluated += 1
                         except Exception:
                             logger.exception("Paper deployment %s evaluation failed", deployment.id)
+
+                    native_result = await db.execute(
+                        select(PaperNativeDeployment).where(PaperNativeDeployment.status == DeploymentStatus.ACTIVE.value)
+                    )
+                    for native_deployment in native_result.scalars().all():
+                        try:
+                            await run_native_strategy(db, native_deployment)
+                            evaluated += 1
+                        except Exception:
+                            logger.exception("Native paper deployment %s evaluation failed", native_deployment.id)
                     self.last_tick_evaluated_count = evaluated
             except Exception:
                 logger.exception("Paper trading scheduler tick failed")

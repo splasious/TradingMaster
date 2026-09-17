@@ -29,6 +29,13 @@ class StrategyVersionCreate(BaseModel):
     entry_rules: RuleNode | None = None
     exit_rules: RuleNode | None = None
     python_code: str | None = Field(default=None, max_length=50000)
+    # "Advanced Python" mode (PRD-adjacent, added for strategies the
+    # sandbox's generate_signal(candles, params) contract can't express --
+    # no fixed instrument, real DB access, multi-leg positions). Still
+    # stored in python_code; this flag alone decides sandboxed ("python")
+    # vs. trusted/unsandboxed ("native") execution -- see
+    # services/paper_trading/native_runner.py.
+    is_native: bool = False
     position_sizing: PositionSizing = Field(default_factory=PositionSizing)
     risk_rules: RiskRules = Field(default_factory=RiskRules)
 

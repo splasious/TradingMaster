@@ -30,6 +30,8 @@ import type {
   LiveOrderOut,
   LiveSyncStatusOut,
   LiveTradeOut,
+  NativeDeploymentOut,
+  NativeTradeOut,
   OptimizationJobOut,
   OptimizationResultOut,
   PaperDeploymentOut,
@@ -368,6 +370,22 @@ export function usePaperPortfolios() {
     queryKey: ["paper-portfolios"],
     queryFn: () => apiFetch<PaperPortfolioOut[]>("/api/v1/paper-trading/portfolios"),
     refetchInterval: 5000,
+  });
+}
+
+export function useNativeDeployments() {
+  return useQuery({
+    queryKey: ["native-deployments"],
+    queryFn: () => apiFetch<NativeDeploymentOut[]>("/api/v1/paper-trading/native-deployments"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useNativeTrades(deploymentId: string | null) {
+  return useQuery({
+    queryKey: ["native-trades", deploymentId],
+    queryFn: () => apiFetch<NativeTradeOut[]>(`/api/v1/paper-trading/native-trades?deployment_id=${deploymentId}`),
+    enabled: !!deploymentId,
   });
 }
 

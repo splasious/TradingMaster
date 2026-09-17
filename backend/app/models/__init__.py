@@ -17,7 +17,15 @@ from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCre
 from app.models.instrument import Instrument
 from app.models.live_trading import KillSwitch, LiveDeployment, LiveOrder, LivePosition, LiveTrade
 from app.models.market_data import BackfillJob, OhlcvCandle
-from app.models.paper_trading import PaperDeployment, PaperOrder, PaperPortfolio, PaperPosition, PaperTrade
+from app.models.paper_trading import (
+    PaperDeployment,
+    PaperNativeDeployment,
+    PaperNativeTrade,
+    PaperOrder,
+    PaperPortfolio,
+    PaperPosition,
+    PaperTrade,
+)
 from app.models.scan import SavedScan
 from app.models.session import Session
 from app.models.strategy import Strategy, StrategyVersion
@@ -49,6 +57,8 @@ __all__ = [
     "OptimizationJob",
     "OptimizationResult",
     "PaperDeployment",
+    "PaperNativeDeployment",
+    "PaperNativeTrade",
     "PaperOrder",
     "PaperPortfolio",
     "PaperPosition",

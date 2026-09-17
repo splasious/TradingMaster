@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Uuid, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -115,4 +115,56 @@ class PaperTrade(Base):
     pnl: Mapped[float] = mapped_column(Float, nullable=False)
     pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
     exit_reason: Mapped[str] = mapped_column(String(20), nullable=False, default="signal")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PaperNativeDeployment(Base):
+    """A deployment for a `Strategy.code_type == "native"` strategy --
+    trusted, unsandboxed Python that can't be expressed as one
+    `generate_signal(candles, params)` call against one pre-selected
+    instrument (see services/paper_trading/native_runner.py). Unlike
+    `PaperDeployment`, deliberately has no `instrument_id` (the strategy
+    picks its own instrument(s) live, e.g. a fresh ATM option strike
+    every day) and no position-sizing config (the strategy sizes itself).
+
+    `state` is an arbitrary JSON blob the strategy's own `evaluate(ctx)`
+    reads and writes between ticks (ctx.state) -- e.g. for a 2-leg
+    options spread, the currently-open position's legs and bias, or
+    `null` when flat. Kept generic (not strategy-specific columns) so
+    the next native strategy doesn't need a schema change."""
+
+    __tablename__ = "paper_native_deployments"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    portfolio_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("paper_portfolios.id", ondelete="CASCADE"), nullable=False)
+    strategy_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False)
+    strategy_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("strategy_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default=DeploymentStatus.ACTIVE.value, nullable=False)
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_signal: Mapped[str | None] = mapped_column(String(20))
+    last_signal_reason: Mapped[str | None] = mapped_column(String(500))
+    state: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PaperNativeTrade(Base):
+    """Closed-trade ledger for native deployments -- `legs` is a JSON
+    list of `{instrument_id, side, quantity, entry_price, exit_price}`
+    so this works for a 1-leg or N-leg strategy alike without a schema
+    change, the same "generic table, strategy-specific content" choice
+    `PaperNativeDeployment.state` makes."""
+
+    __tablename__ = "paper_native_trades"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    deployment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("paper_native_deployments.id", ondelete="CASCADE"), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    legs: Mapped[list] = mapped_column(JSON, nullable=False)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

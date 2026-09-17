@@ -29,6 +29,28 @@ const DEFAULT_PYTHON_CODE = `def generate_signal(candles, params):
     return "HOLD"
 `;
 
+const DEFAULT_NATIVE_CODE = `# Advanced Python -- runs trusted and unsandboxed (real imports, real DB
+# access), for strategies that can't be expressed as one generate_signal()
+# call against one pre-selected instrument: no fixed instrument, multi-leg
+# positions, or data (PCR, option chains) the sandbox can't reach.
+#
+# Must define: async def evaluate(ctx) -> None
+#
+# ctx gives you: ctx.db, ctx.portfolio, ctx.deployment, ctx.state (a plain
+# dict you own, persisted between ticks), ctx.now, and helpers:
+#   await ctx.get_price(instrument_id)
+#   await ctx.get_pcr(underlying_symbol="NIFTY 50", num_expiries=4, timeframe="15m")
+#   await ctx.find_option(underlying_instrument_id, expiry, strike, option_type)
+#   await ctx.list_weekly_expiries(underlying_instrument_id, today, limit=4)
+#   await ctx.open_leg(instrument, side, quantity, price)   # "sell" credits cash, "buy" debits it
+#   await ctx.close_leg(instrument, side, quantity, price)
+#   await ctx.record_trade(legs, pnl, pnl_pct, exit_reason, opened_at)
+#   ctx.note(action, signal=None, reason=None)  # what to show as this deployment's last signal
+
+async def evaluate(ctx):
+    ctx.note("hold", reason="not implemented yet")
+`;
+
 function useFieldOptions() {
   const { data: indicators } = useIndicatorList();
   const options = RAW_FIELDS.map((f) => ({ value: f, label: f }));
@@ -138,7 +160,8 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
   const [exitConditions, setExitConditions] = useState<ScanCondition[]>(
     ruleConditions(v?.exit_rules ?? null) ?? [{ field: "rsi.rsi", operator: "<", value: 45 }],
   );
-  const [pythonCode, setPythonCode] = useState(v?.python_code ?? DEFAULT_PYTHON_CODE);
+  const [pythonCode, setPythonCode] = useState(existing?.code_type === "native" ? DEFAULT_PYTHON_CODE : (v?.python_code ?? DEFAULT_PYTHON_CODE));
+  const [nativeCode, setNativeCode] = useState(existing?.code_type === "native" ? (v?.python_code ?? DEFAULT_NATIVE_CODE) : DEFAULT_NATIVE_CODE);
 
   // "By Number of Stocks" is a UI convenience, not a distinct backend
   // sizing type -- it just computes an equal-weight percent_capital value
@@ -160,13 +183,14 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
       ? { type: "percent_capital" as const, value: 100 / Math.max(1, stockCount) }
       : { type: sizingMode, value: sizingValue };
 
-  const versionBody = (codeType: "visual" | "python") => ({
+  const versionBody = (codeType: "visual" | "python" | "native") => ({
     timeframe,
     instrument_ids: selectedInstruments.map((i) => i.id),
     parameters: {},
     entry_rules: codeType === "visual" ? { all: entryConditions } : null,
     exit_rules: codeType === "visual" ? { all: exitConditions } : null,
-    python_code: codeType === "python" ? pythonCode : null,
+    python_code: codeType === "python" ? pythonCode : codeType === "native" ? nativeCode : null,
+    is_native: codeType === "native",
     position_sizing: positionSizing,
     risk_rules: {
       stop_loss_pct: stopLossPct ? Number(stopLossPct) : null,
@@ -176,7 +200,7 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
   });
 
   const createMutation = useMutation({
-    mutationFn: (codeType: "visual" | "python") =>
+    mutationFn: (codeType: "visual" | "python" | "native") =>
       editId
         ? apiFetch<StrategyOut>(`/api/v1/strategies/${editId}/versions`, {
             method: "POST",
@@ -266,6 +290,7 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
             <TabsList>
               <TabsTrigger value="visual">Visual Mode</TabsTrigger>
               <TabsTrigger value="python">Python Code Mode</TabsTrigger>
+              <TabsTrigger value="native">Advanced Python</TabsTrigger>
             </TabsList>
             <TabsContent value="visual">
               <div className="space-y-5">
@@ -303,6 +328,35 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
                 <div className="flex items-center gap-2">
                   <Button onClick={() => createMutation.mutate("python")} disabled={!name || createMutation.isPending}>
                     {createMutation.isPending ? "Saving..." : editId ? "Save Changes" : "Create Python Strategy"}
+                  </Button>
+                  {editId && (
+                    <Button variant="secondary" onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>
+                      {validateMutation.isPending ? "Validating..." : "Validate"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+            <TabsContent value="native">
+              <div className="space-y-3">
+                <p className="text-xs text-text-muted">
+                  Runs <strong>trusted and unsandboxed</strong> -- real imports, real database access. For
+                  strategies that can&apos;t be expressed as one <code>generate_signal()</code> call against one
+                  pre-selected instrument (no fixed instrument, multi-leg positions, PCR/option-chain data). Must
+                  define <code>async def evaluate(ctx)</code>. Deploys separately from Python Code Mode strategies
+                  (no instrument or % sizing to pick -- the code decides both), from the Paper Trading page&apos;s
+                  Advanced Strategy Deployments section.
+                </p>
+                <textarea
+                  value={nativeCode}
+                  onChange={(e) => setNativeCode(e.target.value)}
+                  rows={18}
+                  className="w-full rounded-md border border-border bg-surface p-3 font-mono text-xs text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                  spellCheck={false}
+                />
+                <div className="flex items-center gap-2">
+                  <Button onClick={() => createMutation.mutate("native")} disabled={!name || createMutation.isPending}>
+                    {createMutation.isPending ? "Saving..." : editId ? "Save Changes" : "Create Advanced Strategy"}
                   </Button>
                   {editId && (
                     <Button variant="secondary" onClick={() => validateMutation.mutate()} disabled={validateMutation.isPending}>

@@ -98,3 +98,44 @@ class EvaluationOut(BaseModel):
     signal: str | None
     price: float | None
     reason: str | None
+
+
+class NativeDeploymentCreate(BaseModel):
+    strategy_id: str
+    portfolio_id: str
+    # No instrument_id, no timeframe -- an "Advanced Python" strategy
+    # picks its own instrument(s) live (see native_runner.py).
+
+
+class NativeDeploymentOut(BaseModel):
+    id: str
+    strategy_id: str
+    strategy_name: str
+    portfolio_id: str
+    portfolio_name: str
+    currency: str
+    status: str
+    last_evaluated_at: datetime | None
+    last_signal: str | None = None
+    last_signal_reason: str | None = None
+    state: dict | None = None
+    created_at: datetime
+    stopped_at: datetime | None
+
+
+class NativeTradeOut(BaseModel):
+    id: str
+    deployment_id: str
+    strategy_name: str | None = None
+    opened_at: datetime
+    closed_at: datetime
+    legs: list[dict]
+    pnl: float
+    pnl_pct: float
+    exit_reason: str
+
+
+class NativeEvaluationOut(BaseModel):
+    action: str
+    signal: str | None
+    reason: str | None
