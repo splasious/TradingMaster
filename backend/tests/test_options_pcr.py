@@ -7,7 +7,12 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.options.pcr import compute_effective_pcr, compute_pcr_series
 
-EXPIRY = date(2026, 9, 15)
+# Relative to "today", not a hardcoded literal -- test_compute_effective_pcr_
+# default_timeframe_matches_real_oi_storage filters on `expiry >= today`
+# (compute_effective_pcr's real behavior), so a fixed past-tense date here
+# silently rots this test to always-fails once real time passes it, exactly
+# what happened to "2026-09-15" itself once the session's real date moved on.
+EXPIRY = date.today() + timedelta(days=7)
 
 
 async def _make_option(db: AsyncSession, underlying_id, symbol: str, option_type: str, strike: float) -> Instrument:
@@ -186,7 +191,7 @@ async def test_compute_effective_pcr_default_timeframe_matches_real_oi_storage(d
     db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="15m", ts=t0, open=100, high=101, low=99, close=100, volume=10, open_interest=1300.0, source="test"))
     await db_session.commit()
 
-    # Note: `ce`/`pe` above use EXPIRY (2026-09-15), fixed at module scope.
+    # Note: `ce`/`pe` above use EXPIRY (a dynamic near-future date), fixed at module scope.
     pcr = await compute_effective_pcr(db_session, underlying_symbol="NIFTY 50")  # no explicit timeframe -- uses the default
     assert pcr == 1.3
 

@@ -43,6 +43,19 @@ class ChainRowOut(BaseModel):
     put: OptionLegOut | None
 
 
+class EffectivePcrOut(BaseModel):
+    """The single PCR number a PCR-driven native strategy actually decides
+    its bias from (see services/options/pcr.py::compute_effective_pcr) --
+    summed put/call OI across the nearest `num_expiries` live expiries,
+    not a per-expiry series."""
+
+    underlying_symbol: str
+    num_expiries: int
+    timeframe: str
+    pcr: float | None
+    bias: str  # "bearish" | "bullish" | "neutral" | "unavailable" (pcr is None)
+
+
 class HistoryDepthOut(BaseModel):
     symbol: str | None
     # What THIS app has already backfilled into ohlcv_candles.

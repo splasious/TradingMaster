@@ -17,6 +17,7 @@ import type {
   BrokerBalanceOut,
   BrokerOut,
   CandleOut,
+  EffectivePcrOut,
   CatalogSyncSchedulerStatusOut,
   ChainRowOut,
   CompletenessOut,
@@ -370,6 +371,17 @@ export function usePaperPortfolios() {
     queryKey: ["paper-portfolios"],
     queryFn: () => apiFetch<PaperPortfolioOut[]>("/api/v1/paper-trading/portfolios"),
     refetchInterval: 5000,
+  });
+}
+
+/** The live PCR number a PCR-driven native strategy actually decides its
+ * bias from (services/options/pcr.py::compute_effective_pcr, same
+ * defaults) -- for the Advanced Strategy Deployments panel's ticker. */
+export function useEffectivePcr(underlyingSymbol = "NIFTY 50") {
+  return useQuery({
+    queryKey: ["effective-pcr", underlyingSymbol],
+    queryFn: () => apiFetch<EffectivePcrOut>(`/api/v1/options/effective-pcr?underlying_symbol=${encodeURIComponent(underlyingSymbol)}`),
+    refetchInterval: 15000,
   });
 }
 

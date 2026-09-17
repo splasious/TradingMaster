@@ -19,6 +19,7 @@ import { apiFetch, ApiError } from "@/lib/api";
 import {
   useAllNativeTrades,
   useAllPaperTrades,
+  useEffectivePcr,
   useInstruments,
   useNativeDeployments,
   useNativeTrades,
@@ -1084,11 +1085,21 @@ function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boole
   );
 }
 
-/** "23300 PE / 23100 PE" -- compact stand-in for the "Instrument" column,
- * since a native deployment isn't pinned to one instrument the way a
- * regular deployment is. */
-function legsLabel(position: NativePositionOut): string {
-  return position.legs.map((l) => `${l.strike ?? "?"}${l.option_type ?? ""}`).join(" / ");
+/** Stand-in for the "Instrument" column -- a native deployment isn't
+ * pinned to one instrument the way a regular deployment is, so each leg
+ * gets its own line (short on top, matching the order they're opened in). */
+function LegsCell({ position }: { position: NativePositionOut }) {
+  return (
+    <div className="space-y-0.5">
+      {position.legs.map((l) => (
+        <div key={l.instrument_symbol} className="whitespace-nowrap">
+          <span className={`mr-1 text-[10px] uppercase ${l.side === "short" ? "text-negative" : "text-positive"}`}>{l.side}</span>
+          {l.strike ?? "?"}
+          {l.option_type ?? ""}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
@@ -1188,7 +1199,7 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
     <>
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
         <Td className="font-medium">{deployment.strategy_name}</Td>
-        <Td>{position ? legsLabel(position) : <span className="text-text-muted">--</span>}</Td>
+        <Td>{position ? <LegsCell position={position} /> : <span className="text-text-muted">--</span>}</Td>
         <Td>
           <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
         </Td>
@@ -1296,13 +1307,32 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
   );
 }
 
+/** Small live-updating badge showing the same PCR number a PCR-driven
+ * native strategy decides its bias from -- refetches every 15s. */
+function PcrTicker({ underlyingSymbol = "NIFTY 50" }: { underlyingSymbol?: string }) {
+  const { data, isLoading } = useEffectivePcr(underlyingSymbol);
+  if (isLoading || !data) return null;
+
+  const tone = data.bias === "bullish" ? "positive" : data.bias === "bearish" ? "negative" : "neutral";
+  return (
+    <Badge tone={tone} title={`${underlyingSymbol} PCR, summed across the nearest ${data.num_expiries} expiries (${data.timeframe})`}>
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+      PCR {data.pcr != null ? data.pcr.toFixed(3) : "--"}
+      <span className="capitalize">{data.bias}</span>
+    </Badge>
+  );
+}
+
 function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
   const { data: deployments, isLoading } = useNativeDeployments();
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Advanced Strategy Deployments</CardTitle>
+        <div className="flex items-center gap-2">
+          <CardTitle>Advanced Strategy Deployments</CardTitle>
+          <PcrTicker />
+        </div>
         <Button variant="secondary" size="sm" onClick={onStart}>
           <Play className="h-3.5 w-3.5" /> Start Advanced Deployment
         </Button>

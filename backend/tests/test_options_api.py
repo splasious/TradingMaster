@@ -78,6 +78,50 @@ async def test_options_dashboard_endpoints_end_to_end(client: AsyncClient, seede
     assert rows[0]["put"]["open_interest"] == 2000
 
 
+async def test_effective_pcr_endpoint_matches_the_service_function(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """The Paper Trading page's live PCR ticker hits this endpoint --
+    must return the same number/bias compute_effective_pcr itself would
+    give a PCR-driven native strategy. Uses a future-relative expiry
+    (not a hardcoded date) so this doesn't rot the way EXPIRY above did."""
+    from datetime import date, timedelta
+
+    future_expiry = date.today() + timedelta(days=7)
+    underlying = Instrument(
+        exchange="NSE", symbol="NIFTY 50", name="Nifty 50 Index", instrument_type="index",
+        data_source="zerodha_kite", external_ref="NIFTY 50",
+    )
+    db_session.add(underlying)
+    await db_session.flush()
+    ce = Instrument(
+        exchange="NFO", symbol="NIFTYFUTCE", name="NIFTYFUTCE", instrument_type="option", data_source="zerodha_kite",
+        external_ref="NIFTYFUTCE", expiry=future_expiry, strike=23000, option_type="CE", lot_size=65,
+        underlying_instrument_id=underlying.id,
+    )
+    pe = Instrument(
+        exchange="NFO", symbol="NIFTYFUTPE", name="NIFTYFUTPE", instrument_type="option", data_source="zerodha_kite",
+        external_ref="NIFTYFUTPE", expiry=future_expiry, strike=23000, option_type="PE", lot_size=65,
+        underlying_instrument_id=underlying.id,
+    )
+    db_session.add_all([ce, pe])
+    await db_session.flush()
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc)
+    db_session.add(OhlcvCandle(instrument_id=ce.id, timeframe="15m", ts=ts, open=100, high=101, low=99, close=100, volume=10, open_interest=1000, source="test"))
+    db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="15m", ts=ts, open=50, high=51, low=49, close=50, volume=10, open_interest=500, source="test"))
+    await db_session.commit()
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = await client.get("/api/v1/options/effective-pcr", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["underlying_symbol"] == "NIFTY 50"
+    assert body["pcr"] == 0.5
+    assert body["bias"] == "bearish"
+
+
 async def test_history_depth_without_connected_account_reports_our_data_only(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     underlying = await _seed(db_session)
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])

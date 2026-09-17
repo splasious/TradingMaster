@@ -9,10 +9,10 @@ from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.user import User
-from app.schemas.options import ChainRowOut, ExpiryOut, HistoryDepthOut, PcrPointOut, UnderlyingOut
+from app.schemas.options import ChainRowOut, EffectivePcrOut, ExpiryOut, HistoryDepthOut, PcrPointOut, UnderlyingOut
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
-from app.services.options.pcr import compute_pcr_series
+from app.services.options.pcr import compute_effective_pcr, compute_pcr_series
 
 router = APIRouter()
 
@@ -66,6 +66,28 @@ async def get_history_depth_endpoint(
     (see options/history_depth.py)."""
     result = await get_history_depth(db, uuid.UUID(underlying_instrument_id), expiry)
     return HistoryDepthOut(**result)
+
+
+@router.get("/effective-pcr", response_model=EffectivePcrOut)
+async def get_effective_pcr(
+    underlying_symbol: str = Query("NIFTY 50"), num_expiries: int = Query(4), timeframe: str = Query("15m"),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+) -> EffectivePcrOut:
+    """The live PCR ticker for the Paper Trading page's Advanced Strategy
+    Deployments panel -- same number and same defaults a PCR-driven native
+    strategy (see native_strategies/nifty_pcr_credit_spread.py) actually
+    reads each tick via ctx.get_pcr(), not the per-expiry chart series
+    below."""
+    pcr = await compute_effective_pcr(db, underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe)
+    if pcr is None:
+        bias = "unavailable"
+    elif pcr < 1:
+        bias = "bearish"
+    elif pcr > 1:
+        bias = "bullish"
+    else:
+        bias = "neutral"
+    return EffectivePcrOut(underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, pcr=pcr, bias=bias)
 
 
 @router.get("/{underlying_instrument_id}/pcr", response_model=list[PcrPointOut])

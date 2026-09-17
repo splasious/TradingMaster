@@ -270,6 +270,14 @@ export interface NativePositionOut {
   unrealized_pnl: number | null;
 }
 
+export interface EffectivePcrOut {
+  underlying_symbol: string;
+  num_expiries: number;
+  timeframe: string;
+  pcr: number | null;
+  bias: string;
+}
+
 export interface NativeDeploymentOut {
   id: string;
   strategy_id: string;
