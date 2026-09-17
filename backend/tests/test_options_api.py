@@ -111,6 +111,10 @@ async def test_effective_pcr_endpoint_matches_the_service_function(client: Async
     db_session.add(OhlcvCandle(instrument_id=pe.id, timeframe="15m", ts=ts, open=50, high=51, low=49, close=50, volume=10, open_interest=500, source="test"))
     await db_session.commit()
 
+    from app.services.market_data.tick_engine import tick_engine
+
+    tick_engine.set_real_price(underlying.id, 23345.5, source="kite")
+
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -120,6 +124,7 @@ async def test_effective_pcr_endpoint_matches_the_service_function(client: Async
     assert body["underlying_symbol"] == "NIFTY 50"
     assert body["pcr"] == 0.5
     assert body["bias"] == "bearish"
+    assert body["spot_price"] == 23345.5
 
 
 async def test_history_depth_without_connected_account_reports_our_data_only(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):

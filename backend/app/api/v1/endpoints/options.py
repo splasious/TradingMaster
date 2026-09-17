@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.user import User
 from app.schemas.options import ChainRowOut, EffectivePcrOut, ExpiryOut, HistoryDepthOut, PcrPointOut, UnderlyingOut
+from app.services.market_data.tick_engine import tick_engine
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
 from app.services.options.pcr import compute_effective_pcr, compute_pcr_series
@@ -87,7 +88,14 @@ async def get_effective_pcr(
         bias = "bullish"
     else:
         bias = "neutral"
-    return EffectivePcrOut(underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, pcr=pcr, bias=bias)
+
+    underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
+    spot_price = tick_engine.get_current_price(underlying.id) if underlying is not None else None
+
+    return EffectivePcrOut(
+        underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, pcr=pcr, bias=bias,
+        spot_price=spot_price,
+    )
 
 
 @router.get("/{underlying_instrument_id}/pcr", response_model=list[PcrPointOut])

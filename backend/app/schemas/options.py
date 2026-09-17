@@ -54,6 +54,10 @@ class EffectivePcrOut(BaseModel):
     timeframe: str
     pcr: float | None
     bias: str  # "bearish" | "bullish" | "neutral" | "unavailable" (pcr is None)
+    # The underlying's live tick, straight from TickEngine (same source the
+    # native PCR strategy itself reads via ctx.get_price) -- None if the
+    # underlying isn't found or has no live tick on file yet.
+    spot_price: float | None
 
 
 class HistoryDepthOut(BaseModel):

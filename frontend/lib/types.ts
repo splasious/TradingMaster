@@ -276,6 +276,7 @@ export interface EffectivePcrOut {
   timeframe: string;
   pcr: number | null;
   bias: string;
+  spot_price: number | null;
 }
 
 export interface NativeDeploymentOut {

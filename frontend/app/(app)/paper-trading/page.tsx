@@ -1280,6 +1280,16 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
         <Td className="text-right font-financial">
           {position ? <LegValuesCell position={position} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
         </Td>
+        <Td className="text-right font-financial">
+          {position && position.unrealized_pnl != null ? (
+            <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
+              {position.unrealized_pnl >= 0 ? "+" : ""}
+              {position.unrealized_pnl.toFixed(2)}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </Td>
         <Td className="max-w-xs text-xs text-text-muted">
           {lastEval ? (
             <span className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`} title={lastEval.reason ?? undefined}>
@@ -1351,11 +1361,16 @@ function PcrTicker({ underlyingSymbol = "NIFTY 50" }: { underlyingSymbol?: strin
 
   const tone = data.bias === "bullish" ? "positive" : data.bias === "bearish" ? "negative" : "neutral";
   return (
-    <Badge tone={tone} title={`${underlyingSymbol} PCR, summed across the nearest ${data.num_expiries} expiries (${data.timeframe})`}>
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-      PCR {data.pcr != null ? data.pcr.toFixed(3) : "--"}
-      <span className="capitalize">{data.bias}</span>
-    </Badge>
+    <>
+      <Badge tone="neutral" title={`${underlyingSymbol} live tick`}>
+        {underlyingSymbol} {data.spot_price != null ? data.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--"}
+      </Badge>
+      <Badge tone={tone} title={`${underlyingSymbol} PCR, summed across the nearest ${data.num_expiries} expiries (${data.timeframe})`}>
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+        PCR {data.pcr != null ? data.pcr.toFixed(3) : "--"}
+        <span className="capitalize">{data.bias}</span>
+      </Badge>
+    </>
   );
 }
 
@@ -1394,6 +1409,7 @@ function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
                 <Th className="text-right">Trade Value</Th>
                 <Th className="text-right">Live Value</Th>
                 <Th className="text-right">P&amp;L</Th>
+                <Th className="text-right">Total P&amp;L</Th>
                 <Th>Last Signal</Th>
                 <Th />
               </tr>
@@ -1459,6 +1475,8 @@ export default function PaperTradingPage() {
         </div>
       )}
 
+      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} />
+
       <Card>
         <CardHeader>
           <CardTitle>Running (in a trade)</CardTitle>
@@ -1487,7 +1505,6 @@ export default function PaperTradingPage() {
         <GroupedDeploymentsTable deployments={stopped} onDelete={setToDelete} />
       </CollapsibleSection>
 
-      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} />
       <NativeClosedTradesPanel />
 
       <ClosedTradesPanel />
