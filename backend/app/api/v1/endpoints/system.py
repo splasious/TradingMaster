@@ -16,6 +16,7 @@ from app.services.broker.kite_ticker_service import diagnose_zerodha_connection,
 from app.services.broker.registry import get_broker_adapter
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler, diagnose_active_pairs
 from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
+from app.services.market_data.oi_snapshot_scheduler import oi_snapshot_scheduler
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 from app.services.paper_trading.scheduler import diagnose_evaluation_freshness, paper_trading_scheduler
 
@@ -117,6 +118,16 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     )
     kite_diagnostic["kite_rest_fallback_last_updated_count"] = kite_rest_price_feed.last_updated_count
     kite_diagnostic["kite_rest_fallback_last_error"] = kite_rest_price_feed.last_error
+    # Live OI persistence for PCR (oi_snapshot_scheduler.py) -- distinct
+    # from kite_ticker's own "connected" status above: the WebSocket can be
+    # connected while this still writes 0/cycle if nothing in the tracked
+    # NFO catalog has a live tick yet (e.g. pre-market), which is exactly
+    # the "is PCR actually fresh right now" question this answers directly.
+    kite_diagnostic["oi_snapshot_last_run_at"] = (
+        oi_snapshot_scheduler.last_run_at.isoformat() if oi_snapshot_scheduler.last_run_at else None
+    )
+    kite_diagnostic["oi_snapshot_last_written_count"] = oi_snapshot_scheduler.last_written_count
+    kite_diagnostic["oi_snapshot_last_error"] = oi_snapshot_scheduler.last_error
     # Every (instrument, timeframe) an active paper/live deployment is
     # actually using, and how stale its stored candles are -- not secret
     # (just symbol names and timestamps), and directly answers "why isn't
