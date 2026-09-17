@@ -34,6 +34,7 @@ import type {
   InstrumentOut,
   NativeDeploymentOut,
   NativeEvaluationOut,
+  NativeLegOut,
   NativePositionOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
@@ -1102,6 +1103,54 @@ function LegsCell({ position }: { position: NativePositionOut }) {
   );
 }
 
+function legTradeValue(leg: NativeLegOut): number {
+  return leg.entry_price * leg.quantity;
+}
+
+function legLiveValue(leg: NativeLegOut): number | null {
+  return leg.current_price != null ? leg.current_price * leg.quantity : null;
+}
+
+function legPnl(leg: NativeLegOut): number | null {
+  if (leg.current_price == null) return null;
+  const diff = leg.side === "short" ? leg.entry_price - leg.current_price : leg.current_price - leg.entry_price;
+  return diff * leg.quantity;
+}
+
+/** Trade Value / Live Value / P&L, one line per leg -- same row order as
+ * LegsCell so each line lines up with its instrument (short on top, then
+ * long), instead of collapsing both legs into one blended spread number. */
+function LegValuesCell({
+  position,
+  compute,
+  colorize = false,
+}: {
+  position: NativePositionOut;
+  compute: (leg: NativeLegOut) => number | null;
+  colorize?: boolean;
+}) {
+  return (
+    <div className="space-y-0.5">
+      {position.legs.map((l) => {
+        const v = compute(l);
+        if (v == null) {
+          return (
+            <div key={l.instrument_symbol} className="whitespace-nowrap text-text-muted">
+              --
+            </div>
+          );
+        }
+        return (
+          <div key={l.instrument_symbol} className={`whitespace-nowrap ${colorize ? (v >= 0 ? "text-positive" : "text-negative") : ""}`}>
+            {colorize && v >= 0 ? "+" : ""}
+            {v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
   const { data: trades } = useNativeTrades(deployment.id);
   const position = deployment.position;
@@ -1223,26 +1272,13 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
           )}
         </Td>
         <Td className="text-right font-financial">
-          {position ? position.trade_value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : <span className="text-text-muted">--</span>}
+          {position ? <LegValuesCell position={position} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
         </Td>
         <Td className="text-right font-financial">
-          {position && position.live_value != null ? (
-            position.live_value.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          ) : position ? (
-            <span className="text-[10px] uppercase text-text-muted">stale</span>
-          ) : (
-            <span className="text-text-muted">--</span>
-          )}
+          {position ? <LegValuesCell position={position} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
         </Td>
         <Td className="text-right font-financial">
-          {position && position.unrealized_pnl != null ? (
-            <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
-              {position.unrealized_pnl >= 0 ? "+" : ""}
-              {position.unrealized_pnl.toFixed(2)}
-            </span>
-          ) : (
-            <span className="text-text-muted">--</span>
-          )}
+          {position ? <LegValuesCell position={position} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
         </Td>
         <Td className="max-w-xs text-xs text-text-muted">
           {lastEval ? (

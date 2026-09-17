@@ -137,6 +137,7 @@ async def test_evaluate_enters_a_bear_call_spread_on_bearish_pcr(db_session: Asy
     assert position["short"]["strike"] == 25000
     assert position["long"]["strike"] == 25200
     assert position["short"]["quantity"] == 150.0  # 2 lots * lot_size 75
+    assert position["entry_spot"] == 25000.0  # rollover distance is measured from this
     # Net credit = (150 - 50) * 150 = 15000
     assert ctx.portfolio.cash == starting_cash + 15000.0
 
@@ -166,7 +167,7 @@ async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: 
     now = datetime(2026, 9, 17, 11, 0, tzinfo=IST)
     state = {
         "position": {
-            "bias": "bearish", "pcr_at_entry": 0.5, "expiry": expiry.isoformat(),
+            "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(old_short.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(old_long.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
             "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
@@ -182,6 +183,7 @@ async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: 
     assert new_position is not None
     assert new_position["short"]["strike"] == 25100.0
     assert new_position["long"]["strike"] == 25300.0
+    assert new_position["entry_spot"] == 25100.0  # the rollover window resets from here
 
     trades = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == ctx_data["deployment"].id))).scalars().all()
     assert len(trades) == 1
@@ -272,14 +274,23 @@ async def test_evaluate_exits_at_3pm_cutoff(db_session: AsyncSession):
     assert trades[0].exit_reason == "time_cutoff_3pm"
 
 
-async def test_evaluate_exits_when_short_strike_is_breached(db_session: AsyncSession):
+async def test_evaluate_rolls_instead_of_exiting_when_short_strike_is_breached(db_session: AsyncSession):
+    """A gap move straight through the short strike is not a separate
+    "breach" exit anymore -- there's no such thing, per the user's request
+    that the only exit triggers are a PCR flip or a 3pm cutoff. Any move of
+    100+ points from entry_spot (breach included) is just a big enough move
+    to trip the same rollover check: close the tested spread and
+    immediately reopen at the new ATM, same bias."""
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
     expiry = date(2026, 9, 18)
     short_inst = _option(underlying.id, 25000, "CE", expiry)
-    long_inst = _option(underlying.id, 25200, "CE", expiry)
+    long_inst = _option(underlying.id, 25200, "CE", expiry)  # new ATM (25150 rounds to 25200) -- this same
+    # 25200 CE contract becomes the new short leg after the roll, since it's
+    # a real option chain lookup by (expiry, strike, type), not a fresh row.
+    new_long = _option(underlying.id, 25400, "CE", expiry)
     put_inst = _option(underlying.id, 24800, "PE", expiry)
-    db_session.add_all([short_inst, long_inst, put_inst])
+    db_session.add_all([short_inst, long_inst, new_long, put_inst])
     await db_session.flush()
     # Keep PCR bearish (unchanged) so the flip check doesn't fire first.
     await _seed_oi(db_session, short_inst.id, "15m", 600)
@@ -287,17 +298,17 @@ async def test_evaluate_exits_when_short_strike_is_breached(db_session: AsyncSes
     await _seed_oi(db_session, put_inst.id, "15m", 500)
     await db_session.commit()
 
-    # Spot sits exactly ON the short strike -- round_to_nearest_100(25000) is
-    # still 25000 (no rollover triggered), but a bearish spread's short CE
-    # being touched is itself the breach.
-    tick_engine.set_real_price(underlying.id, 25000.0, "test")
+    # Spot gapped from the 25000 entry to 25150 -- 150pts, past the short
+    # strike itself and well beyond the 100pt rollover threshold.
+    tick_engine.set_real_price(underlying.id, 25150.0, "test")
     tick_engine.set_real_price(short_inst.id, 250.0, "test")
-    tick_engine.set_real_price(long_inst.id, 100.0, "test")
+    tick_engine.set_real_price(long_inst.id, 100.0, "test")  # old long's exit price == new short's entry price
+    tick_engine.set_real_price(new_long.id, 60.0, "test")
 
     now = datetime(2026, 9, 17, 13, 0, tzinfo=IST)
     state = {
         "position": {
-            "bias": "bearish", "pcr_at_entry": 0.5, "expiry": expiry.isoformat(),
+            "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
             "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
@@ -307,9 +318,51 @@ async def test_evaluate_exits_when_short_strike_is_breached(db_session: AsyncSes
 
     await evaluate(ctx)
 
-    assert ctx.state["position"] is None
+    new_position = ctx.state["position"]
+    assert new_position is not None  # rolled into a fresh spread, not left flat
+    assert new_position["short"]["strike"] == 25200.0
+    assert new_position["long"]["strike"] == 25400.0
+    assert new_position["entry_spot"] == 25150.0
     trades = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == ctx_data["deployment"].id))).scalars().all()
-    assert trades[0].exit_reason == "short_strike_tested"
+    assert trades[0].exit_reason == "rollover"
+
+
+async def test_evaluate_holds_when_spot_move_is_under_100_points(db_session: AsyncSession):
+    ctx_data = await _setup(db_session)
+    underlying = ctx_data["underlying"]
+    expiry = date(2026, 9, 18)
+    short_inst = _option(underlying.id, 25000, "CE", expiry)
+    long_inst = _option(underlying.id, 25200, "CE", expiry)
+    put_inst = _option(underlying.id, 24800, "PE", expiry)
+    db_session.add_all([short_inst, long_inst, put_inst])
+    await db_session.flush()
+    await _seed_oi(db_session, short_inst.id, "15m", 600)
+    await _seed_oi(db_session, long_inst.id, "15m", 400)
+    await _seed_oi(db_session, put_inst.id, "15m", 500)  # PCR unchanged (bearish)
+    await db_session.commit()
+
+    tick_engine.set_real_price(underlying.id, 25060.0, "test")  # only 60pts from entry_spot
+    tick_engine.set_real_price(short_inst.id, 170.0, "test")
+    tick_engine.set_real_price(long_inst.id, 60.0, "test")
+
+    now = datetime(2026, 9, 17, 13, 0, tzinfo=IST)
+    state = {
+        "position": {
+            "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
+            "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
+            "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
+            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+        }
+    }
+    ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
+
+    await evaluate(ctx)
+
+    assert ctx._last_action == "hold"
+    assert ctx.state["position"] is not None
+    assert ctx.state["position"]["short"]["strike"] == 25000.0  # unchanged -- no roll
+    trades = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == ctx_data["deployment"].id))).scalars().all()
+    assert trades == []
 
 
 async def test_evaluate_skips_outside_entry_window(db_session: AsyncSession):

@@ -9,13 +9,18 @@ Nifty PCR Credit Spread Strategy (native, unsandboxed)
   Strikes:   always rounded to end in "00" (skip the intermediate
              50-point strikes)
   Entry:     from 9:45 AM IST onward
-  Exit:      close everything by 3:00 PM IST regardless, OR earlier if
-             the PCR bias flips, OR the short strike is breached
-  Rollover:  if spot drifts 100+ points from the current short strike
-             (i.e. the ATM strike itself has moved), close the current
-             spread and immediately reopen at the new ATM, same bias --
-             repeats as many times as needed through the day, until the
-             PCR bias actually flips (a real exit, not another roll)
+  Exit:      close everything by 3:00 PM IST regardless (hard session
+             cutoff), OR earlier if the PCR bias flips -- these are the
+             only two ways a position is closed without an immediate
+             reopen.
+  Rollover:  if spot drifts 100+ points from the spot rate recorded when
+             the current spread was opened (or last rolled), close it
+             and immediately reopen at the new ATM, same bias -- repeats
+             as many times as needed through the day, until the PCR bias
+             actually flips (a real exit, not another roll). There is no
+             separate "short strike breached" safety-net exit -- a
+             breach is just a large-enough spot move to trip this same
+             100-point rollover check.
   Expiry:    current week's weekly expiry by default; on the expiry
              date itself, roll into next week's expiry instead
   Size:      2 lots on each leg, fixed (not a % of pool capital)
@@ -39,6 +44,7 @@ from app.services.broker.zerodha_broker import IST
 
 STRIKE_STEP = 100
 SPREAD_WIDTH = 200
+ROLLOVER_SPOT_MOVE = 100  # rollover trigger: |current spot - spot when this spread was opened/last rolled| >= this
 LOTS_PER_LEG = 2
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 45)
@@ -148,20 +154,13 @@ async def evaluate(ctx) -> None:
             return
 
         if spot is not None:
-            new_atm = round_to_nearest_100(spot)
-            if new_atm != position["short"]["strike"]:
+            entry_spot = position.get("entry_spot")
+            moved = abs(spot - entry_spot) if entry_spot is not None else 0.0
+            if entry_spot is not None and moved >= ROLLOVER_SPOT_MOVE:
                 await close_position("rollover", short_instrument, long_instrument, short_price, long_price)
                 position = None  # fall through to open a fresh spread at the new ATM below, same tick
             else:
-                short_strike = position["short"]["strike"]
-                breached = (
-                    (bias == "bearish" and spot >= short_strike) or (bias == "bullish" and spot <= short_strike)
-                )
-                if breached:
-                    await close_position("short_strike_tested", short_instrument, long_instrument, short_price, long_price)
-                    ctx.note("exited", signal="COVER", reason="short strike breached")
-                    return
-                ctx.note("hold", reason=f"{bias} spread open, short strike {short_strike}")
+                ctx.note("hold", reason=f"{bias} spread open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved)")
                 return
         else:
             ctx.note("hold", reason="spread open, no live spot to check exit conditions this tick")
@@ -216,6 +215,7 @@ async def evaluate(ctx) -> None:
     ctx.state["position"] = {
         "bias": bias,
         "pcr_at_entry": pcr,
+        "entry_spot": spot,
         "expiry": expiry.isoformat(),
         "short": {
             "instrument_id": str(short_instrument.id), "strike": short_strike, "quantity": quantity,
