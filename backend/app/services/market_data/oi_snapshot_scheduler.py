@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
+from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine
 
@@ -167,10 +168,23 @@ class OiSnapshotScheduler:
     async def _run(self) -> None:
         while True:
             try:
-                async with AsyncSessionLocal() as db:
-                    self.last_written_count = await snapshot_once(db)
+                ticker = kite_ticker_service._ticker
+                if ticker is None or not ticker.is_connected():
+                    # Don't re-persist whatever's still sitting in TickEngine
+                    # from before the WebSocket died -- that's exactly what
+                    # silently masked a multi-hour-stale PCR as "just
+                    # written" once before (the bucket timestamp looked
+                    # fresh even though the OI value inside it hadn't
+                    # actually changed in hours). Skipping here means a
+                    # dead ticker shows up as 0 written / a clear error
+                    # instead of quietly lying about freshness.
+                    self.last_written_count = 0
+                    self.last_error = "kite ticker not connected -- skipping to avoid re-persisting stale OI"
+                else:
+                    async with AsyncSessionLocal() as db:
+                        self.last_written_count = await snapshot_once(db)
+                    self.last_error = None
                 self.last_run_at = datetime.now(timezone.utc)
-                self.last_error = None
             except asyncio.CancelledError:
                 raise
             except Exception:

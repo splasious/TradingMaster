@@ -602,3 +602,77 @@ async def test_insufficient_cash_rejection_still_alerts_once_per_cooldown(
     alerts_resp = await client.get("/api/v1/alerts", headers=headers)
     rejection_alerts = [a for a in alerts_resp.json() if a["title"] == "Paper order rejected"]
     assert len(rejection_alerts) == 1
+
+
+async def test_portfolio_out_includes_native_deployment_pnl(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test: a portfolio whose only activity is an Advanced
+    Python (native) deployment must NOT show 0.00/0.00 for unrealized and
+    realized P&L just because PaperTrade/PaperPosition (the regular,
+    single-instrument tables) are empty for it -- portfolio.cash already
+    reflects real native trade activity, and these two figures have to
+    match it."""
+    from datetime import datetime, timezone
+
+    from app.models.instrument import Instrument
+    from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade
+    from app.services.market_data.tick_engine import tick_engine
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    short_inst = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23300PE", name="Nifty 23300 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23300PE", strike=23300.0, option_type="PE", lot_size=65,
+    )
+    long_inst = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23100PE", name="Nifty 23100 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23100PE", strike=23100.0, option_type="PE", lot_size=65,
+    )
+    db_session.add_all([short_inst, long_inst])
+    await db_session.commit()
+    tick_engine.set_real_price(short_inst.id, 100.0, "test")  # cheaper now than the 112.5 entry -- a winning spread
+    tick_engine.set_real_price(long_inst.id, 60.0, "test")
+
+    code = "async def evaluate(ctx):\n    ctx.note('hold', reason='position seeded directly for this test')\n"
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Portfolio PnL Test Strategy", "version": {"python_code": code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    import uuid as uuid_mod
+
+    deployment = await db_session.get(PaperNativeDeployment, uuid_mod.UUID(deployment_id))
+    deployment.state = {
+        "position": {
+            "bias": "bullish", "pcr_at_entry": 1.4, "expiry": "2026-09-25",
+            "short": {"instrument_id": str(short_inst.id), "strike": 23300.0, "quantity": 130.0, "entry_price": 112.5},
+            "long": {"instrument_id": str(long_inst.id), "strike": 23100.0, "quantity": 130.0, "entry_price": 64.95},
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    db_session.add(
+        PaperNativeTrade(
+            deployment_id=deployment.id, opened_at=datetime.now(timezone.utc), closed_at=datetime.now(timezone.utc),
+            legs=[], pnl=-2574.0, pnl_pct=-5.0, exit_reason="short_strike_tested",
+        )
+    )
+    await db_session.commit()
+
+    trade_value = (112.5 - 64.95) * 130.0
+    live_value = (100.0 - 60.0) * 130.0
+    expected_unrealized = trade_value - live_value
+
+    portfolios_resp = await client.get("/api/v1/paper-trading/portfolios", headers=headers)
+    portfolio_out = next(p for p in portfolios_resp.json() if p["id"] == portfolio_id)
+    assert portfolio_out["realized_pnl_total"] == -2574.0
+    assert portfolio_out["unrealized_pnl"] == expected_unrealized
+    assert portfolio_out["equity"] == portfolio_out["cash"] - live_value

@@ -241,7 +241,19 @@ class KiteTickerService:
                 self.last_error = "No connected Zerodha account"
                 return
             access_token = creds["access_token"]
-            if access_token == self._current_access_token and self._ticker is not None:
+            # Same-token dedup alone left a WebSocket that died mid-day
+            # (a transient disconnect, or the once-observed 403 loop) never
+            # rebuilt for the rest of the day: Kite's own auto-reconnect
+            # only retries with the SAME token (see module docstring), and
+            # this cycle only ever rebuilt on a genuinely NEW token from a
+            # fresh login -- so a dead-but-same-token ticker silently sat
+            # there with is_connected() == False forever, freezing OI at
+            # whatever the last real tick was, hours before an expired
+            # token would ever have been the actual explanation. Checking
+            # is_connected() here makes every 300s cycle self-healing
+            # regardless of why the WS died, not just recoverable via a
+            # fresh "Login with Zerodha".
+            if access_token == self._current_access_token and self._ticker is not None and self._ticker.is_connected():
                 return  # already streaming with the current token, nothing to do
             token_maps = await _resolve_kite_token_map(db, creds["api_key"])
 

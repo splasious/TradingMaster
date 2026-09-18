@@ -217,6 +217,9 @@ class _FakeTicker:
     def close(self):
         self.closed = True
 
+    def is_connected(self):
+        return self.connected
+
 
 async def test_refresh_builds_ticker_and_subscribes_resolved_tokens(db_session: AsyncSession, monkeypatch):
     _FakeTicker.instances.clear()
@@ -278,6 +281,46 @@ async def test_refresh_skips_rebuild_when_token_unchanged(db_session: AsyncSessi
     await service._refresh()  # same token still connected -> no new ticker, no old one closed
     assert len(_FakeTicker.instances) == 1
     assert _FakeTicker.instances[0].closed is False
+
+
+async def test_refresh_rebuilds_when_ticker_died_even_with_the_same_token(db_session: AsyncSession, monkeypatch):
+    """Regression test: a WebSocket that silently dies mid-day (a
+    transient disconnect, or the 403 loop seen in production) must get
+    rebuilt on the very next 300s refresh cycle -- same token or not.
+    Before this fix, the same-token dedup check alone left a dead ticker
+    never rebuilt for the rest of the day (Kite's access_token doesn't
+    change again until the next day's login), silently freezing OI for
+    hours while /system/health still had no way to tell "connected" from
+    "an old ticker object exists but is dead"."""
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_same")
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add(inst)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+    assert len(_FakeTicker.instances) == 1
+    dead_ticker = _FakeTicker.instances[0]
+
+    dead_ticker.connected = False  # simulate the WS dying without a token change
+
+    await service._refresh()
+
+    assert len(_FakeTicker.instances) == 2  # rebuilt despite the identical token
+    assert service._ticker is _FakeTicker.instances[1]
+    assert service._ticker.connected is True
 
 
 async def test_refresh_rebuilds_and_closes_old_ticker_on_new_token(db_session: AsyncSession, monkeypatch):

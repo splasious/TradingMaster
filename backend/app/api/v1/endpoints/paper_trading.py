@@ -5,12 +5,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.endpoints.paper_native_trading import _build_position_out as _build_native_position_out
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.paper_trading import (
     DeploymentStatus,
     PaperDeployment,
+    PaperNativeDeployment,
+    PaperNativeTrade,
     PaperOrder,
     PaperPortfolio,
     PaperPosition,
@@ -100,6 +103,33 @@ async def _portfolio_out(db: AsyncSession, portfolio: PaperPortfolio) -> Portfol
     realized_total = sum(t.pnl for t in trades_result.scalars().all())
 
     equity = portfolio.cash + sum(p.quantity * (p.current_price or p.avg_entry_price) for p in positions)
+
+    # Advanced Python (native) deployments/trades live in their own tables
+    # (paper_native_deployments/paper_native_trades, no instrument_id or
+    # fixed sizing to reuse the query above) -- without this, a portfolio
+    # whose only activity is a native strategy always showed 0.00/0.00 for
+    # both P&L figures here, regardless of real gains/losses, even though
+    # portfolio.cash itself already reflected them correctly.
+    native_trades_result = await db.execute(
+        select(PaperNativeTrade).join(PaperNativeDeployment).where(PaperNativeDeployment.portfolio_id == portfolio.id)
+    )
+    realized_total += sum(t.pnl for t in native_trades_result.scalars().all())
+
+    native_deployments_result = await db.execute(
+        select(PaperNativeDeployment).where(PaperNativeDeployment.portfolio_id == portfolio.id)
+    )
+    for native_deployment in native_deployments_result.scalars().all():
+        native_position = await _build_native_position_out(db, native_deployment.state)
+        if native_position is None:
+            continue
+        if native_position.unrealized_pnl is not None:
+            unrealized_total += native_position.unrealized_pnl
+        # A short spread's cash credit is already in portfolio.cash -- its
+        # mark-to-market contribution to equity is the (negative) cost to
+        # close it now, mirroring _build_position_out's own trade_value/
+        # live_value convention (see native_runner.py's docstring on the
+        # same credit-spread P&L math).
+        equity -= native_position.live_value if native_position.live_value is not None else native_position.trade_value
 
     return PortfolioOut(
         id=str(portfolio.id), name=portfolio.name, currency=portfolio.currency,
