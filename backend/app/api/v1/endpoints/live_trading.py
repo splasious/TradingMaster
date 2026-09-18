@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
@@ -22,12 +22,15 @@ from app.schemas.live_trading import (
     LiveOrderOut,
     LivePositionOut,
     LiveTradeOut,
+    ManualOrderCreate,
+    ManualOrderOut,
     ReconciliationOut,
     SafetyCheckOut,
 )
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.live_trading import kill_switch as kill_switch_service
+from app.services.live_trading.manual_orders import ManualOrderError, place_manual_order
 from app.services.live_trading.oms import _realized_pnl_today, evaluate_live_deployment
 from app.services.live_trading.reconciliation import reconcile_positions
 from app.services.live_trading.safety import check_live_trading_readiness
@@ -191,31 +194,65 @@ async def evaluate_live_deployment_now(deployment_id: str, db: AsyncSession = De
 _LIST_LIMIT = 500
 
 
+@router.post("/orders/manual", response_model=ManualOrderOut, status_code=status.HTTP_201_CREATED)
+async def create_manual_order(
+    payload: ManualOrderCreate, db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("administrator", "trader")),
+) -> ManualOrderOut:
+    """Fires a single real broker order with no strategy/deployment behind
+    it -- see services/live_trading/manual_orders.py for the full safety
+    pipeline (confirmation, kill switch, ownership, connection status,
+    lot-size, notional cap, margin) every request goes through before
+    anything reaches the broker."""
+    try:
+        live_order = await place_manual_order(
+            db, user, instrument_id=payload.instrument_id, broker_account_id=payload.broker_account_id,
+            side=payload.side, quantity=payload.quantity, order_type=payload.order_type,
+            limit_price=payload.limit_price, product=payload.product, confirmed=payload.confirmed,
+        )
+    except ManualOrderError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    instrument = await db.get(Instrument, live_order.instrument_id)
+    return ManualOrderOut(
+        id=str(live_order.id), instrument_symbol=instrument.symbol if instrument else "?",
+        broker_account_id=str(live_order.broker_account_id), client_order_id=live_order.client_order_id,
+        broker_order_id=live_order.broker_order_id, side=live_order.side, quantity=live_order.quantity,
+        product=live_order.product, status=live_order.status, reason=live_order.reason,
+        created_at=live_order.created_at, confirmed_at=live_order.confirmed_at,
+    )
+
+
 @router.get("/orders", response_model=list[LiveOrderOut])
 async def list_live_orders(
     deployment_id: str | None = None, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[LiveOrderOut]:
     """deployment_id omitted -> every order across the caller's own live
-    deployments (admin sees all), for the cross-deployment Orders page.
-    Still deployment_id-scoped when given, for the Live Trading page's
-    existing per-deployment order history."""
+    deployments plus their own manual orders (admin sees all), for the
+    cross-deployment Orders page. Still deployment_id-scoped when given,
+    for the Live Trading page's existing per-deployment order history.
+    Outer joins throughout: a manual order has deployment_id=None, so an
+    inner join here would silently exclude every manual order from this
+    list."""
     stmt = (
         select(LiveOrder, LiveDeployment, Strategy, Instrument)
-        .join(LiveDeployment, LiveDeployment.id == LiveOrder.deployment_id)
-        .join(Strategy, Strategy.id == LiveDeployment.strategy_id)
-        .join(Instrument, Instrument.id == LiveDeployment.instrument_id)
+        .outerjoin(LiveDeployment, LiveDeployment.id == LiveOrder.deployment_id)
+        .outerjoin(Strategy, Strategy.id == LiveDeployment.strategy_id)
+        .outerjoin(Instrument, Instrument.id == func.coalesce(LiveDeployment.instrument_id, LiveOrder.instrument_id))
     )
     if deployment_id is not None:
         stmt = stmt.where(LiveOrder.deployment_id == uuid.UUID(deployment_id))
     elif "administrator" not in user.role_names:
-        stmt = stmt.where(LiveDeployment.owner_id == user.id)
+        stmt = stmt.where((LiveDeployment.owner_id == user.id) | (LiveOrder.owner_id == user.id))
     stmt = stmt.order_by(LiveOrder.created_at.desc()).limit(_LIST_LIMIT)
 
     result = await db.execute(stmt)
     return [
         LiveOrderOut(
-            id=str(o.id), deployment_id=str(o.deployment_id), strategy_name=strategy.name,
-            instrument_symbol=instrument.symbol, client_order_id=o.client_order_id, broker_order_id=o.broker_order_id,
+            id=str(o.id), deployment_id=str(o.deployment_id) if o.deployment_id else None,
+            strategy_name=strategy.name if strategy else "Manual order",
+            instrument_symbol=instrument.symbol if instrument else "?",
+            client_order_id=o.client_order_id, broker_order_id=o.broker_order_id,
             side=o.side, quantity=o.quantity, status=o.status, reason=o.reason, created_at=o.created_at,
             confirmed_at=o.confirmed_at,
         )

@@ -220,6 +220,51 @@ async def test_strategy_scan_rejects_non_owner(client: AsyncClient, seeded_admin
     assert resp.status_code == 403
 
 
+async def test_strategy_scan_timeframe_override(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """The strategy's own saved version.timeframe is "1d", where the seeded
+    daily candles end below the 150 threshold (HOLD). Directly-stored "1wk"
+    candles for the same instrument end above it (BUY) -- passing
+    timeframe="1wk" in the request must switch the scan onto those weekly
+    candles instead of the version's default, proving the override is
+    actually honored end-to-end (schema -> endpoint -> service ->
+    load_candles), not just accepted and ignored."""
+    instrument = await _seed_instrument_with_candles(db_session, "SCANTF", base_price=50, n=40)  # 1d candles end below 150
+    base = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    for i in range(35):  # >= SCAN_MIN_CANDLES so the scan doesn't skip this instrument for too little history
+        close = 200 + i  # 1wk candles end above 150
+        db_session.add(
+            OhlcvCandle(
+                instrument_id=instrument.id, timeframe="1wk", ts=base + timedelta(weeks=i), open=close - 1,
+                high=close + 1, low=close - 1, close=close, volume=1000.0, source="test",
+            )
+        )
+    await db_session.commit()
+
+    login = await client.post("/api/v1/auth/login", json=seeded_admin)
+    token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Timeframe Override Scan", "version": {"timeframe": "1d", "python_code": THRESHOLD_SCAN_CODE}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    default_resp = await client.post(
+        "/api/v1/scanner/run-strategy", json={"strategy_id": strategy_id, "exchange": "NSE"}, headers=headers,
+    )
+    assert default_resp.json()["matched"] == []  # daily candles: HOLD, no match
+
+    override_resp = await client.post(
+        "/api/v1/scanner/run-strategy",
+        json={"strategy_id": strategy_id, "exchange": "NSE", "timeframe": "1wk"},
+        headers=headers,
+    )
+    matched = override_resp.json()["matched"]
+    assert any(m["instrument"]["symbol"] == "SCANTF" and m["signal"] == "BUY" for m in matched)
+
+
 async def test_saved_scan_crud(client: AsyncClient, seeded_admin: dict):
     login = await client.post("/api/v1/auth/login", json=seeded_admin)
     token = login.json()["access_token"]

@@ -44,10 +44,22 @@ class LiveDeployment(Base):
 
 
 class LiveOrder(Base):
+    """Either a deployment-driven order (`deployment_id` set, the other
+    three below null) or a manual/deployment-free order fired directly
+    from a UI action with no strategy behind it (`deployment_id` null,
+    `instrument_id`/`broker_account_id`/`owner_id` set instead) -- exactly
+    one of these two shapes holds for any given row, enforced by the
+    service layer (services/live_trading/manual_orders.py for the manual
+    case), not a DB constraint."""
+
     __tablename__ = "live_orders"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    deployment_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("live_deployments.id", ondelete="CASCADE"), nullable=False)
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("live_deployments.id", ondelete="CASCADE"), nullable=True)
+    # Manual (deployment-free) orders only -- see class docstring.
+    instrument_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("instruments.id", ondelete="SET NULL"), nullable=True)
+    broker_account_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("broker_accounts.id", ondelete="SET NULL"), nullable=True)
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     client_order_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)  # idempotency key, PRD Rule 6
     broker_order_id: Mapped[str | None] = mapped_column(String(64))
     side: Mapped[str] = mapped_column(String(10), nullable=False)

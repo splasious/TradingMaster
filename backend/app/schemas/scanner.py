@@ -49,6 +49,7 @@ class SavedScanOut(BaseModel):
 class StrategyScanRequest(BaseModel):
     strategy_id: str
     exchange: str | None = None
+    timeframe: str | None = None  # overrides the strategy version's own saved timeframe when set
 
 
 class StrategySignalMatch(BaseModel):

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,13 +55,44 @@ class LiveDeploymentOut(BaseModel):
 
 class LiveOrderOut(BaseModel):
     id: str
-    deployment_id: str
+    deployment_id: str | None
     strategy_name: str
     instrument_symbol: str
     client_order_id: str
     broker_order_id: str | None
     side: str
     quantity: float
+    status: str
+    reason: str | None
+    created_at: datetime
+    confirmed_at: datetime | None
+
+
+class ManualOrderCreate(BaseModel):
+    """A single real broker order fired directly (e.g. from a Market
+    Scanner result row), with no strategy/deployment behind it -- see
+    services/live_trading/manual_orders.py for the full safety pipeline
+    this goes through before anything reaches the broker."""
+
+    instrument_id: str
+    broker_account_id: str
+    side: Literal["buy", "sell"]
+    quantity: float = Field(gt=0)
+    order_type: Literal["market", "limit"] = "market"
+    limit_price: float | None = Field(default=None, gt=0)
+    product: Literal["CNC", "MIS", "NRML"]  # required -- never auto-inferred, unlike a deployment's product_override
+    confirmed: bool = False  # explicit user confirmation, re-checked server-side -- same rule as DeploymentCreate.confirmed
+
+
+class ManualOrderOut(BaseModel):
+    id: str
+    instrument_symbol: str
+    broker_account_id: str
+    client_order_id: str
+    broker_order_id: str | None
+    side: str
+    quantity: float
+    product: str | None
     status: str
     reason: str | None
     created_at: datetime

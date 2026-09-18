@@ -31,9 +31,9 @@ class ReconciliationReport:
 
 
 async def reconcile_positions(db: AsyncSession, broker_account: BrokerAccount) -> ReconciliationReport:
-    from app.services.live_trading.oms import _get_authenticated_broker  # local import avoids a cycle
+    from app.services.live_trading.oms import get_authenticated_broker  # local import avoids a cycle
 
-    broker = await _get_authenticated_broker(db, broker_account)
+    broker = await get_authenticated_broker(db, broker_account)
     broker_positions = {p["product_id"]: p for p in await broker.get_positions()}
 
     local_result = await db.execute(

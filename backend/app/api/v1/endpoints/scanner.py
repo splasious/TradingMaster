@@ -102,7 +102,9 @@ async def run_strategy_scan(
         stmt = stmt.where(Instrument.exchange == payload.exchange)
     instruments = (await db.execute(stmt)).scalars().all()
 
-    signal_by_instrument, skipped_symbols = await run_python_strategy_scan(db, version, instruments)
+    signal_by_instrument, skipped_symbols = await run_python_strategy_scan(
+        db, version, instruments, timeframe_override=payload.timeframe
+    )
 
     inst_by_id = {str(i.id): i for i in instruments}
     matched = [

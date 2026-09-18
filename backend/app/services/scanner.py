@@ -66,14 +66,19 @@ def evaluate_condition(candles, condition) -> tuple[bool, float | None]:
     return _OPERATORS[condition.operator](value, condition.value), value
 
 
-async def run_python_strategy_scan(db, version, instruments: list) -> tuple[dict[str, str], list[str]]:
+async def run_python_strategy_scan(
+    db, version, instruments: list, timeframe_override: str | None = None
+) -> tuple[dict[str, str], list[str]]:
     """Runs a Python strategy's current signal against every instrument in
     `instruments`, batched (see module docstring). Returns
     (signal_by_instrument_id, skipped_symbols) -- an instrument is
     skipped for too little history to warm up the strategy's indicators,
     or for its own per-instrument error (a strategy bug that only bites
     on that instrument's data), same "isolate, don't fail the whole scan"
-    behavior the backtest/optimization batch helpers already have."""
+    behavior the backtest/optimization batch helpers already have.
+    `timeframe_override`, when given, is scanned instead of the strategy
+    version's own saved timeframe -- lets a scan check "what would this
+    strategy say on a different timeframe" without editing the strategy."""
     # Local import: services.strategy.rules imports evaluate_condition
     # from this module, so a module-level import here of anything that
     # (transitively) imports rules.py would be a circular import.
@@ -85,7 +90,7 @@ async def run_python_strategy_scan(db, version, instruments: list) -> tuple[dict
     skipped: list[str] = []
 
     for instrument in instruments:
-        candles = (await load_candles(db, instrument.id, version.timeframe))[-SCAN_MAX_CANDLES:]
+        candles = (await load_candles(db, instrument.id, timeframe_override or version.timeframe))[-SCAN_MAX_CANDLES:]
         if len(candles) < SCAN_MIN_CANDLES:
             skipped.append(instrument.symbol)
             continue

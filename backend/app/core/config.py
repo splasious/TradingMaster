@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     delta_api_key: str | None = None
     delta_api_secret: str | None = None
 
+    # Hard cap on a single manual (deployment-free) live order's notional
+    # (quantity * price), independent of broker margin -- a manual order
+    # has no StrategyVersion.risk_rules to read a limit from, so this is
+    # its only risk gate beyond available margin. Starting value is a
+    # conservative guess, not a considered limit -- tune it for your own
+    # risk tolerance before relying on this feature for real size.
+    manual_order_max_notional: float = 50_000.0
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

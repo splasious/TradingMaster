@@ -11,8 +11,13 @@ DeltaExchangeBroker or ZerodhaKiteBroker -- confirmed via a follow-up status
 check before being trusted -- PRD Rule 5: no unconfirmed orders).
 
 Broker-specific concepts (Delta's numeric product_id vs Kite's
-tradingsymbol/exchange/product) never leak past `_get_live_price_and_context`
+tradingsymbol/exchange/product) never leak past `get_live_price_and_context`
 and `_submit_and_confirm` -- everything above that point is broker-agnostic.
+
+`get_authenticated_broker` and `get_live_price_and_context` are exported
+(no leading underscore) so services/live_trading/manual_orders.py can
+reuse them for deployment-free orders without duplicating broker-auth or
+Kite-vocabulary logic.
 """
 
 import json
@@ -74,7 +79,7 @@ class LiveOutcome:
     reason: str | None = None
 
 
-async def _get_authenticated_broker(db: AsyncSession, broker_account: BrokerAccount):
+async def get_authenticated_broker(db: AsyncSession, broker_account: BrokerAccount):
     from app.services.broker.registry import get_broker_adapter  # local import avoids a cycle at module load
 
     credential_result = await db.execute(select(BrokerCredential).where(BrokerCredential.broker_account_id == broker_account.id))
@@ -93,7 +98,7 @@ async def _get_authenticated_broker(db: AsyncSession, broker_account: BrokerAcco
 _FNO_TYPES = ("option", "future")
 
 
-async def _get_live_price_and_context(
+async def get_live_price_and_context(
     broker_code: str, broker, instrument: Instrument, product_override: str | None = None
 ) -> tuple[float, dict]:
     """Real current price plus whatever broker-specific fields place_order()
@@ -167,13 +172,13 @@ async def _evaluate_live_deployment(db: AsyncSession, deployment: LiveDeployment
 
     broker_row = await db.get(Broker, broker_account.broker_id)
     try:
-        broker = await _get_authenticated_broker(db, broker_account)
+        broker = await get_authenticated_broker(db, broker_account)
     except Exception as exc:
         await db.commit()
         return LiveOutcome(action="error", reason=f"Could not authenticate with broker: {exc}")
 
     try:
-        current_price, order_context = await _get_live_price_and_context(
+        current_price, order_context = await get_live_price_and_context(
             broker_row.code, broker, instrument, deployment.product_override
         )
     except MarketDataSourceError as exc:

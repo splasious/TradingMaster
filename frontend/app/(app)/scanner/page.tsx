@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { FireOrderModal } from "@/components/trading/fire-order-modal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +15,8 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useIndicatorList, useStrategies } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
-import type { ScanCondition, ScanOperator, ScanResponse, SavedScanOut, StrategyScanResponse } from "@/lib/types";
+import { TIMEFRAMES } from "@/lib/types";
+import type { InstrumentOut, ScanCondition, ScanOperator, ScanResponse, SavedScanOut, StrategyScanResponse } from "@/lib/types";
 
 const RAW_FIELDS = ["open", "high", "low", "close", "volume"];
 const OPERATORS: ScanOperator[] = [">", "<", ">=", "<=", "=="];
@@ -43,6 +45,7 @@ export default function ScannerPage() {
   const queryClient = useQueryClient();
 
   const [mode, setMode] = useState<"fields" | "strategy">("fields");
+  const [fireOrderInstrument, setFireOrderInstrument] = useState<InstrumentOut | null>(null);
 
   const [exchange, setExchange] = useState("");
   const [timeframe, setTimeframe] = useState("1d");
@@ -86,13 +89,20 @@ export default function ScannerPage() {
   const pythonStrategies = useMemo(() => (strategies ?? []).filter((s) => s.code_type === "python"), [strategies]);
   const [strategyId, setStrategyId] = useState("");
   const [strategyExchange, setStrategyExchange] = useState("");
+  const [strategyTimeframe, setStrategyTimeframe] = useState("1d");
   const [strategyResult, setStrategyResult] = useState<StrategyScanResponse | null>(null);
+
+  function selectStrategy(id: string) {
+    setStrategyId(id);
+    const picked = pythonStrategies.find((s) => s.id === id);
+    setStrategyTimeframe(picked?.latest_version?.timeframe ?? "1d");
+  }
 
   const runStrategyMutation = useMutation({
     mutationFn: () =>
       apiFetch<StrategyScanResponse>("/api/v1/scanner/run-strategy", {
         method: "POST",
-        body: JSON.stringify({ strategy_id: strategyId, exchange: strategyExchange || null }),
+        body: JSON.stringify({ strategy_id: strategyId, exchange: strategyExchange || null, timeframe: strategyTimeframe }),
       }),
     onSuccess: setStrategyResult,
   });
@@ -159,7 +169,11 @@ export default function ScannerPage() {
                   <div className="space-y-1.5">
                     <label className="text-xs font-medium text-text-secondary">Timeframe</label>
                     <Select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="w-24">
-                      <option value="1d">1d</option>
+                      {TIMEFRAMES.map((tf) => (
+                        <option key={tf} value={tf}>
+                          {tf}
+                        </option>
+                      ))}
                     </Select>
                   </div>
                 </div>
@@ -279,6 +293,7 @@ export default function ScannerPage() {
                             {c.field}
                           </Th>
                         ))}
+                        <Th />
                       </tr>
                     </Thead>
                     <Tbody>
@@ -296,6 +311,11 @@ export default function ScannerPage() {
                                 : "--"}
                             </Td>
                           ))}
+                          <Td className="text-right">
+                            <Button variant="destructive" size="sm" onClick={() => setFireOrderInstrument(m.instrument)}>
+                              Fire Order
+                            </Button>
+                          </Td>
                         </tr>
                       ))}
                     </Tbody>
@@ -317,7 +337,7 @@ export default function ScannerPage() {
               <div className="flex gap-3">
                 <div className="space-y-1.5">
                   <label className="text-xs font-medium text-text-secondary">Strategy</label>
-                  <Select value={strategyId} onChange={(e) => setStrategyId(e.target.value)} className="w-64">
+                  <Select value={strategyId} onChange={(e) => selectStrategy(e.target.value)} className="w-64">
                     <option value="">Select a Python strategy...</option>
                     {pythonStrategies.map((s) => (
                       <option key={s.id} value={s.id}>
@@ -332,6 +352,16 @@ export default function ScannerPage() {
                     <option value="">All Markets</option>
                     <option value="NSE">NSE Markets</option>
                     <option value="DELTA">Delta Markets</option>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium text-text-secondary">Timeframe</label>
+                  <Select value={strategyTimeframe} onChange={(e) => setStrategyTimeframe(e.target.value)} className="w-24">
+                    {TIMEFRAMES.map((tf) => (
+                      <option key={tf} value={tf}>
+                        {tf}
+                      </option>
+                    ))}
                   </Select>
                 </div>
               </div>
@@ -388,6 +418,7 @@ export default function ScannerPage() {
                         <Th>Market</Th>
                         <Th>Name</Th>
                         <Th className="text-right">Signal</Th>
+                        <Th />
                       </tr>
                     </Thead>
                     <Tbody>
@@ -400,6 +431,11 @@ export default function ScannerPage() {
                           <Td className="text-text-secondary">{m.instrument.name}</Td>
                           <Td className="text-right">
                             <Badge tone={signalTone(m.signal)}>{m.signal}</Badge>
+                          </Td>
+                          <Td className="text-right">
+                            <Button variant="destructive" size="sm" onClick={() => setFireOrderInstrument(m.instrument)}>
+                              Fire Order
+                            </Button>
                           </Td>
                         </tr>
                       ))}
@@ -416,6 +452,8 @@ export default function ScannerPage() {
           )}
         </>
       )}
+
+      <FireOrderModal key={fireOrderInstrument?.id ?? "none"} instrument={fireOrderInstrument} onClose={() => setFireOrderInstrument(null)} />
     </div>
   );
 }
