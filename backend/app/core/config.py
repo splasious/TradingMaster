@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     delta_api_key: str | None = None
     delta_api_secret: str | None = None
 
+    # Optional: pushes native-strategy alerts (scanner shortlist, trade
+    # entries/exits, EOD report) to a Telegram chat via a bot, in addition
+    # to the in-app Alerts panel. A bot can't message a phone number
+    # directly -- the chat has to be started from that side first (see
+    # app/services/notifications/telegram.py's docstring). Leave unset to
+    # keep alerts in-app only.
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+
     # Hard cap on a single manual (deployment-free) live order's notional
     # (quantity * price), independent of broker margin -- a manual order
     # has no StrategyVersion.risk_rules to read a limit from, so this is

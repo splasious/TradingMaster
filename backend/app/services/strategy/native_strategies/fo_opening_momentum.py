@@ -62,6 +62,7 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import PaperNativeTrade
 from app.services.alerts.service import create_alert
+from app.services.notifications.telegram import send_telegram
 from app.services.broker.zerodha_broker import IST
 
 # ---------------------------------------------------------------------
@@ -436,12 +437,15 @@ async def _close_position(ctx, symbol: str, setup: dict, now_ist: datetime, exit
             exit_reason=exit_reason,
         )
     )
+    alert_title = f"{symbol} {setup['direction']} closed"
+    alert_message = f"{exit_reason}: P&L {pnl:+.2f}"
     await create_alert(
         ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value,
         severity=AlertSeverity.INFO if pnl >= 0 else AlertSeverity.WARNING,
-        title=f"{symbol} {setup['direction']} closed", message=f"{exit_reason}: P&L {pnl:+.2f}",
+        title=alert_title, message=alert_message,
         object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
     )
+    await send_telegram(alert_title, alert_message)
     ctx.note("exited", signal="SELL", reason=f"{symbol}: {exit_reason}, P&L {pnl:+.2f}")
 
 
@@ -499,11 +503,12 @@ async def evaluate(ctx) -> None:
         ctx.state["setups"] = setups
         ctx.state["shortlist_done"] = True
         lines = "\n".join(f"{r['symbol']} {r['direction']} {r['pct_change']:+.2f}% OI{r['oi_pct_change']:+.1f}%" for r in shortlisted_rows) or "(none)"
+        alert_title = f"F&O Opening Momentum: {len(shortlisted_rows)} shortlisted"
         await create_alert(
             ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
-            title=f"F&O Opening Momentum: {len(shortlisted_rows)} shortlisted",
-            message=lines, object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
+            title=alert_title, message=lines, object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
         )
+        await send_telegram(alert_title, lines)
         ctx.note("entered" if shortlisted_rows else "skipped", reason=f"9:20 scan: {len(shortlisted_rows)} shortlisted")
         return
 
@@ -532,11 +537,13 @@ async def evaluate(ctx) -> None:
             + (f" P&L {s['pnl']:+.2f}" if s.get("pnl") is not None else "")
             for sym, s in setups.items()
         ) or "(none)"
+        report_message = f"{summary}\n\n{rows}"
         await create_alert(
             ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
-            title="F&O Opening Momentum: 3:10pm report", message=f"{summary}\n\n{rows}",
+            title="F&O Opening Momentum: 3:10pm report", message=report_message,
             object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
         )
+        await send_telegram("F&O Opening Momentum: 3:10pm report", report_message)
         ctx.state["report_sent"] = True
         ctx.note("exited", reason=summary)
         return
