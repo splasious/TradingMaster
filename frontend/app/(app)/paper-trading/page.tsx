@@ -1208,7 +1208,18 @@ function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOu
   );
 }
 
-function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }) {
+/** One deployment's own field, shown in its dedicated card's summary grid --
+ * matches the label/value pairs the old shared table's columns used to be. */
+function SummaryField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-0.5">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">{label}</div>
+      <div className="font-financial text-sm">{children}</div>
+    </div>
+  );
+}
+
+function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
@@ -1244,112 +1255,121 @@ function NativeDeploymentRow({ deployment }: { deployment: NativeDeploymentOut }
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
   });
 
+  const lastSignalText = lastEval ? (
+    <span className={lastEval.action === "error" ? "text-negative" : ""} title={lastEval.reason ?? undefined}>
+      {lastEval.action}
+      {lastEval.signal ? ` (${lastEval.signal})` : ""}
+      {lastEval.reason ? `: ${lastEval.reason}` : ""}
+    </span>
+  ) : deployment.last_signal ? (
+    <span
+      className={deployment.last_signal === "ERROR" ? "text-negative" : ""}
+      title={deployment.last_signal_reason ?? undefined}
+    >
+      {deployment.last_signal}
+      {deployment.last_signal_reason ? `: ${deployment.last_signal_reason}` : ""}
+    </span>
+  ) : (
+    <span className="text-text-muted">--</span>
+  );
+
   return (
-    <>
-      <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setExpanded(!expanded)}>
-        <Td className="font-medium">{deployment.strategy_name}</Td>
-        <Td>{position ? <LegsCell position={position} /> : <span className="text-text-muted">--</span>}</Td>
-        <Td>
-          <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
-        </Td>
-        <Td>
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <CardTitle>{deployment.strategy_name}</CardTitle>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
-        </Td>
-        <Td>
-          {position ? (
-            <span className="font-financial capitalize">{position.bias ?? "in a trade"}</span>
-          ) : (
-            <span className="text-text-muted">flat</span>
-          )}
-        </Td>
-        <Td className="text-text-secondary">
-          {position ? (
-            <span className="font-financial text-xs" title={new Date(position.opened_at).toISOString()}>
-              {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
-            </span>
-          ) : (
-            <span className="text-text-muted">--</span>
-          )}
-        </Td>
-        <Td className="text-right font-financial">
-          {position ? <LegValuesCell position={position} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
-        </Td>
-        <Td className="text-right font-financial">
-          {position ? <LegValuesCell position={position} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
-        </Td>
-        <Td className="text-right font-financial">
-          {position ? <LegValuesCell position={position} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
-        </Td>
-        <Td className="text-right font-financial">
-          {position && position.unrealized_pnl != null ? (
-            <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
-              {position.unrealized_pnl >= 0 ? "+" : ""}
-              {position.unrealized_pnl.toFixed(2)}
-            </span>
-          ) : (
-            <span className="text-text-muted">--</span>
-          )}
-        </Td>
-        <Td className="max-w-xs text-xs text-text-muted">
-          {lastEval ? (
-            <span className={`block truncate ${lastEval.action === "error" ? "text-negative" : ""}`} title={lastEval.reason ?? undefined}>
-              {lastEval.action}
-              {lastEval.signal ? ` (${lastEval.signal})` : ""}
-              {lastEval.reason ? `: ${lastEval.reason}` : ""}
-            </span>
-          ) : deployment.last_signal ? (
-            <span
-              className={`block truncate ${deployment.last_signal === "ERROR" ? "text-negative" : ""}`}
-              title={deployment.last_signal_reason ?? undefined}
-            >
-              {deployment.last_signal}
-              {deployment.last_signal_reason ? `: ${deployment.last_signal_reason}` : ""}
-            </span>
-          ) : (
-            "--"
-          )}
-        </Td>
-        <Td className="text-right" onClick={(e) => e.stopPropagation()}>
-          <div className="flex justify-end gap-1">
-            {deployment.status === "active" ? (
-              <>
-                <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
-                  <Zap className="h-3.5 w-3.5" /> Evaluate Now
-                </Button>
-                {position != null && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => exitMutation.mutate()}
-                    disabled={exitMutation.isPending}
-                    className="text-negative hover:text-negative"
-                  >
-                    <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
-                  </Button>
-                )}
-                <Button variant="ghost" size="sm" onClick={() => stopMutation.mutate()} disabled={stopMutation.isPending}>
-                  <Square className="h-3.5 w-3.5" /> Stop
-                </Button>
-              </>
-            ) : (
-              <Button
-                variant="ghost" size="sm" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}
-                className="text-text-muted hover:text-negative"
-              >
-                <Trash2 className="h-3.5 w-3.5" /> Delete
+        </div>
+        <div className="flex gap-1">
+          {deployment.status === "active" ? (
+            <>
+              <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
+                <Zap className="h-3.5 w-3.5" /> Evaluate Now
               </Button>
+              {position != null && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => exitMutation.mutate()}
+                  disabled={exitMutation.isPending}
+                  className="text-negative hover:text-negative"
+                >
+                  <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" onClick={() => stopMutation.mutate()} disabled={stopMutation.isPending}>
+                <Square className="h-3.5 w-3.5" /> Stop
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="ghost" size="sm" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}
+              className="text-text-muted hover:text-negative"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Delete
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+          <SummaryField label="Instrument">
+            {position ? <LegsCell position={position} /> : <span className="text-text-muted">--</span>}
+          </SummaryField>
+          <SummaryField label="Pool">
+            <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
+          </SummaryField>
+          <SummaryField label="Position">
+            {position ? (
+              <span className="capitalize">{position.bias ?? "in a trade"}</span>
+            ) : (
+              <span className="text-text-muted">flat</span>
             )}
-          </div>
-        </Td>
-      </tr>
-      {expanded && (
-        <tr>
-          <td colSpan={10} className="p-0">
-            <NativeDeploymentDetail deployment={deployment} />
-          </td>
-        </tr>
-      )}
-    </>
+          </SummaryField>
+          <SummaryField label="Entered">
+            {position ? (
+              <span className="text-xs" title={new Date(position.opened_at).toISOString()}>
+                {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
+              </span>
+            ) : (
+              <span className="text-text-muted">--</span>
+            )}
+          </SummaryField>
+          <SummaryField label="Trade Value">
+            {position ? <LegValuesCell position={position} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
+          </SummaryField>
+          <SummaryField label="Live Value">
+            {position ? <LegValuesCell position={position} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
+          </SummaryField>
+          <SummaryField label="P&amp;L">
+            {position ? <LegValuesCell position={position} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
+          </SummaryField>
+          <SummaryField label="Total P&amp;L">
+            {position && position.unrealized_pnl != null ? (
+              <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
+                {position.unrealized_pnl >= 0 ? "+" : ""}
+                {position.unrealized_pnl.toFixed(2)}
+              </span>
+            ) : (
+              <span className="text-text-muted">--</span>
+            )}
+          </SummaryField>
+        </div>
+
+        <div className="text-xs text-text-muted">
+          <span className="font-medium uppercase tracking-wide">Last Signal: </span>
+          {lastSignalText}
+        </div>
+
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-xs font-medium text-brand hover:underline"
+        >
+          {expanded ? "Hide details" : "Show details"}
+        </button>
+        {expanded && <NativeDeploymentDetail deployment={deployment} />}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1378,51 +1398,35 @@ function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
   const { data: deployments, isLoading } = useNativeDeployments();
 
   return (
-    <Card>
-      <CardHeader>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <CardTitle>Advanced Strategy Deployments</CardTitle>
+          <h2 className="text-sm font-semibold text-text-primary">Advanced Strategy Deployments</h2>
           <PcrTicker />
         </div>
         <Button variant="secondary" size="sm" onClick={onStart}>
           <Play className="h-3.5 w-3.5" /> Start Advanced Deployment
         </Button>
-      </CardHeader>
-      <CardContent className="p-0">
-        {isLoading ? (
-          <LoadingState />
-        ) : !deployments?.length ? (
-          <EmptyState
-            title="No Advanced Python deployments yet"
-            description="For strategies that pick their own instruments live -- multi-leg options, PCR-driven spreads, and the like."
-          />
-        ) : (
-          <Table>
-            <Thead>
-              <tr>
-                <Th>Strategy</Th>
-                <Th>Instrument</Th>
-                <Th>Pool</Th>
-                <Th>Status</Th>
-                <Th>Position</Th>
-                <Th>Entered</Th>
-                <Th className="text-right">Trade Value</Th>
-                <Th className="text-right">Live Value</Th>
-                <Th className="text-right">P&amp;L</Th>
-                <Th className="text-right">Total P&amp;L</Th>
-                <Th>Last Signal</Th>
-                <Th />
-              </tr>
-            </Thead>
-            <Tbody>
-              {deployments.map((d) => (
-                <NativeDeploymentRow key={d.id} deployment={d} />
-              ))}
-            </Tbody>
-          </Table>
-        )}
-      </CardContent>
-    </Card>
+      </div>
+      {isLoading ? (
+        <Card>
+          <CardContent>
+            <LoadingState />
+          </CardContent>
+        </Card>
+      ) : !deployments?.length ? (
+        <Card>
+          <CardContent>
+            <EmptyState
+              title="No Advanced Python deployments yet"
+              description="For strategies that pick their own instruments live -- multi-leg options, PCR-driven spreads, and the like."
+            />
+          </CardContent>
+        </Card>
+      ) : (
+        deployments.map((d) => <NativeDeploymentCard key={d.id} deployment={d} />)
+      )}
+    </div>
   );
 }
 
