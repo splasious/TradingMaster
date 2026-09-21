@@ -12,17 +12,31 @@ backfilled.
   Step 1  Universe:     every stock with an active NFO stock-futures
                          contract in the catalog (excludes index futures,
                          which have no underlying_instrument_id equity).
-  Step 2  9:20 scan:     |% move vs previous close| > 2%.
-  Step 3  OI confirm:    stock-futures OI % change > 7% -- computed from
-                         the near-month future's own 5m OI series: the
-                         last 5m candle of the previous trading session
-                         vs the latest 5m candle available now (an
-                         intraday-rolling reading of an EOD-to-EOD
-                         comparison, per the original PRD's own
-                         "Open Assumptions" -- either interpretation was
-                         left unresolved there).
-  Step 4  Opening cand.: Open == Low (CE) / Open == High (PE) within
-                         0.05%, from the 9:15-9:20 5m candle.
+  Step 2  9:20 + 9:25 scan: |% move vs previous close| > 2%, checked
+                         twice -- once at 9:20, and again at 9:25 per
+                         instruction, to catch any stock that crosses the
+                         threshold a few minutes later than the first
+                         pass. The 9:25 pass only ever ADDS newly-
+                         qualifying stocks to the shortlist; nothing
+                         already shortlisted at 9:20 is re-validated or
+                         removed even if its numbers have since slipped
+                         back below threshold.
+  Step 3  OI confirm:    Total OI % change > 7%, where Total OI = the
+                         near-month future's own OI + every CE strike's
+                         OI + every PE strike's OI for that SAME current
+                         running-month expiry (cross-checked against
+                         NSE's own OI Spurts methodology, per
+                         instruction -- this replaced a futures-OI-only
+                         reading, which is still shown broken out in the
+                         alert for reference, just no longer the gate on
+                         its own). Yesterday's EOD ("1d" candle) reading
+                         vs the latest available now, for every leg.
+                         Re-checked on the 9:25 pass the same way as
+                         Step 2.
+  Step 4  Removed -- previously required Open == Low (CE) / Open == High
+                         (PE) within 0.05% on the 9:15-9:20 5m candle;
+                         dropped per instruction. The 9:15-9:20 candle
+                         itself is still fetched and used by Step 5 below.
   Step 5  Retracement:   reject if the candle's own close has retraced
                          >= 50% of (High-Low) from the defining extreme.
   Step 6  Nifty filter:  green Nifty 9:15-9:20 candle keeps gainers+
@@ -37,6 +51,40 @@ backfilled.
   Step 11 Expiry blackout: no entry within 2 trading days either side of
                          the stock's current-month expiry.
   Step 12 Sizing:         fixed 1 lot per triggered setup.
+
+Additionally, informational only (never used to filter/reject a setup --
+Step 8's actual entry logic in _try_enter is unchanged, always re-picking
+the strike fresh at real breakout time):
+  - Each shortlisted stock gets the near-month expiry's Call and Put
+    strikes with the most open interest within MAX_OI_STRIKE_BAND_PCT of
+    the current spot ("highest OI strike, same stock"), surfaced in the
+    shortlist alert as context on where OI is concentrated near the
+    breakout.
+  - Each shortlisted stock also gets a preview of the ~2% OTM strike
+    Step 8's trade setup would buy if evaluated right now (same
+    _pick_otm_option logic Step 8 itself uses) -- a preview only, since
+    the underlying can keep moving between the scan and the real
+    breakout, at which point _try_enter re-picks the strike against
+    whatever price is current then.
+
+Every alert/Telegram message this module sends (shortlist at 9:20 and
+9:25, exit, 3:10pm report) leads with an explicit "As of <IST timestamp>"
+line, and each shortlisted row spells out both the underlying's actual
+cash (spot) price move (previous close, current price, resulting %) and
+the full Total OI breakdown (futures/CE/PE, yesterday vs today) --
+rather than just the computed percentages -- so Step 2's >2% momentum
+condition and Step 3's >7% Total OI condition can both be verified
+against the raw numbers by eye.
+
+The 9:20 and 9:25 shortlist alerts are sent one-per-stock (_send_shortlist_alert),
+not bundled into a single combined message -- per instruction, so each
+stock gets its own physically separate Telegram notification instead of
+one message listing several stocks together. A 9:20 scan that shortlists
+nothing still sends one "0 shortlisted" confirmation so a quiet scan
+reads as "ran, found nothing," not silence indistinguishable from the
+scan never running; the 9:25 pass has no such fallback (silence there
+just means nothing new qualified, consistent with it never sending
+anything when nothing was added).
 
 State (`ctx.state`) is a flat JSON-safe dict keyed by IST session date --
 switching to a new trading day resets everything. Each shortlisted
@@ -70,9 +118,9 @@ from app.services.broker.zerodha_broker import IST
 # ---------------------------------------------------------------------
 MOMENTUM_PCT = 2.0
 OI_CHANGE_PCT = 7.0
-OPEN_EQ_TOLERANCE_PCT = 0.05
 MAX_RETRACEMENT_PCT = 50.0
 OTM_PCT = 2.0
+MAX_OI_STRIKE_BAND_PCT = 10.0  # informational max-OI-near-spot lookup, see module docstring
 SMA_PERIOD = 8
 SMA_CONFIRM = 2
 EXPIRY_BLACKOUT_DAYS = 2
@@ -102,13 +150,6 @@ def passes_oi_change(oi_pct_change: float | None) -> bool:
     if oi_pct_change is None:
         return False
     return abs(oi_pct_change) > OI_CHANGE_PCT
-
-
-def opening_strength_ok(o: float, h: float, l: float, direction: str) -> bool:
-    if o == 0:
-        return False
-    reference = l if direction == "CE" else h
-    return abs(o - reference) / o * 100.0 <= OPEN_EQ_TOLERANCE_PCT
 
 
 def retracement_pct(h: float, l: float, c: float, direction: str) -> float:
@@ -210,13 +251,18 @@ async def _prev_close(ctx, instrument_id: uuid.UUID, today: date) -> float | Non
     return row
 
 
-async def _futures_oi_pct_change(ctx, future_instrument_id: uuid.UUID, today: date) -> float | None:
-    prev_oi = (
+async def _prev_day_oi(ctx, instrument_id: uuid.UUID, today: date) -> float | None:
+    """Yesterday's EOD open interest for one contract -- its own daily
+    ("1d") candle OI, the actual EOD reading, not a 5m/15m bar that merely
+    happens to fall before today's open (which an intraday series can't
+    guarantee is genuinely the session's last real print, e.g. across a
+    gap in the ticker's own coverage)."""
+    return (
         await ctx.db.execute(
             select(OhlcvCandle.open_interest)
             .where(
-                OhlcvCandle.instrument_id == future_instrument_id,
-                OhlcvCandle.timeframe == CANDLE_TIMEFRAME,
+                OhlcvCandle.instrument_id == instrument_id,
+                OhlcvCandle.timeframe == "1d",
                 OhlcvCandle.ts < _ist_to_utc(today, MARKET_OPEN),
                 OhlcvCandle.open_interest.is_not(None),
             )
@@ -224,21 +270,56 @@ async def _futures_oi_pct_change(ctx, future_instrument_id: uuid.UUID, today: da
             .limit(1)
         )
     ).scalar_one_or_none()
-    latest_oi = (
+
+
+async def _sum_options_oi(ctx, equity_id: uuid.UUID, expiry: date, option_type: str, today: date) -> tuple[float, float]:
+    """(yesterday_total, today_total) OI summed across every strike of one
+    option_type ("CE" or "PE") for the given (current running month)
+    expiry -- a strike with no OI on file yet on either side contributes
+    0, rather than being excluded, so one illiquid strike can't silently
+    understate the whole side's total."""
+    options = (
         await ctx.db.execute(
-            select(OhlcvCandle.open_interest)
-            .where(
-                OhlcvCandle.instrument_id == future_instrument_id,
-                OhlcvCandle.timeframe == CANDLE_TIMEFRAME,
-                OhlcvCandle.open_interest.is_not(None),
+            select(Instrument).where(
+                Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
+                Instrument.expiry == expiry, Instrument.option_type == option_type, Instrument.strike.is_not(None),
             )
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
         )
-    ).scalar_one_or_none()
-    if not prev_oi or latest_oi is None:
+    ).scalars().all()
+    prev_total = 0.0
+    latest_total = 0.0
+    for option in options:
+        prev_total += (await _prev_day_oi(ctx, option.id, today)) or 0.0
+        latest_total += (await _latest_oi(ctx, option.id)) or 0.0
+    return prev_total, latest_total
+
+
+async def _total_oi_pct_change(ctx, equity_id: uuid.UUID, future_instrument_id: uuid.UUID, expiry: date, today: date) -> dict | None:
+    """Total OI = the near-month future's own OI + every CE strike's OI +
+    every PE strike's OI, all for that SAME current-running-month expiry --
+    per instruction (cross-checked against NSE's own OI Spurts
+    methodology), yesterday's EOD reading vs today's latest, exactly the
+    same EOD-to-now convention the futures-only reading used before this
+    replaced it as Step 3's actual >7% gate. Returns None if the
+    yesterday total is unavailable or zero (nothing to compare against);
+    the full per-leg breakdown is returned alongside the total so the
+    notification can show its components, not just the combined number."""
+    fut_prev = await _prev_day_oi(ctx, future_instrument_id, today)
+    fut_latest = await _latest_oi(ctx, future_instrument_id)
+    ce_prev, ce_latest = await _sum_options_oi(ctx, equity_id, expiry, "CE", today)
+    pe_prev, pe_latest = await _sum_options_oi(ctx, equity_id, expiry, "PE", today)
+
+    prev_total = (fut_prev or 0.0) + ce_prev + pe_prev
+    latest_total = (fut_latest or 0.0) + ce_latest + pe_latest
+    if not prev_total:
         return None
-    return (latest_oi - prev_oi) / prev_oi * 100.0
+    return {
+        "pct_change": (latest_total - prev_total) / prev_total * 100.0,
+        "prev_total": prev_total, "latest_total": latest_total,
+        "fut_prev": fut_prev or 0.0, "fut_latest": fut_latest or 0.0,
+        "ce_prev": ce_prev, "ce_latest": ce_latest,
+        "pe_prev": pe_prev, "pe_latest": pe_latest,
+    }
 
 
 async def _nearest_future(ctx, equity_id: uuid.UUID, today: date) -> Instrument | None:
@@ -270,8 +351,48 @@ async def _pick_otm_option(ctx, equity_id: uuid.UUID, expiry: date, direction: s
     return min(options, key=lambda o: abs(o.strike - target))
 
 
+async def _latest_oi(ctx, instrument_id: uuid.UUID) -> float | None:
+    """Most recent open_interest on file for one option contract, at
+    whatever timeframe last carried it -- mirrors NativeContext.get_price's
+    own "any timeframe, latest wins" convention rather than assuming a
+    specific one, since which timeframe actually gets OI written to it
+    depends on which scheduler/backfill last touched this contract."""
+    return (
+        await ctx.db.execute(
+            select(OhlcvCandle.open_interest)
+            .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.open_interest.is_not(None))
+            .order_by(OhlcvCandle.ts.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _max_oi_strike_near_spot(ctx, equity_id: uuid.UUID, expiry: date, spot: float, option_type: str) -> tuple[float, float] | None:
+    """The strike within MAX_OI_STRIKE_BAND_PCT of spot carrying the most
+    open interest, for one option_type ("CE" or "PE") -- (strike, oi) or
+    None if no strike in that band has any OI on file. Informational only,
+    see module docstring: never filters a setup or influences which
+    strike Step 8 actually buys."""
+    lo, hi = spot * (1 - MAX_OI_STRIKE_BAND_PCT / 100.0), spot * (1 + MAX_OI_STRIKE_BAND_PCT / 100.0)
+    options = (
+        await ctx.db.execute(
+            select(Instrument).where(
+                Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
+                Instrument.expiry == expiry, Instrument.option_type == option_type,
+                Instrument.strike.is_not(None), Instrument.strike >= lo, Instrument.strike <= hi,
+            )
+        )
+    ).scalars().all()
+    best: tuple[float, float] | None = None
+    for option in options:
+        oi = await _latest_oi(ctx, option.id)
+        if oi is not None and (best is None or oi > best[1]):
+            best = (option.strike, oi)
+    return best
+
+
 # ---------------------------------------------------------------------
-# Phase A: the 9:20 scan (Steps 1-6)
+# Phase A: the 9:20 / 9:25 scan (Steps 1-6)
 # ---------------------------------------------------------------------
 async def _run_scan(ctx, today: date) -> tuple[dict, list[dict]]:
     """Returns (setups keyed by symbol, alert rows for every stock that
@@ -316,13 +437,12 @@ async def _run_scan(ctx, today: date) -> tuple[dict, list[dict]]:
             continue
 
         near_future = await _nearest_future(ctx, equity.id, today)
-        oi_pct_change = await _futures_oi_pct_change(ctx, near_future.id, today) if near_future else None
+        oi_result = await _total_oi_pct_change(ctx, equity.id, near_future.id, near_future.expiry, today) if near_future else None
+        oi_pct_change = oi_result["pct_change"] if oi_result else None
 
         reasons = []
         if not passes_oi_change(oi_pct_change):
             reasons.append("OI change below threshold")
-        if not opening_strength_ok(opening["open"], opening["high"], opening["low"], direction):
-            reasons.append("Open != Low/High beyond tolerance")
         if not passes_retracement(opening["high"], opening["low"], opening["close"], direction):
             reasons.append("retraced >= 50%")
         if not nifty_filter_allows(direction, nifty_candle["open"], nifty_candle["close"]):
@@ -331,12 +451,31 @@ async def _run_scan(ctx, today: date) -> tuple[dict, list[dict]]:
         if reasons:
             continue
 
+        max_oi_ce = await _max_oi_strike_near_spot(ctx, equity.id, near_future.expiry, price, "CE") if near_future else None
+        max_oi_pe = await _max_oi_strike_near_spot(ctx, equity.id, near_future.expiry, price, "PE") if near_future else None
+        # Preview only -- the strike Step 8 actually buys is re-picked at
+        # real breakout time in _try_enter, against the price at that
+        # moment, which can differ from this scan-time preview if the
+        # underlying keeps moving between now and the real breakout.
+        setup_option = await _pick_otm_option(ctx, equity.id, near_future.expiry, direction, price) if near_future else None
+
         setups[symbol] = {
             "equity_instrument_id": str(equity.id),
             "direction": direction,
             "status": "watching",
+            "prev_close": prev_close,
+            "price_at_scan": price,
             "pct_change": pct_change,
             "oi_pct_change": oi_pct_change,
+            "prev_oi": oi_result["prev_total"] if oi_result else None,
+            "latest_oi": oi_result["latest_total"] if oi_result else None,
+            "oi_detail": oi_result,
+            "setup_option_symbol": setup_option.symbol if setup_option else None,
+            "setup_option_strike": setup_option.strike if setup_option else None,
+            "max_oi_ce_strike": max_oi_ce[0] if max_oi_ce else None,
+            "max_oi_ce_oi": max_oi_ce[1] if max_oi_ce else None,
+            "max_oi_pe_strike": max_oi_pe[0] if max_oi_pe else None,
+            "max_oi_pe_oi": max_oi_pe[1] if max_oi_pe else None,
             "breakout_high": None,
             "breakout_low": None,
             "underlying_closes": [],
@@ -352,9 +491,69 @@ async def _run_scan(ctx, today: date) -> tuple[dict, list[dict]]:
             "exit_reason": None,
             "pnl": None,
         }
-        shortlisted_rows.append({"symbol": symbol, "direction": direction, "pct_change": pct_change, "oi_pct_change": oi_pct_change})
+        shortlisted_rows.append({
+            "symbol": symbol, "direction": direction, "prev_close": prev_close, "price": price,
+            "pct_change": pct_change, "oi_pct_change": oi_pct_change, "oi_detail": oi_result,
+            "setup_option_symbol": setup_option.symbol if setup_option else None,
+            "setup_option_strike": setup_option.strike if setup_option else None,
+            "max_oi_ce": max_oi_ce, "max_oi_pe": max_oi_pe,
+        })
 
     return setups, shortlisted_rows
+
+
+def _timestamp_line(now_ist: datetime) -> str:
+    return f"As of {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST"
+
+
+def _format_shortlist_row(r: dict) -> str:
+    # Cash (equity/spot) price movement spelled out explicitly -- prev
+    # close, current price, and the resulting % move -- so the >2%
+    # momentum condition (Step 2) can be verified by eye against the raw
+    # numbers, not just trusted from the computed percentage alone.
+    line = (
+        f"{r['symbol']} {r['direction']}: cash {r['prev_close']:.2f} -> {r['price']:.2f} "
+        f"({r['pct_change']:+.2f}%, threshold >2%)"
+    )
+
+    # Total OI = futures + every CE strike + every PE strike, all for the
+    # current running-month expiry (cross-checked against NSE's own OI
+    # Spurts methodology, per instruction) -- this combined number is
+    # what Step 3's >7% gate actually checks now, not futures OI alone;
+    # the per-leg breakdown is shown so each component is independently
+    # verifiable, not just the combined total.
+    detail = r.get("oi_detail")
+    if detail:
+        line += (
+            f"\n  OI (Total = Futures+CE+PE, current month): yesterday {detail['prev_total']:,.0f} -> "
+            f"today {detail['latest_total']:,.0f} ({r['oi_pct_change']:+.1f}%, threshold >7%)"
+            f"\n  Futures: {detail['fut_prev']:,.0f} -> {detail['fut_latest']:,.0f} | "
+            f"CE (all strikes): {detail['ce_prev']:,.0f} -> {detail['ce_latest']:,.0f} | "
+            f"PE (all strikes): {detail['pe_prev']:,.0f} -> {detail['pe_latest']:,.0f}"
+        )
+
+    if r.get("setup_option_symbol"):
+        line += f"\n  Trade setup strike: {r['setup_option_symbol']} ({r['setup_option_strike']:.0f}, ~2% OTM as of scan time)"
+
+    max_oi_ce, max_oi_pe = r.get("max_oi_ce"), r.get("max_oi_pe")
+    if max_oi_ce or max_oi_pe:
+        ce_part = f"CE {max_oi_ce[0]:.0f}({max_oi_ce[1]:.0f})" if max_oi_ce else "CE --"
+        pe_part = f"PE {max_oi_pe[0]:.0f}({max_oi_pe[1]:.0f})" if max_oi_pe else "PE --"
+        line += f"\n  Highest OI strike (same stock, near spot): {ce_part} {pe_part}"
+    return line
+
+
+async def _send_shortlist_alert(ctx, now_ist: datetime, row: dict, *, title_suffix: str = "shortlisted") -> None:
+    """One alert/Telegram message per stock -- per instruction, a stock
+    shortlisted alongside others no longer gets bundled into one combined
+    message; each gets its own, titled with that stock's own symbol."""
+    message = f"{_timestamp_line(now_ist)}\n\n{_format_shortlist_row(row)}"
+    alert_title = f"F&O Opening Momentum: {row['symbol']} {title_suffix}"
+    await create_alert(
+        ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
+        title=alert_title, message=message, object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
+    )
+    await send_telegram(alert_title, message)
 
 
 async def _mark_breakout_levels(ctx, setups: dict, today: date) -> None:
@@ -438,7 +637,7 @@ async def _close_position(ctx, symbol: str, setup: dict, now_ist: datetime, exit
         )
     )
     alert_title = f"{symbol} {setup['direction']} closed"
-    alert_message = f"{exit_reason}: P&L {pnl:+.2f}"
+    alert_message = f"{_timestamp_line(now_ist)}\n\n{exit_reason}: P&L {pnl:+.2f}"
     await create_alert(
         ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value,
         severity=AlertSeverity.INFO if pnl >= 0 else AlertSeverity.WARNING,
@@ -485,7 +684,10 @@ async def evaluate(ctx) -> None:
 
     if ctx.state.get("session_date") != today.isoformat():
         ctx.state.clear()
-        ctx.state.update(session_date=today.isoformat(), shortlist_done=False, breakout_marked=False, report_sent=False, setups={})
+        ctx.state.update(
+            session_date=today.isoformat(), shortlist_done=False, second_scan_done=False,
+            breakout_marked=False, report_sent=False, setups={},
+        )
 
     if ctx.state.pop("force_exit", False):
         for symbol, setup in ctx.state["setups"].items():
@@ -502,15 +704,40 @@ async def evaluate(ctx) -> None:
         setups, shortlisted_rows = await _run_scan(ctx, today)
         ctx.state["setups"] = setups
         ctx.state["shortlist_done"] = True
-        lines = "\n".join(f"{r['symbol']} {r['direction']} {r['pct_change']:+.2f}% OI{r['oi_pct_change']:+.1f}%" for r in shortlisted_rows) or "(none)"
-        alert_title = f"F&O Opening Momentum: {len(shortlisted_rows)} shortlisted"
-        await create_alert(
-            ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
-            title=alert_title, message=lines, object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
-        )
-        await send_telegram(alert_title, lines)
+        if shortlisted_rows:
+            for row in shortlisted_rows:
+                await _send_shortlist_alert(ctx, now_ist, row, title_suffix="shortlisted at 9:20")
+        else:
+            # Still one confirmation alert when nothing qualifies, so a
+            # quiet 9:20 scan reads as "ran, found nothing" rather than
+            # being indistinguishable from the scan never having run.
+            message = f"{_timestamp_line(now_ist)}\n\n(none)"
+            await create_alert(
+                ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
+                title="F&O Opening Momentum: 0 shortlisted at 9:20", message=message,
+                object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
+            )
+            await send_telegram("F&O Opening Momentum: 0 shortlisted at 9:20", message)
         ctx.note("entered" if shortlisted_rows else "skipped", reason=f"9:20 scan: {len(shortlisted_rows)} shortlisted")
         return
+
+    # Second pass, per instruction: re-run the exact same scan at 9:25 to
+    # catch any stock that crosses the momentum/OI thresholds a few
+    # minutes later than the 9:20 pass. Only ever ADDS newly-qualifying
+    # symbols to the shortlist -- anything already shortlisted at 9:20
+    # stays, even if its numbers would no longer pass by 9:25 (see module
+    # docstring). Deliberately doesn't `return`, so a freshly-added
+    # symbol's breakout level still gets marked in this same tick, below.
+    if ctx.state["shortlist_done"] and not ctx.state["second_scan_done"] and now_ist.time() >= BREAKOUT_LEVEL_TIME:
+        second_setups, second_rows = await _run_scan(ctx, today)
+        newly_added = {sym: s for sym, s in second_setups.items() if sym not in ctx.state["setups"]}
+        ctx.state["setups"].update(newly_added)
+        ctx.state["second_scan_done"] = True
+        if newly_added:
+            added_rows = [r for r in second_rows if r["symbol"] in newly_added]
+            for row in added_rows:
+                await _send_shortlist_alert(ctx, now_ist, row, title_suffix="shortlisted at 9:25")
+        ctx.note("entered" if newly_added else "hold", reason=f"9:25 second scan: {len(newly_added)} additional shortlisted")
 
     if ctx.state["shortlist_done"] and not ctx.state["breakout_marked"] and now_ist.time() >= BREAKOUT_LEVEL_TIME:
         await _mark_breakout_levels(ctx, ctx.state["setups"], today)
@@ -537,7 +764,7 @@ async def evaluate(ctx) -> None:
             + (f" P&L {s['pnl']:+.2f}" if s.get("pnl") is not None else "")
             for sym, s in setups.items()
         ) or "(none)"
-        report_message = f"{summary}\n\n{rows}"
+        report_message = f"{_timestamp_line(now_ist)}\n\n{summary}\n\n{rows}"
         await create_alert(
             ctx.db, user_id=ctx.portfolio.user_id, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
             title="F&O Opening Momentum: 3:10pm report", message=report_message,

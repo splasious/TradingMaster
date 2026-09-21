@@ -12,11 +12,12 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import NativeContext
 from app.services.strategy.native_strategies.fo_opening_momentum import (
+    _max_oi_strike_near_spot,
+    _total_oi_pct_change,
     evaluate,
     in_expiry_blackout,
     momentum_direction,
     nifty_filter_allows,
-    opening_strength_ok,
     passes_momentum,
     passes_oi_change,
     passes_retracement,
@@ -38,14 +39,6 @@ def test_oi_change():
     assert passes_oi_change(-7.1) is True
     assert passes_oi_change(7.0) is False
     assert passes_oi_change(None) is False
-
-
-def test_opening_strength_tolerance():
-    assert opening_strength_ok(100.0, 101.0, 100.0, "CE") is True  # open == low
-    assert opening_strength_ok(100.05, 101.0, 100.0, "CE") is True  # within 0.05%
-    assert opening_strength_ok(100.2, 101.0, 100.0, "CE") is False  # beyond tolerance
-    assert opening_strength_ok(101.0, 101.0, 100.0, "PE") is True  # open == high
-    assert opening_strength_ok(0.0, 1.0, 0.0, "CE") is False  # guard against zero open
 
 
 def test_retracement():
@@ -85,6 +78,95 @@ def test_expiry_blackout_window():
     assert in_expiry_blackout(date(2026, 10, 1), expiry) is True  # 2 trading days after (Thu)
     assert in_expiry_blackout(date(2026, 9, 22), expiry) is False  # a full week before, clear
     assert in_expiry_blackout(date(2026, 10, 6), expiry) is False  # a week after, clear
+
+
+async def test_max_oi_strike_near_spot_picks_the_highest_oi_within_band(db_session: AsyncSession):
+    equity = Instrument(exchange="NSE", symbol="OICO", name="OI Co", instrument_type="equity", data_source="zerodha_kite", external_ref="OICO")
+    db_session.add(equity)
+    await db_session.flush()
+    expiry = date(2026, 9, 29)
+
+    def _option(strike, oi):
+        opt = Instrument(
+            exchange="NFO", symbol=f"OICO26SEP{int(strike)}CE", name="OICO CE", instrument_type="option", data_source="zerodha_kite",
+            external_ref=f"OICO26SEP{int(strike)}CE", strike=strike, option_type="CE", expiry=expiry, lot_size=500,
+            underlying_instrument_id=equity.id,
+        )
+        db_session.add(opt)
+        return opt
+
+    near_low = _option(95.0, 2000)
+    near_high_max = _option(105.0, 9000)  # highest OI, within the +/-10% band of spot=100
+    far_outside_band = _option(120.0, 50000)  # far higher OI, but outside the band -- must be ignored
+    await db_session.flush()
+
+    ts = datetime(2026, 9, 21, 4, 0, tzinfo=timezone.utc)
+    db_session.add_all([
+        OhlcvCandle(instrument_id=near_low.id, timeframe="5m", ts=ts, open=1, high=1, low=1, close=1, volume=0, open_interest=2000, source="test"),
+        OhlcvCandle(instrument_id=near_high_max.id, timeframe="5m", ts=ts, open=1, high=1, low=1, close=1, volume=0, open_interest=9000, source="test"),
+        OhlcvCandle(instrument_id=far_outside_band.id, timeframe="5m", ts=ts, open=1, high=1, low=1, close=1, volume=0, open_interest=50000, source="test"),
+    ])
+    await db_session.commit()
+
+    ctx = NativeContext(db=db_session, portfolio=None, deployment=None, state={})
+    result = await _max_oi_strike_near_spot(ctx, equity.id, expiry, spot=100.0, option_type="CE")
+    assert result == (105.0, 9000.0)
+
+
+async def test_total_oi_pct_change_sums_futures_and_every_strike(db_session: AsyncSession):
+    """Total OI must be futures + every CE strike + every PE strike for
+    the same expiry -- demonstrated here by a case where the futures leg
+    alone only moves 2% (would fail the >7% threshold on its own), but
+    the combined total clears it because of the options' OI change."""
+    equity = Instrument(exchange="NSE", symbol="TOICO", name="Total OI Co", instrument_type="equity", data_source="zerodha_kite", external_ref="TOICO")
+    db_session.add(equity)
+    await db_session.flush()
+    expiry = date(2026, 9, 29)
+    future = Instrument(
+        exchange="NFO", symbol="TOICO26SEPFUT", name="TOICO FUT", instrument_type="future", data_source="zerodha_kite",
+        external_ref="TOICO26SEPFUT", expiry=expiry, lot_size=500, underlying_instrument_id=equity.id,
+    )
+    db_session.add(future)
+    await db_session.flush()
+
+    def _option(strike, otype):
+        opt = Instrument(
+            exchange="NFO", symbol=f"TOICO26SEP{int(strike)}{otype}", name="x", instrument_type="option", data_source="zerodha_kite",
+            external_ref=f"TOICO26SEP{int(strike)}{otype}", strike=strike, option_type=otype, expiry=expiry, lot_size=500,
+            underlying_instrument_id=equity.id,
+        )
+        db_session.add(opt)
+        return opt
+
+    ce1 = _option(100.0, "CE")
+    pe1 = _option(90.0, "PE")
+    await db_session.flush()
+
+    prev_ts = datetime(2026, 9, 18, 0, 0, tzinfo=IST)
+    today = date(2026, 9, 21)
+    latest_ts = datetime.combine(today, dtime(9, 15), tzinfo=IST)
+
+    db_session.add(_candle(future.id, prev_ts, 1, 1, 1, 1, oi=100000, timeframe="1d"))
+    db_session.add(_candle(future.id, latest_ts, 1, 1, 1, 1, oi=102000))  # futures alone: +2%
+    db_session.add(_candle(ce1.id, prev_ts, 1, 1, 1, 1, oi=20000, timeframe="1d"))
+    db_session.add(_candle(ce1.id, latest_ts, 1, 1, 1, 1, oi=30000))
+    db_session.add(_candle(pe1.id, prev_ts, 1, 1, 1, 1, oi=10000, timeframe="1d"))
+    db_session.add(_candle(pe1.id, latest_ts, 1, 1, 1, 1, oi=15000))
+    await db_session.commit()
+
+    ctx = NativeContext(db=db_session, portfolio=None, deployment=None, state={})
+    result = await _total_oi_pct_change(ctx, equity.id, future.id, expiry, today)
+
+    assert result is not None
+    assert (result["fut_prev"], result["fut_latest"]) == (100000, 102000)
+    assert (result["ce_prev"], result["ce_latest"]) == (20000, 30000)
+    assert (result["pe_prev"], result["pe_latest"]) == (10000, 15000)
+    assert result["prev_total"] == 130000  # 100000 + 20000 + 10000
+    assert result["latest_total"] == 147000  # 102000 + 30000 + 15000
+
+    futures_only_pct = (102000 - 100000) / 100000 * 100.0
+    assert not passes_oi_change(futures_only_pct)  # 2% alone would fail the >7% threshold
+    assert passes_oi_change(result["pct_change"])  # but the combined Total OI change clears it
 
 
 async def _setup(db_session: AsyncSession, *, cash: float = 1000000.0):
@@ -145,9 +227,10 @@ async def test_scan_shortlists_and_enters_on_breakout_then_exits_on_sma(db_sessi
     day = date(2026, 9, 21)  # Monday
     prev_day = date(2026, 9, 18)
 
-    # previous session's close (for % move) and EOD OI (for the OI filter)
+    # previous session's close (for % move) and EOD OI (for the OI filter --
+    # the daily "1d" candle, the real EOD reading, not a 5m bar)
     db_session.add(_candle(equity.id, datetime.combine(prev_day, dtime(15, 25), tzinfo=IST), 95, 96, 94, 95.0))
-    db_session.add(_candle(future.id, datetime.combine(prev_day, dtime(15, 25), tzinfo=IST), 95, 96, 94, 95.0, oi=100000))
+    db_session.add(_candle(future.id, datetime.combine(prev_day, dtime(0, 0), tzinfo=IST), 95, 96, 94, 95.0, oi=100000, timeframe="1d"))
 
     # 9:15-9:20 opening candle: strong CE setup -- open==low, closes near the high (no retracement)
     db_session.add(_candle(equity.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 100.0, 102.0, 100.0, 101.9))
@@ -210,3 +293,62 @@ async def test_scan_shortlists_and_enters_on_breakout_then_exits_on_sma(db_sessi
     ctx.now = datetime.combine(day, dtime(15, 10), tzinfo=IST)
     await evaluate(ctx)
     assert ctx.state["report_sent"] is True
+
+
+async def test_second_scan_at_925_adds_newly_qualifying_stock_without_disturbing_the_first(db_session: AsyncSession):
+    """A stock that doesn't clear the 2% momentum threshold at the 9:20
+    pass but does by 9:25 (its live price kept moving) gets added on the
+    second scan -- per instruction, the 9:25 pass only ever adds newly-
+    qualifying symbols, never re-validates or removes what already
+    passed at 9:20."""
+    ctx_data = await _setup(db_session)
+    equity, nifty, future = ctx_data["equity"], ctx_data["nifty"], ctx_data["future"]
+    day = date(2026, 9, 21)  # Monday
+    prev_day = date(2026, 9, 18)
+
+    late_equity = Instrument(
+        exchange="NSE", symbol="LATECO", name="Late Co", instrument_type="equity", data_source="zerodha_kite", external_ref="LATECO",
+    )
+    db_session.add(late_equity)
+    await db_session.flush()
+    late_future = Instrument(
+        exchange="NFO", symbol="LATECO26SEPFUT", name="LATECO FUT", instrument_type="future", data_source="zerodha_kite",
+        external_ref="LATECO26SEPFUT", expiry=date(2026, 9, 29), lot_size=500, underlying_instrument_id=late_equity.id,
+    )
+    db_session.add(late_future)
+    await db_session.flush()
+
+    db_session.add(_candle(nifty.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 25000, 25050, 24990, 25040))
+
+    # TESTCO: qualifies cleanly at 9:20 (same setup as the main scan test).
+    db_session.add(_candle(equity.id, datetime.combine(prev_day, dtime(15, 25), tzinfo=IST), 95, 96, 94, 95.0))
+    db_session.add(_candle(future.id, datetime.combine(prev_day, dtime(0, 0), tzinfo=IST), 95, 96, 94, 95.0, oi=100000, timeframe="1d"))
+    db_session.add(_candle(equity.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 100.0, 102.0, 100.0, 101.9))
+    db_session.add(_candle(future.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 95, 96, 94, 95.0, oi=108000))
+    tick_engine.set_real_price(equity.id, 103.5, "test")  # +9% vs prev close 95
+
+    # LATECO: identical OI/retracement setup, but its live price is only
+    # +1.5% (below the 2% threshold) at 9:20.
+    db_session.add(_candle(late_equity.id, datetime.combine(prev_day, dtime(15, 25), tzinfo=IST), 200, 201, 199, 200.0))
+    db_session.add(_candle(late_future.id, datetime.combine(prev_day, dtime(0, 0), tzinfo=IST), 200, 201, 199, 200.0, oi=50000, timeframe="1d"))
+    db_session.add(_candle(late_equity.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 200.0, 204.0, 200.0, 203.8))
+    db_session.add(_candle(late_future.id, datetime.combine(day, dtime(9, 15), tzinfo=IST), 200, 201, 199, 200.0, oi=54000))  # +8% -- passes Step 3 throughout
+    tick_engine.set_real_price(late_equity.id, 203.0, "test")  # +1.5% vs prev close 200 -- below threshold at 9:20
+
+    await db_session.commit()
+
+    ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state={}, now=datetime.combine(day, dtime(9, 20), tzinfo=IST))
+    await evaluate(ctx)
+    assert "TESTCO" in ctx.state["setups"]
+    assert "LATECO" not in ctx.state["setups"]
+
+    # LATECO's price keeps moving and clears the threshold by 9:25.
+    tick_engine.set_real_price(late_equity.id, 206.0, "test")  # +3% vs prev close 200
+
+    ctx.now = datetime.combine(day, dtime(9, 25), tzinfo=IST)
+    await evaluate(ctx)
+
+    assert ctx.state["second_scan_done"] is True
+    assert "LATECO" in ctx.state["setups"]
+    assert ctx.state["setups"]["LATECO"]["direction"] == "CE"
+    assert "TESTCO" in ctx.state["setups"]  # untouched by the second pass
