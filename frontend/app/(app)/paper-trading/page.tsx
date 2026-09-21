@@ -1006,7 +1006,9 @@ function NativeClosedTradesPanel() {
                 </Td>
                 <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
                 <Td className="text-xs text-text-muted">
-                  {t.legs.map((l) => `${l.side} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`).join(", ")}
+                  {t.legs
+                    .map((l) => `${l.side} ${l.instrument_symbol ?? "?"} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`)
+                    .join(", ")}
                 </Td>
               </tr>
             ))}
@@ -1223,7 +1225,9 @@ function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOu
                   </Td>
                   <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
                   <Td className="text-xs text-text-muted">
-                    {t.legs.map((l) => `${l.side} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`).join(", ")}
+                    {t.legs
+                      .map((l) => `${l.side} ${l.instrument_symbol ?? "?"} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`)
+                      .join(", ")}
                   </Td>
                 </tr>
               ))}

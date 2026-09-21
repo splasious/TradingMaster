@@ -302,6 +302,9 @@ export interface NativeTradeLeg {
   quantity: number;
   entry_price: number;
   exit_price: number;
+  instrument_symbol: string | null;
+  strike: number | null;
+  option_type: string | null;
 }
 
 export interface NativeTradeOut {

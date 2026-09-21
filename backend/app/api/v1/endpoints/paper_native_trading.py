@@ -265,6 +265,40 @@ async def exit_native_deployment_now_endpoint(deployment_id: str, db: AsyncSessi
     return NativeEvaluationOut(action=outcome.action, signal=outcome.signal, reason=outcome.reason)
 
 
+async def _enrich_trade_legs(db: AsyncSession, trades: list[PaperNativeTrade]) -> dict[uuid.UUID, list[dict]]:
+    """record_trade only ever stores each leg's instrument_id (see
+    NativeContext.record_trade's docstring) -- never a symbol, since the
+    strategy code only has the Instrument row at the moment it trades, not
+    a duty to snapshot its display name. Resolves every trade's legs to
+    their symbol/strike/option_type here, batched into one query across
+    every trade rather than one round trip per leg, so the Closed Trades
+    table can show what was actually traded instead of just "long 16@...".
+    """
+    instrument_ids: set[uuid.UUID] = set()
+    for t in trades:
+        for leg in t.legs or []:
+            if leg.get("instrument_id"):
+                instrument_ids.add(uuid.UUID(leg["instrument_id"]))
+
+    instruments: dict[uuid.UUID, Instrument] = {}
+    if instrument_ids:
+        result = await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))
+        instruments = {i.id: i for i in result.scalars()}
+
+    enriched: dict[uuid.UUID, list[dict]] = {}
+    for t in trades:
+        legs_out = []
+        for leg in t.legs or []:
+            leg = dict(leg)
+            instrument = instruments.get(uuid.UUID(leg["instrument_id"])) if leg.get("instrument_id") else None
+            leg["instrument_symbol"] = instrument.symbol if instrument else None
+            leg["strike"] = instrument.strike if instrument else None
+            leg["option_type"] = instrument.option_type if instrument else None
+            legs_out.append(leg)
+        enriched[t.id] = legs_out
+    return enriched
+
+
 @router.get("/native-trades", response_model=list[NativeTradeOut])
 async def list_native_trades(
     deployment_id: str | None = None, limit: int = 200,
@@ -274,12 +308,14 @@ async def list_native_trades(
         result = await db.execute(
             select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == uuid.UUID(deployment_id)).order_by(PaperNativeTrade.closed_at.desc())
         )
+        trades = list(result.scalars().all())
+        enriched_legs = await _enrich_trade_legs(db, trades)
         return [
             NativeTradeOut(
                 id=str(t.id), deployment_id=str(t.deployment_id), opened_at=t.opened_at, closed_at=t.closed_at,
-                legs=t.legs, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+                legs=enriched_legs[t.id], pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
             )
-            for t in result.scalars().all()
+            for t in trades
         ]
 
     result = await db.execute(
@@ -291,10 +327,12 @@ async def list_native_trades(
         .order_by(PaperNativeTrade.closed_at.desc())
         .limit(limit)
     )
+    rows = result.all()
+    enriched_legs = await _enrich_trade_legs(db, [t for t, _name in rows])
     return [
         NativeTradeOut(
             id=str(t.id), deployment_id=str(t.deployment_id), strategy_name=name, opened_at=t.opened_at, closed_at=t.closed_at,
-            legs=t.legs, pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+            legs=enriched_legs[t.id], pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
         )
-        for t, name in result.all()
+        for t, name in rows
     ]

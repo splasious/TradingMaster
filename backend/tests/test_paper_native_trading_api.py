@@ -308,3 +308,54 @@ async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, s
 
     all_trades_resp = await client.get("/api/v1/paper-trading/native-trades", headers=headers)
     assert any(t["deployment_id"] == deployment_id for t in all_trades_resp.json())
+
+
+async def test_native_trades_endpoint_enriches_legs_with_instrument_symbol(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test: a trade's legs are recorded with only an
+    instrument_id (see NativeContext.record_trade's docstring), so the
+    Closed Trades table used to render "long 16@11896.00->11145.00" with
+    no way to tell which instrument that was. The API must resolve each
+    leg's instrument_id to its symbol before returning it."""
+    from app.models.instrument import Instrument
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    instrument = Instrument(
+        exchange="NSE", symbol="CENTURYTEX", name="Century Textiles", instrument_type="equity",
+        data_source="zerodha_kite", external_ref="CENTURYTEX",
+    )
+    db_session.add(instrument)
+    await db_session.commit()
+    instrument_id = str(instrument.id)
+
+    recording_code = (
+        "from datetime import datetime, timezone\n"
+        "async def evaluate(ctx):\n"
+        "    await ctx.record_trade(\n"
+        "        legs=[{'instrument_id': " + repr(instrument_id) + ", 'side': 'long', 'quantity': 16, 'entry_price': 11896.0, 'exit_price': 11145.0}],\n"
+        "        pnl=-12016.0, pnl_pct=-6.3, exit_reason='macd_signal_zero_cross_down', opened_at=datetime.now(timezone.utc),\n"
+        "    )\n"
+        "    ctx.note('exited', signal='COVER')\n"
+    )
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Leg Symbol Test Strategy", "version": {"python_code": recording_code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+
+    trades_resp = await client.get(f"/api/v1/paper-trading/native-trades?deployment_id={deployment_id}", headers=headers)
+    leg = trades_resp.json()[0]["legs"][0]
+    assert leg["instrument_symbol"] == "CENTURYTEX"
+    assert leg["instrument_id"] == instrument_id
