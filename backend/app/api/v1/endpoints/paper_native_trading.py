@@ -28,41 +28,63 @@ router = APIRouter()
 
 
 async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePositionOut | None:
-    """Display-only reconstruction of the short/long-leg credit-spread
-    shape (see NativePositionOut's docstring) from a deployment's raw
-    state blob -- returns None for any state that isn't shaped this way
-    (flat, or a future native strategy with a different convention)
-    rather than guessing."""
+    """Display-only reconstruction of a deployment's open position from its
+    raw state blob -- returns None for any state that isn't shaped like
+    one of the two real conventions that exist today (flat, or a future
+    native strategy with some other convention) rather than guessing.
+
+    Two shapes exist: nifty_pcr_credit_spread.py's fixed 2-leg
+    {"short": {...}, "long": {...}} (side implied by the dict key), and
+    nifty_pcr_multi_regime's variable {"legs": {name: {"side": "sell" |
+    "buy", ...}, ...}} (2 legs for a directional spread, 4 for the
+    sideways iron condor). Both get normalized into the same (side, leg)
+    list below so the rest of this function -- and the Trade Value/Live
+    Value/Unrealized P&L math -- doesn't care which strategy produced the
+    state. Without this, a multi-regime deployment's dashboard card always
+    showed "flat" with a real position open underneath it, since this
+    function used to recognize only the first shape."""
     position = (state or {}).get("position") if state else None
-    if not isinstance(position, dict) or "short" not in position or "long" not in position:
+    if not isinstance(position, dict):
+        return None
+
+    if isinstance(position.get("legs"), dict):
+        raw_legs: list[tuple[str, dict]] = [(leg["side"], leg) for leg in position["legs"].values()]
+    elif "short" in position and "long" in position:
+        raw_legs = [("sell", position["short"]), ("buy", position["long"])]
+    else:
         return None
 
     legs_out: list[NativeLegOut] = []
-    prices: dict[str, float | None] = {}
-    for side in ("short", "long"):
-        leg = position[side]
+    prices: list[float | None] = []
+    for side, leg in raw_legs:
         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
         if instrument is None:
             return None
         current_price = tick_engine.get_current_price(instrument.id)
-        prices[side] = current_price
+        prices.append(current_price)
         legs_out.append(
             NativeLegOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
-                side=side, quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
+                side="short" if side == "sell" else "long", quantity=leg["quantity"], entry_price=leg["entry_price"],
+                current_price=current_price,
             )
         )
 
-    short_leg, long_leg = position["short"], position["long"]
-    trade_value = (short_leg["entry_price"] - long_leg["entry_price"]) * short_leg["quantity"]
+    # Net credit received at entry (a "sell" leg pays you, a "buy" leg
+    # costs you) -- matches each strategy's own close_position() P&L sign
+    # convention exactly, verified against nifty_pcr_multi_regime's
+    # per-leg (entry - exit) for sell / (exit - entry) for buy formula.
+    trade_value = sum((leg["entry_price"] if side == "sell" else -leg["entry_price"]) * leg["quantity"] for side, leg in raw_legs)
     live_value = None
     unrealized_pnl = None
-    if prices["short"] is not None and prices["long"] is not None:
-        live_value = (prices["short"] - prices["long"]) * short_leg["quantity"]
+    if all(p is not None for p in prices):
+        live_value = sum(
+            (price if side == "sell" else -price) * leg["quantity"] for (side, leg), price in zip(raw_legs, prices)
+        )
         unrealized_pnl = trade_value - live_value
 
     return NativePositionOut(
-        bias=position.get("bias"), opened_at=datetime.fromisoformat(position["opened_at"]),
+        bias=position.get("bias") or position.get("regime"), opened_at=datetime.fromisoformat(position["opened_at"]),
         legs=legs_out, trade_value=trade_value, live_value=live_value, unrealized_pnl=unrealized_pnl,
     )
 

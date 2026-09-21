@@ -184,6 +184,94 @@ async def test_native_deployment_out_computes_spread_position(client: AsyncClien
     assert position["unrealized_pnl"] == trade_value - live_value
 
 
+async def test_native_deployment_out_computes_multi_leg_position(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test: nifty_pcr_multi_regime's iron condor (4 named legs
+    under state["position"]["legs"], each with its own explicit "sell"/
+    "buy" side) must reconstruct the same way the 2-leg "short"/"long"
+    shape above does -- before this fix, _build_position_out only ever
+    recognized the 2-leg shape, so a deployment running this strategy
+    always showed "flat" on the dashboard even while genuinely holding an
+    open position."""
+    from datetime import datetime, timezone
+
+    from app.models.instrument import Instrument
+    from app.services.market_data.tick_engine import tick_engine
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    short_ce = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23400CE", name="Nifty 23400 CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23400CE", strike=23400.0, option_type="CE", lot_size=65,
+    )
+    short_pe = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23400PE", name="Nifty 23400 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23400PE", strike=23400.0, option_type="PE", lot_size=65,
+    )
+    long_ce = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23600CE", name="Nifty 23600 CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23600CE", strike=23600.0, option_type="CE", lot_size=65,
+    )
+    long_pe = Instrument(
+        exchange="NFO", symbol="NIFTY25SEP23200PE", name="Nifty 23200 PE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY25SEP23200PE", strike=23200.0, option_type="PE", lot_size=65,
+    )
+    db_session.add_all([short_ce, short_pe, long_ce, long_pe])
+    await db_session.commit()
+    tick_engine.set_real_price(short_ce.id, 100.0, "test")
+    tick_engine.set_real_price(short_pe.id, 90.0, "test")
+    tick_engine.set_real_price(long_ce.id, 30.0, "test")
+    tick_engine.set_real_price(long_pe.id, 25.0, "test")
+
+    code = "async def evaluate(ctx):\n    ctx.note('hold', reason='position seeded directly for this test')\n"
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Multi-Regime Position Display Test", "version": {"python_code": code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    import uuid as uuid_mod
+
+    from app.models.paper_trading import PaperNativeDeployment
+
+    deployment = await db_session.get(PaperNativeDeployment, uuid_mod.UUID(deployment_id))
+    deployment.state = {
+        "position": {
+            "regime": "sideways", "pcr_at_entry": 0.99, "expiry": "2026-09-25",
+            "legs": {
+                "short_ce": {"instrument_id": str(short_ce.id), "strike": 23400.0, "option_type": "CE", "side": "sell", "quantity": 650.0, "entry_price": 117.5},
+                "short_pe": {"instrument_id": str(short_pe.id), "strike": 23400.0, "option_type": "PE", "side": "sell", "quantity": 650.0, "entry_price": 64.45},
+                "long_ce": {"instrument_id": str(long_ce.id), "strike": 23600.0, "option_type": "CE", "side": "buy", "quantity": 650.0, "entry_price": 30.05},
+                "long_pe": {"instrument_id": str(long_pe.id), "strike": 23200.0, "option_type": "PE", "side": "buy", "quantity": 650.0, "entry_price": 21.20},
+            },
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    await db_session.commit()
+
+    list_resp = await client.get("/api/v1/paper-trading/native-deployments", headers=headers)
+    deployment_out = next(d for d in list_resp.json() if d["id"] == deployment_id)
+    position = deployment_out["position"]
+    assert position is not None, "a 4-leg iron condor position must not display as flat"
+    assert position["bias"] == "sideways"
+    assert len(position["legs"]) == 4
+    assert {leg["side"] for leg in position["legs"]} == {"short", "long"}
+
+    trade_value = (117.5 + 64.45 - 30.05 - 21.20) * 650.0
+    live_value = (100.0 + 90.0 - 30.0 - 25.0) * 650.0
+    assert position["trade_value"] == trade_value
+    assert position["live_value"] == live_value
+    assert position["unrealized_pnl"] == trade_value - live_value
+
+
 async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}
