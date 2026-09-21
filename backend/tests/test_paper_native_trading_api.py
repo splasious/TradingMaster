@@ -272,6 +272,75 @@ async def test_native_deployment_out_computes_multi_leg_position(client: AsyncCl
     assert position["unrealized_pnl"] == trade_value - live_value
 
 
+async def test_native_deployment_out_computes_holdings(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Regression test: a multi-holding strategy (e.g. the MACD/RSI
+    rotation strategy, which buys several independent stocks under
+    state["holdings"] rather than one spread under state["position"])
+    must show up in the API response's `holdings` field -- before this
+    fix, a deployment holding real stocks always showed nothing at all
+    on the dashboard, since only state["position"] was ever read."""
+    from datetime import datetime, timezone
+
+    from app.models.instrument import Instrument
+    from app.services.market_data.tick_engine import tick_engine
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    stock_a = Instrument(
+        exchange="NSE", symbol="LAURUSLABS", name="Laurus Labs", instrument_type="equity",
+        data_source="zerodha_kite", external_ref="LAURUSLABS",
+    )
+    stock_b = Instrument(
+        exchange="NSE", symbol="POLYCAB", name="Polycab India", instrument_type="equity",
+        data_source="zerodha_kite", external_ref="POLYCAB",
+    )
+    db_session.add_all([stock_a, stock_b])
+    await db_session.commit()
+    tick_engine.set_real_price(stock_a.id, 550.0, "test")
+    tick_engine.set_real_price(stock_b.id, 6200.0, "test")
+
+    code = "async def evaluate(ctx):\n    ctx.note('hold', reason='holdings seeded directly for this test')\n"
+    strategy_resp = await client.post(
+        "/api/v1/strategies",
+        json={"name": "Holdings Display Test", "version": {"python_code": code, "is_native": True}},
+        headers=headers,
+    )
+    strategy_id = strategy_resp.json()["id"]
+    deploy_resp = await client.post(
+        "/api/v1/paper-trading/native-deployments",
+        json={"strategy_id": strategy_id, "portfolio_id": portfolio_id},
+        headers=headers,
+    )
+    deployment_id = deploy_resp.json()["id"]
+
+    import uuid as uuid_mod
+
+    from app.models.paper_trading import PaperNativeDeployment
+
+    deployment = await db_session.get(PaperNativeDeployment, uuid_mod.UUID(deployment_id))
+    deployment.state = {
+        "seeded": True,
+        "holdings": {
+            "LAURUSLABS": {"instrument_id": str(stock_a.id), "quantity": 16.0, "entry_price": 500.0, "opened_at": datetime.now(timezone.utc).isoformat()},
+            "POLYCAB": {"instrument_id": str(stock_b.id), "quantity": 1.0, "entry_price": 6000.0, "opened_at": datetime.now(timezone.utc).isoformat()},
+        },
+    }
+    await db_session.commit()
+
+    list_resp = await client.get("/api/v1/paper-trading/native-deployments", headers=headers)
+    deployment_out = next(d for d in list_resp.json() if d["id"] == deployment_id)
+    assert deployment_out["position"] is None
+    holdings = deployment_out["holdings"]
+    assert holdings is not None
+    assert {h["instrument_symbol"] for h in holdings} == {"LAURUSLABS", "POLYCAB"}
+    assert all(h["side"] == "long" for h in holdings)
+    laurus = next(h for h in holdings if h["instrument_symbol"] == "LAURUSLABS")
+    assert laurus["entry_price"] == 500.0
+    assert laurus["current_price"] == 550.0
+
+
 async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     token = await _login(client, seeded_admin["email"], seeded_admin["password"])
     headers = {"Authorization": f"Bearer {token}"}

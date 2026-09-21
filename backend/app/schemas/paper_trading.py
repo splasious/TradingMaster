@@ -149,6 +149,16 @@ class NativeDeploymentOut(BaseModel):
     last_signal_reason: str | None = None
     state: dict | None = None
     position: NativePositionOut | None = None
+    # Display-only summary of deployment.state["holdings"], the OTHER real
+    # state shape that exists today (see native_strategies' MACD/RSI
+    # rotation strategy): a dict of independently-opened long equity
+    # positions, each with its own entry time -- fundamentally not "one
+    # position" (NativePositionOut's single bias/opened_at/legs-belong-
+    # together shape doesn't fit multiple unrelated holdings), so this is
+    # a flat list of legs instead, reusing NativeLegOut as-is (side is
+    # always "long" here; strike/option_type stay None -- equities have
+    # neither).
+    holdings: list[NativeLegOut] | None = None
     created_at: datetime
     stopped_at: datetime | None
 

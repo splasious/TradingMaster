@@ -35,7 +35,6 @@ import type {
   NativeDeploymentOut,
   NativeEvaluationOut,
   NativeLegOut,
-  NativePositionOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
   PaperPortfolioOut,
@@ -863,7 +862,14 @@ function PortfolioCard({
   const nativeUnrealizedPnl = (nativeDeployments ?? [])
     .filter((d) => d.portfolio_id === portfolio.id && d.position)
     .reduce((sum, d) => sum + (d.position!.unrealized_pnl ?? 0), 0);
-  const todayGain = realizedToday + unrealizedPnl + nativeUnrealizedPnl;
+  // Multi-holding strategies (state["holdings"] -- see NativeDeploymentOut.holdings'
+  // docstring) have no single position/unrealized_pnl to read; each holding
+  // is its own independent long, so sum (current - entry) * qty per leg.
+  const holdingsUnrealizedPnl = (nativeDeployments ?? [])
+    .filter((d) => d.portfolio_id === portfolio.id)
+    .flatMap((d) => d.holdings ?? [])
+    .reduce((sum, l) => sum + (l.current_price != null ? (l.current_price - l.entry_price) * l.quantity : 0), 0);
+  const todayGain = realizedToday + unrealizedPnl + nativeUnrealizedPnl + holdingsUnrealizedPnl;
 
   return (
     <Card>
@@ -1120,14 +1126,14 @@ function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boole
 /** Stand-in for the "Instrument" column -- a native deployment isn't
  * pinned to one instrument the way a regular deployment is, so each leg
  * gets its own line (short on top, matching the order they're opened in). */
-function LegsCell({ position }: { position: NativePositionOut }) {
+function LegsCell({ legs }: { legs: NativeLegOut[] }) {
   return (
     <div className="space-y-0.5">
-      {position.legs.map((l) => (
+      {legs.map((l) => (
         <div key={l.instrument_symbol} className="whitespace-nowrap">
           <span className={`mr-1 text-[10px] uppercase ${l.side === "short" ? "text-negative" : "text-positive"}`}>{l.side}</span>
-          {l.strike ?? "?"}
-          {l.option_type ?? ""}
+          {l.instrument_symbol}
+          {l.strike != null ? ` ${l.strike}${l.option_type ?? ""}` : ""}
         </div>
       ))}
     </div>
@@ -1152,17 +1158,17 @@ function legPnl(leg: NativeLegOut): number | null {
  * LegsCell so each line lines up with its instrument (short on top, then
  * long), instead of collapsing both legs into one blended spread number. */
 function LegValuesCell({
-  position,
+  legs,
   compute,
   colorize = false,
 }: {
-  position: NativePositionOut;
+  legs: NativeLegOut[];
   compute: (leg: NativeLegOut) => number | null;
   colorize?: boolean;
 }) {
   return (
     <div className="space-y-0.5">
-      {position.legs.map((l) => {
+      {legs.map((l) => {
         const v = compute(l);
         if (v == null) {
           return (
@@ -1185,13 +1191,15 @@ function LegValuesCell({
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
   const { data: trades } = useNativeTrades(deployment.id);
   const position = deployment.position;
+  const holdings = deployment.holdings;
+  const displayLegs = position ? position.legs : holdings && holdings.length > 0 ? holdings : null;
 
   return (
     <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
-      {position ? (
+      {displayLegs ? (
         <div className="text-xs text-text-secondary">
-          <span className="font-medium">{position.bias ?? "position"}:</span>{" "}
-          {position.legs.map((l) => (
+          <span className="font-medium">{position ? position.bias ?? "position" : "holdings"}:</span>{" "}
+          {displayLegs.map((l) => (
             <span key={l.instrument_symbol} className="mr-3">
               {l.side} {l.quantity} {l.instrument_symbol} @ {l.entry_price.toFixed(2)}
               {l.current_price != null && <> (now {l.current_price.toFixed(2)})</>}
@@ -1257,6 +1265,14 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
   const position = deployment.position;
+  // Multi-holding strategies (e.g. the MACD/RSI rotation strategy) have no
+  // single position -- each holding is its own independently-opened long,
+  // so it's rendered the same way as position.legs but without a single
+  // bias/opened_at/unrealized_pnl to show.
+  const holdings = deployment.holdings;
+  const hasHoldings = holdings != null && holdings.length > 0;
+  const displayLegs = position ? position.legs : hasHoldings ? holdings : null;
+  const holdingsPnl = hasHoldings && holdings.every((l) => l.current_price != null) ? holdings.reduce((sum, l) => sum + legPnl(l)!, 0) : null;
 
   const evaluateMutation = useMutation({
     mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/evaluate`, { method: "POST" }),
@@ -1357,7 +1373,7 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
       <CardContent className="space-y-4">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
           <SummaryField label="Instrument">
-            {position ? <LegsCell position={position} /> : <span className="text-text-muted">--</span>}
+            {displayLegs ? <LegsCell legs={displayLegs} /> : <span className="text-text-muted">--</span>}
           </SummaryField>
           <SummaryField label="Pool">
             <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
@@ -1365,6 +1381,8 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
           <SummaryField label="Position">
             {position ? (
               <span className="capitalize">{position.bias ?? "in a trade"}</span>
+            ) : hasHoldings ? (
+              <span>{holdings.length} holding{holdings.length === 1 ? "" : "s"}</span>
             ) : (
               <span className="text-text-muted">flat</span>
             )}
@@ -1379,23 +1397,26 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
             )}
           </SummaryField>
           <SummaryField label="Trade Value">
-            {position ? <LegValuesCell position={position} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
+            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
           </SummaryField>
           <SummaryField label="Live Value">
-            {position ? <LegValuesCell position={position} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
+            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
           </SummaryField>
           <SummaryField label="P&amp;L">
-            {position ? <LegValuesCell position={position} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
+            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
           </SummaryField>
           <SummaryField label="Total P&amp;L">
-            {position && position.unrealized_pnl != null ? (
-              <span className={position.unrealized_pnl >= 0 ? "text-positive" : "text-negative"}>
-                {position.unrealized_pnl >= 0 ? "+" : ""}
-                {position.unrealized_pnl.toFixed(2)}
-              </span>
-            ) : (
-              <span className="text-text-muted">--</span>
-            )}
+            {(() => {
+              const total = position ? position.unrealized_pnl : holdingsPnl;
+              return total != null ? (
+                <span className={total >= 0 ? "text-positive" : "text-negative"}>
+                  {total >= 0 ? "+" : ""}
+                  {total.toFixed(2)}
+                </span>
+              ) : (
+                <span className="text-text-muted">--</span>
+              );
+            })()}
           </SummaryField>
         </div>
 

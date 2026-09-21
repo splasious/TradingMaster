@@ -89,6 +89,34 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
     )
 
 
+async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[NativeLegOut] | None:
+    """Display-only reconstruction of deployment.state["holdings"] -- a
+    dict of independently-opened long equity positions (see
+    NativeDeploymentOut.holdings' docstring for why this is separate from
+    _build_position_out's single-spread shape). None when the state
+    doesn't have this shape at all (flat, or a single-position strategy)
+    so the API can tell "definitely nothing held" from "holds something,
+    just not this shape" -- an empty list means genuinely flat under this
+    convention specifically."""
+    holdings = (state or {}).get("holdings") if state else None
+    if not isinstance(holdings, dict):
+        return None
+
+    legs_out: list[NativeLegOut] = []
+    for leg in holdings.values():
+        instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+        if instrument is None:
+            continue
+        current_price = tick_engine.get_current_price(instrument.id)
+        legs_out.append(
+            NativeLegOut(
+                instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
+                side="long", quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
+            )
+        )
+    return legs_out
+
+
 async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) -> PaperPortfolio:
     portfolio = await db.get(PaperPortfolio, uuid.UUID(portfolio_id))
     if portfolio is None:
@@ -112,12 +140,13 @@ async def _deployment_out(db: AsyncSession, deployment: PaperNativeDeployment) -
     strategy = await db.get(Strategy, deployment.strategy_id)
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
     position = await _build_position_out(db, deployment.state)
+    holdings = await _build_holdings_out(db, deployment.state)
     return NativeDeploymentOut(
         id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
         portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
         status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
         last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
-        state=deployment.state, position=position, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
+        state=deployment.state, position=position, holdings=holdings, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
     )
 
 
@@ -131,13 +160,14 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     out: list[NativeDeploymentOut] = []
     for d in deployments:
         position = await _build_position_out(db, d.state)
+        holdings = await _build_holdings_out(db, d.state)
         out.append(
             NativeDeploymentOut(
                 id=str(d.id), strategy_id=str(d.strategy_id), strategy_name=strategies[d.strategy_id].name,
                 portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
                 currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
-                position=position, created_at=d.created_at, stopped_at=d.stopped_at,
+                position=position, holdings=holdings, created_at=d.created_at, stopped_at=d.stopped_at,
             )
         )
     return out

@@ -292,6 +292,7 @@ export interface NativeDeploymentOut {
   last_signal_reason: string | null;
   state: Record<string, unknown> | null;
   position: NativePositionOut | null;
+  holdings: NativeLegOut[] | null;
   created_at: string;
   stopped_at: string | null;
 }
