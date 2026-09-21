@@ -196,6 +196,19 @@ async def stop_native_deployment(deployment_id: str, db: AsyncSession = Depends(
     return await _deployment_out(db, deployment)
 
 
+@router.post("/native-deployments/{deployment_id}/restart", response_model=NativeDeploymentOut)
+async def restart_native_deployment(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> NativeDeploymentOut:
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    if deployment.status == DeploymentStatus.ACTIVE.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deployment is already active.")
+    deployment.status = DeploymentStatus.ACTIVE.value
+    deployment.stopped_at = None
+    await write_audit_log(db, user_id=user.id, action="PAPER_NATIVE_TRADING_RESTARTED", object_type="paper_native_deployment", object_id=str(deployment.id))
+    await db.commit()
+    await db.refresh(deployment)
+    return await _deployment_out(db, deployment)
+
+
 @router.delete("/native-deployments/{deployment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_native_deployment(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> None:
     deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)

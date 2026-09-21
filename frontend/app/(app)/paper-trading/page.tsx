@@ -1240,6 +1240,11 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
   });
 
+  const restartMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}/restart`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+  });
+
   const exitMutation = useMutation({
     mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/exit`, { method: "POST" }),
     onSuccess: (data) => {
@@ -1302,12 +1307,17 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
               </Button>
             </>
           ) : (
-            <Button
-              variant="ghost" size="sm" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}
-              className="text-text-muted hover:text-negative"
-            >
-              <Trash2 className="h-3.5 w-3.5" /> Delete
-            </Button>
+            <>
+              <Button variant="ghost" size="sm" onClick={() => restartMutation.mutate()} disabled={restartMutation.isPending}>
+                <Play className="h-3.5 w-3.5" /> {restartMutation.isPending ? "Restarting..." : "Restart"}
+              </Button>
+              <Button
+                variant="ghost" size="sm" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}
+                className="text-text-muted hover:text-negative"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete
+              </Button>
+            </>
           )}
         </div>
       </CardHeader>
