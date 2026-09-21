@@ -57,6 +57,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, ConnectionStatus
 from app.models.instrument import Instrument
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker, resolve_tradingsymbol_with_be_fallback
+from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import TickEngine, tick_engine
 
 logger = logging.getLogger(__name__)
@@ -254,7 +255,24 @@ class KiteTickerService:
                 self.last_error = "refresh failed, see logs"
             await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
 
-    async def _refresh(self) -> None:
+    async def _refresh(self, now: datetime | None = None) -> None:
+        if not nse_market_open(now or datetime.now(timezone.utc)):
+            # Stay disconnected outside real trading hours -- Kite sends no
+            # ticks while NSE is shut anyway, but leaving the connection up
+            # meant TickEngine's set_real_price/set_real_oi kept whatever
+            # they last held (no expiry on either, see tick_engine.py) and
+            # every reader kept treating it as live. That's exactly how a
+            # native strategy once opened and flat-closed a spread against
+            # Friday's frozen price on a Saturday with nothing here to say
+            # otherwise. Closing here means the next _refresh() cycle once
+            # the market reopens reconnects cleanly, same as a cold start.
+            if self._ticker is not None:
+                self._ticker.close()
+                self._ticker = None
+                self._current_access_token = None
+            self.last_error = None
+            return
+
         async with AsyncSessionLocal() as db:
             creds = await find_connected_zerodha_credentials(db)
             if creds is None:

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.paper_trading import DeploymentStatus, PaperDeployment, PaperNativeDeployment
+from app.services.market_data.hours import nse_market_open
 from app.services.market_data.seed_price import get_seed_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.engine import evaluate_deployment
@@ -64,34 +65,50 @@ class PaperTradingScheduler:
             self.last_tick_started_at = datetime.now(timezone.utc)
             try:
                 async with AsyncSessionLocal() as db:
-                    result = await db.execute(select(PaperDeployment).where(PaperDeployment.status == DeploymentStatus.ACTIVE.value))
-                    deployments = list(result.scalars().all())
-                    evaluated = 0
-                    for deployment in deployments:
-                        seed_price = tick_engine.get_current_price(deployment.instrument_id)
-                        if seed_price is None:
-                            seed_price = await get_seed_price(db, deployment.instrument_id)
-                        tick_engine.subscribe(deployment.instrument_id, seed_price=seed_price)
-                        try:
-                            await evaluate_deployment(db, deployment)
-                            evaluated += 1
-                        except Exception:
-                            logger.exception("Paper deployment %s evaluation failed", deployment.id)
-
-                    native_result = await db.execute(
-                        select(PaperNativeDeployment).where(PaperNativeDeployment.status == DeploymentStatus.ACTIVE.value)
-                    )
-                    for native_deployment in native_result.scalars().all():
-                        try:
-                            await run_native_strategy(db, native_deployment)
-                            evaluated += 1
-                        except Exception:
-                            logger.exception("Native paper deployment %s evaluation failed", native_deployment.id)
-                    self.last_tick_evaluated_count = evaluated
+                    self.last_tick_evaluated_count = await self.tick_once(db)
             except Exception:
                 logger.exception("Paper trading scheduler tick failed")
             finally:
                 self.last_tick_completed_at = datetime.now(timezone.utc)
+
+    async def tick_once(self, db: AsyncSession, now: datetime | None = None) -> int:
+        """A no-op outside real NSE trading hours (weekday 09:15-15:30 IST,
+        see hours.nse_market_open) -- nothing genuinely changes while the
+        exchange is shut, so evaluating anyway just means a strategy trading
+        against whatever price TickEngine has cached from the last real
+        session (get_price()/get_current_price() have no notion of "stale",
+        see native_runner.py and tick_engine.py). That's exactly how a
+        native strategy once opened and flat-closed a spread for an
+        artifactual 0.00 P&L on a Saturday, against Friday's frozen price,
+        with the scheduler itself never having any idea the exchange was
+        closed all day."""
+        if not nse_market_open(now or datetime.now(timezone.utc)):
+            return 0
+
+        result = await db.execute(select(PaperDeployment).where(PaperDeployment.status == DeploymentStatus.ACTIVE.value))
+        deployments = list(result.scalars().all())
+        evaluated = 0
+        for deployment in deployments:
+            seed_price = tick_engine.get_current_price(deployment.instrument_id)
+            if seed_price is None:
+                seed_price = await get_seed_price(db, deployment.instrument_id)
+            tick_engine.subscribe(deployment.instrument_id, seed_price=seed_price)
+            try:
+                await evaluate_deployment(db, deployment)
+                evaluated += 1
+            except Exception:
+                logger.exception("Paper deployment %s evaluation failed", deployment.id)
+
+        native_result = await db.execute(
+            select(PaperNativeDeployment).where(PaperNativeDeployment.status == DeploymentStatus.ACTIVE.value)
+        )
+        for native_deployment in native_result.scalars().all():
+            try:
+                await run_native_strategy(db, native_deployment)
+                evaluated += 1
+            except Exception:
+                logger.exception("Native paper deployment %s evaluation failed", native_deployment.id)
+        return evaluated
 
 
 paper_trading_scheduler = PaperTradingScheduler()

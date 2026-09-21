@@ -40,6 +40,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import TickEngine, tick_engine
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,9 @@ class KiteRestPriceFeed:
                 logger.exception("Kite REST price feed tick failed")
                 self.last_error = f"{type(exc).__name__}: {exc}"
 
-    async def refresh_active_instruments(self) -> int:
+    async def refresh_active_instruments(self, now: datetime | None = None) -> int:
+        if not nse_market_open(now or datetime.now(timezone.utc)):
+            return 0
         active_ids = [iid for iid, count in self._engine._subscriber_counts.items() if count > 0]
         if not active_ids:
             return 0

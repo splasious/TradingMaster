@@ -11,6 +11,12 @@ from app.services.broker import kite_ticker_service as svc
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 from app.services.market_data.tick_engine import TickEngine
 
+# A real, known NSE trading Thursday, well inside market hours (09:15-15:30
+# IST == 03:45-10:00 UTC) -- same reference point test_market_data_freshness.py
+# uses, so _refresh(now=MARKET_OPEN_NOW)'s market-hours gate doesn't turn every test in this
+# file into a no-op depending on when the suite happens to run.
+MARKET_OPEN_NOW = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc)
+
 
 class db_session_cm:
     """kite_ticker_service opens its own `async with AsyncSessionLocal()`
@@ -240,7 +246,7 @@ async def test_refresh_builds_ticker_and_subscribes_resolved_tokens(db_session: 
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     assert len(_FakeTicker.instances) == 1
     ticker = _FakeTicker.instances[0]
@@ -254,6 +260,60 @@ async def test_refresh_builds_ticker_and_subscribes_resolved_tokens(db_session: 
     ticker.on_ticks(ticker, [{"instrument_token": 555, "last_price": 120.5, "oi": 900}])
     assert engine.get_current_price(inst.id) == 120.5
     assert engine.get_current_oi(inst.id) == 900
+
+
+async def test_refresh_stays_disconnected_when_market_closed(db_session: AsyncSession, monkeypatch):
+    """No connection attempt at all while NSE is shut -- not even a DB
+    lookup for credentials, since there's nothing to stream and Kite sends
+    no ticks over a weekend anyway."""
+    market_closed_now = datetime(2026, 9, 12, 8, 30, tzinfo=timezone.utc)  # a Saturday
+
+    def _must_not_open_db():
+        raise AssertionError("must not touch the DB while the market is closed")
+
+    monkeypatch.setattr(svc, "AsyncSessionLocal", _must_not_open_db)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh(now=market_closed_now)
+
+    assert service._ticker is None
+    assert service.last_error is None
+
+
+async def test_refresh_closes_existing_ticker_once_market_closes(db_session: AsyncSession, monkeypatch):
+    """A ticker still connected from the last session must be closed, not
+    left running silently, once the market-hours window has passed --
+    otherwise TickEngine's set_real_price/set_real_oi (no expiry on
+    either) keep serving the last real tick as if it were still live."""
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    inst = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add(inst)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh(now=MARKET_OPEN_NOW)
+    ticker = _FakeTicker.instances[0]
+    assert ticker.closed is False
+
+    market_closed_now = datetime(2026, 9, 12, 8, 30, tzinfo=timezone.utc)  # a Saturday
+    await service._refresh(now=market_closed_now)
+
+    assert ticker.closed is True
+    assert service._ticker is None
+    assert service._current_access_token is None
 
 
 async def test_refresh_skips_rebuild_when_token_unchanged(db_session: AsyncSession, monkeypatch):
@@ -275,10 +335,10 @@ async def test_refresh_skips_rebuild_when_token_unchanged(db_session: AsyncSessi
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
     assert len(_FakeTicker.instances) == 1
 
-    await service._refresh()  # same token still connected -> no new ticker, no old one closed
+    await service._refresh(now=MARKET_OPEN_NOW)  # same token still connected -> no new ticker, no old one closed
     assert len(_FakeTicker.instances) == 1
     assert _FakeTicker.instances[0].closed is False
 
@@ -310,13 +370,13 @@ async def test_refresh_rebuilds_when_ticker_died_even_with_the_same_token(db_ses
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
     assert len(_FakeTicker.instances) == 1
     dead_ticker = _FakeTicker.instances[0]
 
     dead_ticker.connected = False  # simulate the WS dying without a token change
 
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     assert len(_FakeTicker.instances) == 2  # rebuilt despite the identical token
     assert service._ticker is _FakeTicker.instances[1]
@@ -342,7 +402,7 @@ async def test_refresh_rebuilds_and_closes_old_ticker_on_new_token(db_session: A
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
     first_ticker = _FakeTicker.instances[0]
 
     # Simulate the next day's fresh "Login with Zerodha" -- a new access_token.
@@ -355,7 +415,7 @@ async def test_refresh_rebuilds_and_closes_old_ticker_on_new_token(db_session: A
     credential.encrypted_payload = encrypt_payload(json.dumps(creds))
     await db_session.commit()
 
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     assert len(_FakeTicker.instances) == 2
     assert first_ticker.closed is True
@@ -384,7 +444,7 @@ async def test_refresh_subscribes_nfo_and_nse_in_different_modes(db_session: Asy
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     ticker = _FakeTicker.instances[0]
     assert sorted(ticker.subscribed) == [555, 777]
@@ -427,7 +487,7 @@ async def test_refresh_trims_nse_tokens_to_fit_subscription_cap_after_nfo(db_ses
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     ticker = _FakeTicker.instances[0]
     # Budget is MAX_SUBSCRIBE_TOKENS(2) - len(nfo)(1) = 1 NSE slot only.
@@ -468,7 +528,7 @@ async def test_refresh_trims_nfo_tokens_that_alone_exceed_subscription_cap(db_se
 
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     ticker = _FakeTicker.instances[0]
     assert len(ticker.subscribed) == 2
@@ -517,7 +577,7 @@ async def test_refresh_keeps_actively_used_instrument_when_trimming_to_cap(db_se
     engine = TickEngine()
     engine.subscribe(hot.id, seed_price=100.0)  # a strategy is actively reading this one right now
     service = svc.KiteTickerService(engine)
-    await service._refresh()
+    await service._refresh(now=MARKET_OPEN_NOW)
 
     ticker = _FakeTicker.instances[0]
     assert len(ticker.subscribed) == 2
@@ -529,7 +589,7 @@ async def test_refresh_no_error_when_nothing_connected(db_session: AsyncSession,
     monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
     engine = TickEngine()
     service = svc.KiteTickerService(engine)
-    await service._refresh()  # must not raise
+    await service._refresh(now=MARKET_OPEN_NOW)  # must not raise
     assert service.last_error == "No connected Zerodha account"
 
 

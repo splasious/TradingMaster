@@ -46,6 +46,7 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.broker.zerodha_broker import IST
+from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import tick_engine
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,13 @@ class OiSnapshotScheduler:
     async def _run(self) -> None:
         while True:
             try:
+                if not nse_market_open(datetime.now(timezone.utc)):
+                    self.last_written_count = 0
+                    self.last_error = None
+                    self.last_run_at = datetime.now(timezone.utc)
+                    await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
+                    continue
+
                 ticker = kite_ticker_service._ticker
                 if ticker is None or not ticker.is_connected():
                     # Don't re-persist whatever's still sitting in TickEngine

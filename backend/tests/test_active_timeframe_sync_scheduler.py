@@ -15,6 +15,13 @@ from app.models.strategy import Strategy, StrategyVersion
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 from app.services.market_data.active_timeframe_sync_scheduler import ActiveTimeframeSyncScheduler
 
+# A real, known NSE trading Thursday, well inside market hours (09:15-15:30
+# IST == 03:45-10:00 UTC) -- same reference point test_market_data_freshness.py
+# uses, so a zerodha-sourced pair's sync isn't silently skipped by the
+# market-hours gate just because the test suite happens to run over a
+# weekend or after-hours.
+ZERODHA_MARKET_OPEN_NOW = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc)
+
 
 def _delta_response(bars: list[dict]) -> httpx.Response:
     payload = {
@@ -226,7 +233,7 @@ async def test_sync_fetches_zerodha_sourced_pairs_including_open_interest(db_ses
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    synced = await scheduler.sync(db_session)
+    synced = await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert synced == 1
     assert captured_segment == ["NFO"]  # from instrument.exchange, not guessed
 
@@ -240,6 +247,26 @@ async def test_sync_fetches_zerodha_sourced_pairs_including_open_interest(db_ses
     assert candles[0].open_interest == 5000
 
 
+async def test_sync_skips_zerodha_pairs_when_market_closed(db_session: AsyncSession, monkeypatch):
+    """No Kite historical-data call at all while NSE is shut -- there's
+    nothing new to fetch, and a narrow "last couple of days" window would
+    otherwise just re-confirm there's no candle for a day the exchange
+    never opened (see the incident this was built to prevent: a native
+    strategy trading a whole Saturday against Friday's frozen price)."""
+    await _active_zerodha_deployment(db_session, timeframe="15m")
+    await _seed_connected_zerodha_account(db_session)
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        raise AssertionError("get_historical_data must not be called while the market is closed")
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    market_closed_now = datetime(2026, 9, 12, 8, 30, tzinfo=timezone.utc)  # a Saturday
+    scheduler = ActiveTimeframeSyncScheduler()
+    synced = await scheduler.sync(db_session, now=market_closed_now)
+    assert synced == 0
+
+
 async def test_sync_skips_zerodha_pairs_without_a_connected_account(db_session: AsyncSession, monkeypatch):
     await _active_zerodha_deployment(db_session, timeframe="15m")
     # No connected Zerodha account seeded this time.
@@ -250,7 +277,7 @@ async def test_sync_skips_zerodha_pairs_without_a_connected_account(db_session: 
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    synced = await scheduler.sync(db_session)
+    synced = await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert synced == 0
 
 
@@ -272,7 +299,7 @@ async def test_sync_fetches_1wk_zerodha_pair_as_1d_with_wide_backfill_window(db_
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    synced = await scheduler.sync(db_session)
+    synced = await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert synced == 1
     assert captured["timeframe"] == "1d"  # not "1wk" -- Kite doesn't support it
     assert captured["window_days"] > 300  # wide one-time backfill, not the normal 2-day window
@@ -306,7 +333,7 @@ async def test_sync_uses_narrow_lookback_once_enough_1d_bars_exist(db_session: A
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    await scheduler.sync(db_session)
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert captured["window_days"] <= 2  # enough daily history already -- back to the normal incremental window
 
 
@@ -324,6 +351,6 @@ async def test_sync_dedupes_1wk_and_1mo_fetches_for_the_same_instrument(db_sessi
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    synced = await scheduler.sync(db_session)
+    synced = await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert call_count["n"] == 1  # both "1wk" and "1mo" map to the same "1d" fetch -- only done once
     assert synced == 1

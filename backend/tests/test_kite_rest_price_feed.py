@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,12 @@ from app.services.market_data import kite_rest_price_feed as feed_module
 from app.services.market_data.kite_rest_price_feed import KiteRestPriceFeed
 from app.services.market_data.tick_engine import TickEngine
 from tests.test_kite_ticker_service import _seed_connected_account, db_session_cm
+
+# A real, known NSE trading Thursday, well inside market hours (09:15-15:30
+# IST == 03:45-10:00 UTC) -- same reference point test_market_data_freshness.py
+# uses, so refresh_active_instruments(now=MARKET_OPEN_NOW)'s market-hours gate doesn't turn
+# every test in this file into a no-op depending on when the suite runs.
+MARKET_OPEN_NOW = datetime(2026, 9, 10, 8, 30, tzinfo=timezone.utc)
 
 
 async def test_refresh_returns_zero_without_a_connected_account(db_session: AsyncSession, monkeypatch):
@@ -24,7 +31,7 @@ async def test_refresh_returns_zero_without_a_connected_account(db_session: Asyn
     engine.subscribe(instrument.id, seed_price=100.0)
     feed = KiteRestPriceFeed(engine)
 
-    updated = await feed.refresh_active_instruments()
+    updated = await feed.refresh_active_instruments(now=MARKET_OPEN_NOW)
     assert updated == 0
     assert engine.get_current_price(instrument.id) == 100.0  # untouched
 
@@ -59,7 +66,7 @@ async def test_refresh_updates_only_subscribed_zerodha_instruments(db_session: A
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp_batch", fake_get_ltp_batch)
 
     feed = KiteRestPriceFeed(engine)
-    updated = await feed.refresh_active_instruments()
+    updated = await feed.refresh_active_instruments(now=MARKET_OPEN_NOW)
 
     assert updated == 1
     assert engine.get_current_price(subscribed.id) == 1502.35
@@ -94,7 +101,7 @@ async def test_refresh_chunks_into_batches_at_batch_size(db_session: AsyncSessio
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp_batch", fake_get_ltp_batch)
 
     feed = KiteRestPriceFeed(engine)
-    updated = await feed.refresh_active_instruments()
+    updated = await feed.refresh_active_instruments(now=MARKET_OPEN_NOW)
 
     assert updated == 7
     assert len(calls) == 3  # ceil(7/3)
@@ -124,7 +131,7 @@ async def test_refresh_continues_past_one_failed_batch(db_session: AsyncSession,
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp_batch", fake_get_ltp_batch)
 
     feed = KiteRestPriceFeed(engine)
-    updated = await feed.refresh_active_instruments()
+    updated = await feed.refresh_active_instruments(now=MARKET_OPEN_NOW)
 
     assert updated == 1
     assert engine.get_current_price(good.id) == 55.0
@@ -135,4 +142,23 @@ async def test_refresh_returns_zero_with_no_subscribers_at_all(db_session: Async
     monkeypatch.setattr(feed_module, "AsyncSessionLocal", lambda: db_session_cm(db_session))
     engine = TickEngine()
     feed = KiteRestPriceFeed(engine)
-    assert await feed.refresh_active_instruments() == 0
+    assert await feed.refresh_active_instruments(now=MARKET_OPEN_NOW) == 0
+
+
+async def test_refresh_skips_polling_when_market_closed(db_session: AsyncSession, monkeypatch):
+    """No Kite REST call, no DB lookup, while NSE is shut -- polling a
+    closed market just re-confirms the same frozen last price instead of
+    a genuine update."""
+    def _must_not_open_db():
+        raise AssertionError("must not touch the DB while the market is closed")
+
+    monkeypatch.setattr(feed_module, "AsyncSessionLocal", _must_not_open_db)
+
+    instrument_id = uuid.uuid4()
+    engine = TickEngine()
+    engine.subscribe(instrument_id, seed_price=100.0)
+    feed = KiteRestPriceFeed(engine)
+
+    market_closed_now = datetime(2026, 9, 12, 8, 30, tzinfo=timezone.utc)  # a Saturday
+    assert await feed.refresh_active_instruments(now=market_closed_now) == 0
+    assert engine.get_current_price(instrument_id) == 100.0  # untouched

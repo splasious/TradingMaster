@@ -47,6 +47,7 @@ from app.services.backfill_platform.timeframes import DERIVABLE_FROM_DAILY
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
 from app.services.market_data.base import MarketDataSourceError
+from app.services.market_data.hours import nse_market_open
 from app.services.market_data.registry import get_market_data_source
 
 logger = logging.getLogger(__name__)
@@ -168,10 +169,13 @@ class ActiveTimeframeSyncScheduler:
         async with AsyncSessionLocal() as db:
             return await self.sync(db)
 
-    async def sync(self, db: AsyncSession) -> int:
+    async def sync(self, db: AsyncSession, now: datetime | None = None) -> int:
         """The syncable core, taking an explicit session -- split out from
         sync_once() so tests can exercise it against their own isolated
-        session instead of the module-level AsyncSessionLocal."""
+        session instead of the module-level AsyncSessionLocal. `now` is
+        injectable the same way (real wall-clock time in production, a
+        fixed value in tests) so the market-hours gate below is
+        deterministic to test."""
         pairs, instruments = await _active_pairs_with_instruments(db)
         if not pairs:
             return 0
@@ -188,7 +192,15 @@ class ActiveTimeframeSyncScheduler:
             zerodha_broker._api_key = zerodha_creds["api_key"]
             zerodha_broker._access_token = zerodha_creds["access_token"]
 
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        # NSE is shut outside real trading hours -- nothing new exists to
+        # fetch, and Kite's own historical candles for that window won't
+        # exist either (see the incident this was built to prevent: a
+        # native strategy trading a whole Saturday against Friday's frozen
+        # price with nobody the wiser). Delta-sourced pairs are unaffected
+        # -- crypto trades around the clock, so only the Zerodha branch
+        # below checks this.
+        zerodha_market_open = nse_market_open(now)
         synced = 0
         skipped_zerodha = 0
         seen_zerodha_fetches: set[tuple] = set()
@@ -206,6 +218,8 @@ class ActiveTimeframeSyncScheduler:
 
             try:
                 if is_zerodha:
+                    if not zerodha_market_open:
+                        continue
                     if zerodha_broker is None:
                         skipped_zerodha += 1
                         continue
