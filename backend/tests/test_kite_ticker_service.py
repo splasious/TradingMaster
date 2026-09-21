@@ -474,6 +474,56 @@ async def test_refresh_trims_nfo_tokens_that_alone_exceed_subscription_cap(db_se
     assert len(ticker.subscribed) == 2
 
 
+async def test_refresh_keeps_actively_used_instrument_when_trimming_to_cap(db_session: AsyncSession, monkeypatch):
+    """A trim to MAX_SUBSCRIBE_TOKENS must never drop an instrument a live
+    strategy is genuinely reading right now (TickEngine.subscribe'd, e.g.
+    via a native strategy's ctx.get_price every tick) just because it
+    happens to fall late in the DB's unordered row order -- that silently
+    starves a live strategy's own price feed once a broad scanner's
+    catalog alone outgrows the cap, which looks identical to "the
+    strategy just isn't finding live premiums" from the outside."""
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 2)
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    # "NIFTY 50" is inserted LAST -- if the trim just kept insertion/query
+    # order, it would be the one dropped despite being actively used.
+    options = [
+        Instrument(
+            exchange="NFO", symbol=f"COLDOPT{i}", name=f"COLDOPT{i}", instrument_type="option",
+            data_source="zerodha_kite", external_ref=f"COLDOPT{i}",
+        )
+        for i in range(2)
+    ]
+    hot = Instrument(
+        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
+    )
+    db_session.add_all([*options, hot])
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        if segment == "NFO":
+            return [
+                {"tradingsymbol": "COLDOPT0", "instrument_token": "100"},
+                {"tradingsymbol": "COLDOPT1", "instrument_token": "101"},
+                {"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"},
+            ]
+        return []
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    engine.subscribe(hot.id, seed_price=100.0)  # a strategy is actively reading this one right now
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+
+    ticker = _FakeTicker.instances[0]
+    assert len(ticker.subscribed) == 2
+    assert 555 in ticker.subscribed
+
+
 async def test_refresh_no_error_when_nothing_connected(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
     monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))

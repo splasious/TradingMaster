@@ -197,6 +197,26 @@ async def _resolve_kite_token_map(db, api_key: str) -> dict[str, dict[int, uuid.
     return token_maps
 
 
+def _prioritize_actively_used(items: list[tuple[int, uuid.UUID]], subscriber_counts: dict[uuid.UUID, int]) -> list[tuple[int, uuid.UUID]]:
+    """Puts every (token, instrument_id) pair a real strategy is currently
+    reading -- TickEngine's own subscriber_counts, the exact signal
+    kite_rest_price_feed.py already keys its own polling off of -- ahead
+    of the rest of the backfilled catalog. A stable sort, so ties (all
+    active, or all idle) keep their original relative order.
+
+    Exists because trimming to MAX_SUBSCRIBE_TOKENS previously kept
+    whatever happened to come first in the DB's (unordered) row order --
+    once a broad scanner's backfilled catalog alone exceeds the cap, that
+    silently drops instruments a live strategy is actually evaluating
+    every tick (e.g. the NIFTY spot + option legs a PCR-driven spread
+    strategy needs) in favor of catalog rows nothing is using yet, purely
+    by chance of row order. Prioritizing "in current use" first means the
+    WS push stream always covers what's actually driving a live decision;
+    only the cold long tail gets trimmed once the catalog outgrows Kite's
+    per-connection cap."""
+    return sorted(items, key=lambda kv: 0 if subscriber_counts.get(kv[1], 0) > 0 else 1)
+
+
 class KiteTickerService:
     def __init__(self, engine: TickEngine) -> None:
         self._engine = engine
@@ -273,22 +293,29 @@ class KiteTickerService:
         # too big" -- an immediate-reconnect loop that looks identical to a
         # dead connection but never actually recovers on its own, since
         # every reconnect re-requests the same oversized subscription.
-        nfo_items = list(nfo_map.items())
+        #
+        # Both segments are sorted actively-used-first before trimming --
+        # see _prioritize_actively_used's docstring for why: a large
+        # scanner's catalog can outgrow the cap on its own, and whichever
+        # rows the trim below drops must be the currently-idle ones, never
+        # an instrument a running strategy is reading this very tick.
+        subscriber_counts = self._engine._subscriber_counts
+        nfo_items = _prioritize_actively_used(list(nfo_map.items()), subscriber_counts)
         if len(nfo_items) > MAX_SUBSCRIBE_TOKENS:
             logger.warning(
                 "NFO token count (%d) exceeds Kite's %d-token per-connection subscription cap -- "
-                "subscribing to the first %d only",
+                "subscribing to the %d most actively-used first",
                 len(nfo_items), MAX_SUBSCRIBE_TOKENS, MAX_SUBSCRIBE_TOKENS,
             )
             nfo_items = nfo_items[:MAX_SUBSCRIBE_TOKENS]
         nfo_map = dict(nfo_items)
 
-        nse_items = list(nse_map.items())
+        nse_items = _prioritize_actively_used(list(nse_map.items()), subscriber_counts)
         budget = max(0, MAX_SUBSCRIBE_TOKENS - len(nfo_map))
         if len(nse_items) > budget:
             logger.warning(
                 "NSE token count (%d) exceeds the remaining subscription budget (%d of Kite's %d-token cap, "
-                "after %d NFO) -- subscribing to the first %d only",
+                "after %d NFO) -- subscribing to the %d most actively-used first",
                 len(nse_items), budget, MAX_SUBSCRIBE_TOKENS, len(nfo_map), budget,
             )
             nse_items = nse_items[:budget]
