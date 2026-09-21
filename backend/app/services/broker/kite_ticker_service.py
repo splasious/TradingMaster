@@ -263,6 +263,26 @@ class KiteTickerService:
             self.last_error = "No NFO/NSE instruments to subscribe to (backfill one first)"
             return
 
+        # NFO itself must be capped here too -- otherwise, once the tracked
+        # NFO catalog alone grows past MAX_SUBSCRIBE_TOKENS (e.g. after
+        # adding a scanner that tracks many underlyings), budget below goes
+        # to 0 for NSE as intended, but the full oversized nfo_map still
+        # gets subscribed uncapped. Kite's server then either rejects the
+        # oversized subscribe request or streams a tick batch too large for
+        # the client to read, both surfacing here as on_error's "Message
+        # too big" -- an immediate-reconnect loop that looks identical to a
+        # dead connection but never actually recovers on its own, since
+        # every reconnect re-requests the same oversized subscription.
+        nfo_items = list(nfo_map.items())
+        if len(nfo_items) > MAX_SUBSCRIBE_TOKENS:
+            logger.warning(
+                "NFO token count (%d) exceeds Kite's %d-token per-connection subscription cap -- "
+                "subscribing to the first %d only",
+                len(nfo_items), MAX_SUBSCRIBE_TOKENS, MAX_SUBSCRIBE_TOKENS,
+            )
+            nfo_items = nfo_items[:MAX_SUBSCRIBE_TOKENS]
+        nfo_map = dict(nfo_items)
+
         nse_items = list(nse_map.items())
         budget = max(0, MAX_SUBSCRIBE_TOKENS - len(nfo_map))
         if len(nse_items) > budget:

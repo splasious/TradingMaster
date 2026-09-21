@@ -437,6 +437,43 @@ async def test_refresh_trims_nse_tokens_to_fit_subscription_cap_after_nfo(db_ses
     assert len(nse_subscribed) == 1
 
 
+async def test_refresh_trims_nfo_tokens_that_alone_exceed_subscription_cap(db_session: AsyncSession, monkeypatch):
+    """NFO alone growing past the cap (e.g. a scanner that tracks many
+    underlyings) must still be trimmed to MAX_SUBSCRIBE_TOKENS -- an
+    oversized subscribe request otherwise gets the connection killed by
+    Kite ("Message too big"), which looked identical to a dead connection
+    but reconnect never recovered from since every retry re-requested the
+    same oversized subscription."""
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 2)
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    options = [
+        Instrument(
+            exchange="NFO", symbol=f"NIFTY26SEP2300{i}CE", name=f"NIFTY26SEP2300{i}CE", instrument_type="option",
+            data_source="zerodha_kite", external_ref=f"NIFTY26SEP2300{i}CE",
+        )
+        for i in range(3)
+    ]
+    db_session.add_all(options)
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        if segment == "NFO":
+            return [{"tradingsymbol": f"NIFTY26SEP2300{i}CE", "instrument_token": str(500 + i)} for i in range(3)]
+        return []
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh()
+
+    ticker = _FakeTicker.instances[0]
+    assert len(ticker.subscribed) == 2
+
+
 async def test_refresh_no_error_when_nothing_connected(db_session: AsyncSession, monkeypatch):
     monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
     monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
