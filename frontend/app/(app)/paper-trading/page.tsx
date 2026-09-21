@@ -843,6 +843,28 @@ function PortfolioCard({
   const unrealizedPnl = myPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0);
   const equity = portfolio.cash + myPositions.reduce((sum, p) => sum + p.quantity * (p.current_price ?? p.avg_entry_price), 0);
 
+  // Today's Gain = today's realized P&L (both regular and Advanced Python
+  // deployments can share a capital pool) + every currently open position's
+  // unrealized P&L (regular above, native's own multi-leg one below) --
+  // these are intraday ("15 MIN") strategies, so a position still open now
+  // was opened today, making this equivalent to today's equity change
+  // without needing a start-of-day equity snapshot this app doesn't keep.
+  const { data: allTrades } = useAllPaperTrades();
+  const { data: allNativeTrades } = useAllNativeTrades();
+  const { data: nativeDeployments } = useNativeDeployments();
+  const today = new Date().toDateString();
+  const myDeploymentIds = new Set(deployments.filter((d) => d.portfolio_id === portfolio.id).map((d) => d.id));
+  const myNativeDeploymentIds = new Set((nativeDeployments ?? []).filter((d) => d.portfolio_id === portfolio.id).map((d) => d.id));
+  const realizedToday =
+    (allTrades ?? []).filter((t) => myDeploymentIds.has(t.deployment_id) && new Date(t.exit_ts).toDateString() === today).reduce((sum, t) => sum + t.pnl, 0) +
+    (allNativeTrades ?? [])
+      .filter((t) => myNativeDeploymentIds.has(t.deployment_id) && new Date(t.closed_at).toDateString() === today)
+      .reduce((sum, t) => sum + t.pnl, 0);
+  const nativeUnrealizedPnl = (nativeDeployments ?? [])
+    .filter((d) => d.portfolio_id === portfolio.id && d.position)
+    .reduce((sum, d) => sum + (d.position!.unrealized_pnl ?? 0), 0);
+  const todayGain = realizedToday + unrealizedPnl + nativeUnrealizedPnl;
+
   return (
     <Card>
       <CardHeader>
@@ -853,7 +875,7 @@ function PortfolioCard({
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </CardHeader>
-      <CardContent className="grid grid-cols-2 gap-4 pt-0 md:grid-cols-4">
+      <CardContent className="grid grid-cols-2 gap-4 pt-0 md:grid-cols-5">
         <div>
           <div className="text-xs text-text-muted">Equity</div>
           <div className="font-financial text-lg font-semibold text-text-primary">{equity.toFixed(2)}</div>
@@ -877,6 +899,13 @@ function PortfolioCard({
           <div className="text-xs text-text-muted">Realized P&amp;L</div>
           <div className={`font-financial text-lg font-semibold ${portfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
             {portfolio.realized_pnl_total.toFixed(2)}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-text-muted">Today&apos;s Gain</div>
+          <div className={`font-financial text-lg font-semibold ${todayGain >= 0 ? "text-positive" : "text-negative"}`}>
+            {todayGain >= 0 ? "+" : ""}
+            {todayGain.toFixed(2)}
           </div>
         </div>
       </CardContent>
