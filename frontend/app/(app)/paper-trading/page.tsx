@@ -1260,7 +1260,7 @@ function SummaryField({ label, children }: { label: string; children: React.Reac
   );
 }
 
-function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut }) {
+function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: NativeDeploymentOut; soloPortfolio?: PaperPortfolioOut }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
@@ -1273,6 +1273,18 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
   const hasHoldings = holdings != null && holdings.length > 0;
   const displayLegs = position ? position.legs : hasHoldings ? holdings : null;
   const holdingsPnl = hasHoldings && holdings.every((l) => l.current_price != null) ? holdings.reduce((sum, l) => sum + legPnl(l)!, 0) : null;
+
+  // Only fetched to compute today's realized P&L for the merged pool-stats
+  // row below (soloPortfolio case) -- called unconditionally either way to
+  // keep this a plain top-level hook call, per rules of hooks.
+  const { data: myTrades } = useNativeTrades(deployment.id);
+  const unrealizedForEquity = position ? position.unrealized_pnl ?? 0 : hasHoldings ? holdings.reduce((sum, l) => sum + (legPnl(l) ?? 0), 0) : 0;
+  const poolEquity = soloPortfolio ? soloPortfolio.cash + unrealizedForEquity : 0;
+  const today = new Date().toDateString();
+  const realizedToday = (myTrades ?? [])
+    .filter((t) => new Date(t.closed_at).toDateString() === today)
+    .reduce((sum, t) => sum + t.pnl, 0);
+  const todayGain = realizedToday + unrealizedForEquity;
 
   const evaluateMutation = useMutation({
     mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/evaluate`, { method: "POST" }),
@@ -1371,6 +1383,40 @@ function NativeDeploymentCard({ deployment }: { deployment: NativeDeploymentOut 
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {soloPortfolio && (
+          // This pool backs no other deployment, so its equity/cash/P&L IS
+          // this strategy's own -- folded in here instead of a separate
+          // PortfolioCard elsewhere on the page (see soloNativePortfolioIds).
+          <div className="grid grid-cols-2 gap-4 border-b border-border pb-4 md:grid-cols-5">
+            <div>
+              <div className="text-xs text-text-muted">Equity</div>
+              <div className="font-financial text-lg font-semibold text-text-primary">{poolEquity.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-text-muted">Cash</div>
+              <div className="font-financial text-lg font-semibold text-text-primary">{soloPortfolio.cash.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
+              <div className={`font-financial text-lg font-semibold ${unrealizedForEquity >= 0 ? "text-positive" : "text-negative"}`}>
+                {unrealizedForEquity.toFixed(2)}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-text-muted">Realized P&amp;L</div>
+              <div className={`font-financial text-lg font-semibold ${soloPortfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
+                {soloPortfolio.realized_pnl_total.toFixed(2)}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-text-muted">Today&apos;s Gain</div>
+              <div className={`font-financial text-lg font-semibold ${todayGain >= 0 ? "text-positive" : "text-negative"}`}>
+                {todayGain >= 0 ? "+" : ""}
+                {todayGain.toFixed(2)}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
           <SummaryField label="Instrument">
             {displayLegs ? <LegsCell legs={displayLegs} /> : <span className="text-text-muted">--</span>}
@@ -1458,8 +1504,36 @@ function PcrTicker({ underlyingSymbol = "NIFTY 50" }: { underlyingSymbol?: strin
   );
 }
 
-function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
+/** Portfolio ids that back exactly one deployment in total (regular +
+ * native combined) where that sole deployment is an Advanced (native) one --
+ * a dedicated pool-per-strategy pairing, the common case for an Advanced
+ * deployment. Its PortfolioCard is folded into that one deployment's own
+ * card instead of shown separately (see NativeDeploymentCard's
+ * soloPortfolio prop); a pool shared across several deployments, or whose
+ * sole deployment is a regular (table-row) one, keeps its own standalone
+ * card since there's no single card to fold it into. */
+function soloNativePortfolioIds(
+  regularDeployments: PaperDeploymentOut[],
+  nativeDeployments: NativeDeploymentOut[],
+): Set<string> {
+  const counts = new Map<string, number>();
+  for (const d of regularDeployments) counts.set(d.portfolio_id, (counts.get(d.portfolio_id) ?? 0) + 1);
+  for (const d of nativeDeployments) counts.set(d.portfolio_id, (counts.get(d.portfolio_id) ?? 0) + 1);
+  return new Set(nativeDeployments.filter((d) => counts.get(d.portfolio_id) === 1).map((d) => d.portfolio_id));
+}
+
+function NativeDeploymentsPanel({
+  onStart,
+  portfolios,
+  regularDeployments,
+}: {
+  onStart: () => void;
+  portfolios: PaperPortfolioOut[];
+  regularDeployments: PaperDeploymentOut[];
+}) {
   const { data: deployments, isLoading } = useNativeDeployments();
+  const soloIds = soloNativePortfolioIds(regularDeployments, deployments ?? []);
+  const portfolioById = new Map(portfolios.map((p) => [p.id, p]));
 
   return (
     <div className="space-y-3">
@@ -1488,7 +1562,9 @@ function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
           </CardContent>
         </Card>
       ) : (
-        deployments.map((d) => <NativeDeploymentCard key={d.id} deployment={d} />)
+        deployments.map((d) => (
+          <NativeDeploymentCard key={d.id} deployment={d} soloPortfolio={soloIds.has(d.portfolio_id) ? portfolioById.get(d.portfolio_id) : undefined} />
+        ))
       )}
     </div>
   );
@@ -1497,6 +1573,10 @@ function NativeDeploymentsPanel({ onStart }: { onStart: () => void }) {
 export default function PaperTradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolios } = usePaperPortfolios();
+  const { data: nativeDeployments } = useNativeDeployments();
+  const standalonePortfolios = (portfolios ?? []).filter(
+    (p) => !soloNativePortfolioIds(deployments ?? [], nativeDeployments ?? []).has(p.id),
+  );
   const [modalOpen, setModalOpen] = useState(false);
   const [nativeModalOpen, setNativeModalOpen] = useState(false);
   const [creatingPool, setCreatingPool] = useState(false);
@@ -1529,9 +1609,9 @@ export default function PaperTradingPage() {
         </div>
       </div>
 
-      {portfolios && portfolios.length > 0 && (
+      {standalonePortfolios.length > 0 && (
         <div className="space-y-3">
-          {portfolios.map((p) => (
+          {standalonePortfolios.map((p) => (
             <PortfolioCard
               key={p.id}
               portfolio={p}
@@ -1543,7 +1623,7 @@ export default function PaperTradingPage() {
         </div>
       )}
 
-      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} />
+      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} portfolios={portfolios ?? []} regularDeployments={deployments ?? []} />
 
       <Card>
         <CardHeader>
