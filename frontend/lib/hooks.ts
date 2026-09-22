@@ -31,6 +31,9 @@ import type {
   LiveOrderOut,
   LiveSyncStatusOut,
   LiveTradeOut,
+  NativeBacktestJobOut,
+  NativeBacktestResultOut,
+  NativeBacktestTradeOut,
   NativeDeploymentOut,
   NativeTradeOut,
   OptimizationJobOut,
@@ -264,6 +267,45 @@ export function useBacktestTrades(jobId: string | null, enabled: boolean) {
   return useQuery({
     queryKey: ["backtest-trades", jobId],
     queryFn: () => apiFetch<BacktestTradeOut[]>(`/api/v1/backtests/${jobId}/trades`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function useNativeBacktestsForStrategy(strategyId: string) {
+  return useQuery({
+    queryKey: ["native-backtests-for-strategy", strategyId],
+    queryFn: () => apiFetch<NativeBacktestJobOut[]>(`/api/v1/native-backtests?strategy_id=${strategyId}`),
+    refetchInterval: (query) => {
+      const stillRunning = query.state.data?.some((j) => j.status === "pending" || j.status === "running");
+      return stillRunning ? 3000 : false;
+    },
+  });
+}
+
+export function useNativeBacktestJob(jobId: string | null) {
+  return useQuery({
+    queryKey: ["native-backtest-job", jobId],
+    queryFn: () => apiFetch<NativeBacktestJobOut>(`/api/v1/native-backtests/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "running" ? 1000 : false;
+    },
+  });
+}
+
+export function useNativeBacktestResult(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["native-backtest-result", jobId],
+    queryFn: () => apiFetch<NativeBacktestResultOut>(`/api/v1/native-backtests/${jobId}/result`),
+    enabled: !!jobId && enabled,
+  });
+}
+
+export function useNativeBacktestTrades(jobId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["native-backtest-trades", jobId],
+    queryFn: () => apiFetch<NativeBacktestTradeOut[]>(`/api/v1/native-backtests/${jobId}/trades`),
     enabled: !!jobId && enabled,
   });
 }

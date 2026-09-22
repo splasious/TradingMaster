@@ -12,7 +12,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state
 import { Modal } from "@/components/ui/modal";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { useBacktestResult, useBacktestsForStrategy, useStrategies } from "@/lib/hooks";
+import { useBacktestResult, useBacktestsForStrategy, useNativeBacktestResult, useNativeBacktestsForStrategy, useStrategies } from "@/lib/hooks";
 import type { StrategyOut, StrategyStatus } from "@/lib/types";
 
 const STATUS_TONE: Record<StrategyStatus, Tone> = {
@@ -101,6 +101,31 @@ function ForceApproveModal({ strategy, onClose }: { strategy: StrategyOut; onClo
   );
 }
 
+function NativeStrategyPerformance({ strategyId }: { strategyId: string }) {
+  const { data: jobs } = useNativeBacktestsForStrategy(strategyId);
+  const latestCompleted = jobs?.find((j) => j.status === "completed") ?? null;
+  const { data: result } = useNativeBacktestResult(latestCompleted?.id ?? null, !!latestCompleted);
+
+  if (!jobs || (jobs.length > 0 && !latestCompleted)) {
+    return <span className="text-xs text-text-muted">--</span>;
+  }
+  if (!latestCompleted || !result) {
+    return <span className="text-xs text-text-muted">Not backtested</span>;
+  }
+
+  const { net_pnl, win_rate_pct, trade_count } = result.metrics;
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+      <span className={`font-financial font-medium ${net_pnl >= 0 ? "text-positive" : "text-negative"}`}>
+        {net_pnl >= 0 ? "+" : ""}
+        {net_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+      </span>
+      <span className="text-text-muted">{win_rate_pct.toFixed(0)}% win</span>
+      <span className="text-text-muted">({trade_count} trades)</span>
+    </span>
+  );
+}
+
 function StrategyPerformance({ strategyId }: { strategyId: string }) {
   const { data: jobs } = useBacktestsForStrategy(strategyId);
   const latestCompleted = jobs?.find((j) => j.status === "completed") ?? null;
@@ -168,7 +193,11 @@ function StrategyCard({
       </div>
 
       <div className="min-h-[1.25rem]">
-        <StrategyPerformance strategyId={strategy.id} />
+        {strategy.code_type === "native" ? (
+          <NativeStrategyPerformance strategyId={strategy.id} />
+        ) : (
+          <StrategyPerformance strategyId={strategy.id} />
+        )}
       </div>
 
       {activeError && (
@@ -324,7 +353,7 @@ export default function StrategiesPage() {
           />
           <StrategyGrid
             title="Advanced Python Strategies"
-            description="Trusted, unsandboxed code -- no fixed instrument, real DB access, multi-leg positions. Deploys from Paper Trading's Advanced Strategy Deployments section, not backtestable through the normal engine."
+            description="Trusted, unsandboxed code -- no fixed instrument, real DB access, multi-leg positions. Deploys from Paper Trading's Advanced Strategy Deployments section; backtest it from the Backtesting page's Advanced (Native) tab."
             strategies={nativeStrategies}
             hasRole={hasRole}
             user={user}

@@ -625,6 +625,43 @@ export interface BacktestTradeOut {
   exit_reason: string;
 }
 
+export interface NativeBacktestJobOut {
+  id: string;
+  strategy_id: string;
+  start_date: string;
+  end_date: string;
+  initial_capital: number;
+  status: BacktestStatus;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface NativeBacktestMetrics {
+  trade_count: number;
+  net_pnl: number;
+  win_rate_pct: number;
+  best_trade: number;
+  worst_trade: number;
+  final_capital: number;
+}
+
+export interface NativeBacktestResultOut {
+  metrics: NativeBacktestMetrics;
+  equity_curve: [string, number][];
+}
+
+export interface NativeBacktestTradeOut {
+  id: string;
+  opened_at: string;
+  closed_at: string;
+  legs: NativeTradeLeg[];
+  pnl: number;
+  pnl_pct: number;
+  exit_reason: string;
+}
+
 export interface PortfolioBacktestJobOut {
   id: string;
   strategy_id: string;

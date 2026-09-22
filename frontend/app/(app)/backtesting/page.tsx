@@ -19,6 +19,10 @@ import {
   useBacktestsForStrategy,
   useBacktestTrades,
   useInstrument,
+  useNativeBacktestJob,
+  useNativeBacktestResult,
+  useNativeBacktestsForStrategy,
+  useNativeBacktestTrades,
   usePortfolioBacktestJob,
   usePortfolioBacktestResult,
   usePortfolioBacktestsForStrategy,
@@ -31,6 +35,9 @@ import {
   type BacktestMetrics,
   type BacktestTradeOut,
   type InstrumentOut,
+  type NativeBacktestJobOut,
+  type NativeBacktestMetrics,
+  type NativeBacktestTradeOut,
   type PortfolioBacktestJobOut,
   type PortfolioBacktestTradeOut,
   type StrategyOut,
@@ -485,6 +492,168 @@ function PortfolioHistoryPanel({ strategyId, focusedJobId, onSelect }: { strateg
   );
 }
 
+function NativeKpiGrid({ metrics }: { metrics: NativeBacktestMetrics }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+      <KpiTile
+        label="Net P&L"
+        value={metrics.net_pnl.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })}
+        tone={metrics.net_pnl >= 0 ? "positive" : "negative"}
+      />
+      <KpiTile label="Win Rate" value={`${metrics.win_rate_pct}%`} />
+      <KpiTile label="Total Trades" value={`${metrics.trade_count}`} />
+      <KpiTile label="Best Trade" value={metrics.best_trade.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })} tone="positive" />
+      <KpiTile label="Worst Trade" value={metrics.worst_trade.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })} tone="negative" />
+      <KpiTile label="Final Capital" value={metrics.final_capital.toLocaleString(undefined, { maximumFractionDigits: 0 })} />
+    </div>
+  );
+}
+
+function NativeBacktestTradesTable({ trades }: { trades: NativeBacktestTradeOut[] }) {
+  return (
+    <Table>
+      <Thead>
+        <tr>
+          <Th>Opened</Th>
+          <Th>Closed</Th>
+          <Th className="text-right">P&amp;L</Th>
+          <Th className="text-right">P&amp;L %</Th>
+          <Th>Exit Reason</Th>
+          <Th>Legs</Th>
+        </tr>
+      </Thead>
+      <Tbody>
+        {trades.map((t) => (
+          <tr key={t.id}>
+            <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleDateString()} {new Date(t.opened_at).toLocaleTimeString()}</Td>
+            <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleDateString()} {new Date(t.closed_at).toLocaleTimeString()}</Td>
+            <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
+              {t.pnl >= 0 ? "+" : ""}
+              {t.pnl.toFixed(2)}
+            </Td>
+            <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
+              {t.pnl_pct >= 0 ? "+" : ""}
+              {t.pnl_pct.toFixed(2)}%
+            </Td>
+            <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+            <Td className="text-xs text-text-muted">
+              {t.legs
+                .map((l) => `${l.side} ${l.instrument_symbol ?? "?"} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`)
+                .join(", ")}
+            </Td>
+          </tr>
+        ))}
+      </Tbody>
+    </Table>
+  );
+}
+
+function NativeHistoryRow({
+  job,
+  isFocused,
+  onSelect,
+  onDeleted,
+}: {
+  job: NativeBacktestJobOut;
+  isFocused: boolean;
+  onSelect: () => void;
+  onDeleted: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const completed = job.status === "completed";
+  const { data: result } = useNativeBacktestResult(job.id, completed);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/native-backtests/${job.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["native-backtests-for-strategy", job.strategy_id] });
+      onDeleted();
+    },
+  });
+
+  return (
+    <tr
+      onClick={onSelect}
+      className={`cursor-pointer ${isFocused ? "bg-active-soft" : "hover:bg-surface-elevated"}`}
+    >
+      <Td className="font-medium">{job.start_date} &rarr; {job.end_date}</Td>
+      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td>
+        <span
+          className={`capitalize ${
+            job.status === "completed" ? "text-positive" : job.status === "failed" ? "text-negative" : "text-active"
+          }`}
+        >
+          {job.status}
+        </span>
+      </Td>
+      <Td className="text-right font-financial">
+        {completed && result ? (
+          <span className={result.metrics.net_pnl >= 0 ? "text-positive" : "text-negative"}>
+            {result.metrics.net_pnl >= 0 ? "+" : ""}
+            {result.metrics.net_pnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </span>
+        ) : (
+          <span className="text-text-muted">--</span>
+        )}
+      </Td>
+      <Td className="text-right" onClick={(e) => e.stopPropagation()}>
+        <Button
+          variant="ghost" size="sm"
+          onClick={() => deleteMutation.mutate()}
+          disabled={deleteMutation.isPending}
+          className="text-text-muted hover:text-negative"
+          title="Delete this backtest run"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </Td>
+    </tr>
+  );
+}
+
+function NativeBacktestHistoryPanel({ strategyId, focusedJobId, onSelect }: { strategyId: string; focusedJobId: string | null; onSelect: (jobId: string | null) => void }) {
+  const { data: jobs, isLoading } = useNativeBacktestsForStrategy(strategyId);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>History{jobs?.length ? ` (${jobs.length})` : ""}</CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        {isLoading ? (
+          <p className="p-4 text-sm text-text-muted">Loading past runs...</p>
+        ) : !jobs?.length ? (
+          <p className="p-4 text-sm text-text-muted">No backtests run yet for this strategy.</p>
+        ) : (
+          <Table>
+            <Thead>
+              <tr>
+                <Th>Range</Th>
+                <Th>Ran</Th>
+                <Th>Status</Th>
+                <Th className="text-right">Net P&amp;L</Th>
+                <Th />
+              </tr>
+            </Thead>
+            <Tbody>
+              {jobs.map((j) => (
+                <NativeHistoryRow
+                  key={j.id}
+                  job={j}
+                  isFocused={j.id === focusedJobId}
+                  onSelect={() => onSelect(j.id)}
+                  onDeleted={() => onSelect(j.id === focusedJobId ? null : focusedJobId)}
+                />
+              ))}
+            </Tbody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function BacktestingPage() {
   const queryClient = useQueryClient();
   const { data: strategies } = useStrategies();
@@ -494,8 +663,11 @@ export default function BacktestingPage() {
   // "single" mirrors the historical behavior (one independent backtest job
   // per instrument, each with the full initial capital, summed client-side).
   // "portfolio" is one shared-capital-pool run across the whole basket at
-  // once -- the Amibroker-style portfolio backtester.
-  const [mode, setMode] = useState<"single" | "portfolio">("single");
+  // once -- the Amibroker-style portfolio backtester. "native" replays an
+  // Advanced Python (native) strategy's own evaluate(ctx) against historical
+  // data (services/backtest/native_runner.py) -- no instrument/timeframe/
+  // sizing inputs at all, since a native strategy picks and sizes its own.
+  const [mode, setMode] = useState<"single" | "portfolio" | "native">("single");
 
   const [timeframe, setTimeframe] = useState("1d");
   const [startDate, setStartDate] = useState("");
@@ -624,6 +796,35 @@ export default function BacktestingPage() {
     },
   });
 
+  const nativeStrategies = useMemo(() => strategies?.filter((s) => s.code_type === "native") ?? [], [strategies]);
+  const [nativeStrategy, setNativeStrategy] = useState<StrategyOut | null>(null);
+  const [nativeStartDate, setNativeStartDate] = useState("");
+  const [nativeEndDate, setNativeEndDate] = useState("");
+  const [nativeInitialCapital, setNativeInitialCapital] = useState(100000);
+  const [nativeFocusedJobId, setNativeFocusedJobId] = useState<string | null>(null);
+
+  const { data: nativeJob } = useNativeBacktestJob(nativeFocusedJobId);
+  const nativeCompleted = nativeJob?.status === "completed";
+  const { data: nativeResult } = useNativeBacktestResult(nativeFocusedJobId, nativeCompleted);
+  const { data: nativeTrades } = useNativeBacktestTrades(nativeFocusedJobId, nativeCompleted);
+
+  const nativeRunMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<NativeBacktestJobOut>("/api/v1/native-backtests", {
+        method: "POST",
+        body: JSON.stringify({
+          strategy_id: nativeStrategy!.id,
+          start_date: nativeStartDate,
+          end_date: nativeEndDate,
+          initial_capital: nativeInitialCapital,
+        }),
+      }),
+    onSuccess: (job) => {
+      setNativeFocusedJobId(job.id);
+      if (nativeStrategy) queryClient.invalidateQueries({ queryKey: ["native-backtests-for-strategy", nativeStrategy.id] });
+    },
+  });
+
   return (
     <div className="space-y-6">
       <div>
@@ -650,6 +851,14 @@ export default function BacktestingPage() {
         >
           Portfolio
         </button>
+        <button
+          onClick={() => setMode("native")}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            mode === "native" ? "bg-active-soft text-active" : "text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          Advanced (Native)
+        </button>
       </div>
       {mode === "portfolio" && (
         <p className="-mt-4 text-xs text-text-muted">
@@ -658,7 +867,73 @@ export default function BacktestingPage() {
           combined trade list/equity curve rather than one independent run per instrument.
         </p>
       )}
+      {mode === "native" && (
+        <p className="-mt-4 text-xs text-text-muted">
+          Replays an Advanced Python strategy&apos;s own logic against historical candles/open-interest -- no
+          instrument/timeframe picker, since the strategy selects and sizes its own positions. Historical option
+          open-interest is only reliably backfilled from 2026-09-09 onward, so a range before that will likely show
+          few or no trades.
+        </p>
+      )}
 
+      {mode === "native" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Configuration</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-text-secondary">Strategy</label>
+                <Select
+                  value={nativeStrategy?.id ?? ""}
+                  onChange={(e) => setNativeStrategy(nativeStrategies.find((s) => s.id === e.target.value) ?? null)}
+                >
+                  <option value="" disabled>
+                    Select an Advanced Python strategy
+                  </option>
+                  {nativeStrategies.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </Select>
+                {strategies && nativeStrategies.length === 0 && (
+                  <p className="text-xs text-text-muted">No Advanced Python (native) strategies yet -- create one in Strategy Builder first.</p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-text-secondary">Initial Capital</label>
+                <Input type="number" value={nativeInitialCapital} onChange={(e) => setNativeInitialCapital(Number(e.target.value))} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-text-secondary">Start Date</label>
+                <Input type="date" value={nativeStartDate} onChange={(e) => setNativeStartDate(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-text-secondary">End Date</label>
+                <Input type="date" value={nativeEndDate} onChange={(e) => setNativeEndDate(e.target.value)} />
+              </div>
+            </div>
+
+            <Button
+              onClick={() => nativeRunMutation.mutate()}
+              disabled={!nativeStrategy || !nativeStartDate || !nativeEndDate || nativeRunMutation.isPending}
+            >
+              {nativeRunMutation.isPending ? "Starting..." : "Run Backtest"}
+            </Button>
+
+            {nativeRunMutation.isError && (
+              <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
+                {nativeRunMutation.error instanceof ApiError ? nativeRunMutation.error.message : "Failed to start"}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
       <Card>
         <CardHeader>
           <CardTitle>Configuration</CardTitle>
@@ -827,6 +1102,53 @@ export default function BacktestingPage() {
           )}
         </CardContent>
       </Card>
+      )}
+
+      {mode === "native" && nativeStrategy && (
+        <NativeBacktestHistoryPanel
+          strategyId={nativeStrategy.id}
+          focusedJobId={nativeFocusedJobId}
+          onSelect={setNativeFocusedJobId}
+        />
+      )}
+
+      {mode === "native" && nativeJob && (
+        <Card>
+          <CardHeader>
+            <CardTitle>
+              Status: <span className="capitalize">{nativeJob.status}</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {nativeJob.status === "failed" && <p className="text-sm text-negative">{nativeJob.error_message}</p>}
+            {(nativeJob.status === "pending" || nativeJob.status === "running") && (
+              <p className="text-sm text-text-muted">Replaying the strategy tick-by-tick against historical data...</p>
+            )}
+
+            {nativeResult && (
+              <div className="space-y-6">
+                <NativeKpiGrid metrics={nativeResult.metrics} />
+
+                <div>
+                  <h3 className="mb-2 text-sm font-semibold text-text-primary">Equity Curve</h3>
+                  <OscillatorChart
+                    lines={[{ id: "equity", color: "#15803d", points: nativeResult.equity_curve.map(([ts, equity]) => ({ ts, value: equity })) }]}
+                    bands={[nativeInitialCapital]}
+                    height={220}
+                  />
+                </div>
+
+                {nativeTrades && nativeTrades.length > 0 && (
+                  <div>
+                    <h3 className="mb-2 text-sm font-semibold text-text-primary">Trades ({nativeTrades.length})</h3>
+                    <NativeBacktestTradesTable trades={nativeTrades} />
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {mode === "single" && strategy && (
         <BacktestHistoryPanel

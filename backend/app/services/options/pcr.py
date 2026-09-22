@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.broker.zerodha_broker import IST
@@ -78,6 +79,7 @@ async def compute_pcr_series(
 
 async def compute_effective_pcr(
     db: AsyncSession, underlying_symbol: str = "NIFTY 50", num_expiries: int = 4, timeframe: str = "15m",
+    as_of: datetime | None = None,
 ) -> float | None:
     """Single PCR number across the underlying's nearest `num_expiries`
     live option expiries -- put OI and call OI each summed across all of
@@ -92,12 +94,19 @@ async def compute_effective_pcr(
     Default timeframe is "15m", not "1d" -- confirmed against the real
     production database (2026-09-12) that NFO option open-interest is
     only ever backfilled/synced at 15m; a "1d" default here would have
-    silently matched zero rows and always returned None."""
+    silently matched zero rows and always returned None.
+
+    `as_of`: replays this as of a historical instant instead of "now" --
+    used by services/backtest/native_runner.py so a backtest can't see
+    expiries that hadn't listed yet or OI bars from after the simulated
+    tick (which live callers never pass, so their behavior is unchanged).
+    """
     underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
     if underlying is None:
         return None
 
-    today = datetime.now(timezone.utc).astimezone(IST).date()
+    reference = as_of or datetime.now(timezone.utc)
+    today = reference.astimezone(IST).date()
     expiry_rows = (
         await db.execute(
             select(Instrument.expiry)
@@ -119,6 +128,8 @@ async def compute_effective_pcr(
     total_put_oi = 0.0
     for expiry in expiry_rows:
         series = await compute_pcr_series(db, underlying.id, expiry, timeframe)
+        if as_of is not None:
+            series = [bar for bar in series if as_aware_utc(bar["ts"]) <= as_of]
         if not series:
             continue
         latest = series[-1]

@@ -201,6 +201,33 @@ async def test_compute_effective_pcr_none_when_underlying_not_found(db_session: 
     assert pcr is None
 
 
+async def test_compute_effective_pcr_as_of_bounds_to_historical_instant(db_session: AsyncSession):
+    """A backtest replay (services/backtest/native_runner.py) must not see
+    OI bars from after its simulated instant -- `as_of` bounds the
+    series[-1] pick to the latest bar at or before `as_of`, not the true
+    latest bar ever. Omitting `as_of` must keep today's live behavior
+    (the true latest bar) exactly unchanged."""
+    underlying = Instrument(exchange="NSE", symbol="NIFTY 50", name="Nifty 50 Index", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50")
+    db_session.add(underlying)
+    await db_session.flush()
+    ce = await _make_option(db_session, underlying.id, "NIFTY26SEP23000CE", "CE", 23000)
+    pe = await _make_option(db_session, underlying.id, "NIFTY26SEP23000PE", "PE", 23000)
+
+    t0 = datetime(2026, 1, 5, 9, 15, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=15)
+    await _add_candle(db_session, ce.id, t0, 100.0)
+    await _add_candle(db_session, pe.id, t0, 200.0)  # t0 PCR = 2.0
+    await _add_candle(db_session, ce.id, t1, 100.0)
+    await _add_candle(db_session, pe.id, t1, 500.0)  # t1 PCR = 5.0 -- must NOT leak into an as_of=t0 read
+    await db_session.commit()
+
+    pcr_as_of_t0 = await compute_effective_pcr(db_session, underlying_symbol="NIFTY 50", timeframe="15m", as_of=t0)
+    assert pcr_as_of_t0 == 2.0
+
+    pcr_live = await compute_effective_pcr(db_session, underlying_symbol="NIFTY 50", timeframe="15m")
+    assert pcr_live == 5.0
+
+
 async def test_compute_effective_pcr_none_when_no_upcoming_expiries(db_session: AsyncSession):
     underlying = Instrument(exchange="NSE", symbol="NIFTY 50", name="Nifty 50 Index", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50")
     db_session.add(underlying)

@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     live_trading,
     market_data,
     market_data_ws,
+    native_backtests,
     optimization,
     options,
     paper_native_trading,
@@ -37,6 +38,7 @@ api_router.include_router(indicators.router, prefix="/indicators", tags=["indica
 api_router.include_router(scanner.router, prefix="/scanner", tags=["scanner"])
 api_router.include_router(strategies.router, prefix="/strategies", tags=["strategies"])
 api_router.include_router(backtests.router, prefix="/backtests", tags=["backtests"])
+api_router.include_router(native_backtests.router, prefix="/native-backtests", tags=["native-backtests"])
 api_router.include_router(portfolio_backtests.router, prefix="/portfolio-backtests", tags=["portfolio-backtests"])
 api_router.include_router(optimization.router, prefix="/optimization", tags=["optimization"])
 api_router.include_router(portfolio_optimization.router, prefix="/portfolio-optimization", tags=["portfolio-optimization"])

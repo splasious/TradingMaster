@@ -74,6 +74,61 @@ class BacktestTrade(Base):
     exit_reason: Mapped[str] = mapped_column(String(20), nullable=False)
 
 
+class NativeBacktestJob(Base):
+    """Historical replay of a `Strategy.code_type == "native"` strategy
+    (see services/backtest/native_runner.py) -- BacktestJob's sibling for
+    Advanced Python strategies, deliberately without `instrument_id`/
+    `timeframe`/position-sizing columns since native strategies pick their
+    own instrument(s) and size themselves, exactly like PaperNativeDeployment
+    has none of those either."""
+
+    __tablename__ = "native_backtest_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    strategy_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False)
+    strategy_version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("strategy_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    initial_capital: Mapped[float] = mapped_column(Float, nullable=False, default=100000.0)
+    status: Mapped[str] = mapped_column(String(20), default=BacktestStatus.PENDING.value, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NativeBacktestResult(Base):
+    __tablename__ = "native_backtest_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("native_backtest_jobs.id", ondelete="CASCADE"), unique=True, nullable=False)
+    metrics: Mapped[dict] = mapped_column(JSON, nullable=False)
+    equity_curve: Mapped[list] = mapped_column(JSON, nullable=False)  # [[iso_ts, equity], ...]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NativeBacktestTrade(Base):
+    """Mirrors PaperNativeTrade's shape exactly (legs is the same
+    `[{instrument_id, side, quantity, entry_price, exit_price}]` JSON) so
+    every trade the replay takes is saved with the same fidelity a real
+    paper-traded native deployment gets."""
+
+    __tablename__ = "native_backtest_trades"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("native_backtest_jobs.id", ondelete="CASCADE"), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    legs: Mapped[list] = mapped_column(JSON, nullable=False)
+    pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_reason: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class OptimizationJob(Base):
     """Grid search over a Python strategy's `params` (PRD section 20).
     Visual-mode rule conditions use literal values, not named parameters,

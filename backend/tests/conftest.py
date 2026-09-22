@@ -15,6 +15,7 @@ from app.models.broker import Broker
 from app.models.user import Role, User, UserRole
 from app.services.backfill_platform import jobs as backfill_platform_jobs
 from app.services.backtest import runner as backtest_runner
+from app.services.backtest import native_runner as native_backtest_runner
 from app.services.backtest import optimization_runner
 from app.services.backtest import portfolio_optimization_runner
 from app.services.backtest import portfolio_runner
@@ -72,6 +73,7 @@ async def client(db_engine, monkeypatch) -> AsyncGenerator[AsyncClient, None]:
     # real dev database instead of this test's isolated one.
     monkeypatch.setattr(market_data_backfill, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(backtest_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(native_backtest_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(optimization_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(portfolio_runner, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(portfolio_optimization_runner, "AsyncSessionLocal", session_factory)
