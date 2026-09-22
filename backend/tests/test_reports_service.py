@@ -6,7 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.broker import Broker, BrokerAccount
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveTrade
-from app.models.paper_trading import DeploymentStatus, PaperDeployment, PaperPortfolio, PaperTrade
+from app.models.paper_trading import (
+    DeploymentStatus,
+    PaperDeployment,
+    PaperNativeDeployment,
+    PaperNativeTrade,
+    PaperPortfolio,
+    PaperTrade,
+)
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import Role, User, UserRole
 from app.services.reports.service import get_trade_rows, rows_to_csv, summarize
@@ -63,11 +70,38 @@ async def _setup(db_session: AsyncSession) -> dict:
     db_session.add(live_deployment)
     await db_session.flush()
 
+    native_strategy = Strategy(name="Native Reports Strategy", owner_id=user.id, code_type="native")
+    db_session.add(native_strategy)
+    await db_session.flush()
+
+    native_version = StrategyVersion(
+        strategy_id=native_strategy.id, version_number=1, timeframe="1d", instrument_ids=[],
+        parameters={}, entry_rules={"all": []}, exit_rules={"all": []}, python_code="def evaluate(ctx): pass",
+        position_sizing={"type": "fixed_quantity", "value": 1}, risk_rules={},
+    )
+    db_session.add(native_version)
+    await db_session.flush()
+
+    native_deployment = PaperNativeDeployment(
+        portfolio_id=portfolio.id, strategy_id=native_strategy.id, strategy_version_id=native_version.id,
+        status=DeploymentStatus.ACTIVE.value, state=None,
+    )
+    db_session.add(native_deployment)
+    await db_session.flush()
+
     now = datetime.now(timezone.utc)
     db_session.add(
         PaperTrade(
             deployment_id=paper_deployment.id, entry_ts=now - timedelta(days=2), entry_price=100.0,
             exit_ts=now - timedelta(days=1), exit_price=110.0, quantity=10, pnl=100.0, pnl_pct=10.0, exit_reason="take_profit",
+        )
+    )
+    db_session.add(
+        PaperNativeTrade(
+            deployment_id=native_deployment.id, opened_at=now - timedelta(hours=14),
+            closed_at=now - timedelta(hours=12),
+            legs=[{"instrument_id": str(instrument.id), "side": "short", "quantity": 25, "entry_price": 50.0, "exit_price": 30.0}],
+            pnl=500.0, pnl_pct=40.0, exit_reason="target",
         )
     )
     db_session.add(
@@ -81,23 +115,31 @@ async def _setup(db_session: AsyncSession) -> dict:
     return {"user": user}
 
 
-async def test_get_trade_rows_merges_paper_and_live_and_sorts_by_exit(db_session: AsyncSession):
+async def test_get_trade_rows_merges_paper_native_and_live_and_sorts_by_exit(db_session: AsyncSession):
     ctx = await _setup(db_session)
     rows = await get_trade_rows(db_session, ctx["user"].id, None, None, None)
 
-    assert len(rows) == 2
+    assert len(rows) == 3
     assert rows[0].environment == "paper"
     assert rows[0].exit_reason == "take_profit"
-    assert rows[1].environment == "live"
-    assert rows[1].exit_reason == "stop_loss"
-    assert rows[0].exit_ts < rows[1].exit_ts
+    # The Advanced (native) strategy's closed trade -- same "paper" bucket
+    # as the single-instrument one above, since paper_native_trades is a
+    # paper-trading table too (see PaperNativeDeployment's docstring).
+    assert rows[1].environment == "paper"
+    assert rows[1].exit_reason == "target"
+    assert rows[1].strategy_name == "Native Reports Strategy"
+    assert rows[1].instrument_symbol == "RPTX"
+    assert rows[1].pnl == 500.0
+    assert rows[2].environment == "live"
+    assert rows[2].exit_reason == "stop_loss"
+    assert rows[0].exit_ts < rows[1].exit_ts < rows[2].exit_ts
 
 
 async def test_get_trade_rows_filters_by_environment(db_session: AsyncSession):
     ctx = await _setup(db_session)
     paper_rows = await get_trade_rows(db_session, ctx["user"].id, "paper", None, None)
-    assert len(paper_rows) == 1
-    assert paper_rows[0].environment == "paper"
+    assert len(paper_rows) == 2
+    assert all(r.environment == "paper" for r in paper_rows)
 
     live_rows = await get_trade_rows(db_session, ctx["user"].id, "live", None, None)
     assert len(live_rows) == 1
@@ -111,7 +153,7 @@ async def test_rows_to_csv_includes_header_and_data(db_session: AsyncSession):
 
     lines = csv_text.strip().splitlines()
     assert lines[0].startswith("environment,strategy,instrument,entry_ts")
-    assert len(lines) == 3
+    assert len(lines) == 4
 
 
 async def test_summarize_computes_net_pnl_and_win_rate(db_session: AsyncSession):
@@ -119,10 +161,10 @@ async def test_summarize_computes_net_pnl_and_win_rate(db_session: AsyncSession)
     rows = await get_trade_rows(db_session, ctx["user"].id, None, None, None)
     summary = summarize(rows)
 
-    assert summary.trade_count == 2
-    assert summary.net_pnl == 50.0
-    assert summary.win_rate_pct == 50.0
-    assert summary.best_trade == 100.0
+    assert summary.trade_count == 3
+    assert summary.net_pnl == 550.0
+    assert round(summary.win_rate_pct, 2) == 66.67
+    assert summary.best_trade == 500.0
     assert summary.worst_trade == -50.0
 
 

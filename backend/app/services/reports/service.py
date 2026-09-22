@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
 from app.models.live_trading import LiveDeployment, LiveTrade
-from app.models.paper_trading import PaperDeployment, PaperPortfolio, PaperTrade
+from app.models.paper_trading import PaperDeployment, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio, PaperTrade
 from app.models.strategy import Strategy
 
 Environment = Literal["paper", "live"]
@@ -59,6 +59,58 @@ async def get_trade_rows(
                 environment="paper", strategy_name=strategy_name, instrument_symbol=instrument_symbol,
                 entry_ts=trade.entry_ts, entry_price=trade.entry_price,
                 exit_ts=trade.exit_ts, exit_price=trade.exit_price, quantity=trade.quantity, pnl=trade.pnl,
+                pnl_pct=trade.pnl_pct, exit_reason=trade.exit_reason,
+            ))
+
+        # Advanced (native) strategy deployments write to their own tables
+        # (paper_native_deployments/paper_native_trades -- no instrument_id
+        # or fixed quantity to reuse the query above, see
+        # PaperNativeDeployment's docstring) but they're still paper-trading
+        # activity and belong in the same Reports "paper" bucket. Without
+        # this, every closed trade from an Advanced Strategy Deployment was
+        # invisible here even though it was already folded into portfolio
+        # P&L (see paper_trading.py's _portfolio_out).
+        native_stmt = (
+            select(PaperNativeTrade, Strategy.name)
+            .join(PaperNativeDeployment, PaperNativeTrade.deployment_id == PaperNativeDeployment.id)
+            .join(PaperPortfolio, PaperNativeDeployment.portfolio_id == PaperPortfolio.id)
+            .join(Strategy, PaperNativeDeployment.strategy_id == Strategy.id)
+            .where(PaperPortfolio.user_id == user_id)
+        )
+        if start:
+            native_stmt = native_stmt.where(PaperNativeTrade.closed_at >= start)
+        if end:
+            native_stmt = native_stmt.where(PaperNativeTrade.closed_at <= end)
+        native_trades = (await db.execute(native_stmt)).all()
+
+        instrument_ids: set[uuid.UUID] = set()
+        for trade, _name in native_trades:
+            for leg in trade.legs or []:
+                if leg.get("instrument_id"):
+                    instrument_ids.add(uuid.UUID(leg["instrument_id"]))
+        instruments: dict[uuid.UUID, Instrument] = {}
+        if instrument_ids:
+            instruments = {
+                i.id: i for i in (await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))).scalars()
+            }
+
+        for trade, strategy_name in native_trades:
+            legs = trade.legs or []
+            symbols = [instruments[uuid.UUID(leg["instrument_id"])].symbol for leg in legs if leg.get("instrument_id") in {str(i) for i in instruments}]
+            # Net premium in/out across all legs (short = credit, long =
+            # debit) -- the same trade_value/live_value convention
+            # paper_native_trading.py's _build_position_out uses for an
+            # *open* position, applied here to a *closed* trade's stored
+            # entry/exit prices so a multi-leg spread still nets down to one
+            # comparable entry/exit figure instead of one row per leg (which
+            # would multiply-count a single trade's pnl in win-rate/summary
+            # stats below).
+            entry_value = sum((leg["entry_price"] if leg["side"] == "short" else -leg["entry_price"]) * leg["quantity"] for leg in legs)
+            exit_value = sum((leg["exit_price"] if leg["side"] == "short" else -leg["exit_price"]) * leg["quantity"] for leg in legs)
+            rows.append(TradeRow(
+                environment="paper", strategy_name=strategy_name, instrument_symbol=", ".join(symbols) or "--",
+                entry_ts=trade.opened_at, entry_price=entry_value,
+                exit_ts=trade.closed_at, exit_price=exit_value, quantity=1, pnl=trade.pnl,
                 pnl_pct=trade.pnl_pct, exit_reason=trade.exit_reason,
             ))
 
