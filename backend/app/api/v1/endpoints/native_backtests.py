@@ -4,7 +4,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.endpoints.paper_native_trading import _enrich_trade_legs
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
 from app.models.backtest import NativeBacktestJob, NativeBacktestResult, NativeBacktestTrade
@@ -18,6 +17,7 @@ from app.schemas.native_backtest import (
 )
 from app.services.audit import write_audit_log
 from app.services.backtest.native_runner import run_native_backtest_job
+from app.services.paper_trading.trade_record import resolve_leg_details
 
 router = APIRouter()
 
@@ -107,13 +107,13 @@ async def get_native_backtest_trades(
         select(NativeBacktestTrade).where(NativeBacktestTrade.job_id == uuid.UUID(job_id)).order_by(NativeBacktestTrade.opened_at)
     )
     trades = list(result.scalars().all())
-    enriched_legs = await _enrich_trade_legs(db, trades)
+    resolved_legs = await resolve_leg_details(db, [t.legs or [] for t in trades])
     return [
         NativeBacktestTradeOut(
-            id=str(t.id), opened_at=t.opened_at, closed_at=t.closed_at, legs=enriched_legs[t.id],
+            id=str(t.id), opened_at=t.opened_at, closed_at=t.closed_at, legs=legs,
             pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
         )
-        for t in trades
+        for t, legs in zip(trades, resolved_legs)
     ]
 
 

@@ -150,12 +150,26 @@ class PaperNativeDeployment(Base):
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# A strategy's own exit_reason string ("time_cutoff_3pm", "pcr_exit_0.845",
+# ...) -- record_trade() truncates to this rather than let an over-long
+# reason fail the insert and lose the trade.
+NATIVE_EXIT_REASON_MAX_LEN = 100
+
+
 class PaperNativeTrade(Base):
     """Closed-trade ledger for native deployments -- `legs` is a JSON
     list of `{instrument_id, side, quantity, entry_price, exit_price}`
     so this works for a 1-leg or N-leg strategy alike without a schema
     change, the same "generic table, strategy-specific content" choice
-    `PaperNativeDeployment.state` makes."""
+    `PaperNativeDeployment.state` makes. Each leg also carries a snapshot
+    of its contract (symbol, strike, option_type, expiry, lot_size,
+    underlying_symbol -- see paper_trading/trade_record.py) so the row
+    stays readable after the contract leaves the instrument catalog.
+
+    `pnl` is gross -- exactly what moved through the pool's cash.
+    `charges` is the estimated brokerage + statutory levies for the round
+    trip (None where not estimable, and for rows saved before it existed);
+    net P&L is pnl - charges."""
 
     __tablename__ = "paper_native_trades"
 
@@ -166,5 +180,6 @@ class PaperNativeTrade(Base):
     legs: Mapped[list] = mapped_column(JSON, nullable=False)
     pnl: Mapped[float] = mapped_column(Float, nullable=False)
     pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
-    exit_reason: Mapped[str] = mapped_column(String(30), nullable=False)
+    charges: Mapped[float | None] = mapped_column(Float)
+    exit_reason: Mapped[str] = mapped_column(String(NATIVE_EXIT_REASON_MAX_LEN), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

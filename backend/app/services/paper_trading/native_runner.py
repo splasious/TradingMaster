@@ -27,15 +27,17 @@ from datetime import date, datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.time import as_aware_utc
 from app.models.alert import AlertSeverity, AlertType
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
-from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
+from app.models.paper_trading import NATIVE_EXIT_REASON_MAX_LEN, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import StrategyVersion
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.pcr import compute_effective_pcr
+from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
 logger = logging.getLogger(__name__)
 
@@ -167,11 +169,26 @@ class NativeContext:
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,
     ) -> None:
-        """`legs`: [{"instrument_id": str, "side": "short"|"long", "quantity": float, "entry_price": float, "exit_price": float}, ...]"""
+        """`legs`: [{"instrument_id": str, "side": "short"|"long", "quantity": float, "entry_price": float, "exit_price": float}, ...]
+
+        Each leg is saved with its contract details alongside, plus the
+        round trip's estimated charges (trade_record.py) -- best effort:
+        if either can't be worked out, the trade is still saved as given.
+        Times are stored as UTC: SQLite keeps a datetime's wall-clock digits
+        but drops its offset, so an IST opened_at saved as-is came back
+        5h30m off. A naive time is taken as UTC, the app-wide convention."""
+        opened_at = as_aware_utc(opened_at).astimezone(timezone.utc)
+        closed_at = as_aware_utc(closed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        charges = None
+        try:
+            [legs] = await resolve_leg_details(self.db, [legs])
+            charges = estimate_charges(legs, opened_at, closed_at)
+        except Exception:
+            logger.exception("Could not resolve trade record details for deployment %s", self.deployment.id)
         self.db.add(
             PaperNativeTrade(
-                deployment_id=self.deployment.id, opened_at=opened_at, closed_at=closed_at or datetime.now(timezone.utc),
-                legs=legs, pnl=pnl, pnl_pct=pnl_pct, exit_reason=exit_reason,
+                deployment_id=self.deployment.id, opened_at=opened_at, closed_at=closed_at,
+                legs=legs, pnl=pnl, pnl_pct=pnl_pct, charges=charges, exit_reason=exit_reason[:NATIVE_EXIT_REASON_MAX_LEN],
             )
         )
         strategy_name = self.deployment.strategy_id  # resolved to a name by the caller if it wants a nicer alert title

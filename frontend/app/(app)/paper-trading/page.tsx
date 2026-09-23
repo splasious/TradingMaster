@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -37,6 +37,8 @@ import type {
   NativeHoldingOut,
   NativeLegOut,
   NativePositionOut,
+  NativeTradeLeg,
+  NativeTradeOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
   PaperPortfolioOut,
@@ -975,7 +977,7 @@ function ClosedTradesPanel() {
                   {t.pnl_pct >= 0 ? "+" : ""}
                   {t.pnl_pct.toFixed(2)}%
                 </Td>
-                <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
+                <Td className="text-text-muted">{exitReasonLabel(t.exit_reason)}</Td>
               </tr>
             ))}
           </Tbody>
@@ -993,42 +995,9 @@ function NativeClosedTradesPanel() {
       {isLoading ? (
         <LoadingState />
       ) : (
-        <Table>
-          <Thead>
-            <tr>
-              <Th>Strategy</Th>
-              <Th>Opened</Th>
-              <Th>Closed</Th>
-              <Th className="text-right">P&amp;L</Th>
-              <Th className="text-right">P&amp;L %</Th>
-              <Th>Exit Reason</Th>
-              <Th>Legs</Th>
-            </tr>
-          </Thead>
-          <Tbody>
-            {trades?.map((t) => (
-              <tr key={t.id}>
-                <Td className="font-medium">{t.strategy_name ?? "--"}</Td>
-                <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleDateString()} {new Date(t.opened_at).toLocaleTimeString()}</Td>
-                <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleDateString()} {new Date(t.closed_at).toLocaleTimeString()}</Td>
-                <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                  {t.pnl >= 0 ? "+" : ""}
-                  {t.pnl.toFixed(2)}
-                </Td>
-                <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
-                  {t.pnl_pct >= 0 ? "+" : ""}
-                  {t.pnl_pct.toFixed(2)}%
-                </Td>
-                <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
-                <Td className="text-xs text-text-muted">
-                  {t.legs
-                    .map((l) => `${l.side} ${l.instrument_symbol ?? "?"} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`)
-                    .join(", ")}
-                </Td>
-              </tr>
-            ))}
-          </Tbody>
-        </Table>
+        <div className="p-4">
+          <NativeTradeRecord trades={trades ?? []} showStrategy filename="advanced-strategy-closed-trades" />
+        </div>
       )}
     </CollapsibleSection>
   );
@@ -1150,9 +1119,55 @@ function currencySymbol(currency: string): string {
   return currency === "INR" ? "₹" : currency === "USD" ? "$" : "";
 }
 
-function formatMoney(value: number, currency: string, signed = false): string {
+function formatMoney(value: number, currency: string, signed = false, decimals = 0): string {
   const sign = value < 0 ? "-" : signed && value > 0 ? "+" : "";
-  return `${sign}${currencySymbol(currency)}${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  const digits = { minimumFractionDigits: decimals, maximumFractionDigits: decimals };
+  return `${sign}${currencySymbol(currency)}${Math.abs(value).toLocaleString(undefined, digits)}`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const IST_PARTS = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Kolkata", year: "numeric", month: "numeric", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+});
+
+function istParts(iso: string): Record<string, string> {
+  return Object.fromEntries(IST_PARTS.formatToParts(new Date(iso)).map((p) => [p.type, p.value]));
+}
+
+/** "23-Sep-2026" in IST -- the exchange's own day, whatever the browser's zone. */
+function istDate(iso: string): string {
+  const p = istParts(iso);
+  return `${p.day}-${MONTHS[Number(p.month) - 1]}-${p.year}`;
+}
+
+/** A plain "2026-09-29" date (e.g. an expiry) in the same "29-Sep-2026" form. */
+function dayText(isoDate: string): string {
+  const [year, month, day] = isoDate.split("-");
+  return MONTHS[Number(month) - 1] ? `${day}-${MONTHS[Number(month) - 1]}-${year}` : isoDate;
+}
+
+/** "09:45:01" in IST. */
+function istTime(iso: string): string {
+  const p = istParts(iso);
+  return `${p.hour}:${p.minute}:${p.second}`;
+}
+
+const EXIT_REASON_ACRONYMS = new Set(["pcr", "rsi", "macd", "atm", "oi", "sl", "tsl", "tp", "eod", "ltp"]);
+
+/** A strategy's exit_reason as words: "time_cutoff_3pm" -> "Time Cutoff 3 PM",
+ * "pcr_exit_0.845" -> "PCR Exit 0.845". */
+function exitReasonLabel(reason: string): string {
+  return reason
+    .split("_")
+    .filter(Boolean)
+    .map((w) => {
+      const clock = /^(\d{1,2})(am|pm)$/i.exec(w);
+      if (clock) return `${clock[1]} ${clock[2].toUpperCase()}`;
+      if (EXIT_REASON_ACRONYMS.has(w.toLowerCase())) return w.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
+    .join(" ");
 }
 
 function formatPrice(value: number): string {
@@ -1486,61 +1501,252 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
   );
 }
 
-function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
-  const { data: trades } = useNativeTrades(deployment.id);
-  const position = deployment.position;
-  const hasHoldings = deployment.holdings != null && deployment.holdings.length > 0;
+function signedText(value: number, decimals = 2): string {
+  return `${value > 0 ? "+" : ""}${value.toFixed(decimals)}`;
+}
+
+function toneFor(value: number | null | undefined): string {
+  return value == null ? "text-text-muted" : value >= 0 ? "text-positive" : "text-negative";
+}
+
+function lotsText(lots: number | null | undefined): string {
+  if (lots == null) return "";
+  return Number.isInteger(lots) ? String(lots) : lots.toFixed(2);
+}
+
+/** Qty with its lot count when known: "650 (10 lots)". */
+function qtyLotsText(quantity: number | null, lots: number | null | undefined): string {
+  if (quantity == null) return "—";
+  const qty = quantity.toLocaleString();
+  if (lots == null) return qty;
+  return `${qty} (${lotsText(lots)} lot${lots === 1 ? "" : "s"})`;
+}
+
+/** Exit time, with its own date when the trade was held past the day it opened. */
+function exitText(t: NativeTradeOut): string {
+  return istDate(t.closed_at) === istDate(t.opened_at) ? istTime(t.closed_at) : `${istDate(t.closed_at)} ${istTime(t.closed_at)}`;
+}
+
+function legContract(leg: NativeTradeLeg): string {
+  return leg.instrument_symbol ?? "?";
+}
+
+function csvCell(value: string | number | null | undefined): string {
+  if (value == null) return "";
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** The same record as the table, one row per trade, legs spelled out in the
+ * last column -- opens cleanly in Excel (BOM for UTF-8). */
+function downloadTradeRecordCsv(trades: NativeTradeOut[], filename: string) {
+  const fixed = (v: number | null) => (v == null ? "" : v.toFixed(2));
+  const header = [
+    "Date", "Strategy", "Symbol", "Side", "Entry Time (IST)", "Exit Time (IST)", "Entry Price", "Exit Price",
+    "Qty", "Lots", "Gross P&L", "Charges (est.)", "Net P&L", "Return %", "Exit Reason", "Legs",
+  ];
+  const rows = trades.map((t) => [
+    istDate(t.opened_at), t.strategy_name, t.underlying_symbol, t.structure, istTime(t.opened_at), exitText(t),
+    fixed(t.entry_price), fixed(t.exit_price), t.quantity, lotsText(t.lots), t.pnl.toFixed(2), fixed(t.charges),
+    t.net_pnl.toFixed(2), t.pnl_pct.toFixed(2), exitReasonLabel(t.exit_reason),
+    t.legs
+      .map((l) => `${l.side === "short" ? "Short" : "Long"} ${legContract(l)} ${l.quantity} @ ${l.entry_price.toFixed(2)} -> ${l.exit_price.toFixed(2)}${l.pnl != null ? ` (${signedText(l.pnl)})` : ""}`)
+      .join("; "),
+  ]);
+  const csv = [header, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
+  const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${filename.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "closed-trades"}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** One row per leg of a closed trade -- what each contract did on its own. */
+function TradeLegsTable({ trade }: { trade: NativeTradeOut }) {
+  const currency = trade.currency ?? "";
+  const cell = "px-3 py-1.5 whitespace-nowrap";
+  return (
+    <Table className="w-auto text-xs">
+      <Thead>
+        <tr>
+          <Th className="px-3 py-1.5">Side</Th>
+          <Th className="px-3 py-1.5">Contract</Th>
+          <Th className="px-3 py-1.5 text-right">Strike</Th>
+          <Th className="px-3 py-1.5">Expiry</Th>
+          <Th className="px-3 py-1.5 text-right">Qty (Lots)</Th>
+          <Th className="px-3 py-1.5 text-right">Entry</Th>
+          <Th className="px-3 py-1.5 text-right">Exit</Th>
+          <Th className="px-3 py-1.5 text-right">P&amp;L</Th>
+        </tr>
+      </Thead>
+      <Tbody>
+        {trade.legs.map((l, i) => (
+          <tr key={`${l.instrument_id}-${i}`}>
+            <Td className={cell}>
+              <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-[10px] uppercase">
+                {l.side}
+              </Badge>
+            </Td>
+            <Td className={`${cell} font-medium`}>{legContract(l)}</Td>
+            <Td className={`${cell} text-right font-financial`}>
+              {l.strike != null ? `${l.strike.toLocaleString()} ${l.option_type ?? ""}` : "—"}
+            </Td>
+            <Td className={`${cell} text-text-secondary`}>{l.expiry ? dayText(l.expiry) : "—"}</Td>
+            <Td className={`${cell} text-right font-financial`}>{qtyLotsText(l.quantity, l.lots)}</Td>
+            <Td className={`${cell} text-right font-financial`}>{formatPrice(l.entry_price)}</Td>
+            <Td className={`${cell} text-right font-financial`}>{formatPrice(l.exit_price)}</Td>
+            <Td className={`${cell} text-right font-financial ${toneFor(l.pnl)}`}>
+              {l.pnl != null ? formatMoney(l.pnl, currency, true, 2) : "—"}
+            </Td>
+          </tr>
+        ))}
+      </Tbody>
+    </Table>
+  );
+}
+
+function TradeRecordRow({ trade: t, showStrategy }: { trade: NativeTradeOut; showStrategy: boolean }) {
+  const [open, setOpen] = useState(false);
+  const currency = t.currency ?? "";
+  const cell = "px-2.5 py-2 whitespace-nowrap";
+  const columns = showStrategy ? 15 : 14;
+  return (
+    <>
+      <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setOpen(!open)} title="Show legs">
+        <Td className={`${cell} w-6 pr-0 text-text-muted`}>
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </Td>
+        <Td className={`${cell} font-financial`}>{istDate(t.opened_at)}</Td>
+        {showStrategy && <Td className={`${cell} font-medium`}>{t.strategy_name ?? "—"}</Td>}
+        <Td className={`${cell} font-medium`}>{t.underlying_symbol ?? "—"}</Td>
+        <Td className={cell}>{t.structure ?? "—"}</Td>
+        <Td className={`${cell} font-financial`}>{istTime(t.opened_at)}</Td>
+        <Td className={`${cell} font-financial`}>{exitText(t)}</Td>
+        <Td className={`${cell} text-right font-financial`}>{t.entry_price != null ? formatPrice(t.entry_price) : "—"}</Td>
+        <Td className={`${cell} text-right font-financial`}>{t.exit_price != null ? formatPrice(t.exit_price) : "—"}</Td>
+        <Td className={`${cell} text-right font-financial`}>{qtyLotsText(t.quantity, t.lots)}</Td>
+        <Td className={`${cell} text-right font-financial ${toneFor(t.pnl)}`}>{formatMoney(t.pnl, currency, true, 2)}</Td>
+        <Td className={`${cell} text-right font-financial text-text-secondary`}>
+          {t.charges != null ? formatMoney(t.charges, currency, false, 2) : "—"}
+        </Td>
+        <Td className={`${cell} text-right font-financial font-semibold ${toneFor(t.net_pnl)}`}>{formatMoney(t.net_pnl, currency, true, 2)}</Td>
+        <Td className={`${cell} text-right font-financial ${toneFor(t.pnl_pct)}`}>{signedText(t.pnl_pct)}%</Td>
+        <Td className={`${cell} text-text-secondary`} title={t.exit_reason}>
+          {exitReasonLabel(t.exit_reason)}
+        </Td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={columns} className="bg-surface-elevated/60 py-2 pl-8 pr-2.5">
+            <TradeLegsTable trade={t} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function RecordStat({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">{label}</div>
+      <div className="font-financial text-sm font-semibold">{children}</div>
+    </div>
+  );
+}
+
+/** Closed trades as a trading record: one row per trade (date, symbol,
+ * structure, entry/exit time and price, qty/lots, gross, charges, net,
+ * return, exit reason), click a row for its legs; totals above, CSV export. */
+function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades: NativeTradeOut[]; showStrategy?: boolean; filename: string }) {
+  if (!trades.length) return <EmptyState title="No closed trades yet" />;
+
+  const wins = trades.filter((t) => t.net_pnl > 0).length;
+  const currencies = new Set(trades.map((t) => t.currency ?? ""));
+  // Totals only add up within one currency (INR and USD pools never convert).
+  const currency = currencies.size === 1 ? [...currencies][0] : null;
+  const gross = trades.reduce((sum, t) => sum + t.pnl, 0);
+  const charges = trades.reduce((sum, t) => sum + (t.charges ?? 0), 0);
+  const net = trades.reduce((sum, t) => sum + t.net_pnl, 0);
+  const th = "px-2.5 whitespace-nowrap";
 
   return (
-    <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
-      {position ? (
-        <div className="text-xs text-text-secondary">
-          <span className="font-medium">{position.bias ?? "position"}:</span>{" "}
-          {position.legs.map((l) => (
-            <span key={l.instrument_symbol} className="mr-3">
-              {l.side} {l.quantity} {l.instrument_symbol} @ {l.entry_price.toFixed(2)}
-              {l.current_price != null && <> (now {l.current_price.toFixed(2)})</>}
-            </span>
-          ))}
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="flex flex-wrap items-end gap-6">
+          <RecordStat label="Closed Trades">{trades.length}</RecordStat>
+          <RecordStat label="Win Rate">
+            {((wins / trades.length) * 100).toFixed(0)}% <span className="text-xs font-normal text-text-muted">({wins}/{trades.length})</span>
+          </RecordStat>
+          {currency != null && (
+            <>
+              <RecordStat label="Gross P&amp;L">
+                <span className={toneFor(gross)}>{formatMoney(gross, currency, true, 2)}</span>
+              </RecordStat>
+              <RecordStat label="Charges (est.)">
+                <span className="text-text-secondary">{formatMoney(charges, currency, false, 2)}</span>
+              </RecordStat>
+              <RecordStat label="Net P&amp;L">
+                <span className={toneFor(net)}>{formatMoney(net, currency, true, 2)}</span>
+              </RecordStat>
+            </>
+          )}
         </div>
-      ) : hasHoldings ? null /* already shown in the card's own HoldingsTable */ : (
-        <div className="text-xs text-text-muted">Flat -- no open position.</div>
-      )}
-      {trades && trades.length > 0 ? (
-        <div>
-          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text-muted">Closed Trades</h4>
-          <Table>
-            <Thead>
-              <tr>
-                <Th>Opened</Th>
-                <Th>Closed</Th>
-                <Th className="text-right">P&amp;L</Th>
-                <Th>Exit Reason</Th>
-                <Th>Legs</Th>
-              </tr>
-            </Thead>
-            <Tbody>
-              {trades.map((t) => (
-                <tr key={t.id}>
-                  <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleString()}</Td>
-                  <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleString()}</Td>
-                  <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                    {t.pnl >= 0 ? "+" : ""}
-                    {t.pnl.toFixed(2)}
-                  </Td>
-                  <Td className="text-text-muted">{t.exit_reason.replace("_", " ")}</Td>
-                  <Td className="text-xs text-text-muted">
-                    {t.legs
-                      .map((l) => `${l.side} ${l.instrument_symbol ?? "?"} ${l.quantity}@${l.entry_price.toFixed(2)}->${l.exit_price.toFixed(2)}`)
-                      .join(", ")}
-                  </Td>
-                </tr>
-              ))}
-            </Tbody>
-          </Table>
-        </div>
+        <Button variant="secondary" size="sm" onClick={() => downloadTradeRecordCsv(trades, filename)}>
+          <Download className="h-3.5 w-3.5" /> Download CSV
+        </Button>
+      </div>
+
+      <div className="rounded-md border border-border">
+        <Table className="text-xs">
+          <Thead>
+            <tr>
+              <Th className="w-6 px-2.5" />
+              <Th className={th}>Date</Th>
+              {showStrategy && <Th className={th}>Strategy</Th>}
+              <Th className={th}>Symbol</Th>
+              <Th className={th}>Side</Th>
+              <Th className={th}>Entry Time</Th>
+              <Th className={th}>Exit Time</Th>
+              <Th className={`${th} text-right`}>Entry Price</Th>
+              <Th className={`${th} text-right`}>Exit Price</Th>
+              <Th className={`${th} text-right`}>Qty (Lots)</Th>
+              <Th className={`${th} text-right`}>Gross P&amp;L</Th>
+              <Th className={`${th} text-right`}>Charges</Th>
+              <Th className={`${th} text-right`}>Net P&amp;L</Th>
+              <Th className={`${th} text-right`}>Return %</Th>
+              <Th className={th}>Exit Reason</Th>
+            </tr>
+          </Thead>
+          <Tbody>
+            {trades.map((t) => (
+              <TradeRecordRow key={t.id} trade={t} showStrategy={showStrategy} />
+            ))}
+          </Tbody>
+        </Table>
+      </div>
+
+      <p className="text-[11px] leading-relaxed text-text-muted">
+        Times are IST. On a multi-leg trade, Entry/Exit Price is the net premium per unit (short premiums minus long);
+        click a row for each leg. Charges are an estimate of brokerage, STT, exchange, SEBI, stamp duty and GST at NSE
+        rates -- paper fills pay none, so the pool&apos;s Realized P&amp;L stays gross.
+      </p>
+    </div>
+  );
+}
+
+function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
+  const { data: trades, isLoading } = useNativeTrades(deployment.id);
+
+  return (
+    <div className="border-t border-border pt-4">
+      {isLoading ? (
+        <LoadingState />
       ) : (
-        <EmptyState title="No closed trades yet" />
+        <NativeTradeRecord trades={trades ?? []} filename={`${deployment.strategy_name}-closed-trades`} />
       )}
     </div>
   );
@@ -1770,6 +1976,7 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
           className="text-xs font-medium text-brand hover:underline"
         >
           {expanded ? "Hide details" : "Show details"}
+          {myTrades?.length ? ` · ${myTrades.length} closed trade${myTrades.length === 1 ? "" : "s"}` : ""}
         </button>
         {expanded && <NativeDeploymentDetail deployment={deployment} />}
       </CardContent>

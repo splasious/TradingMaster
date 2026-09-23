@@ -183,13 +183,30 @@ class NativeDeploymentOut(BaseModel):
 
 
 class NativeTradeOut(BaseModel):
+    """One closed trade as a readable record (see paper_trading/
+    trade_record.py): `legs` carry their contract details and own P&L;
+    entry_price/exit_price/quantity/lots summarize the whole trade -- the
+    per-unit net premium for a multi-leg one -- and are None when the legs
+    don't share one quantity. `pnl` is gross; net_pnl = pnl - charges,
+    with charges an estimate (None where not estimable)."""
+
     id: str
     deployment_id: str
     strategy_name: str | None = None
+    currency: str | None = None
     opened_at: datetime
     closed_at: datetime
     legs: list[dict]
+    underlying_symbol: str | None = None
+    structure: str | None = None
+    side: str | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
+    quantity: float | None = None
+    lots: float | None = None
     pnl: float
+    charges: float | None = None
+    net_pnl: float
     pnl_pct: float
     exit_reason: str
 

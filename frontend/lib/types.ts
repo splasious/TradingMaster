@@ -320,16 +320,37 @@ export interface NativeTradeLeg {
   instrument_symbol: string | null;
   strike: number | null;
   option_type: string | null;
+  expiry?: string | null;
+  lot_size?: number | null;
+  underlying_symbol?: string | null;
+  /** Set on a closed paper trade's legs (NativeTradeOut) only. */
+  pnl?: number;
+  lots?: number | null;
 }
 
+/** One closed Advanced-deployment trade as a readable record -- see
+ * NativeTradeOut in backend/app/schemas/paper_trading.py. entry_price/
+ * exit_price are the per-unit net premium for a multi-leg trade, null when
+ * its legs traded different quantities. pnl is gross; net_pnl = pnl -
+ * charges, charges being an estimate (null where not estimable). */
 export interface NativeTradeOut {
   id: string;
   deployment_id: string;
   strategy_name: string | null;
+  currency: string | null;
   opened_at: string;
   closed_at: string;
   legs: NativeTradeLeg[];
+  underlying_symbol: string | null;
+  structure: string | null;
+  side: string | null;
+  entry_price: number | null;
+  exit_price: number | null;
+  quantity: number | null;
+  lots: number | null;
   pnl: number;
+  charges: number | null;
+  net_pnl: number;
   pnl_pct: number;
   exit_reason: string;
 }

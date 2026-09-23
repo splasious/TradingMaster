@@ -6,6 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
+from app.core.time import as_aware_utc
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
@@ -23,6 +24,7 @@ from app.schemas.paper_trading import (
 from app.services.audit import write_audit_log
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
+from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
@@ -327,38 +329,23 @@ async def exit_native_deployment_now_endpoint(deployment_id: str, db: AsyncSessi
     return NativeEvaluationOut(action=outcome.action, signal=outcome.signal, reason=outcome.reason)
 
 
-async def _enrich_trade_legs(db: AsyncSession, trades: list[PaperNativeTrade]) -> dict[uuid.UUID, list[dict]]:
-    """record_trade only ever stores each leg's instrument_id (see
-    NativeContext.record_trade's docstring) -- never a symbol, since the
-    strategy code only has the Instrument row at the moment it trades, not
-    a duty to snapshot its display name. Resolves every trade's legs to
-    their symbol/strike/option_type here, batched into one query across
-    every trade rather than one round trip per leg, so the Closed Trades
-    table can show what was actually traded instead of just "long 16@...".
-    """
-    instrument_ids: set[uuid.UUID] = set()
-    for t in trades:
-        for leg in t.legs or []:
-            if leg.get("instrument_id"):
-                instrument_ids.add(uuid.UUID(leg["instrument_id"]))
-
-    instruments: dict[uuid.UUID, Instrument] = {}
-    if instrument_ids:
-        result = await db.execute(select(Instrument).where(Instrument.id.in_(instrument_ids)))
-        instruments = {i.id: i for i in result.scalars()}
-
-    enriched: dict[uuid.UUID, list[dict]] = {}
-    for t in trades:
-        legs_out = []
-        for leg in t.legs or []:
-            leg = dict(leg)
-            instrument = instruments.get(uuid.UUID(leg["instrument_id"])) if leg.get("instrument_id") else None
-            leg["instrument_symbol"] = instrument.symbol if instrument else None
-            leg["strike"] = instrument.strike if instrument else None
-            leg["option_type"] = instrument.option_type if instrument else None
-            legs_out.append(leg)
-        enriched[t.id] = legs_out
-    return enriched
+async def _trade_outs(db: AsyncSession, rows: list[tuple[PaperNativeTrade, str, str]]) -> list[NativeTradeOut]:
+    """(trade, strategy name, pool currency) rows -> readable records.
+    Legs saved before record_trade() snapshotted contract details get them
+    resolved here instead, batched across every trade, and their charges
+    estimated the same way record_trade() now does at close."""
+    resolved_legs = await resolve_leg_details(db, [t.legs or [] for t, _name, _currency in rows])
+    out: list[NativeTradeOut] = []
+    for (t, name, currency), legs in zip(rows, resolved_legs):
+        charges = t.charges if t.charges is not None else estimate_charges(legs, t.opened_at, t.closed_at)
+        out.append(
+            NativeTradeOut(
+                id=str(t.id), deployment_id=str(t.deployment_id), strategy_name=name, currency=currency,
+                opened_at=as_aware_utc(t.opened_at), closed_at=as_aware_utc(t.closed_at), **summarize_trade(legs),
+                pnl=t.pnl, charges=charges, net_pnl=t.pnl - (charges or 0.0), pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+            )
+        )
+    return out
 
 
 @router.get("/native-trades", response_model=list[NativeTradeOut])
@@ -366,35 +353,17 @@ async def list_native_trades(
     deployment_id: str | None = None, limit: int = 200,
     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
 ) -> list[NativeTradeOut]:
-    if deployment_id:
-        result = await db.execute(
-            select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == uuid.UUID(deployment_id)).order_by(PaperNativeTrade.closed_at.desc())
-        )
-        trades = list(result.scalars().all())
-        enriched_legs = await _enrich_trade_legs(db, trades)
-        return [
-            NativeTradeOut(
-                id=str(t.id), deployment_id=str(t.deployment_id), opened_at=t.opened_at, closed_at=t.closed_at,
-                legs=enriched_legs[t.id], pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
-            )
-            for t in trades
-        ]
-
-    result = await db.execute(
-        select(PaperNativeTrade, Strategy.name)
+    stmt = (
+        select(PaperNativeTrade, Strategy.name, PaperPortfolio.currency)
         .join(PaperNativeDeployment, PaperNativeTrade.deployment_id == PaperNativeDeployment.id)
         .join(PaperPortfolio, PaperNativeDeployment.portfolio_id == PaperPortfolio.id)
         .join(Strategy, PaperNativeDeployment.strategy_id == Strategy.id)
-        .where(PaperPortfolio.user_id == user.id)
         .order_by(PaperNativeTrade.closed_at.desc())
-        .limit(limit)
     )
-    rows = result.all()
-    enriched_legs = await _enrich_trade_legs(db, [t for t, _name in rows])
-    return [
-        NativeTradeOut(
-            id=str(t.id), deployment_id=str(t.deployment_id), strategy_name=name, opened_at=t.opened_at, closed_at=t.closed_at,
-            legs=enriched_legs[t.id], pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
-        )
-        for t, name in rows
-    ]
+    if deployment_id:
+        await _get_owned_native_deployment(db, user, deployment_id)
+        stmt = stmt.where(PaperNativeTrade.deployment_id == uuid.UUID(deployment_id))
+    else:
+        stmt = stmt.where(PaperPortfolio.user_id == user.id).limit(limit)
+    rows = [tuple(row) for row in (await db.execute(stmt)).all()]
+    return await _trade_outs(db, rows)
