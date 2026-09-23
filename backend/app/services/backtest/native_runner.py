@@ -46,6 +46,8 @@ class BacktestNativeContext(NativeContext):
     note) so a native strategy's evaluate(ctx) needs zero changes to run
     here -- only the three methods below differ from live behavior."""
 
+    is_backtest = True
+
     def __init__(self, db: AsyncSession, portfolio: PaperPortfolio, deployment: PaperNativeDeployment, state: dict, now: datetime):
         super().__init__(db=db, portfolio=portfolio, deployment=deployment, state=state, now=now)
         self.trades: list[dict] = []

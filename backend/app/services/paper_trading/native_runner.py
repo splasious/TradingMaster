@@ -53,6 +53,11 @@ class NativeContext:
     persists whatever is in it back onto the deployment row after each
     tick, never interprets its shape."""
 
+    # True only on backtest/native_runner.py's BacktestNativeContext -- lets
+    # a strategy skip live-only side effects (a live Kite fetch, a Telegram
+    # push) during a historical replay.
+    is_backtest = False
+
     def __init__(
         self, db: AsyncSession, portfolio: PaperPortfolio, deployment: PaperNativeDeployment, state: dict,
         now: datetime | None = None,

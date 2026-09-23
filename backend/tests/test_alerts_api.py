@@ -80,3 +80,21 @@ async def test_alerts_are_scoped_to_the_owning_user(client: AsyncClient, seeded_
 
     resp = await client.get("/api/v1/alerts", headers=headers)
     assert resp.json() == []
+
+
+async def test_create_alert_truncates_to_column_lengths(db_session: AsyncSession):
+    """Postgres rejects an over-long varchar outright (SQLite, used here,
+    doesn't enforce it), which would abort the caller's whole transaction
+    -- create_alert must fit title/message to their columns itself."""
+    alert = await create_alert(
+        db_session, user_id=None, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
+        title="T" * 500, message="M" * 5000,
+    )
+    assert len(alert.title) == 200 and alert.title.endswith("…")
+    assert len(alert.message) == 1000 and alert.message.endswith("…")
+
+    short = await create_alert(
+        db_session, user_id=None, alert_type=AlertType.STRATEGY_SIGNAL.value, severity=AlertSeverity.INFO,
+        title="Order filled", message="Bought 10 @ 100",
+    )
+    assert (short.title, short.message) == ("Order filled", "Bought 10 @ 100")

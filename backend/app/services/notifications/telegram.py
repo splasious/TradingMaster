@@ -31,17 +31,26 @@ TELEGRAM_MAX_LEN = 4000
 
 
 async def send_telegram(subject: str, body: str) -> None:
+    """Never raises: a Telegram timeout/connection error used to propagate
+    straight out of the calling strategy's evaluate(), aborting that tick
+    part-way -- e.g. after the 9:20 scan had already been marked done but
+    before the remaining per-stock alerts went out, which then never got
+    sent at all. A failed push is logged and skipped instead; the in-app
+    alert the caller creates alongside it is unaffected."""
     settings = get_settings()
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return
 
     api_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     full_text = f"<b>{html.escape(subject)}</b>\n<pre>{html.escape(body)}</pre>"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for chunk in _chunk(full_text):
-            resp = await client.post(api_url, json={"chat_id": settings.telegram_chat_id, "text": chunk, "parse_mode": "HTML"})
-            if resp.status_code != 200:
-                logger.error("Telegram send failed (%s): %s", resp.status_code, resp.text)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for chunk in _chunk(full_text):
+                resp = await client.post(api_url, json={"chat_id": settings.telegram_chat_id, "text": chunk, "parse_mode": "HTML"})
+                if resp.status_code != 200:
+                    logger.error("Telegram send failed (%s): %s", resp.status_code, resp.text)
+    except httpx.HTTPError as exc:
+        logger.error("Telegram send failed for %r: %s: %s", subject, type(exc).__name__, exc)
 
 
 def _chunk(text: str, limit: int = TELEGRAM_MAX_LEN) -> list[str]:

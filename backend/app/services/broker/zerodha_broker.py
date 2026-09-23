@@ -402,6 +402,19 @@ class ZerodhaKiteBroker(BrokerInterface):
         data = await self._request("GET", "/quote/ltp", params=params)
         return {instrument: float(quote["last_price"]) for instrument, quote in (data or {}).items()}
 
+    async def get_quote_batch(self, instruments: list[str]) -> dict[str, dict[str, Any]]:
+        """Full-quote sibling of get_ltp_batch (GET /quote, Kite caps it at
+        500 instruments per call) -- one call returns, per instrument,
+        `last_price`, `ohlc` (whose `close` is the PREVIOUS session's close
+        while the market is open) and, for F&O, the live `oi`. Same
+        "EXCHANGE:TRADINGSYMBOL" keys and same silent-omission behavior for
+        anything Kite didn't return a quote for as get_ltp_batch."""
+        if not instruments:
+            return {}
+        params = [("i", instrument) for instrument in instruments]
+        data = await self._request("GET", "/quote", params=params)
+        return dict(data or {})
+
     async def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
         variety = order.get("variety", "regular")
         body = {

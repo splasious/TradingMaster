@@ -352,3 +352,184 @@ async def test_second_scan_at_925_adds_newly_qualifying_stock_without_disturbing
     assert "LATECO" in ctx.state["setups"]
     assert ctx.state["setups"]["LATECO"]["direction"] == "CE"
     assert "TESTCO" in ctx.state["setups"]  # untouched by the second pass
+
+
+# ---------------------------------------------------------------------
+# Live Kite data path -- the production situation at 9:20: a freshly
+# restarted process (TickEngine has no price for any stock yet) and
+# nothing in ohlcv_candles for today, since no scheduler keeps a native
+# strategy's 5m candles or futures OI current. Only yesterday's EOD OI is
+# stored.
+# ---------------------------------------------------------------------
+class _FakeKite:
+    def __init__(self, quotes: dict, bars: dict):
+        self.quotes = quotes
+        self.bars = bars  # {(tradingsymbol, timeframe): [bar, ...]}
+        self.historical_calls: list[tuple[str, str]] = []
+
+    async def get_quote_batch(self, keys):
+        return {key: self.quotes[key] for key in keys if key in self.quotes}
+
+    async def get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        self.historical_calls.append((symbol, timeframe))
+        return [bar for bar in self.bars.get((symbol, timeframe), []) if start <= bar["ts"] <= end]
+
+    async def get_ltp(self, exchange, tradingsymbol):
+        return {"price": self.quotes[f"{exchange}:{tradingsymbol}"]["last_price"]}
+
+
+def _bar(ts_ist: datetime, o, h, l, c):
+    return {"ts": ts_ist, "open": o, "high": h, "low": l, "close": c, "volume": 1000, "open_interest": None}
+
+
+async def _setup_360one(db_session: AsyncSession):
+    """360ONE with a current-month future and one CE/PE strike, plus
+    yesterday's EOD OI for every leg -- and a stale stored close from
+    yesterday, which is all the old DB-only read path had to go on."""
+    ctx_data = await _setup(db_session)
+    equity = Instrument(exchange="NSE", symbol="360ONE", name="360 ONE WAM", instrument_type="equity", data_source="zerodha_kite", external_ref="360ONE")
+    db_session.add(equity)
+    await db_session.flush()
+    expiry = date(2026, 9, 29)
+    future = Instrument(
+        exchange="NFO", symbol="360ONE26SEPFUT", name="360ONE FUT", instrument_type="future", data_source="zerodha_kite",
+        external_ref="360ONE26SEPFUT", expiry=expiry, lot_size=500, underlying_instrument_id=equity.id,
+    )
+    ce = Instrument(
+        exchange="NFO", symbol="360ONE26SEP1060CE", name="x", instrument_type="option", data_source="zerodha_kite",
+        external_ref="360ONE26SEP1060CE", strike=1060.0, option_type="CE", expiry=expiry, lot_size=500, underlying_instrument_id=equity.id,
+    )
+    pe = Instrument(
+        exchange="NFO", symbol="360ONE26SEP960PE", name="x", instrument_type="option", data_source="zerodha_kite",
+        external_ref="360ONE26SEP960PE", strike=960.0, option_type="PE", expiry=expiry, lot_size=500, underlying_instrument_id=equity.id,
+    )
+    db_session.add_all([future, ce, pe])
+    await db_session.flush()
+
+    yesterday = date(2026, 9, 22)
+    eod = datetime.combine(yesterday, dtime(0, 0), tzinfo=IST)
+    db_session.add(_candle(equity.id, datetime.combine(yesterday, dtime(15, 25), tzinfo=IST), 1001, 1002, 999, 1000.0))
+    db_session.add(_candle(future.id, eod, 1, 1, 1, 1, oi=100000, timeframe="1d"))
+    db_session.add(_candle(ce.id, eod, 1, 1, 1, 1, oi=20000, timeframe="1d"))
+    db_session.add(_candle(pe.id, eod, 1, 1, 1, 1, oi=10000, timeframe="1d"))
+    await db_session.commit()
+    return {**ctx_data, "one": equity, "one_future": future, "one_ce": ce, "one_pe": pe}
+
+
+def _fake_kite_for_360one(today: date, *, nifty_green: bool = True) -> _FakeKite:
+    at = lambda h, m: datetime.combine(today, dtime(h, m), tzinfo=IST)  # noqa: E731
+    nifty_bar = _bar(at(9, 15), 25000, 25050, 24990, 25040) if nifty_green else _bar(at(9, 15), 25040, 25050, 24950, 24960)
+    return _FakeKite(
+        quotes={
+            "NSE:360ONE": {"last_price": 1035.0, "ohlc": {"open": 1002.0, "high": 1036.0, "low": 1001.0, "close": 1000.0}},
+            "NSE:TESTCO": {"last_price": 100.5, "ohlc": {"close": 100.0}},  # +0.5% -- below the 2% gate
+            "NFO:360ONE26SEPFUT": {"last_price": 1040.0, "oi": 108000},
+            "NFO:360ONE26SEP1060CE": {"last_price": 12.0, "oi": 25000},
+            "NFO:360ONE26SEP960PE": {"last_price": 3.0, "oi": 11000},
+        },
+        bars={
+            ("NIFTY 50", "5m"): [nifty_bar],
+            ("360ONE", "5m"): [
+                _bar(at(9, 15), 1002.0, 1036.0, 1001.0, 1034.0),
+                _bar(at(9, 20), 1034.0, 1037.0, 1033.0, 1035.0),  # still forming at 9:20:05 -- must not be stored
+            ],
+        },
+    )
+
+
+async def _alert_titles(db_session: AsyncSession) -> list[str]:
+    from sqlalchemy import select as sa_select
+
+    from app.models.alert import Alert
+
+    return list((await db_session.execute(sa_select(Alert.title))).scalars().all())
+
+
+async def test_live_scan_catches_a_stock_whose_data_was_never_stored(db_session: AsyncSession, monkeypatch):
+    from sqlalchemy import select as sa_select
+
+    import app.services.strategy.native_strategies.fo_opening_momentum as fo
+
+    data = await _setup_360one(db_session)
+    today = date(2026, 9, 23)
+    kite = _fake_kite_for_360one(today)
+    monkeypatch.setattr(fo, "_live_broker", lambda ctx: _async_value(kite))
+    monkeypatch.setattr(fo, "KITE_HISTORICAL_PACING_SECONDS", 0)
+    monkeypatch.setattr(fo, "KITE_QUOTE_PACING_SECONDS", 0)
+
+    ctx = NativeContext(
+        db=db_session, portfolio=data["portfolio"], deployment=data["deployment"], state={},
+        now=datetime.combine(today, dtime(9, 20, 5), tzinfo=IST),
+    )
+    await evaluate(ctx)
+
+    assert ctx.state["shortlist_done"] is True
+    setup = ctx.state["setups"]["360ONE"]
+    assert setup["direction"] == "CE"
+    assert round(setup["pct_change"], 2) == 3.5  # Kite quote: 1000 -> 1035, not the stale stored close
+    # Total OI 130,000 (yesterday) -> 144,000 (live) = +10.77%
+    assert round(setup["oi_pct_change"], 2) == 10.77
+    assert setup["oi_detail"]["ce_counted"] == 1 and setup["oi_detail"]["pe_counted"] == 1
+
+    titles = await _alert_titles(db_session)
+    assert "F&O Opening Momentum: 360ONE shortlisted at 9:20" in titles
+    assert "F&O Opening Momentum: 1 shortlisted at 9:20" in titles  # the scan summary
+    assert ctx.state["scan_log"]["9:20"]["counts"]["below_momentum"] == 1  # TESTCO
+
+    stored = (
+        await db_session.execute(
+            sa_select(OhlcvCandle.ts).where(OhlcvCandle.instrument_id == data["one"].id, OhlcvCandle.timeframe == "5m", OhlcvCandle.ts >= fo._ist_to_utc(today, dtime(9, 15)))
+        )
+    ).scalars().all()
+    assert len(stored) == 1  # only the completed 9:15 candle, not the still-forming 9:20 one
+    assert tick_engine.get_current_price(data["one"].id) == 1035.0
+
+
+async def test_live_scan_waits_for_nifty_candle_then_reports_why_a_stock_was_rejected(db_session: AsyncSession, monkeypatch):
+    import app.services.strategy.native_strategies.fo_opening_momentum as fo
+
+    data = await _setup_360one(db_session)
+    today = date(2026, 9, 23)
+    kite = _fake_kite_for_360one(today, nifty_green=False)
+    nifty_bars = kite.bars.pop(("NIFTY 50", "5m"))  # not published by Kite yet
+    monkeypatch.setattr(fo, "_live_broker", lambda ctx: _async_value(kite))
+    monkeypatch.setattr(fo, "KITE_HISTORICAL_PACING_SECONDS", 0)
+    monkeypatch.setattr(fo, "KITE_QUOTE_PACING_SECONDS", 0)
+
+    ctx = NativeContext(
+        db=db_session, portfolio=data["portfolio"], deployment=data["deployment"], state={},
+        now=datetime.combine(today, dtime(9, 20, 2), tzinfo=IST),
+    )
+    await evaluate(ctx)
+    assert ctx.state["shortlist_done"] is False  # retried next tick, not marked done with nothing
+    assert await _alert_titles(db_session) == []
+
+    kite.bars[("NIFTY 50", "5m")] = nifty_bars
+    ctx.now = datetime.combine(today, dtime(9, 20, 12), tzinfo=IST)
+    await evaluate(ctx)
+
+    assert ctx.state["shortlist_done"] is True
+    assert "360ONE" not in ctx.state["setups"]
+    rejected = ctx.state["scan_log"]["9:20"]["rejected"]
+    assert [r["symbol"] for r in rejected] == ["360ONE"]
+    assert rejected[0]["reasons"] == ["Nifty 9:15-9:20 candle red -- gainers excluded"]
+    assert "F&O Opening Momentum: 0 shortlisted at 9:20" in await _alert_titles(db_session)
+
+
+async def _async_value(value):
+    return value
+
+
+async def test_telegram_send_failure_never_raises(monkeypatch):
+    import httpx
+    from types import SimpleNamespace
+
+    from app.services.notifications import telegram
+
+    monkeypatch.setattr(telegram, "get_settings", lambda: SimpleNamespace(telegram_bot_token="t", telegram_chat_id="1"))
+
+    async def _boom(self, *args, **kwargs):
+        raise httpx.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _boom)
+    await telegram.send_telegram("subject", "body")  # must not raise
