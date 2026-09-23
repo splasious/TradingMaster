@@ -146,6 +146,13 @@ class NativePositionOut(BaseModel):
     trade_value: float
     live_value: float | None
     unrealized_pnl: float | None
+    # Every other scalar the strategy stored on the position (pcr_at_entry,
+    # entry_spot, expiry, ...), passed through as-is -- same idea as
+    # NativeHoldingOut.metrics -- plus the legs' underlying and its live
+    # price, so the dashboard can show e.g. entry spot vs spot now.
+    metrics: dict[str, float | int | str | bool | None] = Field(default_factory=dict)
+    underlying_symbol: str | None = None
+    underlying_price: float | None = None
 
 
 class NativeDeploymentOut(BaseModel):

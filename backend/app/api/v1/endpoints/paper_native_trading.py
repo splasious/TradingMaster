@@ -57,10 +57,12 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
 
     legs_out: list[NativeLegOut] = []
     prices: list[float | None] = []
+    leg_instruments: list[Instrument] = []
     for side, leg in raw_legs:
         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
         if instrument is None:
             return None
+        leg_instruments.append(instrument)
         current_price = tick_engine.get_current_price(instrument.id)
         prices.append(current_price)
         legs_out.append(
@@ -84,15 +86,30 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
         )
         unrealized_pnl = trade_value - live_value
 
+    underlying_id = leg_instruments[0].underlying_instrument_id if leg_instruments else None
+    underlying = await db.get(Instrument, underlying_id) if underlying_id else None
     return NativePositionOut(
         bias=position.get("bias") or position.get("regime"), opened_at=datetime.fromisoformat(position["opened_at"]),
         legs=legs_out, trade_value=trade_value, live_value=live_value, unrealized_pnl=unrealized_pnl,
+        metrics=_scalar_metrics(position, _POSITION_CORE_KEYS),
+        underlying_symbol=underlying.symbol if underlying else None,
+        underlying_price=tick_engine.get_current_price(underlying.id) if underlying else None,
     )
 
 
 # Keys every holding carries (see nifty_rs_rotation.py's holdings shape) --
 # anything else a strategy stores on a holding is its own per-stock metric.
 _HOLDING_CORE_KEYS = {"instrument_id", "quantity", "entry_price", "opened_at"}
+# Same for a position: its legs and the fields NativePositionOut already
+# shows (bias/regime, opened_at) -- anything else is the strategy's own.
+_POSITION_CORE_KEYS = {"legs", "short", "long", "opened_at", "bias", "regime"}
+
+
+def _scalar_metrics(entry: dict, core_keys: set[str]) -> dict:
+    return {
+        key: value for key, value in entry.items()
+        if key not in core_keys and (value is None or isinstance(value, (bool, int, float, str)))
+    }
 
 
 def _parse_opened_at(value) -> datetime | None:
@@ -126,10 +143,7 @@ async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[Nati
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="long", quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
                 opened_at=_parse_opened_at(leg.get("opened_at")),
-                metrics={
-                    key: value for key, value in leg.items()
-                    if key not in _HOLDING_CORE_KEYS and (value is None or isinstance(value, (bool, int, float, str)))
-                },
+                metrics=_scalar_metrics(leg, _HOLDING_CORE_KEYS),
             )
         )
     return legs_out

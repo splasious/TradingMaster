@@ -36,6 +36,7 @@ import type {
   NativeEvaluationOut,
   NativeHoldingOut,
   NativeLegOut,
+  NativePositionOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
   PaperPortfolioOut,
@@ -1131,23 +1132,6 @@ function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boole
   );
 }
 
-/** Stand-in for the "Instrument" column -- a native deployment isn't
- * pinned to one instrument the way a regular deployment is, so each leg
- * gets its own line (short on top, matching the order they're opened in). */
-function LegsCell({ legs }: { legs: NativeLegOut[] }) {
-  return (
-    <div className="space-y-0.5">
-      {legs.map((l) => (
-        <div key={l.instrument_symbol} className="whitespace-nowrap">
-          <span className={`mr-1 text-[10px] uppercase ${l.side === "short" ? "text-negative" : "text-positive"}`}>{l.side}</span>
-          {l.instrument_symbol}
-          {l.strike != null ? ` ${l.strike}${l.option_type ?? ""}` : ""}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function legTradeValue(leg: NativeLegOut): number {
   return leg.entry_price * leg.quantity;
 }
@@ -1160,40 +1144,6 @@ function legPnl(leg: NativeLegOut): number | null {
   if (leg.current_price == null) return null;
   const diff = leg.side === "short" ? leg.entry_price - leg.current_price : leg.current_price - leg.entry_price;
   return diff * leg.quantity;
-}
-
-/** Trade Value / Live Value / P&L, one line per leg -- same row order as
- * LegsCell so each line lines up with its instrument (short on top, then
- * long), instead of collapsing both legs into one blended spread number. */
-function LegValuesCell({
-  legs,
-  compute,
-  colorize = false,
-}: {
-  legs: NativeLegOut[];
-  compute: (leg: NativeLegOut) => number | null;
-  colorize?: boolean;
-}) {
-  return (
-    <div className="space-y-0.5">
-      {legs.map((l) => {
-        const v = compute(l);
-        if (v == null) {
-          return (
-            <div key={l.instrument_symbol} className="whitespace-nowrap text-text-muted">
-              --
-            </div>
-          );
-        }
-        return (
-          <div key={l.instrument_symbol} className={`whitespace-nowrap ${colorize ? (v >= 0 ? "text-positive" : "text-negative") : ""}`}>
-            {colorize && v >= 0 ? "+" : ""}
-            {v.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function currencySymbol(currency: string): string {
@@ -1237,8 +1187,28 @@ const HOLDING_METRIC_LABELS: Record<string, string> = {
 // them; unknown keys alphabetically after; rank always last.
 const HOLDING_METRIC_ORDER = ["macd", "macd_hist", "macd_histogram", "macd_signal", "signal", "rsi", "rsi14", "rsi_14", "rs_value", "score"];
 
+const METRIC_ACRONYMS = new Set(["pcr", "rsi", "macd", "atm", "oi", "sma", "ema", "rs", "pnl", "ltp"]);
+
 function metricLabel(key: string): string {
-  return HOLDING_METRIC_LABELS[key] ?? key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  return (
+    HOLDING_METRIC_LABELS[key] ??
+    key
+      .split("_")
+      .map((w) => (METRIC_ACRONYMS.has(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+      .join(" ")
+  );
+}
+
+/** A strategy-recorded value as plain text: ISO dates as "29 Sep 2026",
+ * numbers to at most 2 decimals. */
+function metricText(value: number | string | boolean | null | undefined): string {
+  if (value == null || value === "") return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number") return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+  }
+  return value;
 }
 
 function metricColumns(holdings: NativeHoldingOut[]): string[] {
@@ -1347,6 +1317,172 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
         })}
       </Tbody>
     </Table>
+  );
+}
+
+/** One row per leg of an options position (spread, straddle, iron condor). */
+function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency: string }) {
+  const cell = "px-3 py-2 whitespace-nowrap";
+  return (
+    <Table className="text-xs">
+      <Thead>
+        <tr>
+          <Th className="px-3">Side</Th>
+          <Th className="px-3">Contract</Th>
+          <Th className="px-3 text-right">Strike</Th>
+          <Th className="px-3 text-right">Qty</Th>
+          <Th className="px-3 text-right">Entry</Th>
+          <Th className="px-3 text-right">LTP</Th>
+          <Th className="px-3 text-right">Trade Value</Th>
+          <Th className="px-3 text-right">Live Value</Th>
+          <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
+          <Th className="px-3 text-right">P&amp;L %</Th>
+        </tr>
+      </Thead>
+      <Tbody>
+        {legs.map((l) => {
+          const tradeValue = legTradeValue(l);
+          const live = legLiveValue(l);
+          const pnl = legPnl(l);
+          const pnlPct = pnl != null && tradeValue ? (pnl / tradeValue) * 100 : null;
+          const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
+          return (
+            <tr key={l.instrument_symbol}>
+              <Td className={cell}>
+                <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-[10px] uppercase">
+                  {l.side}
+                </Badge>
+              </Td>
+              <Td className={`${cell} font-medium`}>{l.instrument_symbol}</Td>
+              <Td className={`${cell} text-right font-financial`}>
+                {l.strike != null ? `${l.strike.toLocaleString()} ${l.option_type ?? ""}` : "—"}
+              </Td>
+              <Td className={`${cell} text-right font-financial`}>{l.quantity.toLocaleString()}</Td>
+              <Td className={`${cell} text-right font-financial`}>{formatPrice(l.entry_price)}</Td>
+              <Td className={`${cell} text-right font-financial`}>
+                {l.current_price != null ? formatPrice(l.current_price) : <span className="text-text-muted">—</span>}
+              </Td>
+              <Td className={`${cell} text-right font-financial`}>{formatMoney(tradeValue, currency)}</Td>
+              <Td className={`${cell} text-right font-financial`}>
+                {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
+              </Td>
+              <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
+              <Td className={`${cell} text-right font-financial ${pnlTone}`}>
+                {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
+              </Td>
+            </tr>
+          );
+        })}
+      </Tbody>
+    </Table>
+  );
+}
+
+// Position fields PositionView lays out itself; any other scalar the
+// strategy stores on its position is listed generically after them.
+const POSITION_LAYOUT_KEYS = new Set(["pcr_at_entry", "pcr_exit_below", "pcr_exit_above", "entry_spot", "roll_trigger", "expiry", "exit_time"]);
+
+/** An options position (state["position"]): what it is and when it opened,
+ * the strategy's own decision inputs next to their live values (PCR at
+ * entry vs now and its exit band, entry spot vs now and the roll distance),
+ * then one row per leg. */
+function PositionView({ deployment, position }: { deployment: NativeDeploymentOut; position: NativePositionOut }) {
+  const metrics = position.metrics ?? {};
+  const currency = deployment.currency;
+  // Same query key PcrTicker already polls, so no extra request.
+  const { data: pcrNow } = useEffectivePcr(position.underlying_symbol ?? "NIFTY 50");
+
+  const isCredit = position.trade_value >= 0;
+  const pnl = position.unrealized_pnl;
+  const pnlPct = pnl != null && position.trade_value ? (pnl / Math.abs(position.trade_value)) * 100 : null;
+  const regime = position.bias ?? "in a trade";
+  const regimeTone = regime === "bullish" ? "positive" : regime === "bearish" ? "negative" : "neutral";
+  const opened = new Date(position.opened_at);
+  const openedText =
+    opened.toDateString() === new Date().toDateString()
+      ? opened.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+      : opened.toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+
+  const pcrAtEntry = typeof metrics.pcr_at_entry === "number" ? metrics.pcr_at_entry : null;
+  const exitBelow = typeof metrics.pcr_exit_below === "number" ? metrics.pcr_exit_below : null;
+  const exitAbove = typeof metrics.pcr_exit_above === "number" ? metrics.pcr_exit_above : null;
+  const currentPcr = pcrNow?.pcr ?? null;
+  const pcrOutsideBand = currentPcr != null && ((exitBelow != null && currentPcr < exitBelow) || (exitAbove != null && currentPcr > exitAbove));
+  const exitRule = [exitBelow != null ? `< ${exitBelow.toFixed(2)}` : null, exitAbove != null ? `> ${exitAbove.toFixed(2)}` : null]
+    .filter(Boolean)
+    .join(" or ");
+
+  const entrySpot = typeof metrics.entry_spot === "number" ? metrics.entry_spot : null;
+  const rollTrigger = typeof metrics.roll_trigger === "number" ? metrics.roll_trigger : null;
+  const spotMoved = entrySpot != null && position.underlying_price != null ? position.underlying_price - entrySpot : null;
+  const nearRoll = spotMoved != null && rollTrigger != null && Math.abs(spotMoved) >= rollTrigger * 0.8;
+
+  const otherMetrics = Object.entries(metrics).filter(([key]) => !POSITION_LAYOUT_KEYS.has(key));
+
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <SummaryField label="Pool">
+          <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{currency}</Badge>
+        </SummaryField>
+        <SummaryField label="Position">
+          <Badge tone={regimeTone} className="capitalize">
+            {regime}
+          </Badge>{" "}
+          <span className="text-xs text-text-muted" title={opened.toISOString()}>
+            since {openedText}
+          </span>
+        </SummaryField>
+        <SummaryField label={isCredit ? "Net Credit" : "Net Debit"}>{formatMoney(Math.abs(position.trade_value), currency)}</SummaryField>
+        <SummaryField label={isCredit ? "Cost to Close" : "Value if Closed"}>
+          {position.live_value != null ? formatMoney(Math.abs(position.live_value), currency) : <span className="text-text-muted">--</span>}
+        </SummaryField>
+        <SummaryField label="Total P&amp;L">
+          {pnl != null ? (
+            <span className={pnl >= 0 ? "text-positive" : "text-negative"}>
+              {formatMoney(pnl, currency, true)}
+              {pnlPct != null ? ` (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%)` : ""}
+            </span>
+          ) : (
+            <span className="text-text-muted">--</span>
+          )}
+        </SummaryField>
+      </div>
+
+      {(pcrAtEntry != null || entrySpot != null || metrics.expiry != null || metrics.exit_time != null || otherMetrics.length > 0) && (
+        <div className="grid grid-cols-2 gap-3 rounded-md bg-surface-elevated/50 p-3 sm:grid-cols-5">
+          {pcrAtEntry != null && (
+            <SummaryField label="PCR (entry → now)">
+              {pcrAtEntry.toFixed(3)} →{" "}
+              <span className={pcrOutsideBand ? "text-negative" : ""}>{currentPcr != null ? currentPcr.toFixed(3) : "--"}</span>
+              {exitRule && <div className="text-xs text-text-muted">exit if {exitRule}</div>}
+            </SummaryField>
+          )}
+          {entrySpot != null && (
+            <SummaryField label={`${position.underlying_symbol ?? "Spot"} (entry → now)`}>
+              {formatPrice(entrySpot)} → {position.underlying_price != null ? formatPrice(position.underlying_price) : "--"}
+              {spotMoved != null && (
+                <div className={`text-xs ${nearRoll ? "text-warning" : "text-text-muted"}`}>
+                  {spotMoved >= 0 ? "+" : ""}
+                  {spotMoved.toFixed(1)} pt{rollTrigger != null ? ` · rolls at ±${rollTrigger}` : ""}
+                </div>
+              )}
+            </SummaryField>
+          )}
+          {metrics.expiry != null && <SummaryField label="Expiry">{metricText(metrics.expiry)}</SummaryField>}
+          {metrics.exit_time != null && <SummaryField label="Hard Exit">{metricText(metrics.exit_time)} IST</SummaryField>}
+          {otherMetrics.map(([key, value]) => (
+            <SummaryField key={key} label={metricLabel(key)}>
+              {metricText(value)}
+            </SummaryField>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-md border border-border">
+        <PositionLegsTable legs={position.legs} currency={currency} />
+      </div>
+    </>
   );
 }
 
@@ -1583,7 +1719,9 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
             </div>
           </div>
         )}
-        {!position && hasHoldings ? (
+        {position ? (
+          <PositionView deployment={deployment} position={position} />
+        ) : hasHoldings ? (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
               <SummaryField label="Pool">
@@ -1612,52 +1750,12 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
             </div>
           </>
         ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-            <SummaryField label="Instrument">
-              {displayLegs ? <LegsCell legs={displayLegs} /> : <span className="text-text-muted">--</span>}
-            </SummaryField>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             <SummaryField label="Pool">
               <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
             </SummaryField>
             <SummaryField label="Position">
-              {position ? (
-                <span className="capitalize">{position.bias ?? "in a trade"}</span>
-              ) : hasHoldings ? (
-                <span>{holdings.length} holding{holdings.length === 1 ? "" : "s"}</span>
-              ) : (
-                <span className="text-text-muted">flat</span>
-              )}
-            </SummaryField>
-            <SummaryField label="Entered">
-              {position ? (
-                <span className="text-xs" title={new Date(position.opened_at).toISOString()}>
-                  {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
-                </span>
-              ) : (
-                <span className="text-text-muted">--</span>
-              )}
-            </SummaryField>
-            <SummaryField label="Trade Value">
-              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
-            </SummaryField>
-            <SummaryField label="Live Value">
-              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
-            </SummaryField>
-            <SummaryField label="P&amp;L">
-              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
-            </SummaryField>
-            <SummaryField label="Total P&amp;L">
-              {(() => {
-                const total = position ? position.unrealized_pnl : holdingsPnl;
-                return total != null ? (
-                  <span className={total >= 0 ? "text-positive" : "text-negative"}>
-                    {total >= 0 ? "+" : ""}
-                    {total.toFixed(2)}
-                  </span>
-                ) : (
-                  <span className="text-text-muted">--</span>
-                );
-              })()}
+              <span className="text-text-muted">flat</span>
             </SummaryField>
           </div>
         )}

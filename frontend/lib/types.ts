@@ -277,6 +277,11 @@ export interface NativePositionOut {
   trade_value: number;
   live_value: number | null;
   unrealized_pnl: number | null;
+  /** Every other scalar the strategy stored on the position (pcr_at_entry,
+   * entry_spot, expiry, ...) -- see NativePositionOut in the backend. */
+  metrics: Record<string, number | string | boolean | null>;
+  underlying_symbol: string | null;
+  underlying_price: number | null;
 }
 
 export interface EffectivePcrOut {

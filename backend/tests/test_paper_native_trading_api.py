@@ -1,3 +1,4 @@
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -179,9 +180,12 @@ async def test_native_deployment_out_computes_spread_position(client: AsyncClien
     assert len(position["legs"]) == 2
     trade_value = (112.5 - 64.95) * 130.0
     live_value = (100.0 - 60.0) * 130.0
-    assert position["trade_value"] == trade_value
-    assert position["live_value"] == live_value
-    assert position["unrealized_pnl"] == trade_value - live_value
+    # approx: the endpoint sums per-leg products, which rounds differently
+    # from this one-shot expression in the last float digit.
+    assert position["trade_value"] == pytest.approx(trade_value)
+    assert position["live_value"] == pytest.approx(live_value)
+    assert position["unrealized_pnl"] == pytest.approx(trade_value - live_value)
+    assert position["metrics"] == {"pcr_at_entry": 1.4, "expiry": "2026-09-25"}  # bias/legs/opened_at excluded
 
 
 async def test_native_deployment_out_computes_multi_leg_position(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
@@ -201,9 +205,15 @@ async def test_native_deployment_out_computes_multi_leg_position(client: AsyncCl
     headers = {"Authorization": f"Bearer {token}"}
     portfolio_id = await _default_portfolio_id(client, headers)
 
+    nifty = Instrument(
+        exchange="NSE", symbol="NIFTY 50", name="Nifty 50", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50",
+    )
+    db_session.add(nifty)
+    await db_session.flush()
     short_ce = Instrument(
         exchange="NFO", symbol="NIFTY25SEP23400CE", name="Nifty 23400 CE", instrument_type="option",
         data_source="zerodha_kite", external_ref="NIFTY25SEP23400CE", strike=23400.0, option_type="CE", lot_size=65,
+        underlying_instrument_id=nifty.id,
     )
     short_pe = Instrument(
         exchange="NFO", symbol="NIFTY25SEP23400PE", name="Nifty 23400 PE", instrument_type="option",
@@ -223,6 +233,7 @@ async def test_native_deployment_out_computes_multi_leg_position(client: AsyncCl
     tick_engine.set_real_price(short_pe.id, 90.0, "test")
     tick_engine.set_real_price(long_ce.id, 30.0, "test")
     tick_engine.set_real_price(long_pe.id, 25.0, "test")
+    tick_engine.set_real_price(nifty.id, 23416.6, "test")
 
     code = "async def evaluate(ctx):\n    ctx.note('hold', reason='position seeded directly for this test')\n"
     strategy_resp = await client.post(
@@ -245,7 +256,7 @@ async def test_native_deployment_out_computes_multi_leg_position(client: AsyncCl
     deployment = await db_session.get(PaperNativeDeployment, uuid_mod.UUID(deployment_id))
     deployment.state = {
         "position": {
-            "regime": "sideways", "pcr_at_entry": 0.99, "expiry": "2026-09-25",
+            "regime": "sideways", "pcr_at_entry": 0.99, "entry_spot": 23377.4, "expiry": "2026-09-25",
             "legs": {
                 "short_ce": {"instrument_id": str(short_ce.id), "strike": 23400.0, "option_type": "CE", "side": "sell", "quantity": 650.0, "entry_price": 117.5},
                 "short_pe": {"instrument_id": str(short_pe.id), "strike": 23400.0, "option_type": "PE", "side": "sell", "quantity": 650.0, "entry_price": 64.45},
@@ -267,9 +278,16 @@ async def test_native_deployment_out_computes_multi_leg_position(client: AsyncCl
 
     trade_value = (117.5 + 64.45 - 30.05 - 21.20) * 650.0
     live_value = (100.0 + 90.0 - 30.0 - 25.0) * 650.0
-    assert position["trade_value"] == trade_value
-    assert position["live_value"] == live_value
-    assert position["unrealized_pnl"] == trade_value - live_value
+    # approx: the endpoint sums per-leg products, which rounds differently
+    # from this one-shot expression in the last float digit.
+    assert position["trade_value"] == pytest.approx(trade_value)
+    assert position["live_value"] == pytest.approx(live_value)
+    assert position["unrealized_pnl"] == pytest.approx(trade_value - live_value)
+    # The strategy's own position fields pass through (not its legs/regime,
+    # shown elsewhere), plus the legs' underlying and its live price.
+    assert position["metrics"] == {"pcr_at_entry": 0.99, "entry_spot": 23377.4, "expiry": "2026-09-25"}
+    assert position["underlying_symbol"] == "NIFTY 50"
+    assert position["underlying_price"] == 23416.6
 
 
 async def test_native_deployment_out_computes_holdings(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
