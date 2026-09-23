@@ -323,7 +323,12 @@ async def test_native_deployment_out_computes_holdings(client: AsyncClient, seed
     deployment.state = {
         "seeded": True,
         "holdings": {
-            "LAURUSLABS": {"instrument_id": str(stock_a.id), "quantity": 16.0, "entry_price": 500.0, "opened_at": datetime.now(timezone.utc).isoformat()},
+            "LAURUSLABS": {
+                "instrument_id": str(stock_a.id), "quantity": 16.0, "entry_price": 500.0,
+                "opened_at": "2026-09-21T09:45:00+05:30",
+                # Strategy-specific per-holding values -- passed through as metrics.
+                "rank": 2, "rsi": 68.2, "macd": 1.35, "signal": "Above 0", "note_list": ["not", "a", "scalar"],
+            },
             "POLYCAB": {"instrument_id": str(stock_b.id), "quantity": 1.0, "entry_price": 6000.0, "opened_at": datetime.now(timezone.utc).isoformat()},
         },
     }
@@ -339,6 +344,12 @@ async def test_native_deployment_out_computes_holdings(client: AsyncClient, seed
     laurus = next(h for h in holdings if h["instrument_symbol"] == "LAURUSLABS")
     assert laurus["entry_price"] == 500.0
     assert laurus["current_price"] == 550.0
+    assert laurus["opened_at"].startswith("2026-09-21T")
+    # Every extra scalar the strategy stored comes through; non-scalars and
+    # the core leg keys don't.
+    assert laurus["metrics"] == {"rank": 2, "rsi": 68.2, "macd": 1.35, "signal": "Above 0"}
+    polycab = next(h for h in holdings if h["instrument_symbol"] == "POLYCAB")
+    assert polycab["metrics"] == {}
 
 
 async def test_native_trades_endpoint_lists_closed_trades(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):

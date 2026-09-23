@@ -117,6 +117,18 @@ class NativeLegOut(BaseModel):
     current_price: float | None
 
 
+class NativeHoldingOut(NativeLegOut):
+    """One entry of deployment.state["holdings"] (see
+    NativeDeploymentOut.holdings): the leg itself, when it was opened, and
+    `metrics` -- every other scalar the strategy recorded on that holding
+    (e.g. a rotation strategy's rank/rsi/macd, or nifty_rs_rotation's
+    rs_value), passed through as-is so the dashboard can show why each
+    stock is held without this schema knowing any one strategy's fields."""
+
+    opened_at: datetime | None = None
+    metrics: dict[str, float | int | str | bool | None] = Field(default_factory=dict)
+
+
 class NativePositionOut(BaseModel):
     """Display-only summary of deployment.state["position"] for the
     short/long-leg credit-spread convention native_strategies/
@@ -155,10 +167,10 @@ class NativeDeploymentOut(BaseModel):
     # positions, each with its own entry time -- fundamentally not "one
     # position" (NativePositionOut's single bias/opened_at/legs-belong-
     # together shape doesn't fit multiple unrelated holdings), so this is
-    # a flat list of legs instead, reusing NativeLegOut as-is (side is
-    # always "long" here; strike/option_type stay None -- equities have
-    # neither).
-    holdings: list[NativeLegOut] | None = None
+    # a flat list of legs instead (NativeHoldingOut: a NativeLegOut plus
+    # its own opened_at and strategy metrics; side is always "long" here,
+    # strike/option_type stay None -- equities have neither).
+    holdings: list[NativeHoldingOut] | None = None
     created_at: datetime
     stopped_at: datetime | None
 

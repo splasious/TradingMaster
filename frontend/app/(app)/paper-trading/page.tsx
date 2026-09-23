@@ -34,6 +34,7 @@ import type {
   InstrumentOut,
   NativeDeploymentOut,
   NativeEvaluationOut,
+  NativeHoldingOut,
   NativeLegOut,
   PaperDeploymentOut,
   PaperEvaluationOut,
@@ -840,7 +841,6 @@ function PortfolioCard({
     .filter((d) => d.portfolio_id === portfolio.id && d.open_position)
     .map((d) => d.open_position!);
   const unrealizedPnl = myPositions.reduce((sum, p) => sum + (p.unrealized_pnl ?? 0), 0);
-  const equity = portfolio.cash + myPositions.reduce((sum, p) => sum + p.quantity * (p.current_price ?? p.avg_entry_price), 0);
 
   // Today's Gain = today's realized P&L (both regular and Advanced Python
   // deployments can share a capital pool) + every currently open position's
@@ -870,6 +870,14 @@ function PortfolioCard({
     .flatMap((d) => d.holdings ?? [])
     .reduce((sum, l) => sum + (l.current_price != null ? (l.current_price - l.entry_price) * l.quantity : 0), 0);
   const todayGain = realizedToday + unrealizedPnl + nativeUnrealizedPnl + holdingsUnrealizedPnl;
+  // Advanced (native) deployments sharing this pool hold capital too -- their
+  // legs/holdings count toward equity the same way regular positions do.
+  const nativeMarketValue = (nativeDeployments ?? [])
+    .filter((d) => d.portfolio_id === portfolio.id)
+    .flatMap((d): NativeLegOut[] => (d.position ? d.position.legs : d.holdings ?? []))
+    .reduce((sum, l) => sum + legMarketValue(l), 0);
+  const equity =
+    portfolio.cash + myPositions.reduce((sum, p) => sum + p.quantity * (p.current_price ?? p.avg_entry_price), 0) + nativeMarketValue;
 
   return (
     <Card>
@@ -1188,25 +1196,178 @@ function LegValuesCell({
   );
 }
 
+function currencySymbol(currency: string): string {
+  return currency === "INR" ? "₹" : currency === "USD" ? "$" : "";
+}
+
+function formatMoney(value: number, currency: string, signed = false): string {
+  const sign = value < 0 ? "-" : signed && value > 0 ? "+" : "";
+  return `${sign}${currencySymbol(currency)}${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function formatPrice(value: number): string {
+  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** A leg's signed contribution to its pool's equity at the live price (entry
+ * price until the first tick): a long is an asset worth price x qty, a short
+ * a liability of the same -- opening either already moved its entry value
+ * through cash, so equity = cash + the sum of these. */
+function legMarketValue(leg: NativeLegOut): number {
+  const value = (leg.current_price ?? leg.entry_price) * leg.quantity;
+  return leg.side === "short" ? -value : value;
+}
+
+// Column labels for the per-stock values rotation strategies commonly record
+// on each holding; any other key is shown title-cased.
+const HOLDING_METRIC_LABELS: Record<string, string> = {
+  macd: "MACD",
+  macd_hist: "MACD Hist",
+  macd_histogram: "MACD Hist",
+  macd_signal: "MACD Signal",
+  signal: "Signal",
+  rsi: "RSI",
+  rsi14: "RSI14",
+  rsi_14: "RSI14",
+  rs_value: "RS",
+  score: "Score",
+  rank: "Rank",
+};
+// Known indicators first, in the order a MACD/RSI strategy reasons about
+// them; unknown keys alphabetically after; rank always last.
+const HOLDING_METRIC_ORDER = ["macd", "macd_hist", "macd_histogram", "macd_signal", "signal", "rsi", "rsi14", "rsi_14", "rs_value", "score"];
+
+function metricLabel(key: string): string {
+  return HOLDING_METRIC_LABELS[key] ?? key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function metricColumns(holdings: NativeHoldingOut[]): string[] {
+  const keys = new Set(holdings.flatMap((h) => Object.keys(h.metrics ?? {})));
+  keys.delete("status"); // shown in the Status column instead
+  const position = (k: string) => {
+    if (k === "rank") return Number.MAX_SAFE_INTEGER;
+    const i = HOLDING_METRIC_ORDER.indexOf(k);
+    return i === -1 ? HOLDING_METRIC_ORDER.length : i;
+  };
+  return [...keys].sort((a, b) => position(a) - position(b) || a.localeCompare(b));
+}
+
+function MetricValue({ name, value }: { name: string; value: number | string | boolean | null | undefined }) {
+  if (value == null || value === "") return <span className="text-text-muted">—</span>;
+  if (typeof value === "boolean") return <>{value ? "Yes" : "No"}</>;
+  if (typeof value === "string") return <>{value}</>;
+  if (name === "rank") return <>#{value}</>;
+  if (name.startsWith("macd")) {
+    return (
+      <span className={value >= 0 ? "text-positive" : "text-negative"}>
+        {value >= 0 ? "+" : ""}
+        {value.toFixed(2)}
+      </span>
+    );
+  }
+  if (name.startsWith("rsi")) return <>{value.toFixed(1)}</>;
+  return <>{value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</>;
+}
+
+/** One row per stock a multi-holding (rotation) strategy currently holds:
+ * the position itself, its live P&L, and whatever per-stock values the
+ * strategy recorded on it (its reasons for holding: MACD, RSI, rank, ...). */
+function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; currency: string }) {
+  const columns = metricColumns(holdings);
+  const numericColumns = new Set(
+    columns.filter((c) => holdings.every((h) => h.metrics?.[c] == null || typeof h.metrics[c] === "number")),
+  );
+  const rows = holdings.every((h) => typeof h.metrics?.rank === "number")
+    ? [...holdings].sort((a, b) => (a.metrics.rank as number) - (b.metrics.rank as number))
+    : holdings;
+  const cell = "px-3 py-2 whitespace-nowrap";
+
+  return (
+    <Table className="text-xs">
+      <Thead>
+        <tr>
+          <Th className="px-3">Stock</Th>
+          <Th className="px-3">Status</Th>
+          <Th className="px-3 text-right">Qty</Th>
+          <Th className="px-3 text-right">Avg Entry</Th>
+          <Th className="px-3 text-right">LTP</Th>
+          <Th className="px-3 text-right">Invested</Th>
+          <Th className="px-3 text-right">Live Value</Th>
+          <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
+          <Th className="px-3 text-right">P&amp;L %</Th>
+          {columns.map((c) => (
+            <Th key={c} className={`px-3 ${numericColumns.has(c) ? "text-right" : ""}`}>
+              {metricLabel(c)}
+            </Th>
+          ))}
+          <Th className="px-3">Entry Time</Th>
+        </tr>
+      </Thead>
+      <Tbody>
+        {rows.map((h) => {
+          const invested = legTradeValue(h);
+          const live = legLiveValue(h);
+          const pnl = legPnl(h);
+          const pnlPct = pnl != null && invested ? (pnl / invested) * 100 : null;
+          const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
+          const status = typeof h.metrics?.status === "string" ? h.metrics.status : "HOLD";
+          return (
+            <tr key={h.instrument_symbol}>
+              <Td className={`${cell} font-medium`}>{h.instrument_symbol}</Td>
+              <Td className={cell}>
+                <Badge tone="active" className="px-2 py-0.5 text-[10px] uppercase">
+                  {status}
+                </Badge>
+              </Td>
+              <Td className={`${cell} text-right font-financial`}>{h.quantity.toLocaleString()}</Td>
+              <Td className={`${cell} text-right font-financial`}>{formatPrice(h.entry_price)}</Td>
+              <Td className={`${cell} text-right font-financial`}>
+                {h.current_price != null ? formatPrice(h.current_price) : <span className="text-text-muted">—</span>}
+              </Td>
+              <Td className={`${cell} text-right font-financial`}>{formatMoney(invested, currency)}</Td>
+              <Td className={`${cell} text-right font-financial`}>
+                {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
+              </Td>
+              <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
+              <Td className={`${cell} text-right font-financial ${pnlTone}`}>
+                {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
+              </Td>
+              {columns.map((c) => (
+                <Td key={c} className={`${cell} ${numericColumns.has(c) ? "text-right font-financial" : ""}`}>
+                  <MetricValue name={c} value={h.metrics?.[c]} />
+                </Td>
+              ))}
+              <Td className={`${cell} text-text-secondary`} title={h.opened_at ?? undefined}>
+                {h.opened_at
+                  ? new Date(h.opened_at).toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                  : "—"}
+              </Td>
+            </tr>
+          );
+        })}
+      </Tbody>
+    </Table>
+  );
+}
+
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
   const { data: trades } = useNativeTrades(deployment.id);
   const position = deployment.position;
-  const holdings = deployment.holdings;
-  const displayLegs = position ? position.legs : holdings && holdings.length > 0 ? holdings : null;
+  const hasHoldings = deployment.holdings != null && deployment.holdings.length > 0;
 
   return (
     <div className="space-y-4 border-t border-border bg-surface-elevated/50 p-4">
-      {displayLegs ? (
+      {position ? (
         <div className="text-xs text-text-secondary">
-          <span className="font-medium">{position ? position.bias ?? "position" : "holdings"}:</span>{" "}
-          {displayLegs.map((l) => (
+          <span className="font-medium">{position.bias ?? "position"}:</span>{" "}
+          {position.legs.map((l) => (
             <span key={l.instrument_symbol} className="mr-3">
               {l.side} {l.quantity} {l.instrument_symbol} @ {l.entry_price.toFixed(2)}
               {l.current_price != null && <> (now {l.current_price.toFixed(2)})</>}
             </span>
           ))}
         </div>
-      ) : (
+      ) : hasHoldings ? null /* already shown in the card's own HoldingsTable */ : (
         <div className="text-xs text-text-muted">Flat -- no open position.</div>
       )}
       {trades && trades.length > 0 ? (
@@ -1279,7 +1440,12 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
   // keep this a plain top-level hook call, per rules of hooks.
   const { data: myTrades } = useNativeTrades(deployment.id);
   const unrealizedForEquity = position ? position.unrealized_pnl ?? 0 : hasHoldings ? holdings.reduce((sum, l) => sum + (legPnl(l) ?? 0), 0) : 0;
-  const poolEquity = soloPortfolio ? soloPortfolio.cash + unrealizedForEquity : 0;
+  // Cash + what's held is worth now -- not cash + unrealized P&L, which left
+  // out the capital sitting in the holdings (a pool with ~20L invested in 5
+  // stocks showed Equity as just its spare cash plus the P&L on top).
+  const poolEquity = soloPortfolio ? soloPortfolio.cash + (displayLegs ?? []).reduce((sum, l) => sum + legMarketValue(l), 0) : 0;
+  const holdingsInvested = hasHoldings ? holdings.reduce((sum, l) => sum + legTradeValue(l), 0) : 0;
+  const holdingsLive = hasHoldings && holdings.every((l) => l.current_price != null) ? holdings.reduce((sum, l) => sum + legLiveValue(l)!, 0) : null;
   const today = new Date().toDateString();
   const realizedToday = (myTrades ?? [])
     .filter((t) => new Date(t.closed_at).toDateString() === today)
@@ -1417,54 +1583,84 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
             </div>
           </div>
         )}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
-          <SummaryField label="Instrument">
-            {displayLegs ? <LegsCell legs={displayLegs} /> : <span className="text-text-muted">--</span>}
-          </SummaryField>
-          <SummaryField label="Pool">
-            <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
-          </SummaryField>
-          <SummaryField label="Position">
-            {position ? (
-              <span className="capitalize">{position.bias ?? "in a trade"}</span>
-            ) : hasHoldings ? (
-              <span>{holdings.length} holding{holdings.length === 1 ? "" : "s"}</span>
-            ) : (
-              <span className="text-text-muted">flat</span>
-            )}
-          </SummaryField>
-          <SummaryField label="Entered">
-            {position ? (
-              <span className="text-xs" title={new Date(position.opened_at).toISOString()}>
-                {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
-              </span>
-            ) : (
-              <span className="text-text-muted">--</span>
-            )}
-          </SummaryField>
-          <SummaryField label="Trade Value">
-            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
-          </SummaryField>
-          <SummaryField label="Live Value">
-            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
-          </SummaryField>
-          <SummaryField label="P&amp;L">
-            {displayLegs ? <LegValuesCell legs={displayLegs} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
-          </SummaryField>
-          <SummaryField label="Total P&amp;L">
-            {(() => {
-              const total = position ? position.unrealized_pnl : holdingsPnl;
-              return total != null ? (
-                <span className={total >= 0 ? "text-positive" : "text-negative"}>
-                  {total >= 0 ? "+" : ""}
-                  {total.toFixed(2)}
+        {!position && hasHoldings ? (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+              <SummaryField label="Pool">
+                <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
+              </SummaryField>
+              <SummaryField label="Position">
+                {holdings.length} holding{holdings.length === 1 ? "" : "s"}
+              </SummaryField>
+              <SummaryField label="Invested">{formatMoney(holdingsInvested, deployment.currency)}</SummaryField>
+              <SummaryField label="Live Value">
+                {holdingsLive != null ? formatMoney(holdingsLive, deployment.currency) : <span className="text-text-muted">--</span>}
+              </SummaryField>
+              <SummaryField label="Total P&amp;L">
+                {holdingsPnl != null ? (
+                  <span className={holdingsPnl >= 0 ? "text-positive" : "text-negative"}>
+                    {formatMoney(holdingsPnl, deployment.currency, true)}
+                    {holdingsInvested ? ` (${holdingsPnl >= 0 ? "+" : ""}${((holdingsPnl / holdingsInvested) * 100).toFixed(2)}%)` : ""}
+                  </span>
+                ) : (
+                  <span className="text-text-muted">--</span>
+                )}
+              </SummaryField>
+            </div>
+            <div className="rounded-md border border-border">
+              <HoldingsTable holdings={holdings} currency={deployment.currency} />
+            </div>
+          </>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            <SummaryField label="Instrument">
+              {displayLegs ? <LegsCell legs={displayLegs} /> : <span className="text-text-muted">--</span>}
+            </SummaryField>
+            <SummaryField label="Pool">
+              <span className="text-text-secondary">{deployment.portfolio_name}</span> <Badge tone="neutral">{deployment.currency}</Badge>
+            </SummaryField>
+            <SummaryField label="Position">
+              {position ? (
+                <span className="capitalize">{position.bias ?? "in a trade"}</span>
+              ) : hasHoldings ? (
+                <span>{holdings.length} holding{holdings.length === 1 ? "" : "s"}</span>
+              ) : (
+                <span className="text-text-muted">flat</span>
+              )}
+            </SummaryField>
+            <SummaryField label="Entered">
+              {position ? (
+                <span className="text-xs" title={new Date(position.opened_at).toISOString()}>
+                  {new Date(position.opened_at).toLocaleDateString()} {new Date(position.opened_at).toLocaleTimeString()}
                 </span>
               ) : (
                 <span className="text-text-muted">--</span>
-              );
-            })()}
-          </SummaryField>
-        </div>
+              )}
+            </SummaryField>
+            <SummaryField label="Trade Value">
+              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legTradeValue} /> : <span className="text-text-muted">--</span>}
+            </SummaryField>
+            <SummaryField label="Live Value">
+              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legLiveValue} /> : <span className="text-text-muted">--</span>}
+            </SummaryField>
+            <SummaryField label="P&amp;L">
+              {displayLegs ? <LegValuesCell legs={displayLegs} compute={legPnl} colorize /> : <span className="text-text-muted">--</span>}
+            </SummaryField>
+            <SummaryField label="Total P&amp;L">
+              {(() => {
+                const total = position ? position.unrealized_pnl : holdingsPnl;
+                return total != null ? (
+                  <span className={total >= 0 ? "text-positive" : "text-negative"}>
+                    {total >= 0 ? "+" : ""}
+                    {total.toFixed(2)}
+                  </span>
+                ) : (
+                  <span className="text-text-muted">--</span>
+                );
+              })()}
+            </SummaryField>
+          </div>
+        )}
 
         <div className="text-xs text-text-muted">
           <span className="font-medium uppercase tracking-wide">Last Signal: </span>

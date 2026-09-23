@@ -261,6 +261,15 @@ export interface NativeLegOut {
   current_price: number | null;
 }
 
+/** One entry of a multi-holding strategy's state["holdings"]: the leg,
+ * when it was opened, and whatever per-stock values the strategy itself
+ * recorded on it (rank, rsi, macd, ...) -- see NativeHoldingOut in
+ * backend/app/schemas/paper_trading.py. */
+export interface NativeHoldingOut extends NativeLegOut {
+  opened_at: string | null;
+  metrics: Record<string, number | string | boolean | null>;
+}
+
 export interface NativePositionOut {
   bias: string | null;
   opened_at: string;
@@ -292,7 +301,7 @@ export interface NativeDeploymentOut {
   last_signal_reason: string | null;
   state: Record<string, unknown> | null;
   position: NativePositionOut | null;
-  holdings: NativeLegOut[] | null;
+  holdings: NativeHoldingOut[] | null;
   created_at: string;
   stopped_at: string | null;
 }

@@ -15,6 +15,7 @@ from app.schemas.paper_trading import (
     NativeDeploymentCreate,
     NativeDeploymentOut,
     NativeEvaluationOut,
+    NativeHoldingOut,
     NativeLegOut,
     NativePositionOut,
     NativeTradeOut,
@@ -89,7 +90,19 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
     )
 
 
-async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[NativeLegOut] | None:
+# Keys every holding carries (see nifty_rs_rotation.py's holdings shape) --
+# anything else a strategy stores on a holding is its own per-stock metric.
+_HOLDING_CORE_KEYS = {"instrument_id", "quantity", "entry_price", "opened_at"}
+
+
+def _parse_opened_at(value) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[NativeHoldingOut] | None:
     """Display-only reconstruction of deployment.state["holdings"] -- a
     dict of independently-opened long equity positions (see
     NativeDeploymentOut.holdings' docstring for why this is separate from
@@ -102,16 +115,21 @@ async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[Nati
     if not isinstance(holdings, dict):
         return None
 
-    legs_out: list[NativeLegOut] = []
+    legs_out: list[NativeHoldingOut] = []
     for leg in holdings.values():
         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
         if instrument is None:
             continue
         current_price = tick_engine.get_current_price(instrument.id)
         legs_out.append(
-            NativeLegOut(
+            NativeHoldingOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="long", quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
+                opened_at=_parse_opened_at(leg.get("opened_at")),
+                metrics={
+                    key: value for key, value in leg.items()
+                    if key not in _HOLDING_CORE_KEYS and (value is None or isinstance(value, (bool, int, float, str)))
+                },
             )
         )
     return legs_out
