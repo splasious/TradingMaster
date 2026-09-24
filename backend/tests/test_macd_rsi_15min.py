@@ -185,3 +185,41 @@ async def test_get_candles_leaves_out_the_forming_candle_and_keeps_the_pair_sync
     assert bars[-1]["ts"] == forming_ts - BAR_LENGTH
     assert bars[0]["ts"] < bars[-1]["ts"]  # oldest first
     assert (sbin.id, "15m") in sync_module._native_pairs(ctx.now)
+
+
+async def test_repeated_ticks_sell_once_and_buy_the_replacement_once(db_engine, db_session: AsyncSession):
+    """Through the live runner, reloading state from the database every
+    tick as the scheduler does: SOLARINDS is sold once and SBIN bought once,
+    however many ticks follow. Before the runner deep-copied state, each
+    tick reloaded the unsaved old holdings and sold the same stocks again."""
+    from pathlib import Path
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    import app.services.strategy.native_strategies.macd_rsi_15min as strategy_module
+    from app.services.paper_trading.native_runner import run_native_strategy
+
+    _, cross = _solarinds_closes()
+    ctx, deployment, _ = await _setup(db_session, START + (cross - 20) * BAR_LENGTH)
+    version = await db_session.get(StrategyVersion, deployment.strategy_version_id)
+    version.python_code = Path(strategy_module.__file__).read_text()
+    deployment.state = ctx.state
+    await db_session.commit()
+    cash_before = (await db_session.get(PaperPortfolio, deployment.portfolio_id)).cash
+
+    sessions = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    for _ in range(4):
+        async with sessions() as db:
+            outcome = await run_native_strategy(db, await db.get(PaperNativeDeployment, deployment.id))
+            assert outcome.action != "error", outcome.reason
+
+    async with sessions() as db:
+        saved = await db.get(PaperNativeDeployment, deployment.id)
+        trades = (await db.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == deployment.id))).scalars().all()
+        cash_after = (await db.get(PaperPortfolio, deployment.portfolio_id)).cash
+    assert "SOLARINDS" not in saved.state["holdings"]
+    assert "SBIN" in saved.state["holdings"]
+    assert len(trades) == 1
+    sbin = saved.state["holdings"]["SBIN"]
+    solarinds_exit = trades[0].legs[0]["exit_price"]
+    assert cash_after == cash_before + 100 * solarinds_exit - sbin["quantity"] * sbin["entry_price"]

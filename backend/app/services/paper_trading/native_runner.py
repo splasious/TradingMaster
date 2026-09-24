@@ -19,6 +19,7 @@ conventions the single-instrument engine (engine.py) already has stay
 consistent here too.
 """
 
+import copy
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -251,7 +252,13 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
         await db.commit()
         return EvaluationOutcome(action="error", reason="native strategy code must define async def evaluate(ctx)")
 
-    ctx = NativeContext(db=db, portfolio=portfolio, deployment=deployment, state=dict(deployment.state or {}))
+    # A deep copy, not dict(): state is one JSON column, and SQLAlchemy only
+    # writes it back if the new value differs from its snapshot of the old
+    # one. With a shallow copy that snapshot shared its nested dicts with
+    # the strategy's, so an in-place change (popping a sold stock out of
+    # state["holdings"]) changed both alike and was never saved -- every
+    # tick reloaded the old holdings and sold the same stocks again.
+    ctx = NativeContext(db=db, portfolio=portfolio, deployment=deployment, state=copy.deepcopy(deployment.state or {}))
     try:
         await evaluate_fn(ctx)
     except Exception as exc:
