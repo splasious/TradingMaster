@@ -35,6 +35,8 @@ from app.models.paper_trading import NATIVE_EXIT_REASON_MAX_LEN, PaperNativeDepl
 from app.models.strategy import StrategyVersion
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
+from app.services.market_data.active_timeframe_sync_scheduler import note_native_candle_demand
+from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
@@ -110,6 +112,19 @@ class NativeContext:
             price = row
         tick_engine.subscribe(instrument_id, seed_price=price or 0.0)
         return price
+
+    async def get_candles(self, instrument_id: uuid.UUID | str, timeframe: str, limit: int = 300) -> list[dict]:
+        """The `limit` most recent *finished* candles for one instrument,
+        oldest first, as {"ts", "open", "high", "low", "close", "volume"}
+        dicts (UTC `ts` = when the candle opened). The still-forming candle
+        is left out, so a signal never fires on a bar that can still change.
+        Also keeps this instrument/timeframe on the background candle sync
+        (active_timeframe_sync_scheduler.py) for as long as it's asked for
+        -- a native strategy's stocks live only in its own state, so the
+        sync has no other way to know they need fresh candles."""
+        instrument_id = uuid.UUID(str(instrument_id))
+        note_native_candle_demand(instrument_id, timeframe, self.now)
+        return await load_closed_candles(self.db, instrument_id, timeframe, limit, self.now)
 
     async def get_pcr(self, underlying_symbol: str = "NIFTY 50", num_expiries: int = 4, timeframe: str = "15m") -> float | None:
         return await compute_effective_pcr(self.db, underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe)

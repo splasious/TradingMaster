@@ -35,6 +35,18 @@ def _reset_kite_instruments_cache():
     _INSTRUMENTS_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_native_candle_demand():
+    """Pairs a native strategy asked candles for (ctx.get_candles) are
+    remembered process-wide for the background sync -- same leak risk as
+    the Kite cache above, one test's pairs showing up in the next."""
+    from app.services.market_data import active_timeframe_sync_scheduler
+
+    active_timeframe_sync_scheduler._native_demand.clear()
+    yield
+    active_timeframe_sync_scheduler._native_demand.clear()
+
+
 @pytest_asyncio.fixture
 async def db_engine():
     db_path = f"./test_{uuid.uuid4().hex}.db"

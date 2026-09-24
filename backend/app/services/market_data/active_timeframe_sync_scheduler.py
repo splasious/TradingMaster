@@ -28,10 +28,26 @@ unattended (which its own docstring explicitly declines to do for
 Zerodha); this one only ever touches the (instrument, timeframe) pairs a
 currently-ACTIVE deployment genuinely trades on, so the same caution
 doesn't carry over.
+
+Advanced (native) deployments hold their instruments only in their own
+state -- there's no deployment row naming an instrument/timeframe to find
+here. Instead, NativeContext.get_candles() records every pair a native
+strategy reads (note_native_candle_demand), and this sync covers those too
+for as long as the strategy keeps asking.
+
+Only finished candles are stored (see bar_periods.py): Kite returns the
+still-forming one too, and saving it once meant keeping, forever, its close
+from whatever second the sync happened to see it. Bars already stored are
+updated to the source's values, which repairs any saved that way before.
+An intraday pair is only re-fetched once a new candle can have finished,
+and on the first fetch after startup one that's fallen behind (days
+without a sync) is caught up from its newest stored bar rather than
+leaving a gap.
 """
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -46,6 +62,7 @@ from app.models.paper_trading import DeploymentStatus, PaperDeployment
 from app.services.backfill_platform.timeframes import DERIVABLE_FROM_DAILY
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.market_data.bar_periods import BAR_DURATIONS, INTRADAY_TIMEFRAMES, is_complete
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.hours import nse_market_open
 from app.services.market_data.registry import get_market_data_source
@@ -66,13 +83,34 @@ _DAILY_BACKFILL_LOOKBACK = timedelta(days=400)
 # many trading days) -- pull the wide one-time window instead of the
 # normal 2-day incremental one until it does.
 _MIN_DAILY_BARS_FOR_DERIVED_TIMEFRAME = 90
+# How far back an intraday pair that's fallen behind is caught up in one
+# fetch, in bars -- ~10 calendar days of 15m, well inside Kite's and
+# Delta's per-request limits for every intraday interval.
+_MAX_CATCH_UP_BARS = 1000
+
+# (instrument_id, timeframe) -> when a native strategy last read it. Native
+# strategies are evaluated every ~10s while the market is open, so a pair
+# not asked for in this long belongs to a strategy that stopped or changed.
+NATIVE_DEMAND_TTL = timedelta(minutes=30)
+_native_demand: dict[tuple[uuid.UUID, str], datetime] = {}
 
 
-async def _active_pairs_with_instruments(db: AsyncSession) -> tuple[set[tuple], dict]:
+def note_native_candle_demand(instrument_id: uuid.UUID, timeframe: str, now: datetime | None = None) -> None:
+    _native_demand[(instrument_id, timeframe)] = now or datetime.now(timezone.utc)
+
+
+def _native_pairs(now: datetime) -> set[tuple[uuid.UUID, str]]:
+    for pair, seen_at in list(_native_demand.items()):
+        if now - seen_at > NATIVE_DEMAND_TTL:
+            del _native_demand[pair]
+    return set(_native_demand)
+
+
+async def _active_pairs_with_instruments(db: AsyncSession, now: datetime | None = None) -> tuple[set[tuple], dict]:
     """Every (instrument_id, timeframe) an ACTIVE paper or live deployment
-    currently uses, plus the Instrument rows themselves -- shared between
-    sync() and diagnose_active_pairs() so there's one query, not two
-    near-duplicates."""
+    currently uses, or a native strategy has recently read, plus the
+    Instrument rows themselves -- shared between sync() and
+    diagnose_active_pairs() so there's one query, not two near-duplicates."""
     paper_pairs = (
         await db.execute(
             select(PaperDeployment.instrument_id, PaperDeployment.timeframe)
@@ -88,6 +126,7 @@ async def _active_pairs_with_instruments(db: AsyncSession) -> tuple[set[tuple], 
         )
     ).all()
     pairs = {(instrument_id, timeframe) for instrument_id, timeframe in [*paper_pairs, *live_pairs]}
+    pairs |= _native_pairs(now or datetime.now(timezone.utc))
     if not pairs:
         return pairs, {}
 
@@ -138,6 +177,11 @@ class ActiveTimeframeSyncScheduler:
         self.last_sync_at: datetime | None = None
         self.last_synced_count: int = 0
         self.last_error: str | None = None
+        # (instrument_id, timeframe) -> newest finished bar fetched so far,
+        # kept in memory rather than read back from ohlcv_candles: SQLite
+        # stores a Kite bar's IST wall-clock digits without the offset, so
+        # a stored ts can't be trusted as UTC there.
+        self._newest_fetched: dict[tuple[uuid.UUID, str], datetime] = {}
 
     def start(self) -> None:
         if self._task is None:
@@ -176,7 +220,8 @@ class ActiveTimeframeSyncScheduler:
         injectable the same way (real wall-clock time in production, a
         fixed value in tests) so the market-hours gate below is
         deterministic to test."""
-        pairs, instruments = await _active_pairs_with_instruments(db)
+        now = now or datetime.now(timezone.utc)
+        pairs, instruments = await _active_pairs_with_instruments(db, now)
         if not pairs:
             return 0
 
@@ -192,7 +237,6 @@ class ActiveTimeframeSyncScheduler:
             zerodha_broker._api_key = zerodha_creds["api_key"]
             zerodha_broker._access_token = zerodha_creds["access_token"]
 
-        now = now or datetime.now(timezone.utc)
         # NSE is shut outside real trading hours -- nothing new exists to
         # fetch, and Kite's own historical candles for that window won't
         # exist either (see the incident this was built to prevent: a
@@ -216,10 +260,33 @@ class ActiveTimeframeSyncScheduler:
             # 1wk/1mo bars from that at read time.
             fetch_timeframe = "1d" if is_zerodha and timeframe in DERIVABLE_FROM_DAILY else timeframe
 
+            if is_zerodha and not zerodha_market_open:
+                continue
+
+            start = now - LOOKBACK
+            if fetch_timeframe in INTRADAY_TIMEFRAMES:
+                duration = BAR_DURATIONS[fetch_timeframe]
+                newest = self._newest_fetched.get((instrument.id, fetch_timeframe))
+                if newest is not None and now < newest + 2 * duration:
+                    # The candle after the newest one already fetched
+                    # hasn't finished yet -- nothing new to fetch.
+                    continue
+                if newest is None:
+                    # First fetch since startup: catch up from the newest
+                    # stored bar, overlapping by LOOKBACK -- re-fetching a
+                    # bar only rewrites it with the same values.
+                    latest_ts = (
+                        await db.execute(
+                            select(func.max(OhlcvCandle.ts)).where(
+                                OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == fetch_timeframe
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if latest_ts is not None:
+                        start = min(start, max(as_aware_utc(latest_ts) - LOOKBACK, now - _MAX_CATCH_UP_BARS * duration))
+
             try:
                 if is_zerodha:
-                    if not zerodha_market_open:
-                        continue
                     if zerodha_broker is None:
                         skipped_zerodha += 1
                         continue
@@ -231,7 +298,6 @@ class ActiveTimeframeSyncScheduler:
                         continue
                     seen_zerodha_fetches.add(fetch_key)
 
-                    lookback = LOOKBACK
                     if fetch_timeframe != timeframe:
                         # A derived pair needs real underlying daily
                         # history before load_candles can produce a
@@ -246,45 +312,52 @@ class ActiveTimeframeSyncScheduler:
                             )
                         ).scalar_one()
                         if existing_daily_count < _MIN_DAILY_BARS_FOR_DERIVED_TIMEFRAME:
-                            lookback = _DAILY_BACKFILL_LOOKBACK
+                            start = now - _DAILY_BACKFILL_LOOKBACK
 
                     # Segment ("NFO" vs "NSE") comes straight from the
                     # instrument's own exchange -- correctly covers the
                     # index itself (NSE) and any NFO option/future alike.
                     bars = await zerodha_broker.get_historical_data(
-                        instrument.external_ref, fetch_timeframe, now - lookback, now, instrument.exchange
+                        instrument.external_ref, fetch_timeframe, start, now, instrument.exchange
                     )
                 else:
                     source = get_market_data_source(instrument.data_source)
-                    bars = await source.get_historical_data(instrument.external_ref, fetch_timeframe, now - LOOKBACK, now)
+                    bars = await source.get_historical_data(instrument.external_ref, fetch_timeframe, start, now)
             except (MarketDataSourceError, KiteAPIError):
                 continue
             except Exception:
                 logger.exception("Active timeframe sync failed for %s:%s", instrument.symbol, fetch_timeframe)
                 continue
+            bars = [bar for bar in bars if is_complete(bar["ts"], fetch_timeframe, now)]
             if not bars:
                 continue
 
+            bar_times = [as_aware_utc(bar["ts"]) for bar in bars]
             existing_result = await db.execute(
-                select(OhlcvCandle.ts).where(
-                    OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == fetch_timeframe
+                select(OhlcvCandle).where(
+                    OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == fetch_timeframe,
+                    OhlcvCandle.ts >= min(bar_times),
                 )
             )
-            existing_ts = {as_aware_utc(ts) for ts in existing_result.scalars().all()}
-            for bar in bars:
-                bar_ts = as_aware_utc(bar["ts"])
-                if bar_ts in existing_ts:
-                    continue
-                db.add(
-                    OhlcvCandle(
-                        instrument_id=instrument.id, timeframe=fetch_timeframe, ts=bar_ts,
-                        open=bar["open"], high=bar["high"], low=bar["low"], close=bar["close"],
-                        volume=bar.get("volume"), open_interest=bar.get("open_interest"),
-                        source=instrument.data_source,
+            existing = {as_aware_utc(c.ts): c for c in existing_result.scalars().all()}
+            for bar, bar_ts in zip(bars, bar_times):
+                values = {
+                    "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"],
+                    "volume": bar.get("volume"), "open_interest": bar.get("open_interest"),
+                }
+                candle = existing.get(bar_ts)
+                if candle is None:
+                    candle = OhlcvCandle(
+                        instrument_id=instrument.id, timeframe=fetch_timeframe, ts=bar_ts, source=instrument.data_source, **values,
                     )
-                )
-                existing_ts.add(bar_ts)
+                    db.add(candle)
+                    existing[bar_ts] = candle
+                else:
+                    for key, value in values.items():
+                        if value is not None:
+                            setattr(candle, key, value)
             await db.commit()
+            self._newest_fetched[(instrument.id, fetch_timeframe)] = max(bar_times)
             synced += 1
 
         if skipped_zerodha:

@@ -27,6 +27,7 @@ from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.broker.zerodha_broker import IST
+from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.hours import nse_market_open
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.native_runner import NativeContext
@@ -66,6 +67,12 @@ class BacktestNativeContext(NativeContext):
                 .limit(1)
             )
         ).scalar_one_or_none()
+
+    async def get_candles(self, instrument_id: uuid.UUID | str, timeframe: str, limit: int = 300) -> list[dict]:
+        """Candles finished as of the replayed `now` -- nothing to keep
+        fresh during a replay, so unlike the live context this doesn't
+        touch the background candle sync."""
+        return await load_closed_candles(self.db, uuid.UUID(str(instrument_id)), timeframe, limit, self.now)
 
     async def get_pcr(self, underlying_symbol: str = "NIFTY 50", num_expiries: int = 4, timeframe: str = "15m") -> float | None:
         return await compute_effective_pcr(

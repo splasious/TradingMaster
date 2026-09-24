@@ -13,7 +13,7 @@ from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperDeployment, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
-from app.services.market_data.active_timeframe_sync_scheduler import ActiveTimeframeSyncScheduler
+from app.services.market_data.active_timeframe_sync_scheduler import ActiveTimeframeSyncScheduler, note_native_candle_demand
 
 # A real, known NSE trading Thursday, well inside market hours (09:15-15:30
 # IST == 03:45-10:00 UTC) -- same reference point test_market_data_freshness.py
@@ -152,7 +152,10 @@ async def test_sync_fetches_the_timeframe_an_active_deployment_actually_uses(db_
     assert candles[0].close == 10.5
 
 
-async def test_sync_does_not_duplicate_existing_candles(db_session: AsyncSession, monkeypatch):
+async def test_sync_corrects_existing_candles_instead_of_duplicating(db_session: AsyncSession, monkeypatch):
+    """A stored candle is rewritten with the source's values, not skipped --
+    before, a candle first stored while still forming kept that partial
+    close forever."""
     instrument, _ = await _active_deployment(db_session, timeframe="15m")
     bar_ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     db_session.add(
@@ -177,7 +180,7 @@ async def test_sync_does_not_duplicate_existing_candles(db_session: AsyncSession
         )
     ).scalars().all()
     assert len(candles) == 1  # still just the one -- not duplicated
-    assert candles[0].close == 1  # untouched, not overwritten
+    assert candles[0].close == 10.5  # corrected to the source's value
 
 
 async def test_sync_ignores_instruments_with_no_active_deployment(db_session: AsyncSession, monkeypatch):
@@ -354,3 +357,107 @@ async def test_sync_dedupes_1wk_and_1mo_fetches_for_the_same_instrument(db_sessi
     synced = await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
     assert call_count["n"] == 1  # both "1wk" and "1mo" map to the same "1d" fetch -- only done once
     assert synced == 1
+
+
+async def _nse_equity(db: AsyncSession, symbol: str = "SOLARINDS") -> Instrument:
+    instrument = Instrument(exchange="NSE", symbol=symbol, name=symbol, instrument_type="equity", data_source="zerodha_kite", external_ref=symbol)
+    db.add(instrument)
+    await db.commit()
+    return instrument
+
+
+async def _stored_15m(db: AsyncSession, instrument: Instrument) -> list[OhlcvCandle]:
+    return list((
+        await db.execute(
+            select(OhlcvCandle).where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == "15m").order_by(OhlcvCandle.ts)
+        )
+    ).scalars().all())
+
+
+async def test_sync_never_stores_the_still_forming_candle(db_session: AsyncSession, monkeypatch):
+    """Kite returns the current candle too -- stored, it would keep its
+    close from whatever second the sync saw it."""
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="15m")
+    await _seed_connected_zerodha_account(db_session)
+    finished = ZERODHA_MARKET_OPEN_NOW - timedelta(minutes=20)  # 08:10-08:25 UTC, closed
+    forming = ZERODHA_MARKET_OPEN_NOW - timedelta(minutes=5)  # 08:25-08:40 UTC, still open
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        return [
+            {"ts": finished, "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 10},
+            {"ts": forming, "open": 100.5, "high": 100.5, "low": 100.5, "close": 100.5, "volume": 1},
+        ]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    await ActiveTimeframeSyncScheduler().sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
+
+    candles = await _stored_15m(db_session, instrument)
+    assert [c.ts.replace(tzinfo=timezone.utc) for c in candles] == [finished]
+
+
+async def test_sync_covers_pairs_a_native_strategy_reads(db_session: AsyncSession, monkeypatch):
+    """An Advanced deployment's stocks live only in its own state -- no
+    deployment row names them. ctx.get_candles() records them instead."""
+    instrument = await _nse_equity(db_session)
+    await _seed_connected_zerodha_account(db_session)
+    bar_ts = ZERODHA_MARKET_OPEN_NOW - timedelta(minutes=30)
+    captured = []
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        captured.append((symbol, timeframe, segment))
+        return [{"ts": bar_ts, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    assert await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW) == 0  # nobody's asked for it yet
+
+    note_native_candle_demand(instrument.id, "15m", ZERODHA_MARKET_OPEN_NOW)
+    assert await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW) == 1
+    assert captured == [("SOLARINDS", "15m", "NSE")]
+    assert len(await _stored_15m(db_session, instrument)) == 1
+
+    # A strategy that stops asking (stopped, or changed its watchlist) drops off.
+    later = ZERODHA_MARKET_OPEN_NOW + timedelta(hours=1)
+    assert await ActiveTimeframeSyncScheduler().sync(db_session, now=later) == 0
+
+
+async def test_sync_waits_for_the_next_candle_to_finish_before_fetching_again(db_session: AsyncSession, monkeypatch):
+    await _active_zerodha_deployment(db_session, timeframe="15m")
+    await _seed_connected_zerodha_account(db_session)
+    newest = ZERODHA_MARKET_OPEN_NOW - timedelta(minutes=15)  # 08:15-08:30 UTC, just closed
+    calls = {"n": 0}
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        calls["n"] += 1
+        return [{"ts": newest, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    scheduler = ActiveTimeframeSyncScheduler()
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=14))  # 08:30-08:45 still forming
+    assert calls["n"] == 1
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=15))  # now it's closed
+    assert calls["n"] == 2
+
+
+async def test_sync_catches_up_a_pair_that_fell_days_behind(db_session: AsyncSession, monkeypatch):
+    instrument, _ = await _active_zerodha_deployment(db_session, timeframe="15m")
+    await _seed_connected_zerodha_account(db_session)
+    last_stored = ZERODHA_MARKET_OPEN_NOW - timedelta(days=6)
+    db_session.add(OhlcvCandle(
+        instrument_id=instrument.id, timeframe="15m", ts=last_stored, open=1, high=1, low=1, close=1, volume=1, source="zerodha_kite",
+    ))
+    await db_session.commit()
+    captured = {}
+
+    async def fake_get_historical_data(self, symbol, timeframe, start, end, segment="NSE"):
+        captured["start"] = start
+        return []
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
+
+    await ActiveTimeframeSyncScheduler().sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
+    assert captured["start"] <= last_stored  # the whole gap, not just the last 2 days
