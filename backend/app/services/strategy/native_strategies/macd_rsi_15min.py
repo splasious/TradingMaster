@@ -11,15 +11,17 @@ live, tick-by-tick equivalent: same signal logic, but incrementally
 evaluated each tick against real candles, with real (paper) fills via
 ctx.open_leg/close_leg.
 
-Signal (unchanged from the original, confirmed intentional -- zero-cross
-of the MACD SIGNAL line, not the more common MACD-vs-signal crossover):
-  MACD   = EMA(close, FAST) - EMA(close, SLOW)
-  signal = EMA(MACD, SIGNAL_SPAN)
-  buy  = signal crosses from <0 to >0   (entry-eligible from here until sell)
-  sell = signal crosses from >0 to <0   (exit)
+Signal -- zero-cross of the MACD LINE itself:
+  MACD = EMA(close, FAST) - EMA(close, SLOW)
+  buy  = MACD crosses from <0 to >0   (entry-eligible from here until sell)
+  sell = MACD crosses from >0 to <0   (exit)
+The MACD signal line (an EMA of MACD) isn't used at all. Until 25-Sep-2026
+this strategy traded the signal line's zero-cross instead; the MACD line is
+the faster of the two, so it crosses zero earlier -- earlier entries and
+exits, and somewhat more trades in choppy markets.
 RSI(14) uses Wilder's smoothing, same as the original's rsi14().
 
-Ranking / sizing: among symbols currently in a "buy-eligible" state (signal
+Ranking / sizing: among symbols currently in a "buy-eligible" state (MACD
 zero-crossed positive and hasn't sold since), rank by RSI descending and
 fill up to MAX_POSITIONS slots, equal-weighted at 1/MAX_POSITIONS of this
 strategy's own tracked equity (cash + mark-to-market of current holdings)
@@ -33,7 +35,7 @@ some watchlist symbol. On the very first evaluation after deployment
 (nothing held yet, and this deployment has never seeded before), every
 open slot is filled immediately with the MAX_POSITIONS highest-RSI
 watchlist symbols that have enough history to rank -- regardless of
-whether each one's own MACD signal is currently in a fresh buy-crossed
+whether each one's own MACD line is currently in a fresh buy-crossed
 state. This fires at most once per deployment (ctx.state["seeded"]
 latches True right after the attempt, even if fewer than MAX_POSITIONS
 symbols had enough history to seed with that tick). Every entry after
@@ -44,12 +46,12 @@ Revised 24-Sep-2026 -- why SOLARINDS was never sold:
   - Exits used to fire only when the down-cross was the NEWEST stored
     candle at the moment a tick looked (sell.iloc[-1]). Miss that one
     moment -- a restart, candles arriving late or several at once -- and
-    the position was kept until the signal crossed up and back down again.
-    A holding now exits whenever the signal's latest zero-cross is a
+    the position was kept until the MACD crossed up and back down again.
+    A holding now exits whenever the MACD's latest zero-cross is a
     down-cross on a candle that closed AFTER it was bought, so a missed
-    moment is caught on the next tick (at the price then). If the signal
+    moment is caught on the next tick (at the price then). If the MACD
     has already crossed back up since, it's held on rather than sold and
-    bought straight back. A seeded holding bought while the signal was
+    bought straight back. A seeded holding bought while the MACD was
     already below zero still waits for the next down-cross, as before.
   - Candles come from ctx.get_candles(): finished candles only (a candle
     still forming could cross and un-cross), and asking for them keeps
@@ -70,10 +72,10 @@ Differences from the original research script, deliberately:
     rank, is listed under "not found" / "insufficient history" in the Last
     Signal reason instead of failing the tick.
 
-FAST/SLOW/SIGNAL_SPAN are kept at the strategy's original 12/26/9. A sweep
-across FAST=8..20 on the available real Zerodha history found 9 and 14
-also performed at least as well (see macd_rsi_15min_fast_sweep_results.csv)
--- change FAST below if you want to switch; nothing else needs to change.
+FAST/SLOW are kept at the strategy's original 12/26. An earlier sweep
+across FAST=8..20 found 9 and 14 at least as strong (see
+macd_rsi_15min_fast_sweep_results.csv), but that sweep ran on the
+signal-line rule -- re-run it before changing FAST for the MACD-line rule.
 """
 
 import uuid
@@ -96,7 +98,7 @@ TIMEFRAME = "15m"
 BAR_LENGTH = timedelta(minutes=15)
 MAX_POSITIONS = 5
 
-FAST, SLOW, SIGNAL_SPAN = 12, 26, 9  # sweep found 9 and 14 also strong on available real data -- see module docstring
+FAST, SLOW = 12, 26  # see module docstring before changing FAST
 RSI_PERIOD = 14
 MIN_BARS = 151  # the original script's own warm-up minimum
 HISTORY_BARS = 300  # ample warm-up beyond MIN_BARS
@@ -119,8 +121,8 @@ def _rsi(c: pd.Series) -> pd.Series:
 
 
 def compute_signal(bars: list[dict]) -> dict | None:
-    """Latest signal state from finished candles, oldest -> newest (each a
-    dict with "ts" -- when the candle opened -- and "close"). None if there
+    """Latest MACD-line state from finished candles, oldest -> newest (each
+    a dict with "ts" -- when the candle opened -- and "close"). None if there
     isn't enough history yet.
 
     `last_sell_at` is when the most recent down-cross candle closed (None if
@@ -131,9 +133,8 @@ def compute_signal(bars: list[dict]) -> dict | None:
         return None
     c = pd.Series([bar["close"] for bar in bars])
     macd = c.ewm(span=FAST, adjust=False, min_periods=FAST).mean() - c.ewm(span=SLOW, adjust=False, min_periods=SLOW).mean()
-    signal = macd.ewm(span=SIGNAL_SPAN, adjust=False, min_periods=SIGNAL_SPAN).mean()
-    buy = (signal.shift() < 0) & (signal > 0)
-    sell = (signal.shift() > 0) & (signal < 0)
+    buy = (macd.shift() < 0) & (macd > 0)
+    sell = (macd.shift() > 0) & (macd < 0)
     active = pd.Series(np.where(buy, 1.0, np.where(sell, 0.0, np.nan))).ffill().fillna(0).eq(1)
     rsi = _rsi(c)
     latest_rsi = rsi.iloc[-1]
@@ -190,10 +191,10 @@ async def evaluate(ctx) -> None:
                 "instrument_id": leg["instrument_id"], "side": "long", "quantity": leg["quantity"],
                 "entry_price": leg["entry_price"], "exit_price": price,
             }],
-            pnl=pnl, pnl_pct=pnl_pct, exit_reason="macd_signal_zero_cross_down",
+            pnl=pnl, pnl_pct=pnl_pct, exit_reason="macd_zero_cross_down",
             opened_at=datetime.fromisoformat(leg["opened_at"]),
         )
-        sold.append(f"{symbol} (signal < 0 at {sig['last_sell_at'].astimezone(IST):%d-%b %H:%M})")
+        sold.append(f"{symbol} (MACD < 0 at {sig['last_sell_at'].astimezone(IST):%d-%b %H:%M})")
 
     # --- Fixed decision-time equity: cash plus mark-to-market of whatever
     # is still held after the exits above -- same convention the original
@@ -205,7 +206,7 @@ async def evaluate(ctx) -> None:
 
     # --- Entries: buy-eligible symbols, RSI-ranked, up to MAX_POSITIONS. ----
     # On the very first evaluation after deployment (nothing held yet, and
-    # this deployment has never seeded before), skip the "signal must be
+    # this deployment has never seeded before), skip the "MACD must be
     # freshly active" requirement and just fill every slot with the
     # MAX_POSITIONS highest-RSI watchlist symbols -- see module docstring.
     # Latches permanently after this one attempt so it never re-fires,

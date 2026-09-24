@@ -1,5 +1,5 @@
 """MACD - RSI - 15 MIN (native_strategies/macd_rsi_15min.py). The case that
-matters: SOLARINDS's signal line crossed below zero while held, but by the
+matters: SOLARINDS's MACD line crossed below zero while held, but by the
 time a tick looked, the cross was no longer the newest candle -- the old
 exit rule (only the newest candle counts) kept the stock indefinitely and
 so never freed the slot for a replacement."""
@@ -32,7 +32,7 @@ def _wave(n: int) -> list[float]:
 
 
 def _down_cross_indices(closes: list[float]) -> list[int]:
-    """Bar indices where the signal line crosses below zero -- EMAs are
+    """Bar indices where the MACD line crosses below zero -- EMAs are
     causal, so evaluating each prefix gives the same crosses the full
     series has."""
     return [i for i in range(MIN_BARS - 1, len(closes)) if compute_signal(_bars(closes[: i + 1]))["sell"]]
@@ -57,6 +57,22 @@ def test_last_sell_at_is_the_close_of_the_latest_down_cross_candle():
     assert sig["sell"] is False
     assert sig["active"] is False
     assert sig["last_sell_at"] == START + (cross + 1) * BAR_LENGTH
+
+
+def test_trades_the_macd_line_zero_cross_not_the_signal_line():
+    """Entries and exits follow the MACD line (EMA12 - EMA26) crossing zero.
+    The signal line (EMA9 of MACD) lags it, so its cross comes later."""
+    import pandas as pd
+
+    closes = _wave(300)
+    c = pd.Series(closes)
+    macd = c.ewm(span=12, adjust=False, min_periods=12).mean() - c.ewm(span=26, adjust=False, min_periods=26).mean()
+    signal_line = macd.ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_down = [i for i in range(MIN_BARS - 1, 300) if macd[i - 1] > 0 > macd[i]]
+    signal_down = [i for i in range(MIN_BARS - 1, 300) if signal_line[i - 1] > 0 > signal_line[i]]
+
+    assert _down_cross_indices(closes) == macd_down
+    assert signal_down[0] > macd_down[0]  # the signal line would have sold later
 
 
 def test_not_enough_history():
@@ -134,11 +150,11 @@ async def test_missed_down_cross_still_exits_and_frees_the_slot(db_session: Asyn
     assert "bought: SBIN" in ctx._last_reason
     await db_session.commit()
     trade = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == deployment.id))).scalar_one()
-    assert trade.exit_reason == "macd_signal_zero_cross_down"
+    assert trade.exit_reason == "macd_zero_cross_down"
 
 
 async def test_holding_bought_after_the_down_cross_is_kept(db_session: AsyncSession):
-    """A seeded holding bought while the signal was already below zero waits
+    """A seeded holding bought while the MACD was already below zero waits
     for the next down-cross -- the one before it was bought doesn't count."""
     _, cross = _solarinds_closes()
     opened_after_cross = START + (cross + 2) * BAR_LENGTH
@@ -151,7 +167,7 @@ async def test_holding_bought_after_the_down_cross_is_kept(db_session: AsyncSess
     assert "SBIN" not in ctx.state["holdings"]  # still 5/5, no slot to fill
 
 
-async def test_holding_is_kept_when_the_signal_already_crossed_back_up(db_session: AsyncSession, monkeypatch):
+async def test_holding_is_kept_when_the_macd_already_crossed_back_up(db_session: AsyncSession, monkeypatch):
     """Down-cross after entry, then back above zero before a tick saw it:
     hold on, rather than sell and buy the same stock straight back."""
     import tests.test_macd_rsi_15min as this
