@@ -436,10 +436,13 @@ async def test_sync_waits_for_the_next_candle_to_finish_before_fetching_again(db
     monkeypatch.setattr(ZerodhaKiteBroker, "get_historical_data", fake_get_historical_data)
 
     scheduler = ActiveTimeframeSyncScheduler()
-    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW)
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(seconds=10))  # 08:15 candle closed and settled
+    assert calls["n"] == 1
     await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=14))  # 08:30-08:45 still forming
     assert calls["n"] == 1
-    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=15))  # now it's closed
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=15, seconds=5))  # closed, not settled
+    assert calls["n"] == 1
+    await scheduler.sync(db_session, now=ZERODHA_MARKET_OPEN_NOW + timedelta(minutes=15, seconds=10))  # final now
     assert calls["n"] == 2
 
 

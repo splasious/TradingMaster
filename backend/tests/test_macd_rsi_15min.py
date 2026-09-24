@@ -223,3 +223,30 @@ async def test_repeated_ticks_sell_once_and_buy_the_replacement_once(db_engine, 
     sbin = saved.state["holdings"]["SBIN"]
     solarinds_exit = trades[0].legs[0]["exit_price"]
     assert cash_after == cash_before + 100 * solarinds_exit - sbin["quantity"] * sbin["entry_price"]
+
+
+async def test_a_cross_on_the_forming_candle_trades_only_once_that_candle_completes(db_session: AsyncSession, monkeypatch):
+    """The crossover candle is stored while still forming: nothing happens
+    until it closes, then the exit goes through on the next check -- at
+    the start of the following candle."""
+    import tests.test_macd_rsi_15min as this
+
+    wave = _wave(300)
+    cross = _down_cross_indices(wave)[-1]
+    closes = wave[: cross + 1]  # the down-cross candle is the newest stored one
+    monkeypatch.setattr(this, "_solarinds_closes", lambda: (closes, cross))
+    ctx, deployment, _ = await _setup(db_session, START + (cross - 20) * BAR_LENGTH)
+    cross_opens = START + cross * BAR_LENGTH
+
+    ctx.now = cross_opens + timedelta(minutes=10)  # 5 minutes before the crossover candle closes
+    await evaluate(ctx)
+    assert "SOLARINDS" in ctx.state["holdings"]
+    assert "sold" not in ctx._last_reason
+
+    next_check = NativeContext(
+        db=db_session, portfolio=ctx.portfolio, deployment=deployment, state=ctx.state,
+        now=cross_opens + BAR_LENGTH + timedelta(seconds=10),  # 10s into the next candle
+    )
+    await evaluate(next_check)
+    assert "SOLARINDS" not in next_check.state["holdings"]
+    assert "sold: SOLARINDS" in next_check._last_reason

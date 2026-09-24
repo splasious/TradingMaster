@@ -87,6 +87,9 @@ _MIN_DAILY_BARS_FOR_DERIVED_TIMEFRAME = 90
 # fetch, in bars -- ~10 calendar days of 15m, well inside Kite's and
 # Delta's per-request limits for every intraday interval.
 _MAX_CATCH_UP_BARS = 1000
+# A candle only counts as finished this long after its period ends -- Kite
+# can take a few seconds to fold a just-closed candle's last trades in.
+_SETTLE = timedelta(seconds=10)
 
 # (instrument_id, timeframe) -> when a native strategy last read it. Native
 # strategies are evaluated every ~10s while the market is open, so a pair
@@ -267,7 +270,7 @@ class ActiveTimeframeSyncScheduler:
             if fetch_timeframe in INTRADAY_TIMEFRAMES:
                 duration = BAR_DURATIONS[fetch_timeframe]
                 newest = self._newest_fetched.get((instrument.id, fetch_timeframe))
-                if newest is not None and now < newest + 2 * duration:
+                if newest is not None and now < newest + 2 * duration + _SETTLE:
                     # The candle after the newest one already fetched
                     # hasn't finished yet -- nothing new to fetch.
                     continue
@@ -328,7 +331,7 @@ class ActiveTimeframeSyncScheduler:
             except Exception:
                 logger.exception("Active timeframe sync failed for %s:%s", instrument.symbol, fetch_timeframe)
                 continue
-            bars = [bar for bar in bars if is_complete(bar["ts"], fetch_timeframe, now)]
+            bars = [bar for bar in bars if is_complete(bar["ts"], fetch_timeframe, now - _SETTLE)]
             if not bars:
                 continue
 
