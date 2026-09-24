@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Download, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Download, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
@@ -1763,7 +1763,11 @@ function SummaryField({ label, children }: { label: string; children: React.Reac
   );
 }
 
-function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: NativeDeploymentOut; soloPortfolio?: PaperPortfolioOut }) {
+function NativeDeploymentCard({
+  deployment, soloPortfolio, onMoveUp, onMoveDown,
+}: {
+  deployment: NativeDeploymentOut; soloPortfolio?: PaperPortfolioOut; onMoveUp?: () => void; onMoveDown?: () => void;
+}) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
@@ -1859,6 +1863,16 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
+          {(onMoveUp || onMoveDown) && (
+            <div className="-ml-1.5 flex" role="group" aria-label={`Position of ${deployment.strategy_name}`}>
+              <MoveButton label="Move up" onClick={onMoveUp}>
+                <ArrowUp className="h-3.5 w-3.5" />
+              </MoveButton>
+              <MoveButton label="Move down" onClick={onMoveDown}>
+                <ArrowDown className="h-3.5 w-3.5" />
+              </MoveButton>
+            </div>
+          )}
           <CardTitle>{deployment.strategy_name}</CardTitle>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
           {runningVersion != null && (
@@ -2052,6 +2066,23 @@ function soloNativePortfolioIds(
   return new Set(nativeDeployments.filter((d) => counts.get(d.portfolio_id) === 1).map((d) => d.portfolio_id));
 }
 
+/** One of the up/down arrows that reorder the deployment cards -- disabled
+ * (no handler) on the top card's up and the bottom card's down. */
+function MoveButton({ label, onClick, children }: { label: string; onClick?: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      aria-label={label}
+      title={label}
+      className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary hover:bg-surface-elevated hover:text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-active disabled:pointer-events-none disabled:opacity-30"
+    >
+      {children}
+    </button>
+  );
+}
+
 function NativeDeploymentsPanel({
   onStart,
   portfolios,
@@ -2061,9 +2092,35 @@ function NativeDeploymentsPanel({
   portfolios: PaperPortfolioOut[];
   regularDeployments: PaperDeploymentOut[];
 }) {
+  const queryClient = useQueryClient();
   const { data: deployments, isLoading } = useNativeDeployments();
   const soloIds = soloNativePortfolioIds(regularDeployments, deployments ?? []);
   const portfolioById = new Map(portfolios.map((p) => [p.id, p]));
+
+  // The owner's card order, saved to their account. Shown straight away;
+  // put back as it was if the save fails.
+  const reorderMutation = useMutation({
+    mutationFn: (ids: string[]) =>
+      apiFetch("/api/v1/paper-trading/native-deployments/order", { method: "PUT", body: JSON.stringify({ deployment_ids: ids }) }),
+    onMutate: async (ids) => {
+      await queryClient.cancelQueries({ queryKey: ["native-deployments"] });
+      const previous = queryClient.getQueryData<NativeDeploymentOut[]>(["native-deployments"]);
+      if (previous) {
+        const byId = new Map(previous.map((d) => [d.id, d]));
+        queryClient.setQueryData(["native-deployments"], ids.flatMap((id) => byId.get(id) ?? []));
+      }
+      return { previous };
+    },
+    onError: (_error, _ids, context) => {
+      if (context?.previous) queryClient.setQueryData(["native-deployments"], context.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+  });
+  const move = (index: number, step: -1 | 1) => {
+    const ids = (deployments ?? []).map((d) => d.id);
+    [ids[index], ids[index + step]] = [ids[index + step], ids[index]];
+    reorderMutation.mutate(ids);
+  };
 
   return (
     <div className="space-y-3">
@@ -2092,8 +2149,14 @@ function NativeDeploymentsPanel({
           </CardContent>
         </Card>
       ) : (
-        deployments.map((d) => (
-          <NativeDeploymentCard key={d.id} deployment={d} soloPortfolio={soloIds.has(d.portfolio_id) ? portfolioById.get(d.portfolio_id) : undefined} />
+        deployments.map((d, i) => (
+          <NativeDeploymentCard
+            key={d.id}
+            deployment={d}
+            soloPortfolio={soloIds.has(d.portfolio_id) ? portfolioById.get(d.portfolio_id) : undefined}
+            onMoveUp={deployments.length > 1 && i > 0 ? () => move(i, -1) : undefined}
+            onMoveDown={deployments.length > 1 && i < deployments.length - 1 ? () => move(i, 1) : undefined}
+          />
         ))
       )}
     </div>

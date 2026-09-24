@@ -500,3 +500,48 @@ async def test_deployment_switches_to_latest_saved_version_keeping_its_state(cli
 
     again = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/use-latest-version", headers=headers)
     assert again.status_code == 409
+
+
+async def test_owner_can_reorder_their_deployment_cards(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    from sqlalchemy import select
+
+    from app.core.security import hash_password
+    from app.models.user import Role, User, UserRole
+
+    headers = {"Authorization": f"Bearer {await _login(client, seeded_admin['email'], seeded_admin['password'])}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+
+    async def deploy(name: str) -> str:
+        strategy_id = await _create_native_strategy(client, headers, name=name)
+        resp = await client.post(
+            "/api/v1/paper-trading/native-deployments", json={"strategy_id": strategy_id, "portfolio_id": portfolio_id}, headers=headers,
+        )
+        return resp.json()["id"]
+
+    async def listed() -> list[str]:
+        return [d["id"] for d in (await client.get("/api/v1/paper-trading/native-deployments", headers=headers)).json()]
+
+    a, b, c = await deploy("Order A"), await deploy("Order B"), await deploy("Order C")
+
+    resp = await client.put("/api/v1/paper-trading/native-deployments/order", json={"deployment_ids": [c, a, b]}, headers=headers)
+    assert resp.status_code == 204
+    assert await listed() == [c, a, b]
+
+    # Moving one card: the page sends the whole list in its new order.
+    await client.put("/api/v1/paper-trading/native-deployments/order", json={"deployment_ids": [c, b, a]}, headers=headers)
+    assert await listed() == [c, b, a]
+
+    # A deployment started after the cards were arranged shows up on top.
+    d = await deploy("Order D")
+    assert await listed() == [d, c, b, a]
+
+    # Someone else's ids are ignored -- they can't rearrange another user's cards.
+    trader_role = (await db_session.execute(select(Role).where(Role.name == "trader"))).scalar_one()
+    other = User(email="order-other@tradingmaster.internal", hashed_password=hash_password("OtherPass123!"), full_name="Other")
+    other.user_roles = [UserRole(role=trader_role)]
+    db_session.add(other)
+    await db_session.commit()
+    other_headers = {"Authorization": f"Bearer {await _login(client, 'order-other@tradingmaster.internal', 'OtherPass123!')}"}
+    resp = await client.put("/api/v1/paper-trading/native-deployments/order", json={"deployment_ids": [a, b, c, d]}, headers=other_headers)
+    assert resp.status_code == 204
+    assert await listed() == [d, c, b, a]

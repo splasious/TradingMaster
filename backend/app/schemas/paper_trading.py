@@ -107,6 +107,13 @@ class NativeDeploymentCreate(BaseModel):
     # picks its own instrument(s) live (see native_runner.py).
 
 
+class NativeDeploymentOrderIn(BaseModel):
+    """The owner's deployments, top to bottom, as shown on the Paper
+    Trading page."""
+
+    deployment_ids: list[str] = Field(max_length=500)
+
+
 class NativeLegOut(BaseModel):
     instrument_symbol: str
     strike: float | None

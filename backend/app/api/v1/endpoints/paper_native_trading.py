@@ -14,6 +14,7 @@ from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.schemas.paper_trading import (
     NativeDeploymentCreate,
+    NativeDeploymentOrderIn,
     NativeDeploymentOut,
     NativeEvaluationOut,
     NativeHoldingOut,
@@ -270,9 +271,39 @@ async def list_native_deployments(db: AsyncSession = Depends(get_db), user: User
         select(PaperNativeDeployment)
         .join(PaperPortfolio, PaperNativeDeployment.portfolio_id == PaperPortfolio.id)
         .where(PaperPortfolio.user_id == user.id)
-        .order_by(PaperNativeDeployment.created_at.desc())
+        .order_by(
+            PaperNativeDeployment.display_order.is_not(None), PaperNativeDeployment.display_order,
+            PaperNativeDeployment.created_at.desc(),
+        )
     )
     return await _deployment_outs_batch(db, list(result.scalars().all()))
+
+
+@router.put("/native-deployments/order", status_code=status.HTTP_204_NO_CONTENT)
+async def reorder_native_deployments(
+    payload: NativeDeploymentOrderIn, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> None:
+    """Saves the order the owner arranged their deployment cards in (the
+    up/down arrows on each card). Ids that aren't the caller's own are
+    ignored rather than rejected, so a list that raced a delete still saves."""
+    ids = []
+    for raw in payload.deployment_ids:
+        try:
+            ids.append(uuid.UUID(raw))
+        except ValueError:
+            continue
+    owned = {
+        d.id: d for d in (
+            await db.execute(
+                select(PaperNativeDeployment)
+                .join(PaperPortfolio, PaperNativeDeployment.portfolio_id == PaperPortfolio.id)
+                .where(PaperPortfolio.user_id == user.id, PaperNativeDeployment.id.in_(ids))
+            )
+        ).scalars()
+    }
+    for position, deployment_id in enumerate(i for i in ids if i in owned):
+        owned[deployment_id].display_order = position
+    await db.commit()
 
 
 @router.post("/native-deployments/{deployment_id}/stop", response_model=NativeDeploymentOut)
