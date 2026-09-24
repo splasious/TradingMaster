@@ -1829,6 +1829,14 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
   });
 
+  const switchVersionMutation = useMutation({
+    mutationFn: () => apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}/use-latest-version`, { method: "POST" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+  });
+  const runningVersion = deployment.version_number;
+  const latestVersion = deployment.latest_version_number;
+  const hasNewerVersion = runningVersion != null && latestVersion != null && latestVersion > runningVersion;
+
   const lastSignalText = lastEval ? (
     <span className={lastEval.action === "error" ? "text-negative" : ""} title={lastEval.reason ?? undefined}>
       {lastEval.action}
@@ -1853,6 +1861,11 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
         <div className="flex items-center gap-2">
           <CardTitle>{deployment.strategy_name}</CardTitle>
           <Badge tone={deployment.status === "active" ? "positive" : "inactive"}>{deployment.status}</Badge>
+          {runningVersion != null && (
+            <span className="text-xs text-text-muted" title="The strategy version this deployment runs">
+              v{runningVersion}
+            </span>
+          )}
         </div>
         <div className="flex gap-1">
           {deployment.status === "active" ? (
@@ -1891,6 +1904,22 @@ function NativeDeploymentCard({ deployment, soloPortfolio }: { deployment: Nativ
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {hasNewerVersion && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-warning-soft px-3 py-2 text-xs text-warning">
+            <span>
+              Running v{runningVersion} -- v{latestVersion} has been saved since. Saving doesn&apos;t change a deployment&apos;s
+              code (Restart keeps v{runningVersion} too). Switching keeps its current holdings.
+            </span>
+            <Button variant="secondary" size="sm" onClick={() => switchVersionMutation.mutate()} disabled={switchVersionMutation.isPending}>
+              {switchVersionMutation.isPending ? "Switching..." : `Switch to v${latestVersion}`}
+            </Button>
+            {switchVersionMutation.error && (
+              <span className="w-full text-negative">
+                {switchVersionMutation.error instanceof ApiError ? switchVersionMutation.error.message : "Failed to switch version"}
+              </span>
+            )}
+          </div>
+        )}
         {soloPortfolio && (
           // This pool backs no other deployment, so its equity/cash/P&L IS
           // this strategy's own -- folded in here instead of a separate

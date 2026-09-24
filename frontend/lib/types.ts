@@ -307,6 +307,10 @@ export interface NativeDeploymentOut {
   state: Record<string, unknown> | null;
   position: NativePositionOut | null;
   holdings: NativeHoldingOut[] | null;
+  /** The strategy version this deployment runs, and the newest saved one --
+   * saving new code doesn't change what a running deployment executes. */
+  version_number: number | null;
+  latest_version_number: number | null;
   created_at: string;
   stopped_at: string | null;
 }

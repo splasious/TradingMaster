@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_role
@@ -171,17 +171,7 @@ async def _get_owned_native_deployment(db: AsyncSession, user: User, deployment_
 
 
 async def _deployment_out(db: AsyncSession, deployment: PaperNativeDeployment) -> NativeDeploymentOut:
-    strategy = await db.get(Strategy, deployment.strategy_id)
-    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    position = await _build_position_out(db, deployment.state)
-    holdings = await _build_holdings_out(db, deployment.state)
-    return NativeDeploymentOut(
-        id=str(deployment.id), strategy_id=str(deployment.strategy_id), strategy_name=strategy.name,
-        portfolio_id=str(portfolio.id), portfolio_name=portfolio.name, currency=portfolio.currency,
-        status=deployment.status, last_evaluated_at=deployment.last_evaluated_at,
-        last_signal=deployment.last_signal, last_signal_reason=deployment.last_signal_reason,
-        state=deployment.state, position=position, holdings=holdings, created_at=deployment.created_at, stopped_at=deployment.stopped_at,
-    )
+    return (await _deployment_outs_batch(db, [deployment]))[0]
 
 
 async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNativeDeployment]) -> list[NativeDeploymentOut]:
@@ -191,6 +181,19 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     portfolio_ids = {d.portfolio_id for d in deployments}
     strategies = {s.id: s for s in (await db.execute(select(Strategy).where(Strategy.id.in_(strategy_ids)))).scalars()}
     portfolios = {p.id: p for p in (await db.execute(select(PaperPortfolio).where(PaperPortfolio.id.in_(portfolio_ids)))).scalars()}
+    running_versions = dict(
+        (await db.execute(
+            select(StrategyVersion.id, StrategyVersion.version_number)
+            .where(StrategyVersion.id.in_({d.strategy_version_id for d in deployments}))
+        )).all()
+    )
+    latest_versions = dict(
+        (await db.execute(
+            select(StrategyVersion.strategy_id, func.max(StrategyVersion.version_number))
+            .where(StrategyVersion.strategy_id.in_(strategy_ids))
+            .group_by(StrategyVersion.strategy_id)
+        )).all()
+    )
     out: list[NativeDeploymentOut] = []
     for d in deployments:
         position = await _build_position_out(db, d.state)
@@ -201,7 +204,8 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
                 portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
                 currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
-                position=position, holdings=holdings, created_at=d.created_at, stopped_at=d.stopped_at,
+                position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
+                latest_version_number=latest_versions.get(d.strategy_id), created_at=d.created_at, stopped_at=d.stopped_at,
             )
         )
     return out
@@ -290,6 +294,35 @@ async def restart_native_deployment(deployment_id: str, db: AsyncSession = Depen
     deployment.status = DeploymentStatus.ACTIVE.value
     deployment.stopped_at = None
     await write_audit_log(db, user_id=user.id, action="PAPER_NATIVE_TRADING_RESTARTED", object_type="paper_native_deployment", object_id=str(deployment.id))
+    await db.commit()
+    await db.refresh(deployment)
+    return await _deployment_out(db, deployment)
+
+
+@router.post("/native-deployments/{deployment_id}/use-latest-version", response_model=NativeDeploymentOut)
+async def use_latest_strategy_version(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> NativeDeploymentOut:
+    """Moves a deployment onto its strategy's newest saved version, keeping
+    its state -- holdings, open position, "seeded" and so on -- so the new
+    code carries on from where the old code left off at its next tick.
+    Otherwise a deployment runs the version it was started with for good:
+    saving in the Strategy Builder only adds a version, and Restart keeps
+    the old one. The new code has to understand the state the old code
+    left behind (same keys, same shapes)."""
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    latest = (
+        await db.execute(
+            select(StrategyVersion).where(StrategyVersion.strategy_id == deployment.strategy_id)
+            .order_by(StrategyVersion.version_number.desc()).limit(1)
+        )
+    ).scalar_one()
+    if latest.id == deployment.strategy_version_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already running the latest version.")
+    previous = await db.get(StrategyVersion, deployment.strategy_version_id)
+    deployment.strategy_version_id = latest.id
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_NATIVE_VERSION_UPDATED", object_type="paper_native_deployment", object_id=str(deployment.id),
+        previous_value={"version_number": previous.version_number if previous else None}, new_value={"version_number": latest.version_number},
+    )
     await db.commit()
     await db.refresh(deployment)
     return await _deployment_out(db, deployment)

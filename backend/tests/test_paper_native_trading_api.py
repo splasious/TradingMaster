@@ -457,3 +457,46 @@ async def test_native_trades_endpoint_enriches_legs_with_instrument_symbol(clien
     leg = trades_resp.json()[0]["legs"][0]
     assert leg["instrument_symbol"] == "CENTURYTEX"
     assert leg["instrument_id"] == instrument_id
+
+
+async def test_deployment_switches_to_latest_saved_version_keeping_its_state(client: AsyncClient, seeded_admin: dict):
+    """Saving new code adds a strategy version; a running deployment keeps
+    the version it was started with (Restart included) until switched --
+    and switching keeps its holdings, so the new code carries on from them."""
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    portfolio_id = await _default_portfolio_id(client, headers)
+    v1_code = (
+        "async def evaluate(ctx):\n"
+        "    ctx.state.setdefault('basket', ['SOLARINDS'])\n"
+        "    ctx.note('hold', signal='V1')\n"
+    )
+    v2_code = (
+        "async def evaluate(ctx):\n"
+        "    ctx.note('hold', signal='V2', reason='holding ' + ','.join(ctx.state['basket']))\n"
+    )
+    strategy_id = (await client.post(
+        "/api/v1/strategies", json={"name": "Versioned Native", "version": {"python_code": v1_code, "is_native": True}}, headers=headers,
+    )).json()["id"]
+    deployment_id = (await client.post(
+        "/api/v1/paper-trading/native-deployments", json={"strategy_id": strategy_id, "portfolio_id": portfolio_id}, headers=headers,
+    )).json()["id"]
+    await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+
+    save = await client.post(f"/api/v1/strategies/{strategy_id}/versions", json={"python_code": v2_code, "is_native": True}, headers=headers)
+    assert save.status_code == 200, save.text
+
+    deployment = next(d for d in (await client.get("/api/v1/paper-trading/native-deployments", headers=headers)).json() if d["id"] == deployment_id)
+    assert (deployment["version_number"], deployment["latest_version_number"]) == (1, 2)
+    evaluated = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+    assert evaluated.json()["signal"] == "V1"  # saving alone changes nothing that's running
+
+    switched = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/use-latest-version", headers=headers)
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["version_number"] == 2
+    evaluated = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)
+    assert evaluated.json()["signal"] == "V2"
+    assert evaluated.json()["reason"] == "holding SOLARINDS"  # v1's state carried over
+
+    again = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/use-latest-version", headers=headers)
+    assert again.status_code == 409

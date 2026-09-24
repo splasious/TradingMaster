@@ -178,6 +178,11 @@ class NativeDeploymentOut(BaseModel):
     # its own opened_at and strategy metrics; side is always "long" here,
     # strike/option_type stay None -- equities have neither).
     holdings: list[NativeHoldingOut] | None = None
+    # The strategy version this deployment runs, and the strategy's newest
+    # saved one -- saving in the Strategy Builder adds a version without
+    # changing what a running deployment executes.
+    version_number: int | None = None
+    latest_version_number: int | None = None
     created_at: datetime
     stopped_at: datetime | None
 
