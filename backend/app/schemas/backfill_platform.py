@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SourceStatusOut(BaseModel):
@@ -184,7 +184,15 @@ class BfScheduleIn(BaseModel):
     auto_topup_zerodha_nfo: bool
     delta_enabled: bool
     topup_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    live_start: str = Field("09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    live_end: str = Field("15:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     topup_timeframes: list[Literal["1m", "5m", "15m", "30m", "60m", "1d"]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _live_window_in_order(self) -> "BfScheduleIn":
+        if self.live_start >= self.live_end:
+            raise ValueError("Live data must start before it ends")
+        return self
 
 
 class BfTopupIn(BaseModel):

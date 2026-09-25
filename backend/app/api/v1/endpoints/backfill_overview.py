@@ -47,6 +47,7 @@ async def get_freshness(db: AsyncSession = Depends(get_db), _: User = Depends(ge
         "zerodha_login": o["zerodha_login"],
         "queue": {"state": o["queue"]["state"], "percent": (o["queue"]["run"] or {}).get("percent")},
         "next_run_at": o["schedule"]["next_run_at"],
+        "live_window": {"start": o["schedule"]["live_start"], "end": o["schedule"]["live_end"]},
         "delta_paused": not o["schedule"]["delta_enabled"],
         "symbols": {"zerodha": nse["symbols"], "zerodha_nfo": nfo["symbols"]},
     }

@@ -7,7 +7,8 @@
 - bf_coverage: saved-up-to watermark per symbol and timeframe, filled in
   the background after startup (see coverage.py) -- building it here
   would scan 20M bars inside the deploy's startup.
-- bf_settings: the schedule, as one row; Delta Exchange starts paused.
+- bf_settings: the schedule, as one row -- the 16:15 IST top-up and the
+  09:00-15:30 IST live candle sync window; Delta Exchange starts paused.
 
 Revision ID: b5c6d7e8f9a0
 Revises: a4b5c6d7e8f9
@@ -63,6 +64,8 @@ def upgrade() -> None:
         sa.Column('auto_topup_zerodha_nfo', sa.Boolean(), nullable=False),
         sa.Column('delta_enabled', sa.Boolean(), nullable=False),
         sa.Column('topup_time', sa.String(length=5), nullable=False),
+        sa.Column('live_start', sa.String(length=5), nullable=False),
+        sa.Column('live_end', sa.String(length=5), nullable=False),
         sa.Column('topup_timeframes', sa.JSON(), nullable=False),
         sa.Column('coverage_built_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
@@ -70,7 +73,7 @@ def upgrade() -> None:
     )
     op.bulk_insert(settings, [{
         'id': 1, 'auto_topup_zerodha': True, 'auto_topup_zerodha_nfo': True, 'delta_enabled': False,
-        'topup_time': '16:15', 'topup_timeframes': ['1m', '5m', '15m', '30m', '60m', '1d'],
+        'topup_time': '16:15', 'live_start': '09:00', 'live_end': '15:30', 'topup_timeframes': ['1m', '5m', '15m', '30m', '60m', '1d'],
     }])
 
     op.add_column('bf_backfill_jobs', sa.Column('priority', sa.Integer(), nullable=False, server_default='0'))

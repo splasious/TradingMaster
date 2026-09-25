@@ -69,6 +69,35 @@ def last_completed_session(now: datetime) -> date:
     return previous_trading_day(today)
 
 
+# The live sync keeps going this long past the window's end, so the candles
+# ending at the close (e.g. 15:15-15:30) are saved once final.
+LIVE_GRACE = timedelta(minutes=5)
+
+
+def parse_hhmm(value: str, fallback: time) -> time:
+    try:
+        hours, minutes = (int(part) for part in value.split(":"))
+        return time(hours, minutes)
+    except (ValueError, AttributeError):
+        return fallback
+
+
+def live_window_open(now: datetime, start: str = "09:00", end: str = "15:30") -> bool:
+    """Whether the live candle sync runs: an NSE trading day, between the
+    configured start and end (IST), plus LIVE_GRACE."""
+    ist = as_aware_utc(now).astimezone(IST)
+    if not is_trading_day(ist.date()):
+        return False
+    opens = datetime.combine(ist.date(), parse_hhmm(start, time(9, 0)), tzinfo=IST)
+    closes = datetime.combine(ist.date(), parse_hhmm(end, SESSION_CLOSE), tzinfo=IST) + LIVE_GRACE
+    return opens <= ist <= closes
+
+
+async def live_sync_open(db: AsyncSession, now: datetime) -> bool:
+    settings = await get_settings(db)
+    return live_window_open(now, settings.live_start, settings.live_end)
+
+
 def nse_bar_end(ts: datetime, timeframe: str) -> datetime:
     """When the candle opening at `ts` is final: its period's end, but no
     later than the session close -- the 15:15 60-minute candle is final at

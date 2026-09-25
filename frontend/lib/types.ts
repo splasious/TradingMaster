@@ -1103,6 +1103,8 @@ export interface BfSchedule {
   auto_topup_zerodha_nfo: boolean;
   delta_enabled: boolean;
   topup_time: string;
+  live_start: string;
+  live_end: string;
   topup_timeframes: BfTimeframe[];
   next_run_at: string | null;
   worker_paused: boolean;
@@ -1140,6 +1142,7 @@ export interface BfFreshness {
   zerodha_login: BfLogin;
   queue: { state: BfQueue["state"]; percent: number | null };
   next_run_at: string | null;
+  live_window: { start: string; end: string };
   delta_paused: boolean;
   symbols: { zerodha: number; zerodha_nfo: number };
 }

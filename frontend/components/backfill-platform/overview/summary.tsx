@@ -104,9 +104,8 @@ export function KpiRow({ o }: { o: BfOverview }) {
           {o.live_today_until ? `Up to ${fmtTime(o.live_today_until)} IST` : "No live data today"}
         </div>
         <p className="mt-1.5 text-xs text-text-secondary">
-          {o.live_today_until
-            ? "5m & 15m for charts and strategies -- the daily top-up makes the day final."
-            : "Today's candles arrive during market hours (09:15-15:30 IST)."}
+          Live sync {o.schedule.live_start}-{o.schedule.live_end} IST on trading days
+          {o.live_today_until ? " · the daily top-up makes the day final." : "."}
         </p>
       </Tile>
 

@@ -88,7 +88,9 @@ export function ZerodhaDataCard() {
                 {data.delta_paused ? "Paused" : "Live"}
               </Fact>
             </div>
-            <p className="mt-2.5 text-[11.5px] text-text-muted">Checked {fmtTime(data.as_of)} IST · refreshes every minute</p>
+            <p className="mt-2.5 text-[11.5px] text-text-muted">
+              Live data {data.live_window.start}-{data.live_window.end} IST · top-up after close · checked {fmtTime(data.as_of)}
+            </p>
           </>
         )}
       </div>

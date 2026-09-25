@@ -119,14 +119,15 @@ async def _topup_fixture(db: AsyncSession) -> dict:
     current = await _symbol(db, "CURRENT")
     expired = await _symbol(db, "NIFTY26922C", "zerodha_nfo", expiry=date(2026, 9, 22))
     live_option = await _symbol(db, "NIFTY26929C", "zerodha_nfo", expiry=date(2026, 9, 29))
-    await _symbol(db, "NEVERTRADED", "zerodha_nfo", expiry=date(2026, 9, 29))  # no bars saved: no coverage row
+    never_traded = await _symbol(db, "NEVERTRADED", "zerodha_nfo", expiry=date(2026, 9, 29))  # active, no bars saved yet
+    await _symbol(db, "EXPIREDEMPTY", "zerodha_nfo", expiry=date(2026, 9, 22))  # expired, no bars: Kite has none
     await _tracked(db, behind, "15m", ist(2026, 9, 21, 15, 15))
     await _tracked(db, behind, "1d", ist(2026, 9, 24))  # Thursday's daily: current until Friday's close
     await _tracked(db, current, "15m", ist(2026, 9, 25, 15, 15))
     await _tracked(db, expired, "15m", ist(2026, 9, 22, 15, 15))
     await _tracked(db, live_option, "5m", ist(2026, 9, 24, 15, 25))
     await db.commit()
-    return {"behind": behind, "live_option": live_option}
+    return {"behind": behind, "live_option": live_option, "never_traded": never_traded}
 
 
 async def test_the_daily_topup_queues_only_what_is_behind(db_session, sessions):
@@ -150,8 +151,10 @@ async def test_the_daily_topup_queues_only_what_is_behind(db_session, sessions):
         (symbols["behind"].id, "1d", date(2026, 9, 24), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 0),
         (symbols["behind"].id, "15m", date(2026, 9, 21), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 3),
         (symbols["live_option"].id, "5m", date(2026, 9, 24), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 4),
+        # an active contract with nothing saved yet is tried again, whole default history
+        (symbols["never_traded"].id, "15m", None, date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 3),
     }
-    assert (runs["zerodha"].jobs_total, runs["zerodha_nfo"].jobs_total) == (2, 1)
+    assert (runs["zerodha"].jobs_total, runs["zerodha_nfo"].jobs_total) == (2, 2)
 
 
 async def test_the_topup_waits_for_a_zerodha_login_then_runs(db_session, sessions):
@@ -169,7 +172,7 @@ async def test_the_topup_waits_for_a_zerodha_login_then_runs(db_session, session
     for run in runs:
         await db_session.refresh(run)
     assert {r.status for r in runs} == {"running"} and len(runs) == 2
-    assert len((await db_session.execute(select(BfBackfillJob))).scalars().all()) == 3
+    assert len((await db_session.execute(select(BfBackfillJob))).scalars().all()) == 4
 
 
 async def test_a_run_completes_when_its_jobs_are_done(db_session, sessions):
@@ -187,7 +190,7 @@ async def test_a_run_completes_when_its_jobs_are_done(db_session, sessions):
     for run in runs.values():
         await db_session.refresh(run)
     assert {r.status for r in runs.values()} == {"completed"}
-    assert (runs["zerodha"].message, runs["zerodha_nfo"].message) == ("2 done", "0 done, 1 failed")
+    assert (runs["zerodha"].message, runs["zerodha_nfo"].message) == ("2 done", "0 done, 2 failed")
 
 
 async def test_nothing_runs_on_a_segment_switched_off(db_session, sessions):
@@ -233,3 +236,75 @@ async def test_coverage_is_built_once_from_the_stored_bars(db_session, sessions)
     row = await db_session.get(BfCoverage, (symbol.id, "15m"))
     assert (row.bar_count, row.last_day_bars) == (25, 25)
     assert row.last_ts.replace(tzinfo=timezone.utc) == ist(2026, 9, 24, 15, 15)
+
+
+async def _admin(db: AsyncSession):
+    from app.models.user import Role, User, UserRole
+
+    role = Role(name="administrator", description="Administrator")
+    db.add(role)
+    await db.flush()
+    admin = User(email="admin_topup@tradingmaster.internal", hashed_password="x", full_name="Admin")
+    admin.user_roles = [UserRole(role=role)]
+    db.add(admin)
+    await db.commit()
+    return admin
+
+
+async def test_admins_are_reminded_to_log_in_to_zerodha_from_0845(db_session, sessions):
+    from app.models.alert import Alert
+
+    await _topup_fixture(db_session)
+    admin = await _admin(db_session)
+    scheduler = topup.BackfillTopupScheduler()
+
+    await scheduler.tick(ist(2026, 9, 25, 8, 30))  # before 08:45 -- still time to log in
+    assert (await db_session.execute(select(Alert))).scalars().all() == []
+
+    await scheduler.tick(ist(2026, 9, 25, 8, 46))
+    await scheduler.tick(ist(2026, 9, 25, 9, 30))  # once a day, not every minute
+    alerts = (await db_session.execute(select(Alert))).scalars().all()
+    assert [(a.user_id, a.title, a.severity) for a in alerts] == [(admin.id, "Log in to Zerodha", "warning")]
+
+    await scheduler.tick(ist(2026, 9, 26, 9, 0))  # Saturday: no reminder
+    assert len((await db_session.execute(select(Alert))).scalars().all()) == 1
+
+
+async def test_no_reminder_when_logged_in(db_session, sessions):
+    from app.models.alert import Alert
+
+    await _topup_fixture(db_session)
+    await _admin(db_session)
+    await _connected_account(db_session)
+    await topup.BackfillTopupScheduler().tick(ist(2026, 9, 25, 9, 0))
+    assert (await db_session.execute(select(Alert))).scalars().all() == []
+
+
+async def test_a_topup_with_failures_alerts_the_admins(db_session, sessions):
+    from app.models.alert import Alert
+
+    await _topup_fixture(db_session)
+    await _admin(db_session)
+    await _connected_account(db_session)
+    scheduler = topup.BackfillTopupScheduler()
+    await scheduler.tick(ist(2026, 9, 25, 16, 16))
+    for job in (await db_session.execute(select(BfBackfillJob))).scalars().all():
+        job.status = BfBackfillStatus.FAILED.value if job.source == "zerodha_nfo" else BfBackfillStatus.COMPLETED.value
+    await db_session.commit()
+
+    await scheduler.tick(ist(2026, 9, 25, 16, 40))
+
+    titles = [a.title for a in (await db_session.execute(select(Alert))).scalars().all()]
+    assert titles == ["NFO top-up finished with 2 failed jobs"]  # the clean NSE run raises none
+
+
+def test_the_live_window_runs_0900_to_1530_on_trading_days():
+    from app.services.backfill_platform.coverage import live_window_open
+
+    assert not live_window_open(ist(2026, 9, 25, 8, 59))
+    assert live_window_open(ist(2026, 9, 25, 9, 0))  # before the 09:15 open
+    assert live_window_open(ist(2026, 9, 25, 15, 34))  # a few minutes past 15:30 for the closing candles
+    assert not live_window_open(ist(2026, 9, 25, 15, 36))
+    assert not live_window_open(ist(2026, 9, 26, 10, 0))  # Saturday
+    assert not live_window_open(ist(2026, 10, 2, 10, 0))  # NSE holiday
+    assert live_window_open(ist(2026, 9, 25, 9, 20), start="09:30") is False  # the page's setting is honoured

@@ -4,9 +4,9 @@ Every NSE trading day at the configured time (16:15 IST by default --
 after the 15:30 close), for each Zerodha segment switched on: one job per
 symbol and timeframe that is behind the last closed session, fetching from
 that pair's last saved day (bf_coverage) -- not the source's whole default
-history. It only tops up what is already tracked: pairs with no saved bars
-(e.g. option strikes Kite never returned data for) and expired contracts
-are left alone.
+history. It tops up what is already tracked, plus -- for NFO -- every still-active
+contract with no data yet (a strike that hasn't traded may start to), at
+15m. Expired contracts are left alone: Kite serves no history for them.
 
 A run needs a Zerodha login: without one it waits ("waiting_login") and
 starts as soon as there is one. A missed day needs no special handling --
@@ -17,10 +17,11 @@ import asyncio
 import logging
 from datetime import datetime, time, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
+from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.backfill_platform import (
     JOB_PRIORITY_BULK,
     JOB_PRIORITY_SCHEDULED,
@@ -36,10 +37,14 @@ from app.services.backfill_platform.coverage import (
     KITE_SOURCES,
     build_coverage,
     get_settings,
+    is_trading_day,
     ist_date,
     last_completed_session,
+    parse_hhmm,
     sessions_behind,
 )
+from app.models.user import Role, User, UserRole
+from app.services.alerts.service import create_alert
 from app.services.backfill_platform.timeframes import timeframes_for_source
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_ticker_service import find_connected_zerodha_account
@@ -55,16 +60,47 @@ RUN_SKIPPED = "skipped"
 _OPEN_JOB_STATUSES = (BfBackfillStatus.PENDING.value, BfBackfillStatus.RUNNING.value)
 
 
+# A contract with no saved bars is retried at the NFO rotation's timeframe.
+EMPTY_CONTRACT_TIMEFRAME = "15m"
+LOGIN_REMINDER_AT = time(8, 45)
+
+
 class ZerodhaNotConnected(Exception):
     pass
 
 
+def untraded_active_contracts(session):
+    """NFO contracts with no saved bars that still trade on `session`."""
+    return select(BfSymbol).where(
+        BfSymbol.source == "zerodha_nfo",
+        or_(BfSymbol.expiry.is_(None), BfSymbol.expiry >= session),
+        ~exists().where(BfCoverage.symbol_id == BfSymbol.id),
+    )
+
+
+async def _admin_ids(db: AsyncSession) -> list:
+    return list(
+        (
+            await db.execute(
+                select(User.id).join(UserRole, UserRole.user_id == User.id).join(Role, Role.id == UserRole.role_id)
+                .where(Role.name == "administrator").distinct()
+            )
+        ).scalars()
+    )
+
+
+async def _alert_admins(db: AsyncSession, *, key: str, severity: AlertSeverity, alert_type: str, title: str, message: str) -> None:
+    """One in-app alert per administrator, once per `key`."""
+    already = (await db.execute(select(Alert.id).where(Alert.object_type == "bf_backfill", Alert.object_id == key).limit(1))).first()
+    if already:
+        return
+    for user_id in await _admin_ids(db):
+        await create_alert(db, user_id=user_id, alert_type=alert_type, severity=severity, title=title, message=message,
+                           object_type="bf_backfill", object_id=key)
+
+
 def _topup_time(value: str) -> time:
-    try:
-        hours, minutes = (int(part) for part in value.split(":"))
-        return time(hours, minutes)
-    except ValueError:
-        return time(16, 15)
+    return parse_hhmm(value, time(16, 15))
 
 
 def enabled_sources(settings) -> list[str]:
@@ -97,6 +133,14 @@ async def queue_topup_jobs(
             priority=base_priority + TOPUP_TIMEFRAME_ORDER.index(coverage.timeframe),
         ))
         queued += 1
+    if run.source == "zerodha_nfo" and EMPTY_CONTRACT_TIMEFRAME in wanted:
+        for symbol in (await db.execute(untraded_active_contracts(run.session_date))).scalars().all():
+            db.add(BfBackfillJob(
+                symbol_id=symbol.id, source=run.source, timeframe=EMPTY_CONTRACT_TIMEFRAME,
+                end_date=run.session_date, requested_by=user_id, run_id=run.id,
+                priority=base_priority + TOPUP_TIMEFRAME_ORDER.index(EMPTY_CONTRACT_TIMEFRAME),
+            ))
+            queued += 1
     run.jobs_total = queued
     run.status = RUN_RUNNING if queued else RUN_COMPLETED
     run.started_at = now
@@ -188,6 +232,7 @@ class BackfillTopupScheduler:
     async def tick(self, now: datetime) -> None:
         async with AsyncSessionLocal() as db:
             await self._finish_runs(db, now)
+            await self._remind_login(db, now)
             settings = await get_settings(db)
             if settings.coverage_built_at is None:
                 return
@@ -225,6 +270,21 @@ class BackfillTopupScheduler:
             await db.commit()
         backfill_worker.wake()
 
+    async def _remind_login(self, db: AsyncSession, now: datetime) -> None:
+        """From 08:45 IST on a trading day, an in-app alert if Zerodha isn't
+        logged in yet -- the live sync (from 09:00) and the top-up need it."""
+        ist = now.astimezone(IST)
+        if not is_trading_day(ist.date()) or ist.time() < LOGIN_REMINDER_AT or ist.time() > time(15, 30):
+            return
+        if await find_connected_zerodha_account(db) is not None:
+            return
+        await _alert_admins(
+            db, key=f"login-{ist.date().isoformat()}", severity=AlertSeverity.WARNING, alert_type=AlertType.BROKER_DISCONNECTED.value,
+            title="Log in to Zerodha",
+            message="Zerodha isn't logged in yet today. Live data (09:00-15:30 IST) and the 16:15 top-up need the daily login -- Settings > Brokers.",
+        )
+        await db.commit()
+
     async def _finish_runs(self, db: AsyncSession, now: datetime) -> None:
         """Marks a running run complete once none of its jobs are left."""
         for run in (await db.execute(select(BfBackfillRun).where(BfBackfillRun.status == RUN_RUNNING))).scalars().all():
@@ -236,6 +296,13 @@ class BackfillTopupScheduler:
             run.status = RUN_COMPLETED
             run.completed_at = now
             run.message = f"{done:,} done, {failed:,} failed" if failed else f"{done:,} done"
+            if failed:
+                segment = "NSE" if run.source == "zerodha" else "NFO"
+                await _alert_admins(
+                    db, key=f"run-{run.id}", severity=AlertSeverity.WARNING, alert_type=AlertType.DATA_DISCONNECTED.value,
+                    title=f"{segment} top-up finished with {failed:,} failed job{'s' if failed != 1 else ''}",
+                    message=f"{done:,} jobs completed, {failed:,} failed. See Needs attention on the Data Backfill page to re-run them.",
+                )
         await db.commit()
 
 

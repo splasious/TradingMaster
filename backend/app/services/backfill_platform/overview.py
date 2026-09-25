@@ -34,7 +34,7 @@ from app.services.backfill_platform.coverage import (
     sessions_behind,
 )
 from app.services.backfill_platform.jobs import INTERRUPTED_PREFIX, unresolved_failures
-from app.services.backfill_platform.topup import RUN_RUNNING, RUN_WAITING_LOGIN, _topup_time, enabled_sources
+from app.services.backfill_platform.topup import RUN_RUNNING, RUN_WAITING_LOGIN, _topup_time, enabled_sources, untraded_active_contracts
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.bar_periods import BAR_DURATIONS
@@ -296,15 +296,23 @@ async def _attention(db: AsyncSession, now: datetime, segments: list[dict], logi
             items.append({"severity": cell["status"], "title": title,
                           "detail": f"{n:,} {unit} · oldest saved up to {_fmt_day(cell['oldest_saved_up_to'])}",
                           "action": {"type": "topup", "source": seg["source"]}})
-    empty = (
+    session = last_completed_session(now)
+    empty_total = (
         await db.execute(
             select(func.count()).select_from(BfSymbol)
             .where(BfSymbol.source == "zerodha_nfo", ~exists().where(BfCoverage.symbol_id == BfSymbol.id))
         )
     ).scalar_one()
-    if empty:
-        items.append({"severity": "info", "title": f"{empty:,} NFO contract{'s have' if empty != 1 else ' has'} no data",
-                      "detail": "Kite returned no candles -- strikes that never traded. Left out of top-ups.", "action": None})
+    if empty_total:
+        active = (await db.execute(select(func.count()).select_from(untraded_active_contracts(session).subquery()))).scalar_one()
+        expired = empty_total - active
+        detail = []
+        if active:
+            detail.append(f"{active:,} still active -- retried in each NFO top-up")
+        if expired:
+            detail.append(f"{expired:,} expired -- Kite keeps no history for expired contracts")
+        items.append({"severity": "info", "title": f"{empty_total:,} NFO contract{'s have' if empty_total != 1 else ' has'} no data yet",
+                      "detail": "; ".join(detail) + ".", "action": None})
     if settings.coverage_built_at is None:
         items.insert(0, {"severity": "info", "title": "Counting what is saved",
                          "detail": "First run after the update -- coverage appears within a few minutes.", "action": None})
@@ -394,6 +402,8 @@ def schedule_out(settings, now: datetime) -> dict:
         "auto_topup_zerodha_nfo": settings.auto_topup_zerodha_nfo,
         "delta_enabled": settings.delta_enabled,
         "topup_time": settings.topup_time,
+        "live_start": settings.live_start,
+        "live_end": settings.live_end,
         "topup_timeframes": list(settings.topup_timeframes),
         "next_run_at": _next_run_at(settings, now),
         "worker_paused": backfill_worker.paused,

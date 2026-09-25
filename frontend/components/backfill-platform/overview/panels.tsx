@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Info, Pause, Play, RefreshCw, TriangleAlert, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, Info, Pause, Play, RefreshCw, TriangleAlert, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -84,7 +84,7 @@ export function JobQueueCard({ queue, canOperate }: { queue: BfQueue; canOperate
           </p>
         )}
         <p className="mt-2 text-xs text-text-muted">One job at a time within Kite&apos;s 3 requests/s · the queue survives restarts</p>
-        {canOperate && (queue.state !== "idle" || queue.queued_total > 0) && (
+        {canOperate && (queue.state === "paused" || queue.queued_total > 0) && (
           <div className="mt-3 flex gap-2">
             <Button size="sm" variant="secondary" disabled={setPaused.isPending} onClick={() => setPaused.mutate(queue.state !== "paused")}>
               {queue.state === "paused" ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
@@ -158,6 +158,20 @@ export function AttentionCard({ items, canOperate }: { items: BfAttentionItem[];
 
 const ALL_TIMEFRAMES: BfTimeframe[] = ["1m", "5m", "15m", "30m", "60m", "1d"];
 
+function TimeInput({ id, label, value, disabled, onChange }: { id: string; label: string; value: string; disabled: boolean; onChange: (v: string) => void }) {
+  return (
+    <input
+      id={id}
+      type="time"
+      aria-label={label}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-7 rounded-md border border-border bg-surface px-2 font-financial text-xs text-text-primary disabled:opacity-70 dark:[color-scheme:dark]"
+    />
+  );
+}
+
 function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: boolean) => void; disabled: boolean; label: string }) {
   return (
     <button
@@ -180,7 +194,10 @@ function Toggle({ on, onChange, disabled, label }: { on: boolean; onChange: (v: 
 export function ScheduleCard({ schedule, canEdit }: { schedule: BfSchedule; canEdit: boolean }) {
   // Remounted (fresh draft) only when the saved schedule itself changes --
   // not on every overview refresh, which would wipe an edit in progress.
-  const saved = [schedule.auto_topup_zerodha, schedule.auto_topup_zerodha_nfo, schedule.delta_enabled, schedule.topup_time, schedule.topup_timeframes.join()].join("|");
+  const saved = [
+    schedule.auto_topup_zerodha, schedule.auto_topup_zerodha_nfo, schedule.delta_enabled,
+    schedule.topup_time, schedule.live_start, schedule.live_end, schedule.topup_timeframes.join(),
+  ].join("|");
   return <ScheduleForm key={saved} schedule={schedule} canEdit={canEdit} />;
 }
 
@@ -192,6 +209,8 @@ function ScheduleForm({ schedule, canEdit }: { schedule: BfSchedule; canEdit: bo
     draft.auto_topup_zerodha_nfo !== schedule.auto_topup_zerodha_nfo ||
     draft.delta_enabled !== schedule.delta_enabled ||
     draft.topup_time !== schedule.topup_time ||
+    draft.live_start !== schedule.live_start ||
+    draft.live_end !== schedule.live_end ||
     draft.topup_timeframes.join() !== schedule.topup_timeframes.join();
   const set = (patch: Partial<BfSchedule>) => setDraft((d) => ({ ...d, ...patch }));
   const toggleTf = (tf: BfTimeframe) =>
@@ -220,16 +239,22 @@ function ScheduleForm({ schedule, canEdit }: { schedule: BfSchedule; canEdit: bo
             </div>
           );
         })}
+        <div className="grid grid-cols-[36px_1fr_auto] items-start gap-3 border-b border-border py-2.5">
+          <Activity className="mx-auto mt-0.5 h-4 w-4 text-text-muted" aria-hidden />
+          <div>
+            <div className="text-[13px] font-medium text-text-primary">Live data</div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-text-muted">
+              <TimeInput id="live-start" label="Live data starts" value={draft.live_start} disabled={!canEdit} onChange={(v) => set({ live_start: v })} />
+              to
+              <TimeInput id="live-end" label="Live data ends" value={draft.live_end} disabled={!canEdit} onChange={(v) => set({ live_end: v })} />
+              IST · trading days
+            </div>
+          </div>
+          <FreshBadge kind="ok" label="On" />
+        </div>
         <div className="flex flex-wrap items-center gap-2 py-2.5">
-          <label className="text-xs text-text-muted" htmlFor="topup-time">Run at</label>
-          <input
-            id="topup-time"
-            type="time"
-            value={draft.topup_time}
-            disabled={!canEdit}
-            onChange={(e) => set({ topup_time: e.target.value })}
-            className="h-7 rounded-md border border-border bg-surface px-2 font-financial text-xs text-text-primary disabled:opacity-70"
-          />
+          <label className="text-xs text-text-muted" htmlFor="topup-time">Top-up at</label>
+          <TimeInput id="topup-time" label="Top-up time" value={draft.topup_time} disabled={!canEdit} onChange={(v) => set({ topup_time: v })} />
           <span className="ml-1 text-xs text-text-muted">Timeframes</span>
           {ALL_TIMEFRAMES.map((tf) => {
             const on = draft.topup_timeframes.includes(tf);
@@ -255,13 +280,15 @@ function ScheduleForm({ schedule, canEdit }: { schedule: BfSchedule; canEdit: bo
           <div className="mt-3 flex items-center gap-2">
             <Button
               size="sm"
-              disabled={saveSchedule.isPending || draft.topup_timeframes.length === 0}
+              disabled={saveSchedule.isPending || draft.topup_timeframes.length === 0 || draft.live_start >= draft.live_end}
               onClick={() =>
                 saveSchedule.mutate({
                   auto_topup_zerodha: draft.auto_topup_zerodha,
                   auto_topup_zerodha_nfo: draft.auto_topup_zerodha_nfo,
                   delta_enabled: draft.delta_enabled,
                   topup_time: draft.topup_time,
+                  live_start: draft.live_start,
+                  live_end: draft.live_end,
                   topup_timeframes: draft.topup_timeframes,
                 })
               }
@@ -271,6 +298,7 @@ function ScheduleForm({ schedule, canEdit }: { schedule: BfSchedule; canEdit: bo
             <Button size="sm" variant="ghost" onClick={() => setDraft(schedule)}>Discard</Button>
           </div>
         )}
+        {canEdit && draft.live_start >= draft.live_end && <p className="mt-2 text-xs text-negative">Live data must start before it ends.</p>}
         {saveSchedule.error && <p className="mt-2 text-xs text-negative">{errorText(saveSchedule.error)}</p>}
       </div>
     </Card>

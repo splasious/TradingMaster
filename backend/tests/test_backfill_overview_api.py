@@ -108,14 +108,17 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     assert titles[0] == "Zerodha is not logged in"
     assert "1 job stopped by a server restart" in titles and "1 job failed" in titles  # the redone failure isn't counted
     assert "1 NSE stock behind on 15m" in titles
-    assert "1 NFO contract has no data" in titles
+    assert "1 NFO contract has no data yet" in titles
+    empty = next(a for a in body["attention"] if a["title"] == "1 NFO contract has no data yet")
+    assert empty["detail"] == "1 still active -- retried in each NFO top-up."
     assert body["queue"]["state"] == "idle" and body["schedule"]["topup_time"] == "16:15"
 
 
 async def test_freshness_is_the_compact_nse_status(client, seeded_admin, db_session):
     await _seed(db_session)
     body = (await client.get("/api/v1/backfill-platform/freshness", headers=await _headers(client, seeded_admin))).json()
-    assert set(body) >= {"headline", "timeframes", "live_today_until", "zerodha_login", "next_run_at", "delta_paused", "queue"}
+    assert set(body) >= {"headline", "timeframes", "live_today_until", "zerodha_login", "next_run_at", "delta_paused", "queue", "live_window"}
+    assert body["live_window"] == {"start": "09:00", "end": "15:30"}
     assert [c["timeframe"] for c in body["timeframes"]] == ["1m", "5m", "15m", "30m", "60m", "1d"]
     assert body["zerodha_login"] == {"connected": False, "status": "not_set_up"} and body["delta_paused"] is True
 
@@ -135,9 +138,12 @@ async def test_schedule_is_admin_only_and_validated(client, seeded_admin, db_ses
     await _seed(db_session)
     headers = await _headers(client, seeded_admin)
     payload = {"auto_topup_zerodha": True, "auto_topup_zerodha_nfo": False, "delta_enabled": False,
-               "topup_time": "18:05", "topup_timeframes": ["5m", "15m", "1d"]}
+               "topup_time": "18:05", "live_start": "09:05", "live_end": "15:30", "topup_timeframes": ["5m", "15m", "1d"]}
     resp = await client.put("/api/v1/backfill-platform/schedule", json=payload, headers=headers)
     assert resp.status_code == 200 and resp.json()["topup_time"] == "18:05" and resp.json()["auto_topup_zerodha_nfo"] is False
+    assert (resp.json()["live_start"], resp.json()["live_end"]) == ("09:05", "15:30")
+    bad_window = await client.put("/api/v1/backfill-platform/schedule", json=payload | {"live_start": "15:40"}, headers=headers)
+    assert bad_window.status_code == 422 and "start before it ends" in bad_window.text
     assert (await client.put("/api/v1/backfill-platform/schedule", json=payload | {"topup_time": "25:00"}, headers=headers)).status_code == 422
     assert (await client.put("/api/v1/backfill-platform/schedule", json=payload | {"topup_timeframes": ["1wk"]}, headers=headers)).status_code == 422
 
@@ -151,6 +157,11 @@ async def test_top_up_now_needs_a_zerodha_login_then_queues_what_is_behind(clien
     await _connect_zerodha(db_session, seeded_admin["email"])
     resp = await client.post("/api/v1/backfill-platform/topup", json={"sources": ["zerodha"]}, headers=headers)
     assert resp.status_code == 202 and resp.json() == {"queued": {"zerodha": 1}}  # LAGGINGCO 15m
+    cancelled = (await client.post("/api/v1/backfill-platform/runs/cancel", headers=headers)).json()
+    assert cancelled == {"runs": 1, "jobs_cancelled": 1}
+    # NFO: the expired contract is left alone; the active one with no data yet is tried again.
+    resp = await client.post("/api/v1/backfill-platform/topup", json={"sources": ["zerodha_nfo"]}, headers=headers)
+    assert resp.json() == {"queued": {"zerodha_nfo": 1}}
 
     overview_body = (await client.get("/api/v1/backfill-platform/overview", headers=headers)).json()
     assert overview_body["queue"]["state"] == "running" and overview_body["queue"]["run"]["total"] == 1

@@ -64,7 +64,7 @@ from app.services.broker.kite_ticker_service import find_connected_zerodha_crede
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
 from app.services.market_data.bar_periods import BAR_DURATIONS, INTRADAY_TIMEFRAMES, is_complete
 from app.services.market_data.base import MarketDataSourceError
-from app.services.market_data.hours import nse_market_open
+from app.services.backfill_platform.coverage import live_sync_open
 from app.services.market_data.registry import get_market_data_source
 
 logger = logging.getLogger(__name__)
@@ -247,7 +247,10 @@ class ActiveTimeframeSyncScheduler:
         # price with nobody the wiser). Delta-sourced pairs are unaffected
         # -- crypto trades around the clock, so only the Zerodha branch
         # below checks this.
-        zerodha_market_open = nse_market_open(now)
+        # The window is the Data Backfill page's "Live data" setting --
+        # 09:00-15:30 IST on trading days by default, a few minutes past
+        # the end so the closing candles are saved.
+        zerodha_market_open = await live_sync_open(db, now)
         synced = 0
         skipped_zerodha = 0
         seen_zerodha_fetches: set[tuple] = set()

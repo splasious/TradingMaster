@@ -195,6 +195,10 @@ class BfSettings(Base):
     # Delta Exchange paused: no live sync, no automatic top-up; saved data kept.
     delta_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     topup_time: Mapped[str] = mapped_column(String(5), nullable=False, default="16:15")  # IST, HH:MM
+    # The live candle sync's daily window on NSE trading days (IST, HH:MM) --
+    # it keeps running a few minutes past the end to save the final candles.
+    live_start: Mapped[str] = mapped_column(String(5), nullable=False, default="09:00")
+    live_end: Mapped[str] = mapped_column(String(5), nullable=False, default="15:30")
     topup_timeframes: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: list(DEFAULT_TOPUP_TIMEFRAMES))
     # Set once bf_coverage has been built from the stored bars (coverage.py);
     # null means the build hasn't finished, so it runs again at startup.
