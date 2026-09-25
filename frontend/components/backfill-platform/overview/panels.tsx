@@ -156,7 +156,8 @@ export function AttentionCard({ items, canOperate }: { items: BfAttentionItem[];
   );
 }
 
-const ALL_TIMEFRAMES: BfTimeframe[] = ["1m", "5m", "15m", "30m", "60m", "1d"];
+// No 1-minute: it is no longer kept (backend timeframes.py).
+const ALL_TIMEFRAMES: BfTimeframe[] = ["5m", "15m", "30m", "60m", "1d"];
 
 function TimeInput({ id, label, value, disabled, onChange }: { id: string; label: string; value: string; disabled: boolean; onChange: (v: string) => void }) {
   return (
