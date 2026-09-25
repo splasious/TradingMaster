@@ -33,12 +33,12 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
-from sqlalchemy import insert, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.time import as_aware_utc
-from app.models.backfill_platform import BfSymbol
+from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.pcr import SOURCE_HISTORICAL, SOURCE_LIVE, PcrSnapshot, PcrSnapshotExpiry, PcrStrikeOi
 from app.services.backfill_platform.coverage import IST, is_trading_day, previous_trading_day
@@ -70,7 +70,14 @@ FILL_LOOKBACK_SESSIONS = 5
 LOW_COVERAGE = 0.9
 # ΔOI (both sides, absolute) under this share of total OI reads as flat.
 FLAT_FRACTION = 0.001
-CALC_VERSION = 1
+# The code version a record was made by. 2: the gap fill takes NIFTY only
+# from the candle at the mark and carries OI in from before its window; a
+# record filled by version 1 is made again (see _stale).
+CALC_VERSION = 2
+# How far back the gap fill looks for a quiet contract's last OI.
+CARRY_IN_DAYS = 90
+# The last 15-minute candle of a session (15:15-15:30).
+LAST_CANDLE = time(15, 15)
 
 # Snapshot writes and the "changed since" pass run one at a time: a gap
 # filled while a live record lands would otherwise leave the live one
@@ -360,7 +367,6 @@ async def derive(db: AsyncSession, snap: PcrSnapshot, cache: dict | None = None)
     if expected and with_oi < LOW_COVERAGE * expected:
         flags.append("low_coverage")
     snap.flags = flags
-    snap.calc_version = CALC_VERSION
 
     snap.expiry_rows.clear()
     await db.flush()
@@ -547,9 +553,15 @@ async def latest_pcr(db: AsyncSession, underlying: str, as_of: datetime) -> floa
 # ---------------------------------------------------------------- gap fill
 
 
+def _stale(snap_source: str, calc_version: int) -> bool:
+    """A record the gap fill should make again: filled from history by an
+    older version of it (a live capture is never replaced)."""
+    return snap_source == SOURCE_HISTORICAL and calc_version < CALC_VERSION
+
+
 async def missing_marks(db: AsyncSession, underlying: str, now: datetime, sessions: int = FILL_LOOKBACK_SESSIONS) -> list[datetime]:
     """Marks of the last `sessions` trading sessions, old enough to fill,
-    with no record -- oldest first."""
+    with no record (or a stale one, see _stale) -- oldest first."""
     until = as_aware_utc(now) - FILL_DELAY
     last = latest_mark(until)
     if last is None:
@@ -558,15 +570,16 @@ async def missing_marks(db: AsyncSession, underlying: str, now: datetime, sessio
     for _ in range(sessions - 1):
         first_day = previous_trading_day(first_day)
     marks = expected_marks(last, since=session_marks(first_day)[0])
-    have = set(
-        as_aware_utc(ts) for ts in (
-            await db.execute(
-                select(PcrSnapshot.ts).where(
-                    PcrSnapshot.underlying == underlying, PcrSnapshot.ts >= marks[-1], PcrSnapshot.ts <= marks[0],
-                )
+    if not marks:
+        return []
+    rows = (
+        await db.execute(
+            select(PcrSnapshot.ts, PcrSnapshot.source, PcrSnapshot.calc_version).where(
+                PcrSnapshot.underlying == underlying, PcrSnapshot.ts >= marks[-1], PcrSnapshot.ts <= marks[0],
             )
-        ).scalars().all()
-    ) if marks else set()
+        )
+    ).all()
+    have = {as_aware_utc(ts) for ts, source, version in rows if not _stale(source, version)}
     return sorted(m for m in marks if m not in have)
 
 
@@ -597,9 +610,10 @@ def fillable(session: date, today: date, known_expiries: set[date]) -> bool:
     return not any(session <= e < today for e in known_expiries)
 
 
-def _oi_at(candles: list[dict], mark: datetime) -> tuple[float | None, float | None]:
+def _oi_at(candles: list[dict], mark: datetime, carry_in: float | None = None) -> tuple[float | None, float | None]:
     """OI and price of the last candle closed by `mark` (candles sorted,
-    `ts` = candle start)."""
+    `ts` = candle start). With no such candle, `carry_in`: the contract's OI
+    from before the fetched window (it hasn't traded since)."""
     cutoff = mark - MARK_STEP
     last = None
     for c in candles:
@@ -608,20 +622,44 @@ def _oi_at(candles: list[dict], mark: datetime) -> tuple[float | None, float | N
         else:
             break
     if last is None:
-        return None, None
+        return carry_in, None
     return _num(last.get("open_interest")), _num(last.get("close"))
 
 
-def _spot_at(candles: list[dict], mark: datetime) -> float | None:
-    """NIFTY at `mark`: the close of the candle ending at it; at 09:15 the
-    session's first open; at 09:00 the previous close."""
+def _spot_at(index: dict[datetime, dict], mark: datetime) -> float | None:
+    """NIFTY at `mark`, from 15-minute index candles keyed by their start:
+    the close of the candle ending at the mark; at 09:15 the session's first
+    open; at 09:00 the previous session's close. None when that very candle
+    is missing -- never a stale value carried forward."""
     mark_ist = as_aware_utc(mark).astimezone(IST)
-    if mark_ist.time() == PRE_OPEN_END:
-        for c in candles:
-            if as_aware_utc(c["ts"]) == as_aware_utc(mark):
-                return _num(c.get("open"))
-    _, close = _oi_at(candles, mark)
-    return close
+    session = mark_ist.date()
+    if mark_ist.time() == FIRST_MARK:
+        key, field = datetime.combine(previous_trading_day(session), LAST_CANDLE, tzinfo=IST), "close"
+    elif mark_ist.time() == PRE_OPEN_END:
+        key, field = datetime.combine(session, PRE_OPEN_END, tzinfo=IST), "open"
+    else:
+        key, field = mark_ist - MARK_STEP, "close"
+    candle = index.get(key.astimezone(timezone.utc))
+    return _num(candle.get(field)) if candle else None
+
+
+async def _index_candles(db: AsyncSession, broker: ZerodhaKiteBroker, underlying: str, start: datetime, end: datetime) -> dict[datetime, dict]:
+    """NIFTY's 15-minute candles by start: Kite's history, with the
+    backfill's own saved candles filling anything Kite's answer lacks (once
+    it returned none for the session just closed)."""
+    symbol = UNDERLYINGS[underlying]
+    saved = (
+        await db.execute(
+            select(BfOhlcvBar.ts, BfOhlcvBar.open, BfOhlcvBar.close)
+            .join(BfSymbol, BfSymbol.id == BfOhlcvBar.symbol_id)
+            .where(BfSymbol.source == "zerodha", BfSymbol.symbol == symbol, BfOhlcvBar.timeframe == "15m",
+                   BfOhlcvBar.ts >= start, BfOhlcvBar.ts <= end)
+        )
+    ).all()
+    index = {as_aware_utc(ts): {"open": o, "close": c} for ts, o, c in saved}
+    for c in await broker.get_historical_data(symbol, "15m", start, end, segment="NSE"):
+        index[as_aware_utc(c["ts"])] = c
+    return index
 
 
 async def fill_gaps(
@@ -645,15 +683,15 @@ async def fill_gaps(
     nfo_rows = await broker.get_instruments("NFO")
     start = datetime.combine(previous_trading_day(ist_session(todo[0])), FIRST_MARK, tzinfo=IST)
     end = as_aware_utc(now)
-    index_candles = await broker.get_historical_data(UNDERLYINGS[underlying], "15m", start, end, segment="NSE")
-    index_candles.sort(key=lambda c: as_aware_utc(c["ts"]))
+    index = await _index_candles(db, broker, underlying, start, end)
 
     plans: list[tuple[datetime, float, list[date], list[Contract]]] = []
     wanted: dict[str, Contract] = {}
     for mark in todo:
-        spot = _spot_at(index_candles, mark)
+        spot = _spot_at(index, mark)
         chain = chain_for(nfo_rows, underlying, ist_session(mark))
         if spot is None or len(chain) < EXPIRIES:
+            # Left for a later pass (e.g. NIFTY's candle isn't in yet).
             result["unfillable"] += 1
             continue
         contracts = capture_contracts(chain, spot)
@@ -665,16 +703,35 @@ async def fill_gaps(
 
     history: dict[str, list[dict]] = {}
     for c in wanted.values():
-        history[c.tradingsymbol] = await _contract_history(broker, c, start, end)
+        history[c.tradingsymbol] = await _contract_history(broker, c, "15m", start, end)
+    # A contract with no trade in the window before a mark still has the OI
+    # it had when it last traded: take it from the daily history before the
+    # window (none at all in CARRY_IN_DAYS: it never traded, OI 0).
+    first_cutoff = plans[0][0] - MARK_STEP
+    carry_in: dict[str, float] = {}
+    for c in wanted.values():
+        candles = history[c.tradingsymbol]
+        if candles and as_aware_utc(candles[0]["ts"]) <= first_cutoff:
+            continue
+        daily = await _contract_history(broker, c, "1d", start - timedelta(days=CARRY_IN_DAYS), start - timedelta(minutes=1))
+        before = [d for d in daily if as_aware_utc(d["ts"]).astimezone(IST).date() < start.date() and d.get("open_interest") is not None]
+        carry_in[c.tradingsymbol] = _num(before[-1]["open_interest"]) if before else 0.0
 
     captured_at = datetime.now(timezone.utc)
     for mark, spot, expiries, contracts in plans:
         async with write_lock:
-            if await snapshot_exists(db, underlying, mark):
-                continue
+            existing = (
+                await db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == underlying, PcrSnapshot.ts == mark))
+            ).scalar_one_or_none()
+            if existing is not None:
+                if not _stale(existing.source, existing.calc_version):
+                    continue
+                await db.execute(delete(PcrStrikeOi).where(PcrStrikeOi.snapshot_id == existing.id))
+                await db.delete(existing)
+                await db.flush()
             values = {}
             for c in contracts:
-                oi, price = _oi_at(history.get(c.tradingsymbol, []), mark)
+                oi, price = _oi_at(history.get(c.tradingsymbol, []), mark, carry_in.get(c.tradingsymbol))
                 values[c.tradingsymbol] = (oi, price, None)
             await _write(db, underlying, mark, SOURCE_HISTORICAL, captured_at, spot, expiries, contracts, values)
             await db.commit()
@@ -686,8 +743,8 @@ async def fill_gaps(
     return result
 
 
-async def _contract_history(broker: ZerodhaKiteBroker, c: Contract, start: datetime, end: datetime) -> list[dict]:
-    """15-minute candles with OI, oldest first. Retried twice (the history
+async def _contract_history(broker: ZerodhaKiteBroker, c: Contract, timeframe: str, start: datetime, end: datetime) -> list[dict]:
+    """Candles with OI, oldest first. Retried twice (the history
     rate limit is shared with the backfill queue); a contract that still
     fails aborts the pass rather than being saved as missing -- the next
     pass starts over."""
@@ -695,7 +752,7 @@ async def _contract_history(broker: ZerodhaKiteBroker, c: Contract, start: datet
         await asyncio.sleep(HISTORY_PAUSE_SECONDS if attempt == 0 else 3.0 * attempt)
         try:
             candles = await broker.get_historical_data(
-                c.tradingsymbol, "15m", start, end, segment="NFO", instrument_token=c.instrument_token,
+                c.tradingsymbol, timeframe, start, end, segment="NFO", instrument_token=c.instrument_token,
             )
             return sorted(candles, key=lambda x: as_aware_utc(x["ts"]))
         except KiteAPIError as exc:
