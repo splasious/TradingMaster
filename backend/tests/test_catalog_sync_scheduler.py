@@ -98,3 +98,37 @@ class _SessionCtx:
 
     async def __aexit__(self, *exc) -> None:
         return None
+
+
+async def test_scheduler_syncs_a_never_copied_symbol_with_bars_but_no_jobs(db_session: AsyncSession):
+    # A Delta symbol filled only by the live sync, which creates no jobs.
+    live_only = BfSymbol(source="delta", symbol="SCHEDLIVEONLY", display_name="Live Only")
+    empty = BfSymbol(source="delta", symbol="SCHEDEMPTY", display_name="No Bars")
+    db_session.add_all([live_only, empty])
+    await db_session.flush()
+    db_session.add(BfOhlcvBar(symbol_id=live_only.id, timeframe="1m", ts=datetime(2024, 1, 1, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1))
+    await db_session.commit()
+
+    candidates = {c.id for c in await CatalogSyncScheduler()._find_symbols_needing_sync(db_session)}
+
+    assert live_only.id in candidates
+    assert empty.id not in candidates
+
+
+async def test_scheduler_resyncs_after_a_job_that_failed_partway_but_saved_bars(db_session: AsyncSession):
+    old_sync = datetime.now(timezone.utc) - timedelta(hours=2)
+    partial = BfSymbol(source="zerodha", symbol="SCHEDPARTIAL", display_name="Partial Co", last_synced_at=old_sync)
+    nothing_saved = BfSymbol(source="zerodha", symbol="SCHEDFAILED", display_name="Failed Co", last_synced_at=old_sync)
+    db_session.add_all([partial, nothing_saved])
+    await db_session.flush()
+    for symbol, inserted in ((partial, 500), (nothing_saved, 0)):
+        db_session.add(BfBackfillJob(
+            symbol_id=symbol.id, source="zerodha", timeframe="1m", status=BfBackfillStatus.FAILED.value,
+            inserted_count=inserted, completed_at=datetime.now(timezone.utc),
+        ))
+    await db_session.commit()
+
+    candidates = {c.id for c in await CatalogSyncScheduler()._find_symbols_needing_sync(db_session)}
+
+    assert partial.id in candidates
+    assert nothing_saved.id not in candidates

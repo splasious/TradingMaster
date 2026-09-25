@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models.backfill_platform import BfBackfillJob, BfBackfillStatus, BfSymbol
+from app.models.backfill_platform import BfBackfillJob, BfBackfillStatus, BfOhlcvBar, BfSymbol
 from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_symbol_to_catalog
 
 logger = logging.getLogger(__name__)
@@ -109,20 +109,26 @@ class CatalogSyncScheduler:
             return synced_symbols, synced_bars
 
     async def _find_symbols_needing_sync(self, db: AsyncSession) -> list[BfSymbol]:
-        latest_completion = (
+        """A symbol whose bars changed since it was last copied: a job saved
+        bars after that -- completed, or failed partway after saving some --
+        or it has bars but was never copied at all (e.g. a Delta symbol
+        filled only by the live sync, which has no jobs)."""
+        latest_save = (
             select(BfBackfillJob.symbol_id, func.max(BfBackfillJob.completed_at).label("latest_completed_at"))
-            .where(BfBackfillJob.status == BfBackfillStatus.COMPLETED.value)
+            .where((BfBackfillJob.status == BfBackfillStatus.COMPLETED.value) | (BfBackfillJob.inserted_count > 0))
             .group_by(BfBackfillJob.symbol_id)
             .subquery()
         )
+        has_bars = select(BfOhlcvBar.id).where(BfOhlcvBar.symbol_id == BfSymbol.id).exists()
         stmt = (
             select(BfSymbol)
-            .join(latest_completion, latest_completion.c.symbol_id == BfSymbol.id)
+            .outerjoin(latest_save, latest_save.c.symbol_id == BfSymbol.id)
             .where(
-                (BfSymbol.last_synced_at.is_(None))
-                | (latest_completion.c.latest_completed_at > BfSymbol.last_synced_at)
+                (latest_save.c.latest_completed_at.is_not(None) & BfSymbol.last_synced_at.is_(None))
+                | (latest_save.c.latest_completed_at > BfSymbol.last_synced_at)
+                | (latest_save.c.latest_completed_at.is_(None) & BfSymbol.last_synced_at.is_(None) & has_bars)
             )
-            .order_by(latest_completion.c.latest_completed_at)
+            .order_by(latest_save.c.latest_completed_at.nulls_last())
             .limit(MAX_SYMBOLS_PER_TICK)
         )
         return (await db.execute(stmt)).scalars().all()
