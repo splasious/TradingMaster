@@ -5,6 +5,7 @@ import httpx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.backfill_platform.worker import drain_queue
 from app.services.market_data import delta_source as delta_source_module
 
 _original_request = httpx.AsyncClient.request
@@ -72,8 +73,9 @@ async def test_create_and_complete_backfill_job(client: AsyncClient, seeded_admi
     assert create_resp.status_code == 202
     job_id = create_resp.json()["id"]
 
-    # BackgroundTasks run inline after the response in tests (see conftest's
-    # AsyncSessionLocal monkeypatch for this module -- registered below)
+    # Queued for BackfillWorker; no worker runs in tests, so run the queue here.
+    assert (await client.get(f"/api/v1/backfill-platform/jobs/{job_id}", headers=headers)).json()["status"] == "pending"
+    await drain_queue()
     status_resp = await client.get(f"/api/v1/backfill-platform/jobs/{job_id}", headers=headers)
     assert status_resp.json()["status"] == "completed"
     assert status_resp.json()["inserted_count"] == 2
@@ -95,9 +97,10 @@ async def test_backfill_job_surfaces_source_error(client: AsyncClient, seeded_ad
         headers=headers,
     )
     job_id = create_resp.json()["id"]
+    await drain_queue()  # a network error is retried, then the job fails with the reason
     status_resp = await client.get(f"/api/v1/backfill-platform/jobs/{job_id}", headers=headers)
     assert status_resp.json()["status"] == "failed"
-    assert status_resp.json()["error_message"]
+    assert status_resp.json()["error_message"] == "Could not reach Delta Exchange's API."
 
 
 async def test_create_nfo_backfill_job_stores_fo_metadata(client: AsyncClient, seeded_admin: dict):

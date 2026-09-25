@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.live_trading import LiveDeployment
 from app.models.paper_trading import PaperDeployment
+from app.services.backfill_platform.topup import backfill_topup_scheduler
+from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.live_trading.scheduler import live_trading_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
@@ -44,6 +46,8 @@ class ApplicationMetrics:
     real_price_feed_running: bool
     active_timeframe_sync_scheduler_running: bool
     kite_session_monitor_running: bool
+    backfill_worker_running: bool
+    backfill_topup_scheduler_running: bool
 
 
 @dataclass
@@ -76,6 +80,8 @@ def get_application_metrics() -> ApplicationMetrics:
         real_price_feed_running=real_price_feed.running,
         active_timeframe_sync_scheduler_running=active_timeframe_sync_scheduler.running,
         kite_session_monitor_running=kite_session_monitor_scheduler.running,
+        backfill_worker_running=backfill_worker.running,
+        backfill_topup_scheduler_running=backfill_topup_scheduler.running,
     )
 
 

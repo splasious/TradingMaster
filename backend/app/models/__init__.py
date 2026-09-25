@@ -1,6 +1,15 @@
 from app.models.alert import Alert
 from app.models.audit import AuditLog
-from app.models.backfill_platform import BfBackfillJob, BfOhlcvBar, BfSymbol, BfWatchlist, BfWatchlistItem
+from app.models.backfill_platform import (
+    BfBackfillJob,
+    BfBackfillRun,
+    BfCoverage,
+    BfOhlcvBar,
+    BfSettings,
+    BfSymbol,
+    BfWatchlist,
+    BfWatchlistItem,
+)
 from app.models.backtest import (
     BacktestJob,
     BacktestResult,
@@ -38,6 +47,9 @@ __all__ = [
     "Alert",
     "AuditLog",
     "BfBackfillJob",
+    "BfBackfillRun",
+    "BfCoverage",
+    "BfSettings",
     "BfOhlcvBar",
     "BfSymbol",
     "BfWatchlist",

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.backfill_platform import BfOhlcvBar, BfSymbol
+from app.models.backfill_platform import BfOhlcvBar, BfSettings, BfSymbol
 from app.services.backfill_platform.live_sync_scheduler import BfLiveSyncScheduler
 from app.services.market_data.hours import nse_market_open
 
@@ -167,6 +167,8 @@ async def test_one_symbol_failing_does_not_affect_the_others_in_a_tick(db_engine
 
     monkeypatch.setattr(live_sync_scheduler, "save_bars", failing_for_first)
     monkeypatch.setattr(live_sync_scheduler, "AsyncSessionLocal", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+    db_session.add(BfSettings(id=1, delta_enabled=True))
+    await db_session.commit()
 
     assert await BfLiveSyncScheduler()._sync_once() == 1
 
@@ -175,3 +177,22 @@ async def test_one_symbol_failing_does_not_affect_the_others_in_a_tick(db_engine
         rows = (await db_session.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol.id))).scalars().all()
         counts[symbol.symbol] = len(rows)
     assert counts == {"AAAXUSD": 0, "BBBXUSD": 1}  # the failed symbol's write was rolled back, not committed with the next
+
+
+async def test_nothing_is_fetched_while_delta_is_paused(db_engine, db_session: AsyncSession, monkeypatch):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services.backfill_platform import live_sync_scheduler
+
+    db_session.add(BfSymbol(source="delta", symbol="PAUSEDXUSD", display_name="Paused"))
+    db_session.add(BfSettings(id=1, delta_enabled=False))  # the default: paused on the Data Backfill page
+    await db_session.commit()
+
+    async def no_calls(client_self, url, **kwargs):
+        raise AssertionError("Delta must not be called while paused")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", no_calls)
+    monkeypatch.setattr(live_sync_scheduler, "AsyncSessionLocal", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+
+    assert await BfLiveSyncScheduler()._sync_once() == 0
+    assert (await db_session.execute(select(BfOhlcvBar))).scalars().all() == []

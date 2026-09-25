@@ -39,11 +39,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models.backfill_platform import BfBackfillJob
+from app.models.backfill_platform import JOB_PRIORITY_SCHEDULED, BfBackfillJob
 from app.models.instrument import Instrument
 from app.services.backfill_platform.catalog_sync import UNDERLYING_NAME_ALIASES
-from app.services.backfill_platform.jobs import run_bf_backfill_job
 from app.services.backfill_platform.symbols import get_or_create_symbol
+from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_ticker_service import find_connected_zerodha_account, find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import IST, KiteAPIError, ZerodhaKiteBroker
 
@@ -181,18 +181,14 @@ async def _ensure_underlying_expiries(
                     expiry=expiry, strike=strike, option_type=option_type,
                     lot_size=int(lot_size_raw) if lot_size_raw else None, underlying_symbol=kite_name,
                 )
-                job = BfBackfillJob(
+                db.add(BfBackfillJob(
                     symbol_id=symbol_row.id, source="zerodha_nfo", timeframe=BACKFILL_TIMEFRAME,
-                    requested_by=account_user_id,
-                )
-                db.add(job)
-                # run_bf_backfill_job opens its own AsyncSessionLocal() session
-                # to read this row back -- must be committed first, or that
-                # fresh session (a different connection) won't see it yet.
-                await db.commit()
-                await db.refresh(job)
-                await run_bf_backfill_job(job.id)
+                    requested_by=account_user_id, priority=JOB_PRIORITY_SCHEDULED,
+                ))
                 queued += 1
+    await db.commit()
+    if queued:
+        backfill_worker.wake()
     return queued
 
 

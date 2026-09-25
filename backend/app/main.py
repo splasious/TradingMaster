@@ -7,9 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.services.backfill_platform.catalog_sync_scheduler import catalog_sync_scheduler
-from app.services.backfill_platform.jobs import fail_orphaned_jobs_on_startup
+from app.services.backfill_platform.jobs import requeue_interrupted_jobs_on_startup
 from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
 from app.services.backfill_platform.nfo_expiry_rotation import nfo_expiry_rotation_scheduler
+from app.services.backfill_platform.topup import backfill_topup_scheduler
+from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.live_trading.scheduler import live_trading_scheduler
@@ -27,9 +29,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    orphaned_count = await fail_orphaned_jobs_on_startup()
-    if orphaned_count:
-        logger.warning("Marked %d backfill job(s) as failed -- orphaned by a previous server restart", orphaned_count)
+    requeued = await requeue_interrupted_jobs_on_startup()
+    if requeued:
+        logger.warning("Put %d backfill job(s) interrupted by the last restart back in the queue", requeued)
     tick_engine.start()
     nse_holiday_sync_scheduler.start()
     real_price_feed.start()
@@ -37,6 +39,8 @@ async def lifespan(app: FastAPI):
     paper_trading_scheduler.start()
     live_trading_scheduler.start()
     bf_live_sync_scheduler.start()
+    backfill_worker.start()
+    backfill_topup_scheduler.start()
     catalog_sync_scheduler.start()
     nfo_expiry_rotation_scheduler.start()
     active_timeframe_sync_scheduler.start()
@@ -50,6 +54,8 @@ async def lifespan(app: FastAPI):
     active_timeframe_sync_scheduler.stop()
     nfo_expiry_rotation_scheduler.stop()
     catalog_sync_scheduler.stop()
+    backfill_topup_scheduler.stop()
+    backfill_worker.stop()
     bf_live_sync_scheduler.stop()
     live_trading_scheduler.stop()
     paper_trading_scheduler.stop()

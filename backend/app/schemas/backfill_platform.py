@@ -1,6 +1,7 @@
 from datetime import date, datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SourceStatusOut(BaseModel):
@@ -174,3 +175,21 @@ class LiveSyncStatusOut(BaseModel):
     last_sync_at: datetime | None
     last_synced_count: int
     last_error: str | None
+
+
+class BfScheduleIn(BaseModel):
+    """The Data Backfill page's schedule panel."""
+
+    auto_topup_zerodha: bool
+    auto_topup_zerodha_nfo: bool
+    delta_enabled: bool
+    topup_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    topup_timeframes: list[Literal["1m", "5m", "15m", "30m", "60m", "1d"]] = Field(min_length=1)
+
+
+class BfTopupIn(BaseModel):
+    sources: list[Literal["zerodha", "zerodha_nfo"]] | None = None
+
+
+class BfRetryFailedIn(BaseModel):
+    kind: Literal["interrupted", "failed"]

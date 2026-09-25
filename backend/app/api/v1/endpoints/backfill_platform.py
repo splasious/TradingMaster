@@ -3,7 +3,7 @@ import io
 import uuid
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user, require_role
 from app.db.session import get_db
 from app.models.backfill_platform import (
+    JOB_PRIORITY_BULK,
     BfBackfillJob,
     BfBackfillStatus,
     BfOhlcvBar,
@@ -49,7 +50,7 @@ from app.services.backfill_platform import symbols as symbols_service
 from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_symbol_to_catalog
 from app.services.backfill_platform.catalog_sync_scheduler import catalog_sync_scheduler
 from app.services.backfill_platform.completeness import compute_completeness
-from app.services.backfill_platform.jobs import run_bf_backfill_job
+from app.services.backfill_platform.worker import backfill_worker
 from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_scheduler
 from app.services.backfill_platform.timeframes import timeframes_for_source
 from app.services.market_data.base import MarketDataSourceError
@@ -105,7 +106,7 @@ async def get_source_timeframes(source: str, _: User = Depends(get_current_user)
 
 @router.post("/sources/{source}/backfill-all", response_model=BulkBackfillResult, status_code=status.HTTP_202_ACCEPTED)
 async def backfill_all_for_source(
-    source: str, background_tasks: BackgroundTasks, timeframe: str = Query("1d"),
+    source: str, timeframe: str = Query("1d"),
     start_date: date | None = Query(None), end_date: date | None = Query(None),
     db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator")),
 ) -> BulkBackfillResult:
@@ -134,13 +135,10 @@ async def backfill_all_for_source(
             expiry=result.expiry, strike=result.strike, option_type=result.option_type,
             lot_size=result.lot_size, underlying_symbol=result.underlying_symbol,
         )
-        job = BfBackfillJob(
+        db.add(BfBackfillJob(
             symbol_id=symbol.id, source=source, timeframe=timeframe,
-            start_date=start_date, end_date=end_date, requested_by=user.id,
-        )
-        db.add(job)
-        await db.flush()
-        background_tasks.add_task(run_bf_backfill_job, job.id)
+            start_date=start_date, end_date=end_date, requested_by=user.id, priority=JOB_PRIORITY_BULK,
+        ))
         queued += 1
 
     await write_audit_log(
@@ -148,6 +146,7 @@ async def backfill_all_for_source(
         new_value={"source": source, "queued": queued, "timeframe": timeframe},
     )
     await db.commit()
+    backfill_worker.wake()
     return BulkBackfillResult(source=source, queued=queued)
 
 
@@ -221,7 +220,6 @@ def _job_out(job: BfBackfillJob, symbol: BfSymbol) -> BfBackfillJobOut:
 @router.post("/jobs", response_model=BfBackfillJobOut, status_code=status.HTTP_202_ACCEPTED)
 async def create_backfill_job(
     payload: BfBackfillJobCreate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> BfBackfillJobOut:
@@ -245,8 +243,7 @@ async def create_backfill_job(
     )
     await db.commit()
     await db.refresh(job)
-
-    background_tasks.add_task(run_bf_backfill_job, job.id)
+    backfill_worker.wake()
     return _job_out(job, symbol)
 
 
@@ -280,7 +277,7 @@ async def list_backfill_jobs(
 
 @router.post("/jobs/{job_id}/retry", response_model=BfBackfillJobOut, status_code=status.HTTP_202_ACCEPTED)
 async def retry_backfill_job(
-    job_id: str, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db),
+    job_id: str, db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> BfBackfillJobOut:
     original = await db.get(BfBackfillJob, uuid.UUID(job_id))
@@ -295,8 +292,7 @@ async def retry_backfill_job(
     db.add(job)
     await db.commit()
     await db.refresh(job)
-
-    background_tasks.add_task(run_bf_backfill_job, job.id)
+    backfill_worker.wake()
     return _job_out(job, symbol)
 
 
@@ -575,7 +571,7 @@ async def remove_watchlist_item(
 
 @router.post("/watchlists/{watchlist_id}/backfill", response_model=list[BfBackfillJobOut], status_code=status.HTTP_202_ACCEPTED)
 async def backfill_watchlist(
-    watchlist_id: str, background_tasks: BackgroundTasks, timeframe: str = Query("1d"),
+    watchlist_id: str, timeframe: str = Query("1d"),
     start_date: date | None = Query(None), end_date: date | None = Query(None),
     payload: WatchlistBackfillRequest | None = Body(None),
     db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader", "analyst")),
@@ -602,11 +598,10 @@ async def backfill_watchlist(
             continue
         job = BfBackfillJob(
             symbol_id=symbol.id, source=symbol.source, timeframe=timeframe,
-            start_date=start_date, end_date=end_date, requested_by=user.id,
+            start_date=start_date, end_date=end_date, requested_by=user.id, priority=JOB_PRIORITY_BULK,
         )
         db.add(job)
         await db.flush()
-        background_tasks.add_task(run_bf_backfill_job, job.id)
         jobs_out.append((job, symbol))
 
     await write_audit_log(
@@ -614,6 +609,7 @@ async def backfill_watchlist(
         new_value={"symbol_count": len(jobs_out), "timeframe": timeframe},
     )
     await db.commit()
+    backfill_worker.wake()
     for job, _symbol in jobs_out:
         await db.refresh(job)
     return [_job_out(job, symbol) for job, symbol in jobs_out]

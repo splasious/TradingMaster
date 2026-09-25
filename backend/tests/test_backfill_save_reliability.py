@@ -24,7 +24,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models.backfill_platform import BfBackfillJob, BfBackfillStatus, BfOhlcvBar, BfSymbol
+from app.models.backfill_platform import BfBackfillJob, BfBackfillStatus, BfCoverage, BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.backfill_platform import catalog_sync, catalog_sync_scheduler, jobs
@@ -56,7 +56,8 @@ class FakeKite:
             if d.weekday() < 5:
                 t = datetime(d.year, d.month, d.day, 9, 15, tzinfo=IST)
                 while t < datetime(d.year, d.month, d.day, 15, 30, tzinfo=IST):
-                    bars.append({"ts": t, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10})
+                    if start <= t <= end:
+                        bars.append({"ts": t, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10})
                     t += timedelta(minutes=step)
             d += timedelta(days=1)
         return bars
@@ -102,11 +103,18 @@ async def _bar_count(sessions, symbol_id) -> int:
         return (await db.execute(select(func.count()).select_from(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol_id))).scalar_one()
 
 
+async def _run_until_settled(job_id) -> None:
+    """What the worker does over time: a retried job runs again (here
+    without waiting out its back-off) until it completes or gives up."""
+    for _ in range(jobs.MAX_ATTEMPTS):
+        await jobs.run_bf_backfill_job(job_id)
+
+
 async def test_a_long_source_error_fails_the_job_with_its_reason(db_session, sessions, monkeypatch):
     use_kite(monkeypatch, FakeKite(error=KiteAPIError("Kite API error 500: " + "<html>upstream error</html> " * 120)))
     job_id = await _job(db_session, await _symbol(db_session, "LONGERR"), "15m", 10)
 
-    await jobs.run_bf_backfill_job(job_id)
+    await _run_until_settled(job_id)
 
     job = await _job_row(sessions, job_id)
     assert job.status == BfBackfillStatus.FAILED.value
@@ -118,7 +126,7 @@ async def test_an_unexpected_error_fails_the_job_instead_of_raising(db_session, 
     use_kite(monkeypatch, FakeKite(error=httpx.ReadError("connection reset by peer")))
     job_id = await _job(db_session, await _symbol(db_session, "READERR"), "15m", 10)
 
-    await jobs.run_bf_backfill_job(job_id)  # must not raise
+    await _run_until_settled(job_id)  # must not raise
 
     job = await _job_row(sessions, job_id)
     assert job.status == BfBackfillStatus.FAILED.value
@@ -134,8 +142,9 @@ async def test_backfill_all_carries_on_after_a_failing_job(db_session, sessions,
         use_kite(monkeypatch, FakeKite(error=httpx.ReadError("reset")) if n == 1 else FakeKite())
         await jobs.run_bf_backfill_job(job_id)
 
-    statuses = [(await _job_row(sessions, j)).status for j in job_ids]
-    assert statuses == ["completed", "failed", "completed"]
+    rows = [await _job_row(sessions, j) for j in job_ids]
+    assert [r.status for r in rows] == ["completed", "pending", "completed"]  # the middle one waits to retry
+    assert rows[1].error_message == "Attempt 1 of 3 failed, retrying: ReadError: reset"
 
 
 async def test_a_long_range_is_fetched_in_parts_kite_accepts(db_session, sessions, monkeypatch):
@@ -153,17 +162,68 @@ async def test_a_long_range_is_fetched_in_parts_kite_accepts(db_session, session
     assert job.inserted_count == job.downloaded_count == await _bar_count(sessions, symbol.id)
 
 
-async def test_a_failing_part_keeps_the_bars_already_fetched(db_session, sessions, monkeypatch):
-    use_kite(monkeypatch, FakeKite(fail_on_call=2, error=KiteAPIError("Too many requests")))
+async def test_a_failing_part_keeps_the_bars_already_fetched_and_retries(db_session, sessions, monkeypatch):
+    kite = use_kite(monkeypatch, FakeKite(fail_on_call=2, error=KiteAPIError("Too many requests")))
     symbol = await _symbol(db_session, "PARTIAL")
     job_id = await _job(db_session, symbol, "1m", 120)
 
     await jobs.run_bf_backfill_job(job_id)
 
     job = await _job_row(sessions, job_id)
-    assert job.status == BfBackfillStatus.FAILED.value
+    assert job.status == BfBackfillStatus.PENDING.value and job.run_after is not None
     assert job.inserted_count > 0 and job.inserted_count == await _bar_count(sessions, symbol.id)
-    assert job.error_message.startswith(f"Saved {job.inserted_count} new bars, then: Part 2 of 3")
+    assert job.error_message.startswith(f"Attempt 1 of 3 failed, retrying: Saved {job.inserted_count} new bars, then: Part 2 of 3")
+
+    await jobs.run_bf_backfill_job(job_id)  # the retry fetches every part again
+
+    job = await _job_row(sessions, job_id)
+    assert job.status == BfBackfillStatus.COMPLETED.value and job.error_message is None
+    assert len(kite.calls) == 5 and job.attempts == 2
+
+
+async def test_a_failure_a_retry_cannot_fix_fails_at_once(db_session, sessions, monkeypatch):
+    use_kite(monkeypatch, FakeKite(error=KiteAPIError("'GONE' not found in Kite's NSE instrument list")))
+    job_id = await _job(db_session, await _symbol(db_session, "GONE"), "15m", 10)
+
+    await jobs.run_bf_backfill_job(job_id)
+
+    job = await _job_row(sessions, job_id)
+    assert (job.status, job.attempts) == (BfBackfillStatus.FAILED.value, 1)
+    assert job.error_message == "'GONE' not found in Kite's NSE instrument list"
+
+
+async def test_a_job_updates_the_symbols_coverage(db_session, sessions, monkeypatch):
+    use_kite(monkeypatch, FakeKite())
+    symbol = await _symbol(db_session, "COVERED")
+    job_id = await _job(db_session, symbol, "15m", 10)
+
+    await jobs.run_bf_backfill_job(job_id)
+
+    async with sessions() as db:
+        row = await db.get(BfCoverage, (symbol.id, "15m"))
+    assert row.bar_count == await _bar_count(sessions, symbol.id)
+    assert row.last_ts.replace(tzinfo=timezone.utc) == datetime(2026, 9, 24, 15, 15, tzinfo=IST)
+    assert row.last_day_bars == 25  # a full 09:15-15:30 session of 15-minute bars
+
+
+def _bar(ts: datetime) -> dict:
+    return {"ts": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1}
+
+
+def test_the_candle_still_forming_is_not_saved():
+    day = datetime(2026, 9, 24, tzinfo=IST)
+    at = lambda h, m: day.replace(hour=h, minute=m)  # noqa: E731
+    intraday = [_bar(at(15, 0)), _bar(at(15, 15))]
+    # 15:20 -- the 15:15 candle is still forming.
+    assert [b["ts"] for b in jobs._finished("zerodha", "15m", intraday, at(15, 20))] == [at(15, 0)]
+    # After the close every candle of the day is final -- the 15:15 hourly
+    # one too, although its hour would run to 16:15.
+    assert len(jobs._finished("zerodha", "15m", intraday, at(15, 31))) == 2
+    assert len(jobs._finished("zerodha", "60m", [_bar(at(15, 15))], at(15, 31))) == 1
+    # Kite's daily candle is dated at midnight and final at the close.
+    daily = [_bar(day)]
+    assert jobs._finished("zerodha", "1d", daily, at(15, 0)) == []
+    assert len(jobs._finished("zerodha", "1d", daily, at(15, 31))) == 1
 
 
 async def test_overlapping_backfills_of_one_symbol_both_complete(db_session, sessions, monkeypatch):

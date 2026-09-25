@@ -24,6 +24,7 @@ from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.services.backfill_platform.catalog_sync import sync_symbol_to_catalog
+from app.services.backfill_platform.coverage import bump_coverage, get_settings
 from app.services.backfill_platform.jobs import save_bars
 from app.services.market_data.bar_periods import is_complete
 from app.services.market_data.base import MarketDataSourceError
@@ -73,6 +74,8 @@ class BfLiveSyncScheduler:
     async def _sync_once(self) -> int:
         now = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as db:
+            if not (await get_settings(db)).delta_enabled:
+                return 0  # Delta Exchange paused on the Data Backfill page -- saved data kept
             targets = (await db.execute(select(BfSymbol.id, BfSymbol.symbol).where(BfSymbol.source == "delta"))).all()
         synced = 0
         for symbol_id, name in targets:
@@ -113,6 +116,8 @@ class BfLiveSyncScheduler:
         if not new_bars:
             return
         _, inserted = await save_bars(db, symbol.id, timeframe, new_bars)
+        if inserted:
+            await bump_coverage(db, symbol.id, timeframe, [bar["ts"] for bar in new_bars])
         # A symbol not in the main catalog yet gets there -- with all its
         # history -- through CatalogSyncScheduler after its first backfill.
         if inserted and symbol.last_synced_at is not None:

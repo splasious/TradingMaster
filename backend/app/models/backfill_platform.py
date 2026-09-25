@@ -15,12 +15,14 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Date,
     DateTime,
     Float,
     ForeignKey,
     Integer,
     String,
+    Index,
     UniqueConstraint,
     Uuid,
     func,
@@ -41,6 +43,16 @@ class BfBackfillStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+# Queue order: a job someone started by hand runs before bulk work, and a
+# bulk backfill before the daily automatic top-up. A top-up adds the
+# timeframe's place in TOPUP_TIMEFRAME_ORDER, so daily bars come in first.
+JOB_PRIORITY_MANUAL = 0
+JOB_PRIORITY_BULK = 10
+JOB_PRIORITY_SCHEDULED = 20
+TOPUP_TIMEFRAME_ORDER = ["1d", "60m", "30m", "15m", "5m", "1m"]
 
 
 class BfSymbol(Base):
@@ -111,6 +123,83 @@ class BfBackfillJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The database is the queue (BackfillWorker): jobs wait here as
+    # "pending" -- surviving a restart -- and run one at a time, lowest
+    # priority first, not before run_after (a retry's back-off).
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=JOB_PRIORITY_MANUAL, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    run_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("bf_backfill_runs.id", ondelete="SET NULL"))
+
+    __table_args__ = (
+        Index("ix_bf_backfill_jobs_status_priority", "status", "priority", "created_at"),
+        Index("ix_bf_backfill_jobs_symbol_id", "symbol_id"),
+        Index("ix_bf_backfill_jobs_run_id", "run_id"),
+    )
+
+
+class BfBackfillRun(Base):
+    """One top-up: the daily automatic run for a source, or one started with
+    "Top up now". Its jobs carry its id; progress is counted from them."""
+
+    __tablename__ = "bf_backfill_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # "scheduled" | "manual"
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The NSE session this run brings the data up to.
+    session_date: Mapped[date | None] = mapped_column(Date)
+    # "waiting_login" -> "running" -> "completed" | "cancelled"
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    jobs_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str | None] = mapped_column(String(300))
+    requested_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BfCoverage(Base):
+    """What is saved for one symbol and timeframe: the watermark the daily
+    top-up fetches after, and what every "saved up to" status reads --
+    instead of aggregating bf_ohlcv_bars (20M+ rows) on each request.
+    Kept current by every save (see coverage.py)."""
+
+    __tablename__ = "bf_coverage"
+
+    symbol_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("bf_symbols.id", ondelete="CASCADE"), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(10), primary_key=True)
+    first_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bar_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Bars on the last saved (IST) day -- fewer than a full session's worth
+    # marks a partial day.
+    last_day_bars: Mapped[int | None] = mapped_column(Integer)
+    # The last session a job successfully fetched through, bars or not: a
+    # contract with no trades that day has nothing to save but is not behind.
+    checked_through: Mapped[date | None] = mapped_column(Date)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+DEFAULT_TOPUP_TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d"]
+
+
+class BfSettings(Base):
+    """The Data Backfill page's schedule settings -- a single row (id=1)."""
+
+    __tablename__ = "bf_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    auto_topup_zerodha: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    auto_topup_zerodha_nfo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Delta Exchange paused: no live sync, no automatic top-up; saved data kept.
+    delta_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    topup_time: Mapped[str] = mapped_column(String(5), nullable=False, default="16:15")  # IST, HH:MM
+    topup_timeframes: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: list(DEFAULT_TOPUP_TIMEFRAMES))
+    # Set once bf_coverage has been built from the stored bars (coverage.py);
+    # null means the build hasn't finished, so it runs again at startup.
+    coverage_built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class BfWatchlist(Base):

@@ -113,21 +113,20 @@ async def test_ensure_underlying_expiries_backfills_missing_expiry_with_atm_wind
         assert exchange == "NSE" and tradingsymbol == "NIFTY 50"
         return {"price": 23010.0, "instrument_token": 999}
 
-    queued_job_ids: list[uuid.UUID] = []
-
-    async def fake_run_job(job_id):
-        queued_job_ids.append(job_id)
-
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp", fake_get_ltp)
-    monkeypatch.setattr(rotation, "run_bf_backfill_job", fake_run_job)
 
     broker = ZerodhaKiteBroker()
     added = await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4())
 
     # ATM (23010 -> closest strike 23000) ± 1 -> {22950, 23000, 23050} x {CE, PE} = 6 legs.
     assert added == 6
-    assert len(queued_job_ids) == 6
+    # Queued for BackfillWorker, behind anything started by hand.
+    from app.models.backfill_platform import JOB_PRIORITY_SCHEDULED, BfBackfillJob
+    from sqlalchemy import select as _select
+    queued_jobs = (await db_session.execute(_select(BfBackfillJob))).scalars().all()
+    assert len(queued_jobs) == 6
+    assert {(j.status, j.priority, j.timeframe) for j in queued_jobs} == {("pending", JOB_PRIORITY_SCHEDULED, "15m")}
 
     from app.models.backfill_platform import BfSymbol
     from sqlalchemy import select
@@ -220,17 +219,10 @@ async def test_check_once_backfills_every_tracked_underlying(db_session: AsyncSe
     async def fake_get_ltp(self, exchange, tradingsymbol):
         return {"price": 23000.0, "instrument_token": 999}
 
-    queued: list[uuid.UUID] = []
-
-    async def fake_run_job(job_id):
-        queued.append(job_id)
-
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp", fake_get_ltp)
-    monkeypatch.setattr(rotation, "run_bf_backfill_job", fake_run_job)
 
     scheduler = rotation.NfoExpiryRotationScheduler()
     added = await scheduler.check_once()
     assert added == 2  # ATM only (window=0) x {CE, PE}
-    assert len(queued) == 2
     assert scheduler.last_error is None

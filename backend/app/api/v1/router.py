@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     alerts,
     auth,
+    backfill_overview,
     backfill_platform,
     backtests,
     backup,
@@ -48,5 +49,6 @@ api_router.include_router(live_trading.router, prefix="/live-trading", tags=["li
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(backup.router, prefix="/backup", tags=["backup"])
+api_router.include_router(backfill_overview.router, prefix="/backfill-platform", tags=["backfill-platform"])
 api_router.include_router(backfill_platform.router, prefix="/backfill-platform", tags=["backfill-platform"])
 api_router.include_router(options.router, prefix="/options", tags=["options"])
