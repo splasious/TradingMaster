@@ -67,13 +67,12 @@ GROUP BY source;
 
 \echo
 \echo '== 7. Backfilled but not yet copied to Charts/strategies (catalog sync backlog)'
-SELECT count(*) AS symbols_waiting, to_char(min(j.completed_at), 'DD-Mon HH24:MI') AS oldest_waiting_since
-FROM bf_symbols s
-JOIN LATERAL (
-  SELECT max(completed_at) AS completed_at FROM bf_backfill_jobs
-  WHERE symbol_id = s.id AND status = 'completed'
-) j ON j.completed_at IS NOT NULL
-WHERE s.last_synced_at IS NULL OR j.completed_at > s.last_synced_at;
+WITH latest AS (
+  SELECT symbol_id, max(completed_at) AS completed_at FROM bf_backfill_jobs WHERE status = 'completed' GROUP BY symbol_id
+)
+SELECT count(*) AS symbols_waiting, to_char(min(l.completed_at), 'DD-Mon HH24:MI') AS oldest_waiting_since
+FROM latest l JOIN bf_symbols s ON s.id = l.symbol_id
+WHERE s.last_synced_at IS NULL OR l.completed_at > s.last_synced_at;
 
 \echo
 \echo '== 8. Symbols with fewer candles in the main table than were backfilled (copy gaps)'
@@ -95,12 +94,12 @@ ORDER BY bf.backfilled - coalesce(main.in_main, 0) DESC
 LIMIT 30;
 
 \echo
-\echo '== 9. Intraday history, last 30 days: symbols with the fewest trading days of data'
+\echo '== 9. Intraday history (5m-60m), last 14 days: symbols with the fewest trading days of data'
 SELECT s.source, s.symbol, b.timeframe,
        count(DISTINCT (b.ts AT TIME ZONE 'Asia/Kolkata')::date) AS days_with_data,
        to_char(max(b.ts), 'DD-Mon HH24:MI') AS last_bar
 FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
-WHERE b.timeframe IN ('1m', '5m', '15m', '30m', '60m') AND b.ts > now() - interval '30 days'
+WHERE b.timeframe IN ('5m', '15m', '30m', '60m') AND b.ts > now() - interval '14 days'
 GROUP BY s.source, s.symbol, b.timeframe
 ORDER BY days_with_data, s.symbol
 LIMIT 25;

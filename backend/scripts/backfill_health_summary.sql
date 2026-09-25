@@ -98,18 +98,18 @@ GROUP BY s.source, b.timeframe
 ORDER BY s.source, b.timeframe;
 
 \echo
-\echo '== I. Intraday completeness, last 30 days before today'
+\echo '== I. Intraday completeness (5m/15m/30m/60m), last 14 days before today'
 \echo '   complete = a full session of bars (NSE 09:15-15:30; Delta 24h);'
 \echo '   gap days = market days between a symbol''s first and last day with no bars at all'
 WITH per_day AS (
   SELECT s.source, b.timeframe, b.symbol_id, (b.ts AT TIME ZONE 'Asia/Kolkata')::date AS day, count(*) AS bars
   FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
-  WHERE b.timeframe IN ('1m', '5m', '15m', '30m', '60m')
-    AND b.ts >= date_trunc('day', now()) - interval '30 days' AND b.ts < date_trunc('day', now())
+  WHERE b.timeframe IN ('5m', '15m', '30m', '60m')
+    AND b.ts >= date_trunc('day', now()) - interval '14 days' AND b.ts < date_trunc('day', now())
   GROUP BY 1, 2, 3, 4
 ), expected AS (
   SELECT per_day.*, CASE WHEN source = 'delta' THEN 1440 / tf.minutes ELSE ceil(375.0 / tf.minutes) END AS expected
-  FROM per_day JOIN (VALUES ('1m', 1), ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)) AS tf(timeframe, minutes) USING (timeframe)
+  FROM per_day JOIN (VALUES ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)) AS tf(timeframe, minutes) USING (timeframe)
 ), market_days AS (
   SELECT DISTINCT source, timeframe, day FROM per_day
 ), spans AS (
@@ -129,13 +129,14 @@ ORDER BY e.source, e.timeframe;
 
 \echo
 \echo '== J. Backfilled but not yet copied to Charts/strategies (catalog sync backlog)'
-SELECT count(*) AS symbols_waiting, to_char(min(j.completed_at), 'DD-Mon HH24:MI') AS oldest_waiting_since
-FROM bf_symbols s
-JOIN LATERAL (
-  SELECT max(completed_at) AS completed_at FROM bf_backfill_jobs
-  WHERE symbol_id = s.id AND status = 'completed'
-) j ON j.completed_at IS NOT NULL
-WHERE s.last_synced_at IS NULL OR j.completed_at > s.last_synced_at;
+WITH latest AS (
+  SELECT symbol_id, max(completed_at) AS completed_at FROM bf_backfill_jobs WHERE status = 'completed' GROUP BY symbol_id
+)
+SELECT s.source, count(*) AS symbols_waiting, to_char(min(l.completed_at), 'DD-Mon HH24:MI') AS oldest_waiting_since
+FROM latest l JOIN bf_symbols s ON s.id = l.symbol_id
+WHERE s.last_synced_at IS NULL OR l.completed_at > s.last_synced_at
+GROUP BY s.source
+ORDER BY s.source;
 
 \echo
 \echo '== K. Backfilled bars missing from the main candle table (copy gaps)'
@@ -164,6 +165,21 @@ SELECT i.exchange, c.timeframe, count(DISTINCT c.instrument_id) AS instruments, 
 FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
 GROUP BY i.exchange, c.timeframe
 ORDER BY i.exchange, c.timeframe;
+
+\echo
+\echo '== N. Delta 1m, last 7 days: backfill-table bars vs the chart table''s copy of the same minute'
+\echo '   (chart rows written by the chart sync are finished candles; a differing'
+\echo '    backfill bar was saved before its minute ended)'
+SELECT c.source AS chart_row_written_by, count(*) AS compared,
+       count(*) FILTER (WHERE b.close <> c.close OR b.high <> c.high OR b.low <> c.low
+                        OR coalesce(b.volume, 0) <> coalesce(c.volume, 0)) AS differ
+FROM bf_ohlcv_bars b
+JOIN bf_symbols s ON s.id = b.symbol_id AND s.source = 'delta'
+JOIN instruments i ON i.exchange = 'DELTA' AND i.symbol = s.symbol
+JOIN ohlcv_candles c ON c.instrument_id = i.id AND c.timeframe = '1m' AND c.ts = b.ts
+WHERE b.timeframe = '1m' AND b.ts > now() - interval '7 days'
+GROUP BY c.source
+ORDER BY c.source;
 
 \echo
 \echo '== M. Database and table sizes'
