@@ -418,6 +418,18 @@ WHERE p.id = (SELECT id FROM pcr_snapshots WHERE underlying = 'NIFTY' ORDER BY t
 GROUP BY o.expiry ORDER BY o.expiry;
 
 \echo
+\echo '== X. Timeframes in use: strategies and deployments (counts), and 1m data held'
+SELECT 'strategies' AS what, timeframe, count(*) AS n FROM strategies GROUP BY timeframe
+UNION ALL SELECT 'paper deployments (' || status || ')', timeframe, count(*) FROM paper_deployments GROUP BY status, timeframe
+UNION ALL SELECT 'live deployments (' || status || ')', timeframe, count(*) FROM live_deployments GROUP BY status, timeframe
+ORDER BY 1, 2;
+SELECT 'bf_ohlcv_bars' AS table_name, count(*) AS rows_1m FROM bf_ohlcv_bars WHERE timeframe = '1m'
+UNION ALL SELECT 'ohlcv_candles', count(*) FROM ohlcv_candles WHERE timeframe = '1m'
+UNION ALL SELECT 'bf_coverage', count(*) FROM bf_coverage WHERE timeframe = '1m'
+UNION ALL SELECT 'bf_backfill_jobs (pending/running)', count(*) FROM bf_backfill_jobs WHERE timeframe = '1m' AND status IN ('pending', 'running');
+SELECT topup_timeframes FROM bf_settings;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
