@@ -91,7 +91,7 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     nse = {c["timeframe"]: c for c in body["segments"][0]["cells"]}
     assert (nse["1d"]["status"], nse["1d"]["current"], nse["1d"]["symbols"]) == ("ok", 2, 2)
     assert (nse["15m"]["status"], nse["15m"]["behind"], nse["15m"]["sessions_behind"]) == ("bad", 1, 2)
-    assert nse["1m"] == {"timeframe": "1m", "status": "none", "symbols": 0}
+    assert "1m" not in nse  # 1-minute is no longer kept
     nfo15 = {c["timeframe"]: c for c in body["segments"][1]["cells"]}["15m"]
     assert (nfo15["status"], nfo15["symbols"], nfo15["expired"]) == ("ok", 0, 1)
     assert body["segments"][2] | {"last_saved_at": None} == {
@@ -119,7 +119,7 @@ async def test_freshness_is_the_compact_nse_status(client, seeded_admin, db_sess
     body = (await client.get("/api/v1/backfill-platform/freshness", headers=await _headers(client, seeded_admin))).json()
     assert set(body) >= {"headline", "timeframes", "live_today_until", "zerodha_login", "next_run_at", "delta_paused", "queue", "live_window"}
     assert body["live_window"] == {"start": "09:00", "end": "15:30"}
-    assert [c["timeframe"] for c in body["timeframes"]] == ["1m", "5m", "15m", "30m", "60m", "1d"]
+    assert [c["timeframe"] for c in body["timeframes"]] == ["5m", "15m", "30m", "60m", "1d"]
     assert body["zerodha_login"] == {"connected": False, "status": "not_set_up"} and body["delta_paused"] is True
 
 

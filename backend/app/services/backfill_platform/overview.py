@@ -41,7 +41,7 @@ from app.services.market_data.bar_periods import BAR_DURATIONS
 
 SEGMENTS = {"zerodha": "NSE Equity", "zerodha_nfo": "NFO Options & Futures", "delta": "Delta Exchange"}
 UNIT = {"zerodha": "stocks", "zerodha_nfo": "contracts", "delta": "symbols"}
-TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d"]
+TIMEFRAMES = ["5m", "15m", "30m", "60m", "1d"]  # no 1-minute (timeframes.py)
 TIMEFRAME_LABEL = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "60m": "60m", "1d": "Daily"}
 ATTENTION_DAYS = 7
 _CACHE_SECONDS = 15

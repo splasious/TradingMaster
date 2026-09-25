@@ -5,7 +5,7 @@ source's real API, run continuously while the backend process is up,
 mirroring paper_trading/scheduler.py's established asyncio-task pattern.
 
 What "live" actually means per source, honestly:
-  - Delta (RWA tokens): polls real 1-minute candles every tick -- Delta's
+  - Delta (RWA tokens): polls real 5-minute candles every tick -- Delta's
     RWA/crypto markets trade continuously, no session gate needed.
   - Zerodha: NOT run here. Kite's historical/LTP endpoints need a
     specific user's authenticated session, and there's no single "the"
@@ -33,6 +33,8 @@ from app.services.market_data.delta_source import DeltaExchangeDataSource
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
+# 5-minute, not 1-minute: 1-minute is no longer kept (timeframes.py).
+LIVE_TIMEFRAME = "5m"
 # A candle counts as finished this long after it closes, giving the source
 # time to settle its final values (as active_timeframe_sync_scheduler does).
 _SETTLE = timedelta(seconds=10)
@@ -87,7 +89,7 @@ class BfLiveSyncScheduler:
                     symbol = await db.get(BfSymbol, symbol_id)
                     if symbol is None:
                         continue
-                    await self._sync_symbol(db, symbol, DeltaExchangeDataSource(), "1m", now)
+                    await self._sync_symbol(db, symbol, DeltaExchangeDataSource(), LIVE_TIMEFRAME, now)
                     synced += 1
                 except MarketDataSourceError:
                     continue  # one symbol's source hiccup shouldn't kill the whole tick
@@ -98,7 +100,7 @@ class BfLiveSyncScheduler:
     async def _sync_symbol(self, db, symbol: BfSymbol, data_source, timeframe: str, now: datetime) -> None:
         """Saves the finished candles of the last two days not stored yet,
         then copies them on to the main candle table if the symbol is
-        already there. The minute still in progress is left for a later
+        already there. The candle still in progress is left for a later
         tick: saved now it would keep its partial values for good, since a
         stored bar is never overwritten."""
         start = now - timedelta(days=2)

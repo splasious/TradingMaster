@@ -188,7 +188,9 @@ class BfCoverage(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-DEFAULT_TOPUP_TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "1d"]
+# No 1-minute: not used by anything, and it was the largest share of the
+# stored candles (removed 26 Sep 2026, its saved bars purged -- purge.py).
+DEFAULT_TOPUP_TIMEFRAMES = ["5m", "15m", "30m", "60m", "1d"]
 
 
 class BfSettings(Base):
@@ -207,6 +209,9 @@ class BfSettings(Base):
     live_start: Mapped[str] = mapped_column(String(5), nullable=False, default="09:00")
     live_end: Mapped[str] = mapped_column(String(5), nullable=False, default="15:30")
     topup_timeframes: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: list(DEFAULT_TOPUP_TIMEFRAMES))
+    # Timeframes whose saved candles are still being deleted in the
+    # background (purge.py); emptied once they are gone.
+    purge_timeframes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # Set once bf_coverage has been built from the stored bars (coverage.py);
     # null means the build hasn't finished, so it runs again at startup.
     coverage_built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

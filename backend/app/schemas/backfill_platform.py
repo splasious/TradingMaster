@@ -186,7 +186,7 @@ class BfScheduleIn(BaseModel):
     topup_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     live_start: str = Field("09:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     live_end: str = Field("15:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    topup_timeframes: list[Literal["1m", "5m", "15m", "30m", "60m", "1d"]] = Field(min_length=1)
+    topup_timeframes: list[Literal["5m", "15m", "30m", "60m", "1d"]] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _live_window_in_order(self) -> "BfScheduleIn":

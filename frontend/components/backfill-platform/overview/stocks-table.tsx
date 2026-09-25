@@ -12,7 +12,8 @@ import { cn } from "@/lib/utils";
 import { fmtLongDay, fmtShortDay, TIMEFRAME_SHORT } from "./format";
 import { FreshInline, type FreshKind } from "./fresh-status";
 
-const TIMEFRAMES: BfTimeframe[] = ["1m", "5m", "15m", "30m", "60m", "1d"];
+// No 1-minute: it is no longer kept (backend timeframes.py).
+const TIMEFRAMES: BfTimeframe[] = ["5m", "15m", "30m", "60m", "1d"];
 const PAGE_SIZE = 25;
 const FILTERS: { key: BfStockFilter; label: string }[] = [
   { key: "all", label: "All" },

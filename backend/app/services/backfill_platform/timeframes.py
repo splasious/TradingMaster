@@ -19,12 +19,15 @@ sources that don't natively offer them -- flagged accordingly.
 
 from dataclasses import dataclass
 
+# 1-minute is left out although both sources have it: nothing here uses it
+# and it was the largest share of the stored candles (dropped 26 Sep 2026;
+# its saved bars were purged, see purge.py).
 _NATIVE: dict[str, list[str]] = {
-    "delta": ["1m", "5m", "15m", "30m", "60m", "4h", "1d", "1wk"],
-    "zerodha": ["1m", "5m", "15m", "30m", "60m", "1d"],
+    "delta": ["5m", "15m", "30m", "60m", "4h", "1d", "1wk"],
+    "zerodha": ["5m", "15m", "30m", "60m", "1d"],
     # Kite's historical-candle API supports the same intervals across every
     # segment (NSE/NFO/BFO/MCX) -- NFO options/futures get the same set.
-    "zerodha_nfo": ["1m", "5m", "15m", "30m", "60m", "1d"],
+    "zerodha_nfo": ["5m", "15m", "30m", "60m", "1d"],
 }
 
 # Available everywhere as a resample of stored daily bars, even where not
