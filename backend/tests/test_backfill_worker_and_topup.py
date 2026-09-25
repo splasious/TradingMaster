@@ -150,9 +150,10 @@ async def test_the_daily_topup_queues_only_what_is_behind(db_session, sessions):
         # daily first (priority order), each from its last saved day to the session
         (symbols["behind"].id, "1d", date(2026, 9, 24), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 0),
         (symbols["behind"].id, "15m", date(2026, 9, 21), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 3),
-        (symbols["live_option"].id, "5m", date(2026, 9, 24), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 4),
+        # NFO after every NSE timeframe
+        (symbols["live_option"].id, "5m", date(2026, 9, 24), date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 6 + 4),
         # an active contract with nothing saved yet is tried again, whole default history
-        (symbols["never_traded"].id, "15m", None, date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 3),
+        (symbols["never_traded"].id, "15m", None, date(2026, 9, 25), user_id, JOB_PRIORITY_SCHEDULED + 6 + 3),
     }
     assert (runs["zerodha"].jobs_total, runs["zerodha_nfo"].jobs_total) == (2, 2)
 
@@ -203,6 +204,35 @@ async def test_nothing_runs_on_a_segment_switched_off(db_session, sessions):
     await topup.BackfillTopupScheduler().tick(ist(2026, 9, 25, 16, 16))
 
     assert {r.source for r in (await db_session.execute(select(BfBackfillRun))).scalars().all()} == {"zerodha"}
+
+
+async def test_a_topup_takes_over_jobs_an_earlier_one_still_has_queued(db_session, sessions):
+    symbols = await _topup_fixture(db_session)
+    await _connected_account(db_session)
+    scheduler = topup.BackfillTopupScheduler()
+    await scheduler.tick(ist(2026, 9, 24, 16, 16))  # Thursday's run: BEHIND 15m, NEVERTRADED 15m
+    thursday = {r.source: r for r in (await db_session.execute(select(BfBackfillRun))).scalars().all()}
+    assert (thursday["zerodha"].jobs_total, thursday["zerodha_nfo"].jobs_total) == (1, 1)
+
+    await scheduler.tick(ist(2026, 9, 25, 16, 16))  # still queued at Friday's 16:15
+
+    jobs = (await db_session.execute(select(BfBackfillJob))).scalars().all()
+    assert len(jobs) == 4 and len({(j.symbol_id, j.timeframe) for j in jobs}) == 4  # no second job for a pair
+    runs = {(r.session_date, r.source): r for r in (await db_session.execute(select(BfBackfillRun))).scalars().all()}
+    for run in runs.values():
+        await db_session.refresh(run)
+    friday = {s: runs[(date(2026, 9, 25), s)] for s in ("zerodha", "zerodha_nfo")}
+    carried = {j.symbol_id: j for j in jobs if j.symbol_id in (symbols["behind"].id, symbols["never_traded"].id) and j.timeframe == "15m"}
+    for job in carried.values():
+        await db_session.refresh(job)
+        assert job.run_id == friday[job.source].id and job.end_date == date(2026, 9, 25)
+    assert (friday["zerodha"].jobs_total, friday["zerodha_nfo"].jobs_total) == (2, 2)
+
+    await scheduler.tick(ist(2026, 9, 25, 16, 17))  # the emptied Thursday runs close
+    for source in ("zerodha", "zerodha_nfo"):
+        run = runs[(date(2026, 9, 24), source)]
+        await db_session.refresh(run)
+        assert (run.status, run.jobs_total, run.message) == ("completed", 0, "1 queued job moved to the 25 Sep top-up")
 
 
 async def test_a_waiting_run_is_superseded_by_the_next_sessions(db_session, sessions):

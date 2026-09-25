@@ -53,6 +53,13 @@ JOB_PRIORITY_MANUAL = 0
 JOB_PRIORITY_BULK = 10
 JOB_PRIORITY_SCHEDULED = 20
 TOPUP_TIMEFRAME_ORDER = ["1d", "60m", "30m", "15m", "5m", "1m"]
+# Top-up jobs: every NSE stock timeframe before any NFO contract -- NSE is
+# ~500 stocks, NFO tens of thousands of contracts.
+TOPUP_SOURCE_ORDER = ["zerodha", "zerodha_nfo"]
+
+
+def topup_priority(base: int, source: str, timeframe: str) -> int:
+    return base + TOPUP_SOURCE_ORDER.index(source) * len(TOPUP_TIMEFRAME_ORDER) + TOPUP_TIMEFRAME_ORDER.index(timeframe)
 
 
 class BfSymbol(Base):

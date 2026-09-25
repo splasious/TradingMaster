@@ -25,12 +25,12 @@ from app.models.alert import Alert, AlertSeverity, AlertType
 from app.models.backfill_platform import (
     JOB_PRIORITY_BULK,
     JOB_PRIORITY_SCHEDULED,
-    TOPUP_TIMEFRAME_ORDER,
     BfBackfillJob,
     BfBackfillRun,
     BfBackfillStatus,
     BfCoverage,
     BfSymbol,
+    topup_priority,
 )
 from app.services.backfill_platform.coverage import (
     IST,
@@ -107,10 +107,45 @@ def enabled_sources(settings) -> list[str]:
     return [s for s, on in (("zerodha", settings.auto_topup_zerodha), ("zerodha_nfo", settings.auto_topup_zerodha_nfo)) if on]
 
 
+async def _carry_queued_jobs(db: AsyncSession, run: BfBackfillRun) -> set[tuple]:
+    """Moves the still-queued jobs of earlier top-ups of `run.source` into
+    `run`, extended to its session. Returns their (symbol_id, timeframe)."""
+    earlier_ids = (
+        await db.execute(
+            select(BfBackfillJob.run_id).where(
+                BfBackfillJob.source == run.source, BfBackfillJob.status == BfBackfillStatus.PENDING.value,
+                BfBackfillJob.run_id.is_not(None), BfBackfillJob.run_id != run.id,
+            ).distinct()
+        )
+    ).scalars().all()
+    taken: set[tuple] = set()
+    for earlier_id in earlier_ids:
+        moved = (
+            await db.execute(
+                update(BfBackfillJob)
+                .where(BfBackfillJob.run_id == earlier_id, BfBackfillJob.status == BfBackfillStatus.PENDING.value)
+                .values(run_id=run.id, end_date=run.session_date)
+                .returning(BfBackfillJob.symbol_id, BfBackfillJob.timeframe)
+                .execution_options(synchronize_session=False)
+            )
+        ).all()
+        taken.update((m.symbol_id, m.timeframe) for m in moved)
+        earlier = await db.get(BfBackfillRun, earlier_id)
+        if earlier is not None:
+            earlier.jobs_total = max(0, earlier.jobs_total - len(moved))
+            earlier.message = f"{len(moved):,} queued job{'s' if len(moved) != 1 else ''} moved to the {run.session_date:%d %b} top-up"
+    return taken
+
+
 async def queue_topup_jobs(
     db: AsyncSession, run: BfBackfillRun, timeframes: list[str], user_id, now: datetime, base_priority: int,
 ) -> int:
-    """Adds a job for every pair of `run.source` behind the last session."""
+    """Adds a job for every pair of `run.source` behind the last session.
+
+    Jobs an earlier top-up still has queued (e.g. a catch-up still going at
+    16:15) move to this run and fetch through its session, instead of a
+    second job for the same pair."""
+    taken = await _carry_queued_jobs(db, run)
     native = {o.value for o in timeframes_for_source(run.source) if o.native}
     wanted = [tf for tf in timeframes if tf in native]
     rows = (
@@ -120,8 +155,10 @@ async def queue_topup_jobs(
             .where(BfSymbol.source == run.source, BfCoverage.timeframe.in_(wanted))
         )
     ).all()
-    queued = 0
+    queued = len(taken)
     for coverage, symbol in rows:
+        if (symbol.id, coverage.timeframe) in taken:
+            continue
         last_day = ist_date(coverage.last_ts)
         if symbol.expiry is not None and symbol.expiry <= last_day:
             continue  # expired contract: nothing trades after its last saved day
@@ -130,15 +167,17 @@ async def queue_topup_jobs(
         db.add(BfBackfillJob(
             symbol_id=symbol.id, source=run.source, timeframe=coverage.timeframe,
             start_date=last_day, end_date=run.session_date, requested_by=user_id, run_id=run.id,
-            priority=base_priority + TOPUP_TIMEFRAME_ORDER.index(coverage.timeframe),
+            priority=topup_priority(base_priority, run.source, coverage.timeframe),
         ))
         queued += 1
     if run.source == "zerodha_nfo" and EMPTY_CONTRACT_TIMEFRAME in wanted:
         for symbol in (await db.execute(untraded_active_contracts(run.session_date))).scalars().all():
+            if (symbol.id, EMPTY_CONTRACT_TIMEFRAME) in taken:
+                continue
             db.add(BfBackfillJob(
                 symbol_id=symbol.id, source=run.source, timeframe=EMPTY_CONTRACT_TIMEFRAME,
                 end_date=run.session_date, requested_by=user_id, run_id=run.id,
-                priority=base_priority + TOPUP_TIMEFRAME_ORDER.index(EMPTY_CONTRACT_TIMEFRAME),
+                priority=topup_priority(base_priority, run.source, EMPTY_CONTRACT_TIMEFRAME),
             ))
             queued += 1
     run.jobs_total = queued
@@ -295,7 +334,9 @@ class BackfillTopupScheduler:
             done = counts.get(BfBackfillStatus.COMPLETED.value, 0)
             run.status = RUN_COMPLETED
             run.completed_at = now
-            run.message = f"{done:,} done, {failed:,} failed" if failed else f"{done:,} done"
+            summary = f"{done:,} done, {failed:,} failed" if failed else f"{done:,} done"
+            # A note left by _carry_queued_jobs stays after the counts.
+            run.message = summary if not run.message else run.message if not (done or failed) else f"{summary} · {run.message}"
             if failed:
                 segment = "NSE" if run.source == "zerodha" else "NFO"
                 await _alert_admins(
