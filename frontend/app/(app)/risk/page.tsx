@@ -76,7 +76,7 @@ export default function RiskPage() {
   const { data: deployments } = useLiveDeployments();
   const { data: brokerAccounts } = useBrokerAccounts();
   const active = (deployments ?? []).filter((d) => d.status === "active");
-  const connectedLiveAccounts = (brokerAccounts ?? []).filter((a) => a.environment === "live" && a.connection_status === "connected");
+  const connectedLiveAccounts = (brokerAccounts ?? []).filter((a) => a.environment === "live" && a.connection_status === "connected" && a.broker.supports_trading !== false);
 
   return (
     <div className="space-y-6">

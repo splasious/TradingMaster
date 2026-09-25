@@ -19,7 +19,7 @@ from app.schemas.broker import (
 )
 from app.services.audit import write_audit_log
 from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
-from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth
+from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth, supports_trading
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
 
 router = APIRouter()
@@ -28,7 +28,7 @@ router = APIRouter()
 def _broker_out(broker: Broker) -> BrokerOut:
     return BrokerOut(
         id=str(broker.id), code=broker.code, name=broker.name, is_enabled=broker.is_enabled,
-        is_real_adapter=is_real_adapter(broker.code),
+        is_real_adapter=is_real_adapter(broker.code), supports_trading=supports_trading(broker.code),
     )
 
 

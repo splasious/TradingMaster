@@ -139,7 +139,7 @@ function StartLiveDeploymentModal({ open, onClose }: { open: boolean; onClose: (
             <option value="" disabled>
               Select a connected broker account
             </option>
-            {brokerAccounts?.filter((a) => a.connection_status === "connected").map((a) => (
+            {brokerAccounts?.filter((a) => a.connection_status === "connected" && a.broker.supports_trading !== false).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.broker.name} -- {a.account_label}
               </option>

@@ -45,7 +45,7 @@ export function FireOrderModal({ instrument, onClose }: { instrument: Instrument
   const [confirmed, setConfirmed] = useState(false);
 
   const liveConnectedAccounts = brokerAccounts?.filter(
-    (a) => a.connection_status === "connected" && a.environment === "live",
+    (a) => a.connection_status === "connected" && a.environment === "live" && a.broker.supports_trading !== false,
   );
 
   const fireMutation = useMutation({

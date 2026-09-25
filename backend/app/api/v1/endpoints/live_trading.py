@@ -29,6 +29,7 @@ from app.schemas.live_trading import (
 )
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
+from app.services.broker.registry import supports_trading
 from app.services.live_trading import kill_switch as kill_switch_service
 from app.services.live_trading.manual_orders import ManualOrderError, place_manual_order
 from app.services.live_trading.oms import _realized_pnl_today, evaluate_live_deployment
@@ -119,6 +120,13 @@ async def start_live_deployment(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instrument or broker account not found")
     if broker_account.user_id != user.id and "administrator" not in user.role_names:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your broker account")
+
+    account_broker = await db.get(Broker, broker_account.broker_id)
+    if account_broker is not None and not supports_trading(account_broker.code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{account_broker.name} is connected for login and funds only -- trading through it isn't enabled yet",
+        )
 
     version = await _latest_version(db, strategy.id)
     if version is None:
@@ -293,6 +301,12 @@ async def reconcile(broker_account_id: str, db: AsyncSession = Depends(get_db), 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
     if broker_account.user_id != user.id and "administrator" not in user.role_names:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your broker account")
+    account_broker = await db.get(Broker, broker_account.broker_id)
+    if account_broker is not None and not supports_trading(account_broker.code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{account_broker.name} is connected for login and funds only -- positions aren't read from it yet",
+        )
 
     report = await reconcile_positions(db, broker_account)
     return ReconciliationOut(

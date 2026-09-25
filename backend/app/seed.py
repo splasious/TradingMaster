@@ -24,6 +24,8 @@ BROKERS = [
     ("delta_exchange", "Delta Exchange"),
     ("hdfc_securities", "HDFC Securities"),
     ("kotak_neo", "Kotak Neo"),
+    ("angel_one", "Angel One"),
+    ("dhan", "Dhan"),
 ]
 
 # A curated starter catalog so the app is useful without first running

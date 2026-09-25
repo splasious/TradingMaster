@@ -14,8 +14,10 @@ hdfc_securities_broker.py's module docstring for a precise confirmed-vs-
 inferred breakdown before relying on it for real capital).
 """
 
+from app.services.broker.angel_one_broker import AngelOneBroker
 from app.services.broker.base import BrokerInterface
 from app.services.broker.delta_broker import DeltaExchangeBroker
+from app.services.broker.dhan_broker import DhanBroker
 from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
 from app.services.broker.kotak_neo_broker import KotakNeoBroker
 from app.services.broker.mock_broker import MockBroker
@@ -26,7 +28,14 @@ _REGISTRY: dict[str, type[BrokerInterface]] = {
     "delta_exchange": DeltaExchangeBroker,
     "hdfc_securities": HDFCSecuritiesBroker,
     "kotak_neo": KotakNeoBroker,
+    "angel_one": AngelOneBroker,
+    "dhan": DhanBroker,
 }
+
+# Connect-and-verify only for now (login, profile, funds): their order,
+# position and order-status calls aren't built yet, so nothing that trades
+# -- Live Trading, manual orders, reconciliation -- may use them.
+_CONNECT_ONLY_BROKERS = {"angel_one", "dhan"}
 
 # Brokers whose auth can't complete in a single authenticate() call --
 # they need an interactive browser login first (see the relevant
@@ -49,3 +58,15 @@ def is_real_adapter(broker_code: str) -> bool:
 
 def requires_interactive_auth(broker_code: str) -> bool:
     return broker_code in _INTERACTIVE_AUTH_BROKERS
+
+
+def supports_trading(broker_code: str) -> bool:
+    return broker_code not in _CONNECT_ONLY_BROKERS
+
+
+def require_trading_support(broker_code: str, broker_name: str | None = None) -> None:
+    if not supports_trading(broker_code):
+        raise ValueError(
+            f"{broker_name or broker_code} is connected for login and funds only -- "
+            "trading through it isn't enabled yet"
+        )

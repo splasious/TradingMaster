@@ -20,6 +20,8 @@ export interface BrokerOut {
   name: string;
   is_enabled: boolean;
   is_real_adapter: boolean;
+  /** False for brokers connected for login and funds only (no trading yet). */
+  supports_trading: boolean;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "reconnecting" | "disconnected" | "delayed" | "error";

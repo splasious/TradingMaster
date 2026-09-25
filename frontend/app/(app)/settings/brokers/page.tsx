@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, LogIn } from "lucide-react";
 import { useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
@@ -31,6 +32,55 @@ const BROKER_LABELS: Record<string, string> = {
   hdfc_securities: "HDFC Securities",
 };
 
+// Brokers that log in with a PIN and a TOTP secret -- no daily login --
+// and the fields each one needs, with where to find them.
+type CredentialField = { key: string; label: string; hint: string; secret?: boolean };
+const PIN_TOTP_FIELDS: Record<string, CredentialField[]> = {
+  angel_one: [
+    { key: "api_key", label: "SmartAPI key", hint: "smartapi.angelone.in > My Apps" },
+    { key: "client_code", label: "Client code", hint: "Your Angel One client ID" },
+    { key: "pin", label: "Login PIN", hint: "The PIN you log in to Angel One with", secret: true },
+    { key: "totp_secret", label: "TOTP secret", hint: "The key from TOTP setup, not a 6-digit code", secret: true },
+  ],
+  dhan: [
+    { key: "client_id", label: "Client ID", hint: "Your Dhan client ID (Profile)" },
+    { key: "pin", label: "Login PIN", hint: "The PIN you log in to Dhan with", secret: true },
+    { key: "totp_secret", label: "TOTP secret", hint: "The key from TOTP setup, not a 6-digit code", secret: true },
+  ],
+};
+
+function CredentialInputs({
+  fields, values, onChange, required, keepHint,
+}: {
+  fields: CredentialField[];
+  values: Record<string, string>;
+  onChange: (values: Record<string, string>) => void;
+  required?: boolean;
+  keepHint?: boolean;
+}) {
+  return (
+    <>
+      {fields.map((f) => (
+        <div key={f.key} className="space-y-1.5">
+          <label className="text-sm font-medium text-text-secondary">{f.label}</label>
+          <Input
+            type={f.secret ? "password" : "text"}
+            required={required}
+            autoComplete="off"
+            value={values[f.key] ?? ""}
+            onChange={(e) => onChange({ ...values, [f.key]: e.target.value })}
+            placeholder={keepHint ? "Leave blank to keep current" : f.hint}
+          />
+        </div>
+      ))}
+    </>
+  );
+}
+
+function credentialsFrom(fields: CredentialField[], values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(fields.map((f) => [f.key, (values[f.key] ?? "").trim()]));
+}
+
 function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClose: () => void; accounts: BrokerAccountOut[] }) {
   const { data: brokers } = useBrokers();
   const queryClient = useQueryClient();
@@ -44,10 +94,12 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
   const [ucc, setUcc] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
   const [mpin, setMpin] = useState("");
+  const [pinTotp, setPinTotp] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [confirmDuplicate, setConfirmDuplicate] = useState(false);
 
   const isKotakNeo = brokerCode === "kotak_neo";
+  const pinTotpFields = PIN_TOTP_FIELDS[brokerCode];
   const existing = accounts.filter((a) => a.broker.code === brokerCode && a.environment === environment);
   // Kite's daily-expiry re-login only needs the SAME account's "Login with
   // Zerodha" button -- creating another "Connect Broker" row every day (the
@@ -65,7 +117,9 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
           environment,
           credentials: isKotakNeo
             ? { consumer_key: consumerKey, mobile_number: mobileNumber, ucc, totp_secret: totpSecret, mpin }
-            : { api_key: apiKey, api_secret: apiSecret },
+            : pinTotpFields
+              ? credentialsFrom(pinTotpFields, pinTotp)
+              : { api_key: apiKey, api_secret: apiSecret },
         }),
       }),
     onSuccess: () => {
@@ -87,7 +141,7 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
       >
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Broker</label>
-          <Select required value={brokerCode} onChange={(e) => { setBrokerCode(e.target.value); setConfirmDuplicate(false); }}>
+          <Select required value={brokerCode} onChange={(e) => { setBrokerCode(e.target.value); setConfirmDuplicate(false); setPinTotp({}); }}>
             <option value="" disabled>
               Select a broker
             </option>
@@ -151,6 +205,8 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
               <Input type="password" value={mpin} onChange={(e) => setMpin(e.target.value)} />
             </div>
           </>
+        ) : pinTotpFields ? (
+          <CredentialInputs fields={pinTotpFields} values={pinTotp} onChange={setPinTotp} required />
         ) : (
           <>
             <div className="space-y-1.5">
@@ -165,8 +221,9 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
         )}
 
         <p className="text-xs text-text-muted">
-          All four brokers use real adapters -- real API credentials are required. Delta Exchange and Kotak Neo
-          authenticate immediately. Zerodha Kite and HDFC Securities need one more step after this: an interactive
+          All brokers use real adapters -- real API credentials are required. Delta Exchange, Kotak Neo, Angel One
+          and Dhan authenticate immediately. Angel One and Dhan are connected for login and funds only for now --
+          orders can&apos;t be placed through them yet. Zerodha Kite and HDFC Securities need one more step after this: an interactive
           browser login (neither supports key/secret-only auth) -- you&apos;ll get a &quot;Login with...&quot; button
           for the account once it&apos;s created. Kotak Neo needs TOTP registration completed on their own site first
           (one-time, scan a QR code into an authenticator app) -- the TOTP secret above is that same registration
@@ -219,9 +276,12 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
   const [ucc, setUcc] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
   const [mpin, setMpin] = useState("");
+  const [pinTotp, setPinTotp] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const isKotakNeo = account?.broker.code === "kotak_neo";
+  const pinTotpFields = account ? PIN_TOTP_FIELDS[account.broker.code] : undefined;
+  const pinTotpTouched = Object.values(pinTotp).some((v) => v.trim());
 
   // Re-seed the label whenever a different row is opened for editing --
   // the modal instance is shared across rows, only mounted while one is open.
@@ -236,6 +296,7 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
     setUcc("");
     setTotpSecret("");
     setMpin("");
+    setPinTotp({});
     setError(null);
   }
 
@@ -249,6 +310,8 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
       // the old secret).
       if (isKotakNeo) {
         if (kotakFieldsTouched) body.credentials = { consumer_key: consumerKey, mobile_number: mobileNumber, ucc, totp_secret: totpSecret, mpin };
+      } else if (pinTotpFields) {
+        if (pinTotpTouched) body.credentials = credentialsFrom(pinTotpFields, pinTotp);
       } else if (apiKey || apiSecret) {
         body.credentials = { api_key: apiKey, api_secret: apiSecret };
       }
@@ -272,6 +335,11 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
           if (isKotakNeo) {
             if (kotakFieldsTouched && !(consumerKey && mobileNumber && ucc && totpSecret && mpin)) {
               setError("Fill in all five fields together, or leave all blank to keep the current ones.");
+              return;
+            }
+          } else if (pinTotpFields) {
+            if (pinTotpTouched && pinTotpFields.some((f) => !(pinTotp[f.key] ?? "").trim())) {
+              setError(`Fill in all ${pinTotpFields.length} fields together, or leave all blank to keep the current ones.`);
               return;
             }
           } else {
@@ -323,6 +391,14 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
             <p className="text-xs text-text-muted">
               Only fill these in if you actually need to correct them -- all five must be provided together, or leave
               all blank to keep the current ones. Kotak Neo has no separate daily re-login step.
+            </p>
+          </>
+        ) : pinTotpFields ? (
+          <>
+            <CredentialInputs fields={pinTotpFields} values={pinTotp} onChange={setPinTotp} keepHint />
+            <p className="text-xs text-text-muted">
+              Only fill these in to correct them -- all {pinTotpFields.length} together, or leave all blank to keep the
+              current ones. {account.broker.name} logs in by itself with the TOTP secret; there is no daily re-login.
             </p>
           </>
         ) : (
@@ -405,8 +481,9 @@ export default function BrokersSettingsPage() {
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
           <p className="text-sm text-text-muted">
-            Zerodha Kite, Delta Exchange, HDFC Securities, and Kotak Neo all use real adapters -- HMAC-signed for
-            Delta, session-token auth via interactive login for Kite and HDFC, TOTP+MPIN for Kotak Neo.
+            Zerodha Kite, Delta Exchange, HDFC Securities, Kotak Neo, Angel One and Dhan all use real adapters --
+            HMAC-signed for Delta, session-token auth via interactive login for Kite and HDFC, TOTP for Kotak Neo,
+            Angel One and Dhan. Angel One and Dhan are connected for login and funds only for now.
           </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
@@ -440,7 +517,16 @@ export default function BrokersSettingsPage() {
               <Tbody>
                 {accounts.map((account) => (
                   <tr key={account.id}>
-                    <Td>{account.broker.name}</Td>
+                    <Td>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {account.broker.name}
+                        {account.broker.supports_trading === false && (
+                          <Badge tone="neutral" title="Connected for login and funds only -- trading through it isn't enabled yet">
+                            Login &amp; funds only
+                          </Badge>
+                        )}
+                      </div>
+                    </Td>
                     <Td>{account.account_label}</Td>
                     <Td className="capitalize">{account.environment}</Td>
                     <Td>

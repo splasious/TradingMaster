@@ -41,6 +41,7 @@ from app.models.live_trading import LiveOrder
 from app.models.user import User
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
+from app.services.broker.registry import supports_trading
 from app.services.live_trading.kill_switch import get_kill_switch
 from app.services.live_trading.oms import get_authenticated_broker, get_live_price_and_context
 from app.services.live_trading.order_state_machine import STATE_MAPS, LiveOrderStatus
@@ -85,6 +86,8 @@ async def place_manual_order(
             raise ManualOrderError(f"Quantity must be a multiple of the lot size ({instrument.lot_size})")
 
     broker_row = await db.get(Broker, broker_account.broker_id)
+    if not supports_trading(broker_row.code):
+        raise ManualOrderError(f"{broker_row.name} is connected for login and funds only -- trading through it isn't enabled yet")
     try:
         broker = await get_authenticated_broker(db, broker_account)
     except Exception as exc:

@@ -9,6 +9,8 @@ class BrokerOut(BaseModel):
     name: str
     is_enabled: bool
     is_real_adapter: bool
+    # False for connect-and-verify-only brokers (registry._CONNECT_ONLY_BROKERS).
+    supports_trading: bool = True
 
     model_config = {"from_attributes": True}
 

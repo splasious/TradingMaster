@@ -116,7 +116,7 @@ export default function DashboardPage() {
   const summary = usePortfolioSummary();
   const { data: health } = useSystemHealth();
   const { data: brokerAccounts } = useBrokerAccounts();
-  const liveAccount = brokerAccounts?.find((a) => a.environment === "live" && a.connection_status === "connected");
+  const liveAccount = brokerAccounts?.find((a) => a.environment === "live" && a.connection_status === "connected" && a.broker.supports_trading !== false);
   const { data: liveBalance } = useBrokerBalance(liveAccount?.id ?? null);
 
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
