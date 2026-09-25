@@ -69,7 +69,7 @@ export default function AlertsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Alerts</h1>
           <p className="text-sm text-text-muted">Order fills, rejections, stop/target triggers, risk breaches, and system events.</p>

@@ -224,7 +224,7 @@ export default function OptimizationPage() {
           <div className="space-y-2">
             <label className="text-xs font-medium uppercase tracking-wide text-text-muted">Parameter Ranges</label>
             {ranges.map((r, i) => (
-              <div key={i} className="flex items-center gap-2">
+              <div key={i} className="flex flex-wrap items-center gap-2">
                 <Input
                   placeholder="param name"
                   value={r.name}

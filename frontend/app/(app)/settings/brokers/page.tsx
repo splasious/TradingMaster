@@ -401,7 +401,7 @@ export default function BrokersSettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
           <p className="text-sm text-text-muted">

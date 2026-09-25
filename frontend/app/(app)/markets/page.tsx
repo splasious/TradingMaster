@@ -136,7 +136,7 @@ export default function MarketsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Markets</h1>
           <p className="text-sm text-text-muted">Delta Markets (real history, public API).</p>
@@ -147,8 +147,8 @@ export default function MarketsPage() {
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
-        <Input placeholder="Search symbol or name..." value={q} onChange={(e) => setQ(e.target.value)} className="max-w-xs" />
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <Input placeholder="Search symbol or name..." value={q} onChange={(e) => setQ(e.target.value)} className="w-full sm:max-w-xs" />
         <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-40">
           <option value="">All Markets</option>
           <option value="NSE">{marketLabel("NSE")}</option>

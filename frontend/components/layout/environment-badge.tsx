@@ -7,5 +7,11 @@ import { Badge } from "@/components/ui/badge";
 export function EnvironmentBadge() {
   const env = process.env.NEXT_PUBLIC_ENVIRONMENT ?? "development";
   const tone = env === "production" ? "critical" : env === "staging" ? "warning" : "neutral";
-  return <Badge tone={tone}>{env.toUpperCase()}</Badge>;
+  const short = { production: "PROD", staging: "STAGE", development: "DEV" }[env] ?? env.toUpperCase();
+  return (
+    <Badge tone={tone}>
+      <span className="sm:hidden">{short}</span>
+      <span className="hidden sm:inline">{env.toUpperCase()}</span>
+    </Badge>
+  );
 }

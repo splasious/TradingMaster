@@ -361,24 +361,32 @@ export default function ChartsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
-          <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
-            <option value="">All Markets</option>
-            <option value="NSE">{marketLabel("NSE")}</option>
-            <option value="DELTA">{marketLabel("DELTA")}</option>
-          </Select>
-          <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
-            <option value="">All Categories</option>
-            {CATEGORY_OPTIONS.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </Select>
-          <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-1 lg:gap-3">
+            <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
+              <option value="">All Markets</option>
+              <option value="NSE">{marketLabel("NSE")}</option>
+              <option value="DELTA">{marketLabel("DELTA")}</option>
+            </Select>
+            <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+              <option value="">All Categories</option>
+              {CATEGORY_OPTIONS.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </Select>
+          </div>
+          <div className="max-h-56 space-y-0.5 overflow-y-auto lg:max-h-[32rem]">
             {instruments?.map((i) => {
               const category = getCategory(i.symbol, categoryMap);
               return (
                 <button
                   key={i.id}
-                  onClick={() => setSelected(i)}
+                  onClick={() => {
+                    setSelected(i);
+                    // On a phone the chart is below the list: bring it into view.
+                    if (window.matchMedia("(max-width: 1023px)").matches) {
+                      document.getElementById("chart-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }
+                  }}
                   className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm ${
                     resolvedSelected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
                   }`}
@@ -395,7 +403,7 @@ export default function ChartsPage() {
         </CardContent>
       </Card>
 
-      <Card className="lg:col-span-3">
+      <Card id="chart-panel" className="scroll-mt-3 lg:col-span-3">
         <CardHeader className="flex-wrap gap-3">
           <CardTitle>{resolvedSelected ? `${resolvedSelected.symbol} -- ${resolvedSelected.name}` : "Select an instrument"}</CardTitle>
           {resolvedSelected && (

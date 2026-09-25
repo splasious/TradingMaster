@@ -128,7 +128,7 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Welcome, {user?.full_name}</h1>
           <p className="text-sm text-text-muted">Paper trading overview -- live prices, real positions, real orders.</p>

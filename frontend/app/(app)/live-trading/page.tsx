@@ -406,7 +406,7 @@ export default function LiveTradingPage() {
     <div className="space-y-6">
       <LiveTradingBanner />
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Live Trading</h1>
           <p className="text-sm text-text-muted">Real orders through the connected Delta Exchange broker, gated by the safety checklist and risk engine.</p>

@@ -67,8 +67,8 @@ export function StocksTable() {
             ))}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="inline-flex rounded-lg border border-border p-0.5">
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <div className="inline-flex shrink-0 whitespace-nowrap rounded-lg border border-border p-0.5">
             {(["zerodha", "zerodha_nfo"] as const).map((s) => (
               <button
                 key={s}
@@ -84,7 +84,7 @@ export function StocksTable() {
               </button>
             ))}
           </div>
-          <label className="flex h-8 w-56 items-center gap-2 rounded-md border border-border-strong bg-surface px-2.5 text-[13px]">
+          <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-border-strong bg-surface px-2.5 text-[13px] sm:w-56 sm:flex-none">
             <Search className="h-3.5 w-3.5 text-text-muted" aria-hidden />
             <input
               value={q}

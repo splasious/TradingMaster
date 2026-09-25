@@ -46,7 +46,7 @@ export function KillSwitchPanel() {
         {hasRole("administrator") && (
           <>
             {!killSwitch?.active ? (
-              <div className="flex gap-2">
+              <div className="flex flex-col gap-2 sm:flex-row">
                 <Input placeholder="Reason for activating..." value={reason} onChange={(e) => setReason(e.target.value)} />
                 <Button variant="destructive" onClick={() => activateMutation.mutate()} disabled={!reason || activateMutation.isPending}>
                   Activate Kill Switch

@@ -208,7 +208,7 @@ function StrategyCard({
 
       <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-text-muted">
         <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           {strategy.status === "paper_trading" && canEdit && (
             <Button
               variant="secondary"
@@ -308,7 +308,7 @@ export default function StrategiesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Strategies</h1>
           <p className="text-sm text-text-muted">Visual rule-based or sandboxed Python strategies.</p>

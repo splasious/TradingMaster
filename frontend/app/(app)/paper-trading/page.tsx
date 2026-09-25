@@ -2124,8 +2124,8 @@ function NativeDeploymentsPanel({
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-sm font-semibold text-text-primary">Advanced Strategy Deployments</h2>
           <PcrTicker />
         </div>
@@ -2185,14 +2185,14 @@ export default function PaperTradingPage() {
     <div className="space-y-6">
       <PaperTradingBanner />
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Paper Trading</h1>
           <p className="text-sm text-text-muted">
             Live Market Data &rarr; Strategy &rarr; Signal &rarr; Risk Engine &rarr; Paper Execution &rarr; Portfolio. Re-evaluated automatically every ~10s, or trigger manually.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => setCreatingPool(true)}>
             <Plus className="h-3.5 w-3.5" /> New Capital Pool
           </Button>

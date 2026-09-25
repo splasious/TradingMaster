@@ -120,7 +120,7 @@ export default function ScannerPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Market Scanner</h1>
           <p className="text-sm text-text-muted">
@@ -236,7 +236,7 @@ export default function ScannerPage() {
                     placeholder="Scan name to save..."
                     value={scanName}
                     onChange={(e) => setScanName(e.target.value)}
-                    className="w-48"
+                    className="min-w-0 flex-1 sm:w-48 sm:flex-none"
                   />
                   <Button variant="secondary" onClick={() => saveMutation.mutate()} disabled={!scanName || saveMutation.isPending}>
                     Save
