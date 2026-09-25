@@ -152,6 +152,22 @@ GROUP BY c.source
 ORDER BY c.source;
 
 \echo
+\echo '== O. Saved-up-to coverage (bf_coverage) and schedule'
+SELECT (SELECT count(*) FROM bf_coverage) AS coverage_rows,
+       to_char(coverage_built_at, 'DD-Mon HH24:MI') AS coverage_built, topup_time, live_start, live_end,
+       auto_topup_zerodha, auto_topup_zerodha_nfo, delta_enabled
+FROM bf_settings;
+
+\echo
+\echo '== P. Top-up runs, last 3 days'
+SELECT kind, source, session_date, status, jobs_total, message,
+       to_char(created_at, 'DD-Mon HH24:MI') AS created, to_char(completed_at, 'DD-Mon HH24:MI') AS completed
+FROM bf_backfill_runs
+WHERE created_at > now() - interval '3 days'
+ORDER BY created_at DESC
+LIMIT 20;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
