@@ -1,0 +1,174 @@
+-- Backfill health summary: counts and statuses only -- no symbol names,
+-- no error text -- so it is safe to print in a public CI log (see
+-- .github/workflows/backfill-health-check.yml). backfill_health_check.sql
+-- next to it has the per-symbol detail. Read-only, like that one.
+
+SET TIME ZONE 'Asia/Kolkata';
+SET default_transaction_read_only = on;
+SET statement_timeout = '120s';
+\pset footer off
+
+\echo
+\echo '== A. Backfill jobs by status, all time'
+SELECT source, status, count(*) AS jobs, coalesce(sum(inserted_count), 0) AS bars_saved,
+       to_char(max(created_at), 'DD-Mon-YYYY HH24:MI') AS latest
+FROM bf_backfill_jobs
+GROUP BY source, status
+ORDER BY source, status;
+
+\echo
+\echo '== B. Backfill jobs by timeframe, last 30 days'
+SELECT source, timeframe, status, count(*) AS jobs, coalesce(sum(inserted_count), 0) AS bars_saved,
+       to_char(max(created_at), 'DD-Mon HH24:MI') AS latest
+FROM bf_backfill_jobs
+WHERE created_at > now() - interval '30 days'
+GROUP BY source, timeframe, status
+ORDER BY source, timeframe, status;
+
+\echo
+\echo '== C. Jobs running or queued right now'
+SELECT status, count(*) AS jobs,
+       count(*) FILTER (WHERE created_at < now() - interval '30 minutes') AS older_than_30_min,
+       to_char(min(created_at), 'DD-Mon HH24:MI') AS oldest
+FROM bf_backfill_jobs
+WHERE status IN ('running', 'pending')
+GROUP BY status;
+
+\echo
+\echo '== D. Failed jobs by cause'
+SELECT CASE
+         WHEN error_message IS NULL THEN 'no message'
+         WHEN error_message LIKE 'Interrupted by a server restart%' THEN 'interrupted by a server restart'
+         WHEN error_message LIKE 'Symbol no longer exists%' THEN 'symbol deleted'
+         WHEN error_message ILIKE '%value too long%' OR error_message ILIKE '%StringDataRightTruncation%' THEN 'text too long for a column'
+         WHEN error_message ILIKE '%duplicate key%' OR error_message ILIKE '%UniqueViolation%' OR error_message ILIKE '%IntegrityError%' THEN 'duplicate bar (overlapping backfills)'
+         WHEN error_message ILIKE '%exceeds max limit%' OR error_message ILIKE '%interval exceeds%' THEN 'date range longer than Kite allows'
+         WHEN error_message ILIKE '%too many requests%' OR error_message ILIKE '% 429%' THEN 'rate limited'
+         WHEN error_message ILIKE '%token%' OR error_message ILIKE '%api_key%' OR error_message ILIKE '%not connected%'
+              OR error_message ILIKE '%login%' OR error_message ILIKE '% 403%' THEN 'Kite login/session'
+         WHEN error_message ILIKE '%timeout%' OR error_message ILIKE '%timed out%' OR error_message ILIKE '%ReadError%'
+              OR error_message ILIKE '%ConnectError%' OR error_message ILIKE '%connection%' THEN 'network'
+         WHEN error_message ILIKE '% 5__ %' OR error_message ILIKE '%error 5__%' THEN 'source server error (5xx)'
+         ELSE 'other'
+       END AS cause,
+       count(*) AS jobs,
+       count(*) FILTER (WHERE completed_at > now() - interval '7 days') AS last_7_days,
+       to_char(max(completed_at), 'DD-Mon-YYYY HH24:MI') AS last_seen
+FROM bf_backfill_jobs
+WHERE status = 'failed'
+GROUP BY 1
+ORDER BY count(*) DESC;
+
+\echo
+\echo '== E. Jobs failed by a server restart: how long had they been running?'
+\echo '   (a job left "running" by an unhandled error was only closed at the next restart)'
+SELECT CASE
+         WHEN started_at IS NULL THEN 'still queued'
+         WHEN completed_at - started_at > interval '30 minutes' THEN 'over 30 min (likely stuck)'
+         ELSE 'under 30 min'
+       END AS had_been_running,
+       count(*) AS jobs, to_char(max(completed_at), 'DD-Mon-YYYY HH24:MI') AS last_seen
+FROM bf_backfill_jobs
+WHERE status = 'failed' AND error_message LIKE 'Interrupted by a server restart%'
+GROUP BY 1
+ORDER BY 1;
+
+\echo
+\echo '== F. Completed jobs that downloaded nothing'
+SELECT source, timeframe, count(*) AS jobs, to_char(max(completed_at), 'DD-Mon-YYYY HH24:MI') AS latest
+FROM bf_backfill_jobs
+WHERE status = 'completed' AND downloaded_count = 0
+GROUP BY source, timeframe
+ORDER BY source, timeframe;
+
+\echo
+\echo '== G. Tracked symbols, and how many have no bars'
+SELECT s.source, count(*) AS symbols,
+       count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM bf_ohlcv_bars b WHERE b.symbol_id = s.id)) AS without_bars
+FROM bf_symbols s
+GROUP BY s.source
+ORDER BY s.source;
+
+\echo
+\echo '== H. Stored backfill bars by source and timeframe'
+SELECT s.source, b.timeframe, count(DISTINCT b.symbol_id) AS symbols, count(*) AS bars,
+       to_char(min(b.ts), 'DD-Mon-YYYY') AS first_bar, to_char(max(b.ts), 'DD-Mon-YYYY HH24:MI') AS last_bar
+FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+GROUP BY s.source, b.timeframe
+ORDER BY s.source, b.timeframe;
+
+\echo
+\echo '== I. Intraday completeness, last 30 days before today'
+\echo '   complete = a full session of bars (NSE 09:15-15:30; Delta 24h);'
+\echo '   gap days = market days between a symbol''s first and last day with no bars at all'
+WITH per_day AS (
+  SELECT s.source, b.timeframe, b.symbol_id, (b.ts AT TIME ZONE 'Asia/Kolkata')::date AS day, count(*) AS bars
+  FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+  WHERE b.timeframe IN ('1m', '5m', '15m', '30m', '60m')
+    AND b.ts >= date_trunc('day', now()) - interval '30 days' AND b.ts < date_trunc('day', now())
+  GROUP BY 1, 2, 3, 4
+), expected AS (
+  SELECT per_day.*, CASE WHEN source = 'delta' THEN 1440 / tf.minutes ELSE ceil(375.0 / tf.minutes) END AS expected
+  FROM per_day JOIN (VALUES ('1m', 1), ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)) AS tf(timeframe, minutes) USING (timeframe)
+), market_days AS (
+  SELECT DISTINCT source, timeframe, day FROM per_day
+), spans AS (
+  SELECT source, timeframe, symbol_id, min(day) AS first_day, max(day) AS last_day, count(*) AS days FROM per_day GROUP BY 1, 2, 3
+), gaps AS (
+  SELECT sp.source, sp.timeframe,
+         sum((SELECT count(*) FROM market_days m
+              WHERE m.source = sp.source AND m.timeframe = sp.timeframe AND m.day BETWEEN sp.first_day AND sp.last_day) - sp.days) AS gap_days
+  FROM spans sp GROUP BY 1, 2
+)
+SELECT e.source, e.timeframe, count(DISTINCT e.symbol_id) AS symbols, count(*) AS symbol_days,
+       count(*) FILTER (WHERE e.bars >= e.expected) AS complete, count(*) FILTER (WHERE e.bars < e.expected) AS partial,
+       min(e.bars) AS fewest_bars_in_a_day, max(e.expected) AS full_day, max(g.gap_days) AS gap_days
+FROM expected e JOIN gaps g USING (source, timeframe)
+GROUP BY e.source, e.timeframe
+ORDER BY e.source, e.timeframe;
+
+\echo
+\echo '== J. Backfilled but not yet copied to Charts/strategies (catalog sync backlog)'
+SELECT count(*) AS symbols_waiting, to_char(min(j.completed_at), 'DD-Mon HH24:MI') AS oldest_waiting_since
+FROM bf_symbols s
+JOIN LATERAL (
+  SELECT max(completed_at) AS completed_at FROM bf_backfill_jobs
+  WHERE symbol_id = s.id AND status = 'completed'
+) j ON j.completed_at IS NOT NULL
+WHERE s.last_synced_at IS NULL OR j.completed_at > s.last_synced_at;
+
+\echo
+\echo '== K. Backfilled bars missing from the main candle table (copy gaps)'
+WITH bf AS (
+  SELECT s.source, s.symbol, b.timeframe, count(*) AS backfilled
+  FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+  GROUP BY s.source, s.symbol, b.timeframe
+), main AS (
+  SELECT i.exchange, i.symbol, c.timeframe, count(*) AS in_main
+  FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+  GROUP BY i.exchange, i.symbol, c.timeframe
+)
+SELECT bf.source, bf.timeframe, count(*) AS series,
+       count(*) FILTER (WHERE coalesce(main.in_main, 0) < bf.backfilled) AS series_behind,
+       coalesce(sum(greatest(bf.backfilled - coalesce(main.in_main, 0), 0)), 0) AS bars_missing
+FROM bf
+LEFT JOIN main ON main.symbol = bf.symbol AND main.timeframe = bf.timeframe
+  AND main.exchange = CASE bf.source WHEN 'zerodha' THEN 'NSE' WHEN 'zerodha_nfo' THEN 'NFO' ELSE 'DELTA' END
+GROUP BY bf.source, bf.timeframe
+ORDER BY bf.source, bf.timeframe;
+
+\echo
+\echo '== L. Main candle table (what Charts and strategies read)'
+SELECT i.exchange, c.timeframe, count(DISTINCT c.instrument_id) AS instruments, count(*) AS candles,
+       to_char(max(c.ts), 'DD-Mon-YYYY HH24:MI') AS last_candle
+FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+GROUP BY i.exchange, c.timeframe
+ORDER BY i.exchange, c.timeframe;
+
+\echo
+\echo '== M. Database and table sizes'
+SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
+SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
+FROM pg_stat_user_tables
+WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_candles', 'instruments')
+ORDER BY pg_total_relation_size(relid) DESC;

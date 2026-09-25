@@ -8,6 +8,8 @@
 -- Times are shown in IST.
 
 SET TIME ZONE 'Asia/Kolkata';
+SET default_transaction_read_only = on;
+SET statement_timeout = '120s';
 \pset footer off
 
 \echo
