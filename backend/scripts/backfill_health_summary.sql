@@ -430,6 +430,72 @@ UNION ALL SELECT 'bf_backfill_jobs (pending/running)', count(*) FROM bf_backfill
 SELECT topup_timeframes FROM bf_settings;
 
 \echo
+\echo '== Y. Storage by data set and timeframe: rows and MB in total, and per trading day (last 7 days)'
+\echo '   (every candle is kept twice: bf_ohlcv_bars (backfill store) and ohlcv_candles (charts/strategies);'
+\echo '    MB = rows x measured bytes per row of each table, indexes included)'
+WITH sz AS (
+  SELECT relname, pg_total_relation_size(relid)::numeric / NULLIF(n_live_tup, 0) AS bpr
+  FROM pg_stat_user_tables WHERE relname IN ('bf_ohlcv_bars', 'ohlcv_candles')),
+bf AS (
+  SELECT CASE
+           WHEN s.source = 'zerodha' THEN '1 NSE equities + indices'
+           WHEN s.source = 'delta' THEN '6 Delta crypto'
+           WHEN s.option_type IS NULL THEN '5 NFO futures'
+           WHEN s.underlying_symbol = 'NIFTY' THEN '2 NFO NIFTY options'
+           WHEN s.underlying_symbol IN ('BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX') THEN '3 NFO other index options'
+           ELSE '4 NFO stock options' END AS dataset,
+         x.timeframe,
+         count(DISTINCT x.symbol_id) AS symbols,
+         count(*) AS rows_total,
+         count(*) FILTER (WHERE x.ts > now() - interval '7 days') AS rows_7d,
+         count(DISTINCT (x.ts AT TIME ZONE 'Asia/Kolkata')::date) FILTER (WHERE x.ts > now() - interval '7 days') AS days_7d
+  FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+  GROUP BY 1, 2),
+mc AS (
+  SELECT CASE
+           WHEN i.exchange = 'NSE' THEN '1 NSE equities + indices'
+           WHEN i.exchange = 'DELTA' THEN '6 Delta crypto'
+           WHEN i.option_type IS NULL THEN '5 NFO futures'
+           WHEN u.symbol = 'NIFTY 50' THEN '2 NFO NIFTY options'
+           WHEN u.symbol LIKE 'NIFTY%' OR u.symbol IN ('SENSEX', 'BANKEX') THEN '3 NFO other index options'
+           ELSE '4 NFO stock options' END AS dataset,
+         c.timeframe,
+         count(*) AS rows_total,
+         count(*) FILTER (WHERE c.ts > now() - interval '7 days') AS rows_7d
+  FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+  LEFT JOIN instruments u ON u.id = i.underlying_instrument_id
+  GROUP BY 1, 2)
+SELECT coalesce(bf.dataset, mc.dataset) AS dataset, coalesce(bf.timeframe, mc.timeframe) AS tf,
+       bf.symbols,
+       coalesce(bf.rows_total, 0) + coalesce(mc.rows_total, 0) AS rows_total,
+       round((coalesce(bf.rows_total, 0) * (SELECT bpr FROM sz WHERE relname = 'bf_ohlcv_bars')
+            + coalesce(mc.rows_total, 0) * (SELECT bpr FROM sz WHERE relname = 'ohlcv_candles')) / 1e6) AS mb_total,
+       bf.days_7d,
+       round((coalesce(bf.rows_7d, 0) + coalesce(mc.rows_7d, 0))::numeric / NULLIF(bf.days_7d, 0)) AS rows_per_day,
+       round(((coalesce(bf.rows_7d, 0) * (SELECT bpr FROM sz WHERE relname = 'bf_ohlcv_bars')
+             + coalesce(mc.rows_7d, 0) * (SELECT bpr FROM sz WHERE relname = 'ohlcv_candles')) / NULLIF(bf.days_7d, 0) / 1e6)::numeric, 1) AS mb_per_day
+FROM bf FULL JOIN mc ON mc.dataset = bf.dataset AND mc.timeframe = bf.timeframe
+ORDER BY 1, 2;
+
+\echo
+\echo '== Y2. Bytes per row, and the rest of the database'
+SELECT relname AS table_name, n_live_tup AS rows, pg_size_pretty(pg_total_relation_size(relid)) AS size,
+       round(pg_total_relation_size(relid)::numeric / NULLIF(n_live_tup, 0)) AS bytes_per_row,
+       pg_size_pretty(pg_indexes_size(relid)) AS of_which_indexes
+FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 12;
+SELECT pg_size_pretty(pg_database_size(current_database())) AS database,
+       pg_size_pretty(sum(pg_total_relation_size(relid)) FILTER (WHERE relname NOT IN ('bf_ohlcv_bars', 'ohlcv_candles'))) AS everything_else
+FROM pg_stat_user_tables;
+
+\echo
+\echo '== Y3. PCR records per trading day'
+SELECT count(DISTINCT p.session_date) AS sessions, count(DISTINCT p.id) AS records, count(o.id) AS contract_rows,
+       pg_size_pretty(pg_total_relation_size('pcr_strike_oi') + pg_total_relation_size('pcr_snapshots') + pg_total_relation_size('pcr_snapshot_expiries')) AS size,
+       pg_size_pretty(((pg_total_relation_size('pcr_strike_oi') + pg_total_relation_size('pcr_snapshots') + pg_total_relation_size('pcr_snapshot_expiries'))
+                       / NULLIF(count(DISTINCT p.session_date), 0))::bigint) AS per_session
+FROM pcr_snapshots p LEFT JOIN pcr_strike_oi o ON o.snapshot_id = p.id;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
