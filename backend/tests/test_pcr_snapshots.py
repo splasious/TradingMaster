@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.backfill_platform import BfSymbol
+from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.pcr import SOURCE_HISTORICAL, SOURCE_LIVE, PcrSnapshot, PcrStrikeOi
 from app.services.options import pcr_snapshots as ps
 from app.services.options.pcr import compute_effective_pcr
@@ -68,6 +68,8 @@ class FakeKite:
 
     async def get_historical_data(self, symbol, timeframe, start, end, segment="NSE", instrument_token=None):
         self.history_calls += 1
+        if timeframe == "1d":
+            return self.daily(symbol, start, end)
         candles = []
         d = start.astimezone(IST).date()
         while d <= end.astimezone(IST).date():
@@ -84,7 +86,13 @@ class FakeKite:
                                             "open_interest": oi_of(row["instrument_type"], float(row["strike"]), close_t)})
                     t = close_t
             d += timedelta(days=1)
-        return candles
+        return [c for c in candles if self.keep(symbol, segment, c)]
+
+    def keep(self, symbol, segment, candle):
+        return True
+
+    def daily(self, symbol, start, end):
+        return []
 
 
 @pytest.fixture(autouse=True)
@@ -328,3 +336,98 @@ async def test_scheduler_waits_for_login_then_captures_the_due_mark(db_engine, m
     assert scheduler.last_capture_ts == mark and scheduler.last_error is None
     async with factory() as db:
         assert (await db.execute(select(func.count()).select_from(PcrSnapshot))).scalar_one() == 1
+
+
+# ------------------------------------------------ gap fill: NIFTY and quiet contracts
+
+
+class GappyKite(FakeKite):
+    """Kite's history without NIFTY's candles from `index_until` on, and
+    with `quiet` contracts that had no 15m trade in the window (last traded
+    before it, daily OI `QUIET_OI`) and `never` contracts never traded."""
+
+    QUIET_OI = 777_000.0
+
+    def __init__(self, spot_fn, index_until=None, quiet=(), never=()):
+        super().__init__(spot_fn)
+        self.index_until, self.quiet, self.never = index_until, set(quiet), set(never)
+        self.daily_calls = 0
+
+    def keep(self, symbol, segment, candle):
+        if segment == "NSE":
+            return self.index_until is None or candle["ts"] < self.index_until
+        return symbol not in self.quiet and symbol not in self.never
+
+    def daily(self, symbol, start, end):
+        self.daily_calls += 1
+        if symbol in self.quiet:
+            return [{"ts": datetime(2026, 9, 18, tzinfo=IST), "open": 1, "close": 1, "open_interest": self.QUIET_OI}]
+        return []
+
+
+async def test_gap_fill_takes_nifty_only_from_the_candle_at_the_mark(db_session: AsyncSession):
+    # Kite's answer stops before 25 Sep (as it once did): no NIFTY for those
+    # marks means no record -- never the 24 Sep close carried forward.
+    kite = GappyKite(lambda t: 23500.0, index_until=at(25, 9, 0))
+    result = await ps.fill_gaps(db_session, kite, "NIFTY", at(25, 10, 5), sessions=1)
+    assert result == {"filled": 1, "unfillable": 4, "missing": 5}  # only 09:00 (the 24 Sep close)
+    snaps = (await db_session.execute(select(PcrSnapshot))).scalars().all()
+    assert [s.ts.replace(tzinfo=timezone.utc) for s in snaps] == [at(25, 9, 0)]
+
+
+async def test_gap_fill_uses_the_backfills_own_nifty_candles_when_kite_has_none(db_session: AsyncSession):
+    sym = BfSymbol(source="zerodha", symbol="NIFTY 50", display_name="NIFTY 50")
+    db_session.add(sym)
+    await db_session.flush()
+    for i in range(4):
+        t = at(25, 9, 15) + timedelta(minutes=15 * i)
+        db_session.add(BfOhlcvBar(symbol_id=sym.id, timeframe="15m", ts=t, open=23600.0 + i, high=23700, low=23500, close=23610.0 + i))
+    await db_session.commit()
+
+    kite = GappyKite(lambda t: 23500.0, index_until=at(25, 9, 0))
+    result = await ps.fill_gaps(db_session, kite, "NIFTY", at(25, 10, 5), sessions=1)
+    assert result["filled"] == 5
+    spots = {s.ts.replace(tzinfo=timezone.utc): s.spot for s in (await db_session.execute(select(PcrSnapshot))).scalars()}
+    assert spots == {
+        at(25, 9, 0): 23500.0, at(25, 9, 15): 23600.0, at(25, 9, 30): 23610.0, at(25, 9, 45): 23611.0, at(25, 10, 0): 23612.0,
+    }
+
+
+async def test_quiet_contracts_carry_their_last_oi_into_the_window(db_session: AsyncSession):
+    rows = FakeKite(lambda t: 23500.0).rows
+    ce = next(r["tradingsymbol"] for r in rows if r["expiry"] == "2026-09-29" and r["strike"] == "23500.0" and r["instrument_type"] == "CE")
+    pe = next(r["tradingsymbol"] for r in rows if r["expiry"] == "2026-09-29" and r["strike"] == "23500.0" and r["instrument_type"] == "PE")
+    kite = GappyKite(lambda t: 23500.0, quiet={ce}, never={pe})
+    await ps.fill_gaps(db_session, kite, "NIFTY", at(25, 9, 20), sessions=1)
+    assert kite.daily_calls == 2  # only the two contracts with no trade in the window
+    oi = {
+        s: v for s, v in (await db_session.execute(select(PcrStrikeOi.tradingsymbol, PcrStrikeOi.oi).where(PcrStrikeOi.tradingsymbol.in_([ce, pe])))).all()
+    }
+    assert oi == {ce: GappyKite.QUIET_OI, pe: 0.0}
+    snap = (await db_session.execute(select(PcrSnapshot).order_by(PcrSnapshot.ts.desc()))).scalars().first()
+    assert snap.contracts_with_oi == snap.contracts_expected == 648
+
+
+async def test_records_from_an_older_fill_are_made_again_but_live_ones_kept(db_session: AsyncSession):
+    kite = FakeKite(lambda t: 23500.0)
+    live = await capture(db_session, kite, at(25, 9, 15))
+    await ps.fill_gaps(db_session, kite, "NIFTY", at(25, 9, 50), sessions=1)
+    old = (await db_session.execute(select(PcrSnapshot).where(PcrSnapshot.source == SOURCE_HISTORICAL))).scalars().all()
+    assert len(old) == 3
+    for s in old:
+        s.calc_version = 1
+        s.spot = 1.0  # what the old fill got wrong
+    await db_session.commit()
+
+    assert await ps.missing_marks(db_session, "NIFTY", at(25, 9, 50), sessions=1) == [at(25, 9, 0), at(25, 9, 30), at(25, 9, 45)]
+    result = await ps.fill_gaps(db_session, kite, "NIFTY", at(25, 9, 50), sessions=1)
+    assert result["filled"] == 3
+    snaps = (await db_session.execute(select(PcrSnapshot).order_by(PcrSnapshot.ts))).scalars().all()
+    assert [(s.source, s.calc_version, s.spot) for s in snaps] == [
+        (SOURCE_HISTORICAL, ps.CALC_VERSION, 23500.0), (SOURCE_LIVE, ps.CALC_VERSION, 23500.0),
+        (SOURCE_HISTORICAL, ps.CALC_VERSION, 23500.0), (SOURCE_HISTORICAL, ps.CALC_VERSION, 23500.0),
+    ]
+    assert snaps[1].id == live.id
+    # Contract rows of the replaced records went with them.
+    count = (await db_session.execute(select(func.count()).select_from(PcrStrikeOi))).scalar_one()
+    assert count == 4 * 121 * 2 * 4
