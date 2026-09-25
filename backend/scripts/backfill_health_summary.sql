@@ -98,36 +98,6 @@ GROUP BY s.source, b.timeframe
 ORDER BY s.source, b.timeframe;
 
 \echo
-\echo '== I. Intraday completeness (5m/15m/30m/60m), last 14 days before today'
-\echo '   complete = a full session of bars (NSE 09:15-15:30; Delta 24h);'
-\echo '   gap days = market days between a symbol''s first and last day with no bars at all'
-WITH per_day AS (
-  SELECT s.source, b.timeframe, b.symbol_id, (b.ts AT TIME ZONE 'Asia/Kolkata')::date AS day, count(*) AS bars
-  FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
-  WHERE b.timeframe IN ('5m', '15m', '30m', '60m')
-    AND b.ts >= date_trunc('day', now()) - interval '14 days' AND b.ts < date_trunc('day', now())
-  GROUP BY 1, 2, 3, 4
-), expected AS (
-  SELECT per_day.*, CASE WHEN source = 'delta' THEN 1440 / tf.minutes ELSE ceil(375.0 / tf.minutes) END AS expected
-  FROM per_day JOIN (VALUES ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)) AS tf(timeframe, minutes) USING (timeframe)
-), market_days AS (
-  SELECT DISTINCT source, timeframe, day FROM per_day
-), spans AS (
-  SELECT source, timeframe, symbol_id, min(day) AS first_day, max(day) AS last_day, count(*) AS days FROM per_day GROUP BY 1, 2, 3
-), gaps AS (
-  SELECT sp.source, sp.timeframe,
-         sum((SELECT count(*) FROM market_days m
-              WHERE m.source = sp.source AND m.timeframe = sp.timeframe AND m.day BETWEEN sp.first_day AND sp.last_day) - sp.days) AS gap_days
-  FROM spans sp GROUP BY 1, 2
-)
-SELECT e.source, e.timeframe, count(DISTINCT e.symbol_id) AS symbols, count(*) AS symbol_days,
-       count(*) FILTER (WHERE e.bars >= e.expected) AS complete, count(*) FILTER (WHERE e.bars < e.expected) AS partial,
-       min(e.bars) AS fewest_bars_in_a_day, max(e.expected) AS full_day, max(g.gap_days) AS gap_days
-FROM expected e JOIN gaps g USING (source, timeframe)
-GROUP BY e.source, e.timeframe
-ORDER BY e.source, e.timeframe;
-
-\echo
 \echo '== J. Backfilled but not yet copied to Charts/strategies (catalog sync backlog)'
 WITH latest AS (
   SELECT symbol_id, max(completed_at) AS completed_at FROM bf_backfill_jobs WHERE status = 'completed' GROUP BY symbol_id
