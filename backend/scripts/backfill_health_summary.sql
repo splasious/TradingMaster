@@ -259,6 +259,97 @@ WHERE i.exchange = 'NFO' AND i.data_source = 'zerodha_kite' AND i.expiry >= (now
 GROUP BY 1 ORDER BY 1;
 
 \echo
+\echo '== U. NIFTY next 4 expiries, change-in-OI PCR (today vs previous session, app catalog strikes): sum of put OI change / sum of call OI change'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50' ORDER BY created_at LIMIT 1),
+exp AS (
+  SELECT DISTINCT i.expiry FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY i.expiry LIMIT 4),
+opt AS (
+  SELECT i.id, i.expiry, i.option_type FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry IN (SELECT expiry FROM exp)),
+c AS (
+  SELECT o.id, o.expiry, o.option_type, k.ts, (k.ts AT TIME ZONE 'Asia/Kolkata')::date AS d, k.open_interest AS oi
+  FROM opt o JOIN ohlcv_candles k ON k.instrument_id = o.id AND k.timeframe = '15m'
+  WHERE k.ts > now() - interval '10 days' AND k.open_interest IS NOT NULL),
+days AS (SELECT max(d) FILTER (WHERE d < (SELECT max(d) FROM c)) AS prev_d, max(d) AS cur_d FROM c),
+cur AS (SELECT DISTINCT ON (id) id, expiry, option_type, oi FROM c WHERE d = (SELECT cur_d FROM days) ORDER BY id, ts DESC),
+prev AS (SELECT DISTINCT ON (id) id, oi FROM c WHERE d = (SELECT prev_d FROM days) ORDER BY id, ts DESC),
+j AS (SELECT cur.expiry, cur.option_type, cur.oi - coalesce(prev.oi, 0) AS chg, prev.id IS NULL AS no_prev FROM cur LEFT JOIN prev USING (id)),
+per AS (
+  SELECT to_char(expiry, 'DD-Mon') AS expiry, count(*) AS contracts, count(*) FILTER (WHERE no_prev) AS no_prev_day_oi,
+         round(sum(chg) FILTER (WHERE option_type = 'CE')) AS call_oi_change, round(sum(chg) FILTER (WHERE option_type = 'PE')) AS put_oi_change,
+         round((sum(chg) FILTER (WHERE option_type = 'PE') / NULLIF(sum(chg) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3) AS coi_pcr,
+         expiry AS sort_key
+  FROM j GROUP BY expiry
+  UNION ALL
+  SELECT 'ALL 4', count(*), count(*) FILTER (WHERE no_prev),
+         round(sum(chg) FILTER (WHERE option_type = 'CE')), round(sum(chg) FILTER (WHERE option_type = 'PE')),
+         round((sum(chg) FILTER (WHERE option_type = 'PE') / NULLIF(sum(chg) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3), '9999-12-31'::date
+  FROM j)
+SELECT (SELECT to_char(prev_d, 'DD-Mon') || ' -> ' || to_char(cur_d, 'DD-Mon') FROM days) AS sessions, expiry, contracts, no_prev_day_oi,
+       call_oi_change, put_oi_change, coi_pcr
+FROM per ORDER BY sort_key;
+
+\echo
+\echo '== V. Full NIFTY chain as tracked by the backfill (bf_symbols), next 4 expiries: strikes, OI coverage, full-chain PCR and change-in-OI PCR'
+WITH exp AS (
+  SELECT DISTINCT expiry FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND underlying_symbol = 'NIFTY' AND option_type IN ('CE', 'PE')
+    AND expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY expiry LIMIT 4),
+s AS (
+  SELECT id, expiry, option_type, strike FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND underlying_symbol = 'NIFTY' AND option_type IN ('CE', 'PE') AND expiry IN (SELECT expiry FROM exp)),
+b AS (
+  SELECT s.id, s.expiry, s.option_type, x.ts, (x.ts AT TIME ZONE 'Asia/Kolkata')::date AS d, x.open_interest AS oi
+  FROM s JOIN bf_ohlcv_bars x ON x.symbol_id = s.id AND x.timeframe = '15m'
+  WHERE x.ts > now() - interval '10 days' AND x.open_interest IS NOT NULL),
+days AS (SELECT max(d) FILTER (WHERE d < (now() AT TIME ZONE 'Asia/Kolkata')::date) AS prev_d, (now() AT TIME ZONE 'Asia/Kolkata')::date AS cur_d FROM b),
+cur AS (SELECT DISTINCT ON (id) id, expiry, option_type, oi FROM b WHERE d = (SELECT cur_d FROM days) ORDER BY id, ts DESC),
+prev AS (SELECT DISTINCT ON (id) id, expiry, option_type, oi FROM b WHERE d = (SELECT prev_d FROM days) ORDER BY id, ts DESC),
+chain AS (SELECT expiry, count(*) FILTER (WHERE option_type = 'CE') AS ce, count(*) FILTER (WHERE option_type = 'PE') AS pe, min(strike) AS lo, max(strike) AS hi FROM s GROUP BY expiry),
+pc AS (SELECT expiry, count(*) AS n, sum(oi) FILTER (WHERE option_type = 'CE') AS c_oi, sum(oi) FILTER (WHERE option_type = 'PE') AS p_oi FROM prev GROUP BY expiry),
+cc AS (SELECT expiry, count(*) AS n, sum(oi) FILTER (WHERE option_type = 'CE') AS c_oi, sum(oi) FILTER (WHERE option_type = 'PE') AS p_oi FROM cur GROUP BY expiry),
+chg AS (SELECT cur.expiry, cur.option_type, cur.oi - prev.oi AS d_oi FROM cur JOIN prev USING (id)),
+ch AS (SELECT expiry, count(*) AS n, sum(d_oi) FILTER (WHERE option_type = 'CE') AS c_d, sum(d_oi) FILTER (WHERE option_type = 'PE') AS p_d FROM chg GROUP BY expiry)
+SELECT to_char(chain.expiry, 'DD-Mon') AS expiry, chain.ce AS chain_ce, chain.pe AS chain_pe, chain.lo AS min_strike, chain.hi AS max_strike,
+       pc.n AS prev_day_with_oi, round((pc.p_oi / NULLIF(pc.c_oi, 0))::numeric, 3) AS pcr_prev_close,
+       cc.n AS today_with_oi, round((cc.p_oi / NULLIF(cc.c_oi, 0))::numeric, 3) AS pcr_today,
+       ch.n AS both_days, round(ch.c_d) AS call_oi_change, round(ch.p_d) AS put_oi_change,
+       round((ch.p_d / NULLIF(ch.c_d, 0))::numeric, 3) AS coi_pcr
+FROM chain LEFT JOIN pc USING (expiry) LEFT JOIN cc USING (expiry) LEFT JOIN ch USING (expiry)
+ORDER BY chain.expiry;
+
+\echo
+\echo '== V2. Same, all 4 expiries summed (full chain as tracked by the backfill)'
+WITH exp AS (
+  SELECT DISTINCT expiry FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND underlying_symbol = 'NIFTY' AND option_type IN ('CE', 'PE')
+    AND expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY expiry LIMIT 4),
+s AS (
+  SELECT id, option_type FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND underlying_symbol = 'NIFTY' AND option_type IN ('CE', 'PE') AND expiry IN (SELECT expiry FROM exp)),
+b AS (
+  SELECT s.id, s.option_type, x.ts, (x.ts AT TIME ZONE 'Asia/Kolkata')::date AS d, x.open_interest AS oi
+  FROM s JOIN bf_ohlcv_bars x ON x.symbol_id = s.id AND x.timeframe = '15m'
+  WHERE x.ts > now() - interval '10 days' AND x.open_interest IS NOT NULL),
+days AS (SELECT max(d) FILTER (WHERE d < (now() AT TIME ZONE 'Asia/Kolkata')::date) AS prev_d, (now() AT TIME ZONE 'Asia/Kolkata')::date AS cur_d FROM b),
+cur AS (SELECT DISTINCT ON (id) id, option_type, oi FROM b WHERE d = (SELECT cur_d FROM days) ORDER BY id, ts DESC),
+prev AS (SELECT DISTINCT ON (id) id, option_type, oi FROM b WHERE d = (SELECT prev_d FROM days) ORDER BY id, ts DESC),
+chg AS (SELECT cur.option_type, cur.oi - prev.oi AS d_oi FROM cur JOIN prev USING (id))
+SELECT (SELECT count(*) FROM s) AS chain_contracts,
+       (SELECT count(*) FROM prev) AS prev_day_with_oi,
+       (SELECT round((sum(oi) FILTER (WHERE option_type = 'PE') / NULLIF(sum(oi) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3) FROM prev) AS pcr_prev_close,
+       (SELECT count(*) FROM cur) AS today_with_oi,
+       (SELECT round((sum(oi) FILTER (WHERE option_type = 'PE') / NULLIF(sum(oi) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3) FROM cur) AS pcr_today,
+       (SELECT count(*) FROM chg) AS both_days,
+       (SELECT round(sum(d_oi) FILTER (WHERE option_type = 'CE')) FROM chg) AS call_oi_change,
+       (SELECT round(sum(d_oi) FILTER (WHERE option_type = 'PE')) FROM chg) AS put_oi_change,
+       (SELECT round((sum(d_oi) FILTER (WHERE option_type = 'PE') / NULLIF(sum(d_oi) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3) FROM chg) AS coi_pcr;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
