@@ -90,6 +90,26 @@ async def test_bulk_backfill_queues_a_job_per_symbol(client: AsyncClient, seeded
     assert len(jobs_resp.json()) == 2
 
 
+async def test_bulk_backfill_queues_nothing_for_a_timeframe_the_source_lacks(client: AsyncClient, seeded_admin: dict, monkeypatch):
+    # Delta has no native monthly candle -- every job would only fail.
+    async def fake_get(client_self, url, **kwargs):
+        assert "delta.exchange" not in str(url), "the source should not be asked for anything"
+        return await _original_get(client_self, url, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    resp = await client.post(
+        "/api/v1/backfill-platform/sources/delta/backfill-all",
+        params={"timeframe": "1mo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["queued"] == 0
+
+    jobs_resp = await client.get("/api/v1/backfill-platform/jobs?source=delta", headers={"Authorization": f"Bearer {token}"})
+    assert jobs_resp.json() == []
+
+
 async def test_bulk_backfill_requires_administrator(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
     from sqlalchemy import select
 

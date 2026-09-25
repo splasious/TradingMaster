@@ -112,8 +112,16 @@ async def backfill_all_for_source(
     """Pulls the entire tracked universe for a source -- Kite's full NSE
     instrument list, or all of Delta's RWA tokens -- queuing one background
     job per symbol rather than blocking the request on however long
-    hundreds of real network calls take."""
+    hundreds of real network calls take.
+
+    Queues nothing for a timeframe the source doesn't serve natively (e.g.
+    Zerodha's weekly/monthly -- views derived from its daily bars): each
+    job would only fail against the source's real API, hundreds per click
+    when every timeframe is selected. The watchlist backfill skips these
+    the same way."""
     _check_source(source)
+    if timeframe not in {o.value for o in timeframes_for_source(source) if o.native}:
+        return BulkBackfillResult(source=source, queued=0)
     try:
         all_symbols = await symbols_service.list_all_symbols(db, source, user.id)
     except MarketDataSourceError as exc:

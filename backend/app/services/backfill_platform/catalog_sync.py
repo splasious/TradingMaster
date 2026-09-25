@@ -77,7 +77,14 @@ def _instrument_type_for(bf_symbol: BfSymbol) -> str:
     return "equity"
 
 
-async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> CatalogSyncResult:
+async def sync_symbol_to_catalog(
+    db: AsyncSession, bf_symbol: BfSymbol, timeframe: str | None = None, since: datetime | None = None,
+) -> CatalogSyncResult:
+    """Copies the symbol's bars -- all of them, or with timeframe/since only
+    that timeframe's bars from `since` on (the live sync passing on the
+    minutes it just saved). Only a full copy sets last_synced_at: a partial
+    one must not make CatalogSyncScheduler skip history a backfill job
+    saved that it hasn't copied yet."""
     exchange = _SOURCE_TO_EXCHANGE.get(bf_symbol.source)
     data_source = _SOURCE_TO_DATA_SOURCE.get(bf_symbol.source)
     if exchange is None or data_source is None:
@@ -140,6 +147,10 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
     after: tuple[str, datetime] | None = None
     while True:
         page_stmt = select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id)
+        if timeframe is not None:
+            page_stmt = page_stmt.where(BfOhlcvBar.timeframe == timeframe)
+        if since is not None:
+            page_stmt = page_stmt.where(BfOhlcvBar.ts >= since)
         if after is not None:
             page_stmt = page_stmt.where(tuple_(BfOhlcvBar.timeframe, BfOhlcvBar.ts) > after)
         page = (await db.execute(page_stmt.order_by(BfOhlcvBar.timeframe, BfOhlcvBar.ts).limit(_PAGE_SIZE))).scalars().all()
@@ -162,7 +173,8 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
         for bar in page:
             db.expunge(bar)
 
-    bf_symbol.last_synced_at = datetime.now(timezone.utc)
+    if timeframe is None and since is None:
+        bf_symbol.last_synced_at = datetime.now(timezone.utc)
     return CatalogSyncResult(
         symbol=bf_symbol.symbol, instrument_id=str(instrument.id),
         instrument_created=instrument_created, bars_synced=synced, bars_skipped=skipped,

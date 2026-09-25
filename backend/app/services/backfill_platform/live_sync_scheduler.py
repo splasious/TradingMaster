@@ -23,12 +23,18 @@ from sqlalchemy import select
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
+from app.services.backfill_platform.catalog_sync import sync_symbol_to_catalog
+from app.services.backfill_platform.jobs import save_bars
+from app.services.market_data.bar_periods import is_complete
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
 
 logger = logging.getLogger(__name__)
 
 SYNC_INTERVAL_SECONDS = 60
+# A candle counts as finished this long after it closes, giving the source
+# time to settle its final values (as active_timeframe_sync_scheduler does).
+_SETTLE = timedelta(seconds=10)
 
 
 class BfLiveSyncScheduler:
@@ -66,40 +72,52 @@ class BfLiveSyncScheduler:
 
     async def _sync_once(self) -> int:
         now = datetime.now(timezone.utc)
-        synced = 0
         async with AsyncSessionLocal() as db:
-            symbols = (await db.execute(select(BfSymbol))).scalars().all()
-            for symbol in symbols:
+            targets = (await db.execute(select(BfSymbol.id, BfSymbol.symbol).where(BfSymbol.source == "delta"))).all()
+        synced = 0
+        for symbol_id, name in targets:
+            # A session per symbol: a failure rolls back that symbol's writes
+            # only, instead of leaving one shared session unusable (or
+            # committing them along with the next symbol's).
+            async with AsyncSessionLocal() as db:
                 try:
-                    if symbol.source == "delta":
-                        await self._sync_symbol(db, symbol, DeltaExchangeDataSource(), "1m", now)
-                        synced += 1
+                    symbol = await db.get(BfSymbol, symbol_id)
+                    if symbol is None:
+                        continue
+                    await self._sync_symbol(db, symbol, DeltaExchangeDataSource(), "1m", now)
+                    synced += 1
                 except MarketDataSourceError:
                     continue  # one symbol's source hiccup shouldn't kill the whole tick
                 except Exception:
-                    logger.exception("Live sync failed for %s:%s", symbol.source, symbol.symbol)
+                    logger.exception("Live sync failed for delta:%s", name)
         return synced
 
     async def _sync_symbol(self, db, symbol: BfSymbol, data_source, timeframe: str, now: datetime) -> None:
+        """Saves the finished candles of the last two days not stored yet,
+        then copies them on to the main candle table if the symbol is
+        already there. The minute still in progress is left for a later
+        tick: saved now it would keep its partial values for good, since a
+        stored bar is never overwritten."""
         start = now - timedelta(days=2)
         bars = await data_source.get_historical_data(symbol.symbol, timeframe, start, now)
+        bars = [bar for bar in bars if is_complete(bar["ts"], timeframe, now - _SETTLE)]
         if not bars:
             return
         existing_result = await db.execute(
-            select(BfOhlcvBar.ts).where(BfOhlcvBar.symbol_id == symbol.id, BfOhlcvBar.timeframe == timeframe)
+            select(BfOhlcvBar.ts).where(
+                BfOhlcvBar.symbol_id == symbol.id, BfOhlcvBar.timeframe == timeframe, BfOhlcvBar.ts >= start,
+            )
         )
         existing_ts = {as_aware_utc(ts) for ts in existing_result.scalars().all()}
-        for bar in bars:
-            bar_ts = as_aware_utc(bar["ts"])
-            if bar_ts in existing_ts:
-                continue
-            db.add(
-                BfOhlcvBar(
-                    symbol_id=symbol.id, timeframe=timeframe, ts=bar_ts,
-                    open=bar["open"], high=bar["high"], low=bar["low"], close=bar["close"], volume=bar.get("volume"),
-                )
-            )
-            existing_ts.add(bar_ts)
+        new_bars = [bar for bar in bars if as_aware_utc(bar["ts"]) not in existing_ts]
+        if not new_bars:
+            return
+        _, inserted = await save_bars(db, symbol.id, timeframe, new_bars)
+        # A symbol not in the main catalog yet gets there -- with all its
+        # history -- through CatalogSyncScheduler after its first backfill.
+        if inserted and symbol.last_synced_at is not None:
+            since = min(as_aware_utc(bar["ts"]) for bar in new_bars)
+            await sync_symbol_to_catalog(db, symbol, timeframe=timeframe, since=since)
         await db.commit()
 
 

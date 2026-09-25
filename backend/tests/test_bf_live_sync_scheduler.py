@@ -79,3 +79,99 @@ async def test_sync_symbol_does_not_duplicate_existing_bars(db_session: AsyncSes
 
     bars = (await db_session.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol.id))).scalars().all()
     assert len(bars) == 1  # still just the one -- not duplicated
+
+
+def _delta_rows(*times: datetime) -> list[dict]:
+    return [
+        {"time": int(t.timestamp()), "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10.0}
+        for t in times
+    ]
+
+
+def _fake_delta(monkeypatch, rows: list[dict]) -> None:
+    async def fake_get(client_self, url, **kwargs):
+        body = {"success": True, "result": rows}
+        return httpx.Response(200, content=json.dumps(body).encode(), request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+
+async def test_sync_symbol_leaves_the_minute_in_progress_for_a_later_tick(db_session: AsyncSession, monkeypatch):
+    from app.models.market_data import OhlcvCandle
+    from app.services.market_data.delta_source import DeltaExchangeDataSource
+
+    symbol = BfSymbol(source="delta", symbol="TSLAXUSD", display_name="Tesla xStock Token")
+    db_session.add(symbol)
+    await db_session.commit()
+    now = datetime(2026, 9, 25, 5, 0, 30, tzinfo=timezone.utc)
+    _fake_delta(monkeypatch, _delta_rows(
+        datetime(2026, 9, 25, 4, 58, tzinfo=timezone.utc),
+        datetime(2026, 9, 25, 4, 59, tzinfo=timezone.utc),
+        datetime(2026, 9, 25, 5, 0, tzinfo=timezone.utc),  # still forming at 05:00:30
+    ))
+
+    await BfLiveSyncScheduler()._sync_symbol(db_session, symbol, DeltaExchangeDataSource(), "1m", now)
+
+    stored = (await db_session.execute(select(BfOhlcvBar.ts).where(BfOhlcvBar.symbol_id == symbol.id).order_by(BfOhlcvBar.ts))).scalars().all()
+    assert [ts.replace(tzinfo=timezone.utc).minute for ts in stored] == [58, 59]
+    # Never synced to the main catalog, so it isn't created there by the live sync.
+    assert (await db_session.execute(select(OhlcvCandle))).scalars().all() == []
+
+
+async def test_sync_symbol_copies_the_new_minutes_to_the_chart_table(db_session: AsyncSession, monkeypatch):
+    from app.models.market_data import OhlcvCandle
+    from app.services.market_data.delta_source import DeltaExchangeDataSource
+
+    synced_at = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    symbol = BfSymbol(source="delta", symbol="AAPLXUSD", display_name="Apple xStock Token", last_synced_at=synced_at)
+    db_session.add(symbol)
+    await db_session.flush()
+    # A 5m bar a backfill saved but the catalog sync hasn't copied yet --
+    # left for CatalogSyncScheduler, which last_synced_at still points to.
+    db_session.add(BfOhlcvBar(symbol_id=symbol.id, timeframe="5m", ts=datetime(2026, 9, 25, 4, 55, tzinfo=timezone.utc),
+                              open=1, high=1, low=1, close=1, volume=1))
+    await db_session.commit()
+    now = datetime(2026, 9, 25, 5, 0, 30, tzinfo=timezone.utc)
+    _fake_delta(monkeypatch, _delta_rows(
+        datetime(2026, 9, 25, 4, 58, tzinfo=timezone.utc), datetime(2026, 9, 25, 4, 59, tzinfo=timezone.utc),
+    ))
+
+    await BfLiveSyncScheduler()._sync_symbol(db_session, symbol, DeltaExchangeDataSource(), "1m", now)
+
+    candles = (await db_session.execute(select(OhlcvCandle).order_by(OhlcvCandle.ts))).scalars().all()
+    assert [(c.timeframe, c.ts.replace(tzinfo=timezone.utc).minute, c.close) for c in candles] == [("1m", 58, 100.5), ("1m", 59, 100.5)]
+    await db_session.refresh(symbol)
+    assert symbol.last_synced_at.replace(tzinfo=timezone.utc) == synced_at
+
+
+async def test_one_symbol_failing_does_not_affect_the_others_in_a_tick(db_engine, db_session: AsyncSession, monkeypatch):
+    from datetime import timedelta
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.services.backfill_platform import live_sync_scheduler
+
+    first = BfSymbol(source="delta", symbol="AAAXUSD", display_name="A")
+    second = BfSymbol(source="delta", symbol="BBBXUSD", display_name="B")
+    db_session.add_all([first, second])
+    await db_session.commit()
+    finished = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=5)
+    _fake_delta(monkeypatch, _delta_rows(finished))
+    real_save = live_sync_scheduler.save_bars
+
+    async def failing_for_first(db, symbol_id, timeframe, bars):
+        result = await real_save(db, symbol_id, timeframe, bars)  # writes, then fails before commit
+        if symbol_id == first.id:
+            raise RuntimeError("simulated failure")
+        return result
+
+    monkeypatch.setattr(live_sync_scheduler, "save_bars", failing_for_first)
+    monkeypatch.setattr(live_sync_scheduler, "AsyncSessionLocal", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+
+    assert await BfLiveSyncScheduler()._sync_once() == 1
+
+    counts = {}
+    for symbol in (first, second):
+        rows = (await db_session.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol.id))).scalars().all()
+        counts[symbol.symbol] = len(rows)
+    assert counts == {"AAAXUSD": 0, "BBBXUSD": 1}  # the failed symbol's write was rolled back, not committed with the next

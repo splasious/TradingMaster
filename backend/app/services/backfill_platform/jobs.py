@@ -95,7 +95,7 @@ async def _fetch_bars(db: AsyncSession, source: str, symbol: str, timeframe: str
     raise MarketDataSourceError(f"Unknown source '{source}'")
 
 
-async def _save_bars(db: AsyncSession, symbol_id: uuid.UUID, timeframe: str, bars: list[Bar]) -> tuple[int, int]:
+async def save_bars(db: AsyncSession, symbol_id: uuid.UUID, timeframe: str, bars: list[Bar]) -> tuple[int, int]:
     """Inserts the bars, skipping any already stored -- ON CONFLICT DO
     NOTHING, so two backfills of the same symbol running at once can't
     fail each other on the unique (symbol, timeframe, ts) constraint the way
@@ -175,7 +175,7 @@ async def _run_job(job_id: uuid.UUID) -> None:
                     fetch_error = f"Part {n + 1} of {len(windows)} ({start:%d %b %Y} to {end:%d %b %Y}) failed: {exc}"
                 break
 
-        downloaded, inserted = await _save_bars(db, symbol_row.id, job.timeframe, bars)
+        downloaded, inserted = await save_bars(db, symbol_row.id, job.timeframe, bars)
         job.downloaded_count = downloaded
         job.inserted_count = inserted
         job.duplicate_count = downloaded - inserted
