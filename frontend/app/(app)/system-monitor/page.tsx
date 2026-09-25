@@ -74,6 +74,8 @@ export default function SystemMonitorPage() {
                 <RunningBadge running={data.application.paper_trading_scheduler_running} label="Paper trading scheduler" />
                 <RunningBadge running={data.application.active_timeframe_sync_scheduler_running} label="Active timeframe sync" />
                 <RunningBadge running={data.application.kite_session_monitor_running} label="Kite session monitor" />
+                <RunningBadge running={data.application.backfill_worker_running} label="Backfill job queue" />
+                <RunningBadge running={data.application.backfill_topup_scheduler_running} label="Daily Zerodha top-up" />
               </div>
               <div className="text-sm text-text-secondary">
                 Subscribed instruments:{" "}

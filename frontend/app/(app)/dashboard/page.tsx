@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { PriceChart } from "@/components/charts/price-chart";
+import { ZerodhaDataCard } from "@/components/dashboard/zerodha-data-card";
 import { OrderTicket } from "@/components/trading/order-ticket";
 import { PaperPositionsTable } from "@/components/trading/paper-positions-table";
 import { WatchlistPanel } from "@/components/trading/watchlist-panel";
@@ -201,7 +202,10 @@ export default function DashboardPage() {
         <OrderTicket key={chartInstrument?.id ?? "none"} instrument={chartInstrument} />
       </div>
 
-      <PaperPositionsTable />
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[1fr_380px]">
+        <PaperPositionsTable />
+        <ZerodhaDataCard />
+      </div>
     </div>
   );
 }

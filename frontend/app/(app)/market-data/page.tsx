@@ -4,10 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { JobHistoryPanel } from "@/components/backfill-platform/job-history";
-import { LiveSyncStatus } from "@/components/backfill-platform/live-sync-status";
-import { SourceBlock } from "@/components/backfill-platform/source-block";
-import { WatchlistsPanel } from "@/components/backfill-platform/watchlists-panel";
+import { DataBackfillDashboard } from "@/components/backfill-platform/overview/data-backfill-dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -222,21 +219,12 @@ export default function MarketDataPage() {
 
       <Tabs defaultValue="backfill-platform">
         <TabsList>
-          <TabsTrigger value="backfill-platform">Data Backfill Platform</TabsTrigger>
+          <TabsTrigger value="backfill-platform">Data Backfill</TabsTrigger>
           <TabsTrigger value="instrument-catalog">Instrument Catalog (Strategies)</TabsTrigger>
         </TabsList>
 
         <TabsContent value="backfill-platform">
-          <div className="space-y-6">
-            <LiveSyncStatus />
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <SourceBlock source="delta" />
-              <SourceBlock source="zerodha" />
-              <SourceBlock source="zerodha_nfo" />
-            </div>
-            <WatchlistsPanel />
-            <JobHistoryPanel />
-          </div>
+          <DataBackfillDashboard />
         </TabsContent>
 
         <TabsContent value="instrument-catalog">

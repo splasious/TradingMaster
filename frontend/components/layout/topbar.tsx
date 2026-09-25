@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useSystemHealth, useUnreadAlertCount } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
+import { DataFreshnessPill } from "./data-freshness-pill";
 import { EnvironmentBadge } from "./environment-badge";
 import { ThemeToggle } from "./theme-toggle";
 
@@ -50,8 +51,11 @@ export function Topbar() {
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-border bg-surface px-5">
-      <SystemHealthIndicator />
+    <header className="flex h-14 items-center justify-between gap-3 border-b border-border bg-surface px-5">
+      <div className="flex min-w-0 items-center gap-2">
+        <SystemHealthIndicator />
+        <DataFreshnessPill />
+      </div>
 
       <div className="flex items-center gap-3">
         <EnvironmentBadge />

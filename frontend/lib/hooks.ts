@@ -61,6 +61,10 @@ import type {
   UnderlyingOut,
   UnreadCountOut,
   UserOut,
+  BfFreshness,
+  BfOverview,
+  BfStockFilter,
+  BfStocksOut,
 } from "./types";
 
 export function useSystemHealth() {
@@ -749,6 +753,34 @@ export function useBfTimeframes(source: BfSource) {
   return useQuery({
     queryKey: ["bf-timeframes", source],
     queryFn: () => apiFetch<TimeframeOptionOut[]>(`/api/v1/backfill-platform/sources/${source}/timeframes`),
+  });
+}
+
+/** The Data Backfill page's overview -- polled faster while a top-up runs. */
+export function useBfOverview() {
+  return useQuery({
+    queryKey: ["bf-overview"],
+    queryFn: () => apiFetch<BfOverview>("/api/v1/backfill-platform/overview"),
+    refetchInterval: (query) => (query.state.data?.queue.state === "running" ? 5_000 : 30_000),
+  });
+}
+
+/** "Zerodha data saved up to" -- the top-bar pill on every page and the Dashboard card. */
+export function useBfFreshness() {
+  return useQuery({
+    queryKey: ["bf-freshness"],
+    queryFn: () => apiFetch<BfFreshness>("/api/v1/backfill-platform/freshness"),
+    refetchInterval: 60_000,
+  });
+}
+
+export function useBfStocks(source: "zerodha" | "zerodha_nfo", status: BfStockFilter, q: string, page: number, pageSize = 25) {
+  const params = new URLSearchParams({ source, status, q, offset: String(page * pageSize), limit: String(pageSize) });
+  return useQuery({
+    queryKey: ["bf-stocks", source, status, q, page, pageSize],
+    queryFn: () => apiFetch<BfStocksOut>(`/api/v1/backfill-platform/coverage/stocks?${params}`),
+    placeholderData: (previous) => previous,
+    refetchInterval: 30_000,
   });
 }
 

@@ -778,6 +778,8 @@ export interface ApplicationMetricsOut {
   real_price_feed_running: boolean;
   active_timeframe_sync_scheduler_running: boolean;
   kite_session_monitor_running: boolean;
+  backfill_worker_running: boolean;
+  backfill_topup_scheduler_running: boolean;
 }
 
 export interface TradingMetricsOut {
@@ -1008,4 +1010,164 @@ export interface HistoryDepthOut {
   kite_latest: string | null;
   kite_candle_count: number | null;
   error: string | null;
+}
+
+// ---- Data Backfill overview (backend: services/backfill_platform/overview.py)
+
+/** ok = the last closed NSE session is saved; warn = 1 session behind;
+ * bad = 2+ behind; none = nothing tracked for that timeframe. */
+export type BfFreshStatus = "ok" | "warn" | "bad" | "none";
+export type BfTimeframe = "1m" | "5m" | "15m" | "30m" | "60m" | "1d";
+
+export interface BfCoverageCell {
+  timeframe: BfTimeframe;
+  status: BfFreshStatus;
+  symbols: number;
+  updating?: boolean;
+  saved_up_to?: string;
+  oldest_saved_up_to?: string;
+  sessions_behind?: number;
+  expired?: number;
+  current?: number;
+  behind?: number;
+  partial?: number;
+  bars?: number;
+  history_from?: string;
+}
+
+export interface BfSegment {
+  source: BfSource;
+  label: string;
+  unit: string;
+  symbols: number;
+  enabled?: boolean;
+  paused?: boolean;
+  last_saved_at?: string | null;
+  cells: BfCoverageCell[];
+}
+
+export interface BfHeadline {
+  saved_up_to: string | null;
+  status: BfFreshStatus;
+  last_session?: string;
+  timeframes: number;
+  timeframes_current: number;
+  behind: { timeframe: BfTimeframe; sessions_behind: number }[];
+}
+
+export interface BfLogin {
+  connected: boolean;
+  status: "connected" | "expired" | "not_set_up";
+}
+
+export interface BfQueue {
+  state: "idle" | "running" | "paused" | "waiting_login";
+  run: {
+    kind: "scheduled" | "manual";
+    started_at: string | null;
+    total: number;
+    done: number;
+    failed: number;
+    running: number;
+    queued: number;
+    percent: number;
+    eta_seconds: number | null;
+  } | null;
+  queued_total: number;
+  current: { symbol: string | null; timeframe: string; source: BfSource; from_date: string | null } | null;
+  waiting_message: string | null;
+  last_run: {
+    kind: string;
+    source: BfSource;
+    status: string;
+    completed_at: string | null;
+    message: string | null;
+    session_date: string | null;
+  } | null;
+}
+
+export type BfAttentionAction =
+  | { type: "topup"; source: BfSource }
+  | { type: "retry_failed"; kind: "interrupted" | "failed"; count: number }
+  | { type: "link"; href: string };
+
+export interface BfAttentionItem {
+  severity: "bad" | "warn" | "info";
+  title: string;
+  detail: string;
+  action: BfAttentionAction | null;
+}
+
+export interface BfSchedule {
+  auto_topup_zerodha: boolean;
+  auto_topup_zerodha_nfo: boolean;
+  delta_enabled: boolean;
+  topup_time: string;
+  topup_timeframes: BfTimeframe[];
+  next_run_at: string | null;
+  worker_paused: boolean;
+}
+
+export interface BfStorage {
+  database_bytes: number;
+  tables: Record<string, { bytes: number; rows: number }>;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+  backups_verified: boolean;
+}
+
+export interface BfOverview {
+  as_of: string;
+  coverage_ready: boolean;
+  last_session: string;
+  headline: BfHeadline;
+  live_today_until: string | null;
+  zerodha_login: BfLogin;
+  segments: BfSegment[];
+  queue: BfQueue;
+  attention: BfAttentionItem[];
+  schedule: BfSchedule;
+  storage: BfStorage | null;
+}
+
+export interface BfFreshness {
+  as_of: string;
+  coverage_ready: boolean;
+  last_session: string;
+  headline: BfHeadline;
+  timeframes: BfCoverageCell[];
+  live_today_until: string | null;
+  zerodha_login: BfLogin;
+  queue: { state: BfQueue["state"]; percent: number | null };
+  next_run_at: string | null;
+  delta_paused: boolean;
+  symbols: { zerodha: number; zerodha_nfo: number };
+}
+
+export type BfStockFilter = "all" | "current" | "behind" | "partial" | "failed";
+
+export interface BfStockCell {
+  saved_up_to: string;
+  sessions_behind: number;
+  status: "ok" | "warn" | "bad" | "updating" | "expired";
+  partial: boolean;
+  failed: boolean;
+  bars: number;
+}
+
+export interface BfStockRow {
+  symbol_id: string;
+  symbol: string;
+  cells: Partial<Record<BfTimeframe, BfStockCell>>;
+  history_from: string;
+  expired: boolean;
+  behind: boolean;
+  partial: boolean;
+  failed: boolean;
+}
+
+export interface BfStocksOut {
+  counts: Record<BfStockFilter, number>;
+  total: number;
+  rows: BfStockRow[];
 }

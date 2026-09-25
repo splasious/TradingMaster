@@ -284,16 +284,17 @@ async def _attention(db: AsyncSession, now: datetime, segments: list[dict], logi
         for cell in seg["cells"]:
             if cell["status"] in ("ok", "none"):
                 continue
-            unit = UNIT[seg["source"]]
+            n = cell["behind"]
+            unit = UNIT[seg["source"]] if n != 1 else UNIT[seg["source"]][:-1]
             name = SEGMENTS[seg["source"]].split()[0]
             tf = TIMEFRAME_LABEL[cell["timeframe"]]
             s = cell["sessions_behind"]
-            if cell["behind"] == cell["symbols"]:
+            if n == cell["symbols"]:
                 title = f"{name} {tf} is {s} session{'s' if s != 1 else ''} behind"
             else:
-                title = f"{cell['behind']:,} {name} {unit} behind on {tf}"
+                title = f"{n:,} {name} {unit} behind on {tf}"
             items.append({"severity": cell["status"], "title": title,
-                          "detail": f"{cell['behind']:,} {unit} · oldest saved up to {_fmt_day(cell['oldest_saved_up_to'])}",
+                          "detail": f"{n:,} {unit} · oldest saved up to {_fmt_day(cell['oldest_saved_up_to'])}",
                           "action": {"type": "topup", "source": seg["source"]}})
     empty = (
         await db.execute(
@@ -302,7 +303,7 @@ async def _attention(db: AsyncSession, now: datetime, segments: list[dict], logi
         )
     ).scalar_one()
     if empty:
-        items.append({"severity": "info", "title": f"{empty:,} NFO contracts have no data",
+        items.append({"severity": "info", "title": f"{empty:,} NFO contract{'s have' if empty != 1 else ' has'} no data",
                       "detail": "Kite returned no candles -- strikes that never traded. Left out of top-ups.", "action": None})
     if settings.coverage_built_at is None:
         items.insert(0, {"severity": "info", "title": "Counting what is saved",

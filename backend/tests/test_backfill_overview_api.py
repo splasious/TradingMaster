@@ -107,8 +107,8 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     titles = [a["title"] for a in body["attention"]]
     assert titles[0] == "Zerodha is not logged in"
     assert "1 job stopped by a server restart" in titles and "1 job failed" in titles  # the redone failure isn't counted
-    assert "1 NSE stocks behind on 15m" in titles
-    assert "1 NFO contracts have no data" in titles
+    assert "1 NSE stock behind on 15m" in titles
+    assert "1 NFO contract has no data" in titles
     assert body["queue"]["state"] == "idle" and body["schedule"]["topup_time"] == "16:15"
 
 
