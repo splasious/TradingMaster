@@ -419,7 +419,7 @@ GROUP BY o.expiry ORDER BY o.expiry;
 
 \echo
 \echo '== X. Timeframes in use: strategies and deployments (counts), and 1m data held'
-SELECT 'strategies' AS what, timeframe, count(*) AS n FROM strategies GROUP BY timeframe
+SELECT 'strategy versions' AS what, timeframe, count(*) AS n FROM strategy_versions GROUP BY timeframe
 UNION ALL SELECT 'paper deployments (' || status || ')', timeframe, count(*) FROM paper_deployments GROUP BY status, timeframe
 UNION ALL SELECT 'live deployments (' || status || ')', timeframe, count(*) FROM live_deployments GROUP BY status, timeframe
 ORDER BY 1, 2;
