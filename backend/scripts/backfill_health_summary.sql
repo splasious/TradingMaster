@@ -375,6 +375,32 @@ FROM pcr_snapshots WHERE underlying = 'NIFTY'
 ORDER BY ts DESC LIMIT 5;
 
 \echo
+\echo '== W3. PCR records of the latest session, every mark'
+SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS mark_ist, source, round(spot::numeric, 1) AS nifty, atm_strike,
+       contracts_with_oi || '/' || contracts_expected AS coverage, round(pcr::numeric, 3) AS pcr, positioning
+FROM pcr_snapshots
+WHERE underlying = 'NIFTY' AND session_date = (SELECT max(session_date) FROM pcr_snapshots WHERE underlying = 'NIFTY')
+ORDER BY ts;
+
+\echo
+\echo '== W4. NIFTY 50 15m candles saved by the backfill for that session (reference for W3)'
+SELECT to_char(x.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS candle_start, round(x.open::numeric, 1) AS open, round(x.close::numeric, 1) AS close
+FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+WHERE s.symbol = 'NIFTY 50' AND x.timeframe = '15m'
+  AND (x.ts AT TIME ZONE 'Asia/Kolkata')::date = (SELECT max(session_date) FROM pcr_snapshots WHERE underlying = 'NIFTY')
+ORDER BY x.ts;
+
+\echo
+\echo '== W5. Latest PCR record: contracts without OI, by expiry and distance from ATM'
+SELECT o.expiry, count(*) AS contracts, count(*) FILTER (WHERE o.oi IS NULL) AS no_oi,
+       count(*) FILTER (WHERE o.oi IS NULL AND abs(o.strike - p.atm_strike) <= 500) AS no_oi_within_500,
+       count(*) FILTER (WHERE o.oi IS NULL AND abs(o.strike - p.atm_strike) > 1500) AS no_oi_beyond_1500,
+       min(o.strike) AS min_strike, max(o.strike) AS max_strike
+FROM pcr_strike_oi o JOIN pcr_snapshots p ON p.id = o.snapshot_id
+WHERE p.id = (SELECT id FROM pcr_snapshots WHERE underlying = 'NIFTY' ORDER BY ts DESC LIMIT 1)
+GROUP BY o.expiry ORDER BY o.expiry;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
