@@ -11,10 +11,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.time import as_aware_utc
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
@@ -29,6 +28,10 @@ _SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite", 
 # Shared (not module-private) since nfo_expiry_rotation.py also needs it,
 # in reverse, to go from our Instrument.symbol back to Kite's own "name".
 UNDERLYING_NAME_ALIASES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
+
+
+# Bars copied per INSERT -- well under Postgres' 32,767 bind-parameter cap.
+_PAGE_SIZE = 1000
 
 
 class CatalogSyncError(Exception):
@@ -124,37 +127,40 @@ async def sync_symbol_to_catalog(db: AsyncSession, bf_symbol: BfSymbol) -> Catal
             # whenever it re-syncs an existing row.
             instrument.data_source = data_source
 
-    bars = (await db.execute(select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id))).scalars().all()
-    if not bars:
-        bf_symbol.last_synced_at = datetime.now(timezone.utc)
-        return CatalogSyncResult(
-            symbol=bf_symbol.symbol, instrument_id=str(instrument.id),
-            instrument_created=instrument_created, bars_synced=0, bars_skipped=0,
-        )
-
-    existing = {
-        (row.timeframe, as_aware_utc(row.ts))
-        for row in (
-            await db.execute(select(OhlcvCandle.timeframe, OhlcvCandle.ts).where(OhlcvCandle.instrument_id == instrument.id))
-        ).all()
-    }
-
+    # Copied a page at a time with ON CONFLICT DO NOTHING: memory stays flat
+    # however much history the symbol has (a 60-day 1-minute backfill is
+    # ~17k bars), and a candle the live sync wrote in the meantime is
+    # skipped instead of failing the whole copy on the unique constraint.
+    if db.get_bind().dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert
     synced = 0
     skipped = 0
-    for bar in bars:
-        key = (bar.timeframe, as_aware_utc(bar.ts))
-        if key in existing:
-            skipped += 1
-            continue
-        db.add(
-            OhlcvCandle(
-                instrument_id=instrument.id, timeframe=bar.timeframe, ts=bar.ts,
-                open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume,
-                open_interest=bar.open_interest, source=f"bf_{bf_symbol.source}",
-            )
+    after: tuple[str, datetime] | None = None
+    while True:
+        page_stmt = select(BfOhlcvBar).where(BfOhlcvBar.symbol_id == bf_symbol.id)
+        if after is not None:
+            page_stmt = page_stmt.where(tuple_(BfOhlcvBar.timeframe, BfOhlcvBar.ts) > after)
+        page = (await db.execute(page_stmt.order_by(BfOhlcvBar.timeframe, BfOhlcvBar.ts).limit(_PAGE_SIZE))).scalars().all()
+        if not page:
+            break
+        rows = [
+            {
+                "id": uuid.uuid4(), "instrument_id": instrument.id, "timeframe": bar.timeframe, "ts": bar.ts,
+                "open": bar.open, "high": bar.high, "low": bar.low, "close": bar.close, "volume": bar.volume,
+                "open_interest": bar.open_interest, "source": f"bf_{bf_symbol.source}",
+            }
+            for bar in page
+        ]
+        result = await db.execute(
+            insert(OhlcvCandle).values(rows).on_conflict_do_nothing(index_elements=["instrument_id", "timeframe", "ts"])
         )
-        existing.add(key)
-        synced += 1
+        synced += result.rowcount
+        skipped += len(rows) - result.rowcount
+        after = (page[-1].timeframe, page[-1].ts)
+        for bar in page:
+            db.expunge(bar)
 
     bf_symbol.last_synced_at = datetime.now(timezone.utc)
     return CatalogSyncResult(

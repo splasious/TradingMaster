@@ -38,6 +38,8 @@ class CatalogSyncScheduler:
         self.last_synced_symbols: int = 0
         self.last_synced_bars: int = 0
         self.last_error: str | None = None
+        # Symbols the latest tick couldn't sync (the rest were saved).
+        self.last_failures: list[str] = []
 
     def start(self) -> None:
         if self._task is None:
@@ -60,7 +62,10 @@ class CatalogSyncScheduler:
                 self.last_synced_symbols = symbols
                 self.last_synced_bars = bars
                 self.last_run_at = datetime.now(timezone.utc)
-                self.last_error = None
+                self.last_error = (
+                    f"{len(self.last_failures)} symbol(s) failed to sync: " + "; ".join(self.last_failures[:5])
+                    if self.last_failures else None
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -68,12 +73,21 @@ class CatalogSyncScheduler:
                 self.last_error = str(exc)
 
     async def sync_pending(self) -> tuple[int, int]:
+        """Each symbol is copied and committed on its own. They used to
+        share one transaction, so a single symbol that failed to save rolled
+        back the whole batch of up to 100 -- and the same batch came back
+        every tick, stalling everything behind it. A failing symbol is now
+        rolled back, logged and retried next tick; the rest carry on."""
         async with AsyncSessionLocal() as db:
-            candidates = await self._find_symbols_needing_sync(db)
+            candidate_ids = [symbol.id for symbol in await self._find_symbols_needing_sync(db)]
             synced_symbols = 0
             synced_bars = 0
-            now = datetime.now(timezone.utc)
-            for symbol in candidates:
+            failures: list[str] = []
+            for symbol_id in candidate_ids:
+                symbol = await db.get(BfSymbol, symbol_id)
+                if symbol is None:
+                    continue
+                name = symbol.symbol
                 try:
                     result = await sync_symbol_to_catalog(db, symbol)
                     synced_symbols += 1
@@ -84,8 +98,14 @@ class CatalogSyncScheduler:
                     # added to _VALID_SOURCES without a matching catalog_sync
                     # entry. Mark synced anyway so it isn't retried every tick.
                     pass
-                symbol.last_synced_at = now
-            await db.commit()
+                except Exception as exc:
+                    await db.rollback()
+                    logger.exception("Catalog sync failed for %s", name)
+                    failures.append(f"{name}: {type(exc).__name__}: {exc}"[:300])
+                    continue
+                symbol.last_synced_at = datetime.now(timezone.utc)
+                await db.commit()
+            self.last_failures = failures
             return synced_symbols, synced_bars
 
     async def _find_symbols_needing_sync(self, db: AsyncSession) -> list[BfSymbol]:
@@ -102,6 +122,7 @@ class CatalogSyncScheduler:
                 (BfSymbol.last_synced_at.is_(None))
                 | (latest_completion.c.latest_completed_at > BfSymbol.last_synced_at)
             )
+            .order_by(latest_completion.c.latest_completed_at)
             .limit(MAX_SYMBOLS_PER_TICK)
         )
         return (await db.execute(stmt)).scalars().all()
