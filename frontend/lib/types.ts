@@ -987,6 +987,81 @@ export interface PcrPointOut {
   put_oi_change: number | null;
 }
 
+export interface PcrSnapshotExpiryOut {
+  expiry: string;
+  atm_strike: number | null;
+  strike_lo: number | null;
+  strike_hi: number | null;
+  contracts_expected: number;
+  contracts_with_oi: number;
+  total_call_oi: number | null;
+  total_put_oi: number | null;
+  pcr: number | null;
+  call_oi_change: number | null;
+  put_oi_change: number | null;
+  oi_change_pcr: number | null;
+  call_oi_change_day: number | null;
+  put_oi_change_day: number | null;
+}
+
+/** One 15-minute mark (backend services/options/pcr_snapshots.py). Only
+ * `ts`/`session_date`/`status` are set when `status` isn't "recorded". */
+export interface PcrSnapshotRowOut {
+  ts: string;
+  session_date: string;
+  status: "recorded" | "missing" | "pending";
+  source: string | null;
+  captured_at: string | null;
+  expiries: string[];
+  spot: number | null;
+  atm_strike: number | null;
+  strike_step: number | null;
+  strike_window: number | null;
+  contracts_expected: number | null;
+  contracts_with_oi: number | null;
+  total_call_oi: number | null;
+  total_put_oi: number | null;
+  pcr: number | null;
+  prev_ts: string | null;
+  prev_pcr: number | null;
+  pcr_change: number | null;
+  spot_change: number | null;
+  spot_change_pct: number | null;
+  atm_shift: number | null;
+  call_oi_change: number | null;
+  put_oi_change: number | null;
+  oi_change_pcr: number | null;
+  oi_change_contracts: number | null;
+  day_baseline_ts: string | null;
+  call_oi_change_day: number | null;
+  put_oi_change_day: number | null;
+  oi_change_pcr_day: number | null;
+  positioning: string | null;
+  oi_driver: string | null;
+  flags: string[];
+  expiry_rows: PcrSnapshotExpiryOut[] | null;
+}
+
+export interface PcrCaptureStatusOut {
+  running: boolean;
+  filling: boolean;
+  last_capture_ts: string | null;
+  last_capture_at: string | null;
+  last_error: string | null;
+  last_fill_at: string | null;
+  last_fill_result: Record<string, { filled: number; unfillable: number; missing: number; waiting_login?: boolean }> | null;
+  last_fill_error: string | null;
+}
+
+export interface PcrSnapshotsOut {
+  underlying: string;
+  strike_window: number;
+  expiries_summed: number;
+  marks_per_session: number;
+  rows: PcrSnapshotRowOut[];
+  capture: PcrCaptureStatusOut;
+}
+
 export interface OptionLegOut {
   instrument_id: string;
   symbol: string;

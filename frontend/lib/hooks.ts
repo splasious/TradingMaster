@@ -43,6 +43,7 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   PcrPointOut,
+  PcrSnapshotsOut,
   PortfolioBacktestJobOut,
   PortfolioBacktestResultOut,
   PortfolioBacktestTradeOut,
@@ -824,6 +825,18 @@ export function useOptionChain(underlyingInstrumentId: string | null, expiry: st
     queryFn: () => apiFetch<ChainRowOut[]>(`/api/v1/options/${underlyingInstrumentId}/chain?expiry=${expiry}`),
     enabled: !!underlyingInstrumentId && !!expiry,
     refetchInterval: 60_000,
+  });
+}
+
+/** The 15-minute PCR records, newest first (missing/pending marks included
+ * so the sequence is continuous). Re-read every 30s: a new record lands
+ * a few seconds after each quarter hour. */
+export function usePcrSnapshots(underlying = "NIFTY", limit = 60) {
+  return useQuery({
+    queryKey: ["pcr-snapshots", underlying, limit],
+    queryFn: () =>
+      apiFetch<PcrSnapshotsOut>(`/api/v1/options/pcr/snapshots?underlying=${underlying}&limit=${limit}&include_expiries=true`),
+    refetchInterval: 30_000,
   });
 }
 

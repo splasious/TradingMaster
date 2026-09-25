@@ -30,6 +30,12 @@
   --active-soft: #dbeafe;
   --inactive: #9aa1ad;
   --inactive-soft: #eef0f3;
+
+  /* Chart series (PCR Analysis): Put, Call, PCR -- checked for colour-blind
+     separation and contrast on this surface. */
+  --series-put: #2a78d6;
+  --series-call: #eb6834;
+  --series-pcr: #4a3aa7;
 }
 
 .dark {
@@ -60,6 +66,10 @@
   --active-soft: #10233d;
   --inactive: #6d7585;
   --inactive-soft: #1c2028;
+
+  --series-put: #3987e5;
+  --series-call: #d95926;
+  --series-pcr: #9085e9;
 }
 
 @theme inline {
@@ -93,6 +103,10 @@
   --color-active-soft: var(--active-soft);
   --color-inactive: var(--inactive);
   --color-inactive-soft: var(--inactive-soft);
+
+  --color-series-put: var(--series-put);
+  --color-series-call: var(--series-call);
+  --color-series-pcr: var(--series-pcr);
 }
 
 body {
