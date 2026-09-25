@@ -206,6 +206,9 @@ export default function ChartsPage() {
   const [exchange, setExchange] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [selected, setSelected] = useState<InstrumentOut | null>(null);
+  // Phones and tablets: the chart comes first and the instrument list opens
+  // under a search box above it (the desktop list is beside the chart).
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [timeframe, setTimeframe] = useState("1d");
   const [indicatorLines, setIndicatorLines] = useState<Map<string, OverlayLine[]>>(new Map());
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
@@ -355,38 +358,30 @@ export default function ChartsPage() {
           />
         ))}
 
-      <Card className="lg:col-span-1">
+      <Card className="hidden lg:col-span-1 lg:block">
         <CardHeader>
           <CardTitle>Instruments</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="Search..." value={q} onChange={(e) => setQ(e.target.value)} />
-          <div className="grid grid-cols-2 gap-2 lg:grid-cols-1 lg:gap-3">
-            <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
-              <option value="">All Markets</option>
-              <option value="NSE">{marketLabel("NSE")}</option>
-              <option value="DELTA">{marketLabel("DELTA")}</option>
-            </Select>
-            <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
-              <option value="">All Categories</option>
-              {CATEGORY_OPTIONS.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </Select>
-          </div>
-          <div className="max-h-56 space-y-0.5 overflow-y-auto lg:max-h-[32rem]">
+          <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
+            <option value="">All Markets</option>
+            <option value="NSE">{marketLabel("NSE")}</option>
+            <option value="DELTA">{marketLabel("DELTA")}</option>
+          </Select>
+          <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+            <option value="">All Categories</option>
+            {CATEGORY_OPTIONS.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </Select>
+          <div className="max-h-[32rem] space-y-0.5 overflow-y-auto">
             {instruments?.map((i) => {
               const category = getCategory(i.symbol, categoryMap);
               return (
                 <button
                   key={i.id}
-                  onClick={() => {
-                    setSelected(i);
-                    // On a phone the chart is below the list: bring it into view.
-                    if (window.matchMedia("(max-width: 1023px)").matches) {
-                      document.getElementById("chart-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-                    }
-                  }}
+                  onClick={() => setSelected(i)}
                   className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm ${
                     resolvedSelected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
                   }`}
@@ -403,7 +398,60 @@ export default function ChartsPage() {
         </CardContent>
       </Card>
 
-      <Card id="chart-panel" className="scroll-mt-3 lg:col-span-3">
+      <Card className="lg:col-span-3">
+        <div className="border-b border-border px-4 py-3 lg:hidden">
+          <div className="flex items-center gap-2">
+            <Input
+              placeholder="Search instrument..."
+              value={q}
+              onChange={(e) => {
+                setQ(e.target.value);
+                setPickerOpen(true);
+              }}
+              onFocus={() => setPickerOpen(true)}
+            />
+            {pickerOpen && resolvedSelected && (
+              <Button variant="ghost" size="sm" onClick={() => setPickerOpen(false)}>
+                Cancel
+              </Button>
+            )}
+          </div>
+          {(pickerOpen || !resolvedSelected) && (
+            <div className="mt-2 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
+                  <option value="">All Markets</option>
+                  <option value="NSE">{marketLabel("NSE")}</option>
+                  <option value="DELTA">{marketLabel("DELTA")}</option>
+                </Select>
+                <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+                  <option value="">All Categories</option>
+                  {CATEGORY_OPTIONS.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </Select>
+              </div>
+              <div className="max-h-64 space-y-0.5 overflow-y-auto rounded-md border border-border p-1">
+                {instruments?.map((i) => (
+                  <button
+                    key={i.id}
+                    onClick={() => {
+                      setSelected(i);
+                      setPickerOpen(false);
+                    }}
+                    className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-2 text-left text-sm ${
+                      resolvedSelected?.id === i.id ? "bg-active-soft text-active" : "text-text-secondary hover:bg-surface-elevated"
+                    }`}
+                  >
+                    <span className="truncate">{i.symbol}</span>
+                    <span className="shrink-0 text-xs text-text-muted">{marketLabel(i.exchange)}</span>
+                  </button>
+                ))}
+                {instruments && !instruments.length && <p className="px-2 py-3 text-sm text-text-muted">No instruments match.</p>}
+              </div>
+            </div>
+          )}
+        </div>
         <CardHeader className="flex-wrap gap-3">
           <CardTitle>{resolvedSelected ? `${resolvedSelected.symbol} -- ${resolvedSelected.name}` : "Select an instrument"}</CardTitle>
           {resolvedSelected && (

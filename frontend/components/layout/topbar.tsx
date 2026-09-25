@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, CheckCircle2, ChevronDown, LogOut, Menu, XCircle } from "lucide-react";
+import { Bell, CheckCircle2, ChevronDown, LogOut, XCircle } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 
@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 import { DataFreshnessPill } from "./data-freshness-pill";
 import { EnvironmentBadge } from "./environment-badge";
-import { ThemeToggle } from "./theme-toggle";
+import { ThemeMenuItem, ThemeToggle } from "./theme-toggle";
 
 function AlertsBell() {
   const { data } = useUnreadAlertCount();
@@ -35,31 +35,24 @@ function SystemHealthIndicator() {
   return (
     <div
       className={cn(
-        "flex shrink-0 items-center gap-1.5 rounded-full px-1.5 py-1.5 text-xs font-medium sm:px-2.5 sm:py-1",
+        "flex shrink-0 items-center gap-1.5 rounded-full px-1.5 py-1.5 text-xs font-medium xl:px-2.5 xl:py-1",
         isLoading ? "bg-inactive-soft text-inactive" : healthy ? "bg-positive-soft text-positive" : "bg-critical-soft text-critical",
       )}
       title={data ? Object.entries(data.components).map(([k, v]) => `${k}: ${v}`).join(", ") : "Checking..."}
     >
       {healthy ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <XCircle className="h-3.5 w-3.5 shrink-0" />}
-      <span className="hidden sm:inline">{isLoading ? "Checking" : healthy ? "All systems healthy" : "Degraded"}</span>
+      <span className="hidden xl:inline">{isLoading ? "Checking" : healthy ? "All systems healthy" : "Degraded"}</span>
     </div>
   );
 }
 
-export function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
+export function Topbar() {
   const { user, logout } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-2 sm:gap-3 sm:px-5">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-3 sm:gap-3 sm:px-5">
       <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
-        <button
-          onClick={onOpenNav}
-          aria-label="Open menu"
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-text-secondary hover:bg-surface-elevated hover:text-text-primary lg:hidden"
-        >
-          <Menu className="h-5 w-5" />
-        </button>
         <SystemHealthIndicator />
         <DataFreshnessPill />
       </div>
@@ -67,7 +60,10 @@ export function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
       <div className="flex shrink-0 items-center gap-0.5 sm:gap-3">
         <EnvironmentBadge />
         <AlertsBell />
-        <ThemeToggle />
+        {/* On a phone the theme switch is in the account menu instead. */}
+        <div className="hidden sm:block">
+          <ThemeToggle />
+        </div>
 
         <div className="relative">
           <button
@@ -78,17 +74,18 @@ export function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand text-xs font-semibold text-brand-foreground">
               {user?.full_name?.[0]?.toUpperCase() ?? "?"}
             </span>
-            <span className="hidden text-text-primary md:inline">{user?.full_name}</span>
-            <ChevronDown className="hidden h-3.5 w-3.5 md:block" />
+            <span className="hidden text-text-primary 2xl:inline">{user?.full_name}</span>
+            <ChevronDown className="hidden h-3.5 w-3.5 2xl:block" />
           </button>
 
           {menuOpen && (
             <div className="absolute right-0 z-20 mt-1 w-48 rounded-md border border-border bg-surface-elevated py-1 shadow-lg">
               <div className="border-b border-border px-3 py-2">
-                <div className="text-sm font-medium text-text-primary md:hidden">{user?.full_name}</div>
+                <div className="text-sm font-medium text-text-primary 2xl:hidden">{user?.full_name}</div>
                 <div className="truncate text-xs text-text-muted">{user?.email}</div>
                 <div className="mt-0.5 text-xs capitalize text-text-secondary">{user?.roles.join(", ")}</div>
               </div>
+              <ThemeMenuItem onDone={() => setMenuOpen(false)} className="sm:hidden" />
               <button
                 onClick={() => logout()}
                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-negative hover:bg-negative-soft"

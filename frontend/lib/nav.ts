@@ -74,3 +74,17 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
     ],
   },
 ];
+
+/** The phone/tablet bottom bar (below lg): the most-used pages, one tap
+ * away. Every other page is under its "More" sheet. Live Trading is left
+ * off on purpose -- real money stays one step further away. */
+export const BOTTOM_TABS: { label: string; href: string }[] = [
+  { label: "Home", href: "/dashboard" },
+  { label: "Paper", href: "/paper-trading" },
+  { label: "Charts", href: "/charts" },
+  { label: "Data", href: "/market-data" },
+];
+
+export function isActivePath(pathname: string, href: string): boolean {
+  return pathname === href || pathname.startsWith(href + "/");
+}

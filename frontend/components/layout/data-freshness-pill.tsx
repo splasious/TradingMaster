@@ -31,12 +31,12 @@ export function DataFreshnessPill() {
       href="/market-data"
       title="Open Data Backfill"
       className={cn(
-        "flex min-w-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium hover:opacity-90 sm:gap-2 sm:px-2.5",
+        "flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium hover:opacity-90 sm:gap-2 sm:px-2.5",
         updating ? "bg-active-soft text-active" : tone.className,
       )}
     >
       <Icon className={cn("h-3.5 w-3.5 shrink-0", updating && "animate-spin")} aria-hidden />
-      <span className="hidden md:inline">Zerodha data saved up to</span>
+      <span className="hidden lg:inline">Zerodha data saved up to</span>
       <b className="truncate font-financial font-semibold text-text-primary">{fmtSavedUpTo(savedUpTo)}</b>
       {updating && data.queue.percent != null && <span className="hidden font-financial sm:inline">· updating {data.queue.percent}%</span>}
       {!updating && lagging && (
