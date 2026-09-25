@@ -1,0 +1,85 @@
+name: Backfill health check
+
+# A read-only look at the backfill data in the VPS database, run on demand.
+# This repository is public and so is this job's log, so it only prints
+# counts and statuses (backend/scripts/backfill_health_summary.sql) -- no
+# symbol names, no error text. For the per-symbol detail, run
+# backend/scripts/backfill_health_check.sql on the server itself (see the
+# command at the top of that file).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backfill-health-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: backend/scripts
+
+      - name: Check backfill data on the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/vps
+
+          # Runs on the VPS: $1 says what to do; for "sql", $2 is the
+          # query file, base64-encoded.
+          cat > "$RUNNER_TEMP/remote.sh" <<'REMOTE'
+          set -eu
+          cd /opt/tradingmaster
+          compose() { docker compose -f docker-compose.prod.yml --env-file .env "$@"; }
+          case "$1" in
+            status)
+              compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+              df -h / | awk 'NR == 2 {print "Disk: " $3 " used of " $2 " (" $5 ")"}'
+              ;;
+            sql)
+              db=$(compose ps --format '{{.Service}} {{.Image}}' | awk 'tolower($2) ~ /postgres/ {print $1; exit}')
+              if [ -z "$db" ]; then echo "No running Postgres container found" >&2; exit 3; fi
+              printf '%s' "$2" | base64 -d | compose exec -T "$db" \
+                sh -c 'psql -X -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}"'
+              ;;
+            log-counts)
+              # Counts only -- the lines themselves stay on the server.
+              compose logs --since 72h --no-color backend > /tmp/backend-72h.log 2>&1 || true
+              for pattern in 'Traceback' 'backfill.*(error|fail)' 'catalog.sync.*(error|fail)' \
+                             'IntegrityError|UniqueViolation' 'StringDataRightTruncation|value too long'; do
+                printf '%-40s %s\n' "$pattern" "$(grep -ciE "$pattern" /tmp/backend-72h.log || true)"
+              done
+              rm -f /tmp/backend-72h.log
+              ;;
+          esac
+          REMOTE
+
+          remote() {
+            ssh -i ~/.ssh/vps -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR \
+              -o ConnectTimeout=20 "root@$VPS_HOST" bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"
+          }
+
+          echo "== Containers"
+          remote status
+
+          remote sql "$(base64 -w0 backend/scripts/backfill_health_summary.sql)"
+
+          echo
+          echo "== Backend log lines in the last 72 hours matching (count)"
+          remote log-counts
+
+      - name: Remove the SSH key
+        if: always()
+        run: rm -f ~/.ssh/vps
