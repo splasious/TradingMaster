@@ -49,7 +49,10 @@ jobs:
               df -h / | awk 'NR == 2 {print "Disk: " $3 " used of " $2 " (" $5 ")"}'
               ;;
             sql)
-              db=$(compose ps --format '{{.Service}} {{.Image}}' | awk 'tolower($2) ~ /postgres/ {print $1; exit}')
+              db=$(compose ps --services --status running | grep -m1 -ixE 'postgres|postgresql|db|database' || true)
+              if [ -z "$db" ]; then
+                db=$(compose ps --format '{{.Service}} {{.Image}}' | awk 'tolower($2) ~ /postgres|timescale|pgvector|postgis/ {print $1; exit}')
+              fi
               if [ -z "$db" ]; then echo "No running Postgres container found" >&2; exit 3; fi
               printf '%s' "$2" | base64 -d | compose exec -T "$db" \
                 sh -c 'psql -X -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}"'
