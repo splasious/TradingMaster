@@ -21,6 +21,7 @@ from app.services.market_data.nse_holiday_sync_scheduler import nse_holiday_sync
 from app.services.market_data.oi_snapshot_scheduler import oi_snapshot_scheduler
 from app.services.market_data.real_price_feed import real_price_feed
 from app.services.market_data.tick_engine import tick_engine
+from app.services.options.pcr_snapshot_scheduler import pcr_snapshot_scheduler
 from app.services.paper_trading.scheduler import paper_trading_scheduler
 
 settings = get_settings()
@@ -45,11 +46,13 @@ async def lifespan(app: FastAPI):
     nfo_expiry_rotation_scheduler.start()
     active_timeframe_sync_scheduler.start()
     oi_snapshot_scheduler.start()
+    pcr_snapshot_scheduler.start()
     kite_session_monitor_scheduler.start()
     kite_ticker_service.start()
     yield
     kite_ticker_service.stop()
     kite_session_monitor_scheduler.stop()
+    pcr_snapshot_scheduler.stop()
     oi_snapshot_scheduler.stop()
     active_timeframe_sync_scheduler.stop()
     nfo_expiry_rotation_scheduler.stop()

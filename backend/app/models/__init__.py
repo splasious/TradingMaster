@@ -38,6 +38,7 @@ from app.models.paper_trading import (
     PaperPosition,
     PaperTrade,
 )
+from app.models.pcr import PcrSnapshot, PcrSnapshotExpiry, PcrStrikeOi
 from app.models.scan import SavedScan
 from app.models.session import Session
 from app.models.strategy import Strategy, StrategyVersion
@@ -74,6 +75,9 @@ __all__ = [
     "OhlcvCandle",
     "OptimizationJob",
     "OptimizationResult",
+    "PcrSnapshot",
+    "PcrSnapshotExpiry",
+    "PcrStrikeOi",
     "PaperDeployment",
     "PaperNativeDeployment",
     "PaperNativeTrade",

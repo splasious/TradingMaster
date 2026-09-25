@@ -350,9 +350,34 @@ SELECT (SELECT count(*) FROM s) AS chain_contracts,
        (SELECT round((sum(d_oi) FILTER (WHERE option_type = 'PE') / NULLIF(sum(d_oi) FILTER (WHERE option_type = 'CE'), 0))::numeric, 3) FROM chg) AS coi_pcr;
 
 \echo
+\echo '== W. 15-minute PCR records (27 a session, 09:00-15:30 IST): last 5 sessions'
+SELECT session_date, count(*) AS records,
+       count(*) FILTER (WHERE source = 'live_quote') AS live,
+       count(*) FILTER (WHERE source = 'historical_fill') AS filled,
+       to_char(min(ts AT TIME ZONE 'Asia/Kolkata'), 'HH24:MI') AS first_mark,
+       to_char(max(ts AT TIME ZONE 'Asia/Kolkata'), 'HH24:MI') AS last_mark,
+       min(round(100.0 * contracts_with_oi / NULLIF(contracts_expected, 0))) AS min_coverage_pct,
+       count(*) FILTER (WHERE flags::text LIKE '%late%') AS late,
+       count(*) FILTER (WHERE flags::text LIKE '%gap_before%') AS gap_before,
+       count(*) FILTER (WHERE flags::text LIKE '%low_coverage%') AS low_coverage
+FROM pcr_snapshots WHERE underlying = 'NIFTY'
+GROUP BY session_date ORDER BY session_date DESC LIMIT 5;
+
+\echo
+\echo '== W2. Latest 5 PCR records'
+SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS mark_ist, source,
+       round(extract(epoch FROM captured_at - ts)) AS capture_delay_s,
+       round(spot::numeric, 1) AS nifty, atm_strike, contracts_with_oi || '/' || contracts_expected AS coverage,
+       round(pcr::numeric, 3) AS pcr, round(pcr_change::numeric, 3) AS pcr_change,
+       round(call_oi_change) AS call_oi_change, round(put_oi_change) AS put_oi_change,
+       round(oi_change_pcr::numeric, 2) AS oi_change_pcr, positioning
+FROM pcr_snapshots WHERE underlying = 'NIFTY'
+ORDER BY ts DESC LIMIT 5;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
 FROM pg_stat_user_tables
-WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_candles', 'instruments')
+WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_candles', 'instruments', 'pcr_snapshots', 'pcr_strike_oi')
 ORDER BY pg_total_relation_size(relid) DESC;

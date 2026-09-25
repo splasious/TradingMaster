@@ -25,6 +25,11 @@ from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.broker.zerodha_broker import IST
+from app.services.options.pcr_snapshots import EXPIRIES as SNAPSHOT_EXPIRIES
+from app.services.options.pcr_snapshots import UNDERLYINGS, latest_pcr
+
+# Index Instrument symbol -> the PCR records' underlying ("NIFTY 50" -> "NIFTY").
+SNAPSHOT_UNDERLYINGS = {index: name for name, index in UNDERLYINGS.items()}
 
 
 async def compute_pcr_series(
@@ -100,12 +105,23 @@ async def compute_effective_pcr(
     used by services/backtest/native_runner.py so a backtest can't see
     expiries that hadn't listed yet or OI bars from after the simulated
     tick (which live callers never pass, so their behavior is unchanged).
+
+    For NIFTY's 4 expiries at 15m, the 15-minute PCR record
+    (pcr_snapshots.py: ATM ±40 strikes, captured at each mark) is read
+    first -- the latest one at/before `as_of` or now; the roll-up below
+    is the fallback for instants before those records began.
     """
+    reference = as_of or datetime.now(timezone.utc)
+    snapshot_underlying = SNAPSHOT_UNDERLYINGS.get(underlying_symbol)
+    if snapshot_underlying is not None and num_expiries == SNAPSHOT_EXPIRIES and timeframe == "15m":
+        pcr = await latest_pcr(db, snapshot_underlying, reference)
+        if pcr is not None:
+            return pcr
+
     underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
     if underlying is None:
         return None
 
-    reference = as_of or datetime.now(timezone.utc)
     today = reference.astimezone(IST).date()
     expiry_rows = (
         await db.execute(

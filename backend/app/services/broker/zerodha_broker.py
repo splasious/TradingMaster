@@ -306,7 +306,8 @@ class ZerodhaKiteBroker(BrokerInterface):
         return rows
 
     async def get_historical_data(
-        self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, segment: str = "NSE"
+        self, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, segment: str = "NSE",
+        instrument_token: str | int | None = None,
     ) -> list[dict[str, Any]]:
         """Real Kite historical candles (GET /instruments/historical/{token}/{interval}),
         for the Data Backfill Platform's Zerodha block -- kept separate from
@@ -316,17 +317,23 @@ class ZerodhaKiteBroker(BrokerInterface):
         get_instruments()'s CSV dump since Kite's historical endpoint
         doesn't accept a plain tradingsymbol. `segment` selects which
         instrument dump to search ("NFO" for options/futures tradingsymbols
-        like "NIFTY25SEP25000CE", which only exist in that dump)."""
+        like "NIFTY25SEP25000CE", which only exist in that dump).
+        `instrument_token`: skips that lookup when the caller already has
+        the token from the dump (the PCR gap fill fetches ~1,000 contracts
+        in a row -- rebuilding the NFO dump's index for each is wasted)."""
         interval = KITE_INTERVAL_MAP.get(timeframe)
         if interval is None:
             raise KiteAPIError(f"Zerodha Kite does not support timeframe '{timeframe}' via this adapter (supported: {sorted(KITE_INTERVAL_MAP)})")
 
-        instruments = await self.get_instruments(segment)
-        by_symbol = {row["tradingsymbol"]: row for row in instruments if row.get("tradingsymbol")}
-        match = resolve_tradingsymbol_with_be_fallback(by_symbol, symbol)
-        if match is None:
-            raise KiteAPIError(f"'{symbol}' not found in Kite's {segment} instrument list")
-        token = match["instrument_token"]
+        if instrument_token is not None:
+            token = instrument_token
+        else:
+            instruments = await self.get_instruments(segment)
+            by_symbol = {row["tradingsymbol"]: row for row in instruments if row.get("tradingsymbol")}
+            match = resolve_tradingsymbol_with_be_fallback(by_symbol, symbol)
+            if match is None:
+                raise KiteAPIError(f"'{symbol}' not found in Kite's {segment} instrument list")
+            token = match["instrument_token"]
 
         end = end or datetime.now(timezone.utc)
         start = start or (end - timedelta(days=60 if interval != "day" else 2000))

@@ -60,6 +60,83 @@ class EffectivePcrOut(BaseModel):
     spot_price: float | None
 
 
+class PcrSnapshotExpiryOut(BaseModel):
+    expiry: date
+    atm_strike: float | None
+    strike_lo: float | None
+    strike_hi: float | None
+    contracts_expected: int
+    contracts_with_oi: int
+    total_call_oi: float | None
+    total_put_oi: float | None
+    pcr: float | None
+    call_oi_change: float | None
+    put_oi_change: float | None
+    oi_change_pcr: float | None
+    call_oi_change_day: float | None
+    put_oi_change_day: float | None
+
+
+class PcrSnapshotRowOut(BaseModel):
+    """One 15-minute mark (services/options/pcr_snapshots.py). `status` is
+    "recorded", or "missing"/"pending" (no record; pending while the
+    mark's live capture can still land) -- every other field is then None."""
+
+    ts: datetime
+    session_date: date
+    status: str
+    source: str | None = None
+    captured_at: datetime | None = None
+    expiries: list[date] = []
+    spot: float | None = None
+    atm_strike: float | None = None
+    strike_step: float | None = None
+    strike_window: int | None = None
+    contracts_expected: int | None = None
+    contracts_with_oi: int | None = None
+    total_call_oi: float | None = None
+    total_put_oi: float | None = None
+    pcr: float | None = None
+    prev_ts: datetime | None = None
+    prev_pcr: float | None = None
+    pcr_change: float | None = None
+    spot_change: float | None = None
+    spot_change_pct: float | None = None
+    atm_shift: float | None = None
+    call_oi_change: float | None = None
+    put_oi_change: float | None = None
+    oi_change_pcr: float | None = None
+    oi_change_contracts: int | None = None
+    day_baseline_ts: datetime | None = None
+    call_oi_change_day: float | None = None
+    put_oi_change_day: float | None = None
+    oi_change_pcr_day: float | None = None
+    positioning: str | None = None
+    oi_driver: str | None = None
+    flags: list[str] = []
+    expiry_rows: list[PcrSnapshotExpiryOut] | None = None
+
+
+class PcrCaptureStatusOut(BaseModel):
+    running: bool
+    filling: bool
+    last_capture_ts: datetime | None
+    last_capture_at: datetime | None
+    last_error: str | None
+    last_fill_at: datetime | None
+    last_fill_result: dict | None
+    last_fill_error: str | None
+
+
+class PcrSnapshotsOut(BaseModel):
+    underlying: str
+    strike_window: int
+    expiries_summed: int
+    marks_per_session: int
+    rows: list[PcrSnapshotRowOut]  # newest first
+    capture: PcrCaptureStatusOut
+
+
 class HistoryDepthOut(BaseModel):
     symbol: str | None
     # What THIS app has already backfilled into ohlcv_candles.

@@ -1,7 +1,7 @@
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,11 +9,23 @@ from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.models.instrument import Instrument
 from app.models.user import User
-from app.schemas.options import ChainRowOut, EffectivePcrOut, ExpiryOut, HistoryDepthOut, PcrPointOut, UnderlyingOut
+from app.schemas.options import (
+    ChainRowOut,
+    EffectivePcrOut,
+    ExpiryOut,
+    HistoryDepthOut,
+    PcrCaptureStatusOut,
+    PcrPointOut,
+    PcrSnapshotRowOut,
+    PcrSnapshotsOut,
+    UnderlyingOut,
+)
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
 from app.services.options.pcr import compute_effective_pcr, compute_pcr_series
+from app.services.options.pcr_snapshot_scheduler import pcr_snapshot_scheduler
+from app.services.options.pcr_snapshots import EXPIRIES, MARKS_PER_SESSION, MAX_ROWS, STRIKE_WINDOW, UNDERLYINGS, snapshot_rows
 
 router = APIRouter()
 
@@ -95,6 +107,33 @@ async def get_effective_pcr(
     return EffectivePcrOut(
         underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, pcr=pcr, bias=bias,
         spot_price=spot_price,
+    )
+
+
+@router.get("/pcr/snapshots", response_model=PcrSnapshotsOut)
+async def get_pcr_snapshots(
+    underlying: str = Query("NIFTY"),
+    limit: int = Query(25, ge=1, le=MAX_ROWS),
+    start: date | None = Query(None, description="First session (IST date); with or instead of `limit`"),
+    end: date | None = Query(None, description="Last session (IST date)"),
+    include_expiries: bool = Query(False),
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+) -> PcrSnapshotsOut:
+    """The 15-minute PCR records, newest first: the latest `limit` marks
+    (25 by default), or every mark of the sessions `start`..`end`. A mark
+    with no record comes back as "missing" (or "pending" while its capture
+    can still land), so the sequence is always continuous."""
+    if underlying not in UNDERLYINGS:
+        raise HTTPException(status_code=404, detail=f"No PCR records for '{underlying}' (available: {', '.join(UNDERLYINGS)})")
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=422, detail="start is after end")
+    rows = await snapshot_rows(
+        db, underlying, datetime.now(timezone.utc), limit=limit, start=start, end=end, include_expiries=include_expiries,
+    )
+    return PcrSnapshotsOut(
+        underlying=underlying, strike_window=STRIKE_WINDOW, expiries_summed=EXPIRIES,
+        marks_per_session=MARKS_PER_SESSION, rows=[PcrSnapshotRowOut(**row) for row in rows],
+        capture=PcrCaptureStatusOut(**pcr_snapshot_scheduler.status()),
     )
 
 
