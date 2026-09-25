@@ -191,6 +191,74 @@ ORDER BY jobs DESC
 LIMIT 25;
 
 \echo
+\echo '== R. NIFTY PCR health, next 4 expiries: contracts in the catalog, the latest 15m bucket, PCR as the app computes it (only contracts with a row in that bucket) vs every contract''s last OI on file'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50' ORDER BY created_at LIMIT 1),
+exp AS (
+  SELECT DISTINCT i.expiry FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY i.expiry LIMIT 4),
+opt AS (
+  SELECT i.id, i.expiry, i.option_type, i.strike FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry IN (SELECT expiry FROM exp)),
+c AS (
+  SELECT o.expiry, o.option_type, o.id, k.ts, k.open_interest
+  FROM opt o JOIN ohlcv_candles k ON k.instrument_id = o.id AND k.timeframe = '15m'
+  WHERE k.ts > now() - interval '10 days' AND k.open_interest IS NOT NULL),
+latest AS (SELECT expiry, max(ts) AS ts FROM c GROUP BY expiry),
+app AS (
+  SELECT c.expiry, count(*) FILTER (WHERE option_type = 'CE') AS ce_rows, count(*) FILTER (WHERE option_type = 'PE') AS pe_rows,
+         sum(open_interest) FILTER (WHERE option_type = 'CE') AS ce_oi, sum(open_interest) FILTER (WHERE option_type = 'PE') AS pe_oi
+  FROM c JOIN latest l ON l.expiry = c.expiry AND l.ts = c.ts GROUP BY c.expiry),
+lastoi AS (SELECT DISTINCT ON (id) expiry, option_type, open_interest FROM c ORDER BY id, ts DESC),
+allc AS (
+  SELECT expiry, count(*) FILTER (WHERE option_type = 'CE') AS ce_n, count(*) FILTER (WHERE option_type = 'PE') AS pe_n,
+         sum(open_interest) FILTER (WHERE option_type = 'CE') AS ce_oi, sum(open_interest) FILTER (WHERE option_type = 'PE') AS pe_oi
+  FROM lastoi GROUP BY expiry),
+cat AS (
+  SELECT expiry, count(*) FILTER (WHERE option_type = 'CE') AS ce, count(*) FILTER (WHERE option_type = 'PE') AS pe,
+         min(strike) AS lo, max(strike) AS hi FROM opt GROUP BY expiry)
+SELECT to_char(cat.expiry, 'DD-Mon') AS expiry, cat.ce AS catalog_ce, cat.pe AS catalog_pe, cat.lo AS min_strike, cat.hi AS max_strike,
+       to_char(l.ts AT TIME ZONE 'Asia/Kolkata', 'DD-Mon HH24:MI') AS latest_bucket,
+       app.ce_rows, app.pe_rows, round((app.pe_oi / NULLIF(app.ce_oi, 0))::numeric, 3) AS pcr_app,
+       allc.ce_n AS ce_with_oi, allc.pe_n AS pe_with_oi, round((allc.pe_oi / NULLIF(allc.ce_oi, 0))::numeric, 3) AS pcr_last_oi,
+       round(app.ce_oi) AS call_oi_app, round(app.pe_oi) AS put_oi_app, round(allc.ce_oi) AS call_oi_all, round(allc.pe_oi) AS put_oi_all
+FROM cat LEFT JOIN latest l USING (expiry) LEFT JOIN app USING (expiry) LEFT JOIN allc USING (expiry)
+ORDER BY cat.expiry;
+
+\echo
+\echo '== S. NIFTY next 4 expiries, today (IST) per 15m bucket: contracts with OI, rows written by the live feed, PCR over all 4 expiries in that bucket'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50' ORDER BY created_at LIMIT 1),
+exp AS (
+  SELECT DISTINCT i.expiry FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY i.expiry LIMIT 4),
+opt AS (
+  SELECT i.id, i.option_type FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry IN (SELECT expiry FROM exp))
+SELECT to_char(k.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS bucket, count(*) AS contracts,
+       count(*) FILTER (WHERE k.source = 'kite_live') AS from_live_feed,
+       round((sum(k.open_interest) FILTER (WHERE o.option_type = 'PE') / NULLIF(sum(k.open_interest) FILTER (WHERE o.option_type = 'CE'), 0))::numeric, 3) AS pcr
+FROM opt o JOIN ohlcv_candles k ON k.instrument_id = o.id AND k.timeframe = '15m'
+WHERE k.open_interest IS NOT NULL
+  AND k.ts >= date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata'
+GROUP BY k.ts ORDER BY k.ts;
+
+\echo
+\echo '== T. Live-feed budget: unexpired NFO contracts the Kite ticker tries to subscribe (Kite allows 3,000 per connection)'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50' ORDER BY created_at LIMIT 1),
+exp AS (
+  SELECT DISTINCT i.expiry FROM instruments i JOIN u ON i.underlying_instrument_id = u.id
+  WHERE i.instrument_type = 'option' AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY i.expiry LIMIT 4)
+SELECT CASE WHEN i.underlying_instrument_id = (SELECT id FROM u) AND i.expiry IN (SELECT expiry FROM exp) THEN 'NIFTY options, next 4 expiries'
+            WHEN i.underlying_instrument_id = (SELECT id FROM u) THEN 'NIFTY, other'
+            ELSE 'all other NFO' END AS contracts,
+       count(*)
+FROM instruments i
+WHERE i.exchange = 'NFO' AND i.data_source = 'zerodha_kite' AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+GROUP BY 1 ORDER BY 1;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
