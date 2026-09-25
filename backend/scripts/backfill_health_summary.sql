@@ -168,6 +168,29 @@ ORDER BY created_at DESC
 LIMIT 20;
 
 \echo
+\echo '== Q. Failed in the last 3 hours, by source / timeframe / kind (counts; Kite error class only)'
+SELECT source, timeframe,
+       CASE
+         WHEN error_message LIKE 'Interrupted by a server restart%' THEN 'interrupted by a server restart'
+         WHEN error_message ILIKE '%does not support%' THEN 'timeframe not supported'
+         WHEN error_message ILIKE '%paused%' THEN 'source paused'
+         WHEN error_message ~ $re$API error '[A-Za-z]+'$re$ THEN 'Kite ' || substring(error_message from $re$API error '([A-Za-z]+)'$re$)
+         WHEN error_message ILIKE '%not found%' OR error_message ILIKE '%no longer exists%' THEN 'symbol/instrument not found'
+         WHEN error_message ILIKE '%no zerodha%' OR error_message ILIKE '%no credentials%' OR error_message ILIKE '%not authenticated%' THEN 'no Zerodha login'
+         WHEN error_message ILIKE '%timeout%' OR error_message ILIKE '%timed out%' THEN 'timeout'
+         ELSE 'other'
+       END AS kind,
+       CASE WHEN run_id IS NOT NULL THEN 'top-up' WHEN priority = 10 THEN 're-run/bulk' ELSE 'other' END AS job_type,
+       count(*) AS jobs,
+       to_char(min(created_at), 'DD-Mon') AS created_from,
+       to_char(max(created_at), 'DD-Mon') AS created_to
+FROM bf_backfill_jobs
+WHERE status = 'failed' AND completed_at > now() - interval '3 hours'
+GROUP BY 1, 2, 3, 4
+ORDER BY jobs DESC
+LIMIT 25;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
