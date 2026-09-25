@@ -391,6 +391,23 @@ WHERE s.symbol = 'NIFTY 50' AND x.timeframe = '15m'
 ORDER BY x.ts;
 
 \echo
+\echo '== W6. NIFTY in the PCR records vs the backfill 15m candles, per session'
+WITH p AS (
+  SELECT session_date, count(DISTINCT spot) AS distinct_spot, min(spot) AS pcr_min, max(spot) AS pcr_max,
+         min(atm_strike) AS atm_min, max(atm_strike) AS atm_max
+  FROM pcr_snapshots WHERE underlying = 'NIFTY' GROUP BY session_date),
+b AS (
+  SELECT (x.ts AT TIME ZONE 'Asia/Kolkata')::date AS d, count(*) AS candles, min(x.close) AS bf_min, max(x.close) AS bf_max,
+         (array_agg(x.close ORDER BY x.ts DESC))[1] AS bf_last_close
+  FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+  WHERE s.symbol = 'NIFTY 50' AND x.timeframe = '15m' AND x.ts > now() - interval '10 days'
+  GROUP BY 1)
+SELECT b.d AS session, p.distinct_spot, round(p.pcr_min::numeric, 1) AS pcr_nifty_min, round(p.pcr_max::numeric, 1) AS pcr_nifty_max,
+       p.atm_min, p.atm_max, b.candles AS bf_candles, round(b.bf_min::numeric, 1) AS bf_min, round(b.bf_max::numeric, 1) AS bf_max,
+       round(b.bf_last_close::numeric, 1) AS bf_last_close
+FROM b LEFT JOIN p ON p.session_date = b.d ORDER BY b.d;
+
+\echo
 \echo '== W5. Latest PCR record: contracts without OI, by expiry and distance from ATM'
 SELECT o.expiry, count(*) AS contracts, count(*) FILTER (WHERE o.oi IS NULL) AS no_oi,
        count(*) FILTER (WHERE o.oi IS NULL AND abs(o.strike - p.atm_strike) <= 500) AS no_oi_within_500,
