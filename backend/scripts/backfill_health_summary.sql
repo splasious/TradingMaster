@@ -659,6 +659,30 @@ FROM fo_scan_results GROUP BY 1, 2 ORDER BY 1, 2;
 \endif
 
 \echo
+\echo '== G. Stock-option candles still held (index options excluded): rows by copy and timeframe, estimated size'
+CREATE TEMP TABLE g_so AS
+  SELECT id, symbol FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND option_type IN ('CE', 'PE')
+    AND (underlying_symbol IS NULL OR underlying_symbol NOT IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50'));
+CREATE TEMP TABLE g_si AS
+  SELECT i.id FROM instruments i JOIN g_so ON i.external_ref = g_so.symbol WHERE i.exchange = 'NFO' AND i.instrument_type = 'option';
+SELECT (SELECT count(*) FROM g_so) AS stock_option_symbols,
+       (SELECT count(*) FROM bf_symbols WHERE source = 'zerodha_nfo' AND option_type IN ('CE', 'PE') AND underlying_symbol IS NULL) AS without_underlying,
+       (SELECT count(*) FROM g_si) AS matching_instruments,
+       (SELECT count(*) FROM bf_coverage v JOIN g_so ON v.symbol_id = g_so.id) AS coverage_rows;
+SELECT 'backfill copy' AS copy, b.timeframe, count(*) AS rows,
+       pg_size_pretty((count(*) * pg_total_relation_size('bf_ohlcv_bars') / NULLIF((SELECT reltuples FROM pg_class WHERE relname = 'bf_ohlcv_bars'), 0))::bigint) AS est_size
+FROM bf_ohlcv_bars b JOIN g_so ON b.symbol_id = g_so.id GROUP BY b.timeframe
+UNION ALL
+SELECT 'chart copy', c.timeframe, count(*),
+       pg_size_pretty((count(*) * pg_total_relation_size('ohlcv_candles') / NULLIF((SELECT reltuples FROM pg_class WHERE relname = 'ohlcv_candles'), 0))::bigint)
+FROM ohlcv_candles c JOIN g_si ON c.instrument_id = g_si.id GROUP BY c.timeframe
+ORDER BY 1, 2;
+SELECT coalesce(u.instrument_type, '(none)') AS option_underlying_type, count(*) AS options
+FROM instruments o LEFT JOIN instruments u ON u.id = o.underlying_instrument_id WHERE o.instrument_type = 'option' GROUP BY 1 ORDER BY 1;
+DROP TABLE g_so, g_si;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
