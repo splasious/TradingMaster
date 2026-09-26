@@ -608,7 +608,7 @@ SELECT days.d AS session,
      WHERE c.created_at < (days.d + time '09:21') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_by_921,
   (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.eq AND c.timeframe = '5m'
      AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_ever,
-  (SELECT count(*) FILTER (WHERE abs(mv) > 0.02) || ' of ' || count(*) || ', >1%: ' || count(*) FILTER (WHERE abs(mv) > 0.01) || ', max ' || round(max(abs(mv)) * 100, 1) || '%'
+  (SELECT count(*) FILTER (WHERE abs(mv) > 0.02) || ' of ' || count(*) || ', >1%: ' || count(*) FILTER (WHERE abs(mv) > 0.01) || ', max ' || round((max(abs(mv)) * 100)::numeric, 1) || '%'
      FROM (SELECT t.close / NULLIF(p.close, 0) - 1 AS mv FROM fut
        JOIN ohlcv_candles t ON t.instrument_id = fut.eq AND t.timeframe = '5m' AND t.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata'
        CROSS JOIN LATERAL (SELECT c.close FROM ohlcv_candles c WHERE c.instrument_id = fut.eq AND c.timeframe = '5m'
