@@ -686,6 +686,13 @@ SELECT coalesce(u.instrument_type, '(none)') AS option_underlying_type, count(*)
 FROM instruments o LEFT JOIN instruments u ON u.id = o.underlying_instrument_id WHERE o.instrument_type = 'option' GROUP BY 1 ORDER BY 1;
 
 \echo
+\echo '== U. Space inside the candle tables: live rows, deleted rows not yet vacuumed, space free for reuse (estimate: size minus live rows x bytes per row measured 26 Sep)'
+SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS live_rows, n_dead_tup AS deleted_not_vacuumed,
+       pg_size_pretty(greatest(pg_total_relation_size(relid) - n_live_tup * CASE relname WHEN 'bf_ohlcv_bars' THEN 253 ELSE 277 END, 0)) AS est_free_for_reuse,
+       to_char(greatest(last_autovacuum, last_vacuum) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_vacuum_ist
+FROM pg_stat_user_tables WHERE relname IN ('bf_ohlcv_bars', 'ohlcv_candles') ORDER BY 1;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
