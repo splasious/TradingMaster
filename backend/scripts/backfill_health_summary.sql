@@ -600,7 +600,7 @@ fut AS (
   ORDER BY i.underlying_instrument_id, i.expiry),
 opt AS (SELECT o.id FROM instruments o JOIN fut ON o.underlying_instrument_id = fut.eq AND o.expiry = fut.expiry WHERE o.instrument_type = 'option')
 SELECT days.d AS session,
-  (SELECT to_char(min(c.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') FROM ohlcv_candles c JOIN nifty ON c.instrument_id = nifty.id
+  (SELECT to_char(min(c.created_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') FROM ohlcv_candles c JOIN nifty ON c.instrument_id = nifty.id
      WHERE c.timeframe = '5m' AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata') AS nifty_915_saved_at,
   (SELECT count(*) FROM fut) AS fno_stocks,
   (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.eq AND c.timeframe = '5m'
@@ -608,10 +608,11 @@ SELECT days.d AS session,
      WHERE c.created_at < (days.d + time '09:21') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_by_921,
   (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.eq AND c.timeframe = '5m'
      AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_ever,
-  (SELECT count(*) FROM fut
-     JOIN ohlcv_candles t ON t.instrument_id = fut.eq AND t.timeframe = '5m' AND t.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata'
-     JOIN ohlcv_candles p ON p.instrument_id = fut.eq AND p.timeframe = '5m' AND p.ts = (days.prev + time '15:25') AT TIME ZONE 'Asia/Kolkata'
-     WHERE abs(t.close / NULLIF(p.close, 0) - 1) > 0.02) AS moved_over_2pct_at_920,
+  (SELECT count(*) FILTER (WHERE abs(mv) > 0.02) || ' of ' || count(*) || ', >1%: ' || count(*) FILTER (WHERE abs(mv) > 0.01) || ', max ' || round(max(abs(mv)) * 100, 1) || '%'
+     FROM (SELECT t.close / NULLIF(p.close, 0) - 1 AS mv FROM fut
+       JOIN ohlcv_candles t ON t.instrument_id = fut.eq AND t.timeframe = '5m' AND t.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata'
+       CROSS JOIN LATERAL (SELECT c.close FROM ohlcv_candles c WHERE c.instrument_id = fut.eq AND c.timeframe = '5m'
+                             AND c.ts < (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata' ORDER BY c.ts DESC LIMIT 1) p) m) AS moved_over_2pct_at_920,
   (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.fut_id AND c.timeframe = '1d'
      AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = days.prev AND c.open_interest IS NOT NULL) AS futures_with_yesterday_oi,
   (SELECT count(*) FROM opt) AS current_month_options,
