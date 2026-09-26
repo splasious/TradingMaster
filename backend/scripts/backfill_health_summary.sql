@@ -519,11 +519,12 @@ FROM per;
 SELECT sv.version_number, (sv.created_at AT TIME ZONE 'Asia/Kolkata')::date AS saved_on,
        md5(replace(sv.python_code, E'\r', '')) = '405136770683983aa9e2dda692d2b5c5' AS same_as_repo,
        sv.python_code LIKE '%_total_oi_pct_change%' AS total_oi_gate, sv.python_code LIKE '%second_scan_done%' AS scan_925,
-       sv.python_code LIKE '%_fetch_quotes%' AS live_quotes,
+       sv.python_code LIKE '%_fetch_quotes%' AS live_quotes, sv.python_code LIKE '%0, rather than being excluded%' AS missing_oi_as_zero,
+       sv.python_code LIKE '%F&O Spurt%' AS titled_spurt, length(sv.python_code) AS code_chars,
        count(d.id) AS deployments, count(d.id) FILTER (WHERE d.status = 'active') AS active,
        max(d.last_evaluated_at) AS last_evaluated
 FROM strategy_versions sv LEFT JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
-WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%'
+WHERE (sv.python_code LIKE '%FLY OI SCN%' OR sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%')
 GROUP BY sv.id, sv.version_number, sv.created_at, sv.python_code ORDER BY sv.created_at;
 
 \echo
@@ -546,7 +547,7 @@ SELECT d.status, d.state->>'session_date' AS session,
        (SELECT sum((s.value->'oi_detail'->>'ce_counted')::int) || '/' || sum((s.value->'oi_detail'->>'ce_listed')::int) FROM json_each(d.state->'setups') s) AS ce_legs_counted,
        (SELECT sum((s.value->'oi_detail'->>'pe_counted')::int) || '/' || sum((s.value->'oi_detail'->>'pe_listed')::int) FROM json_each(d.state->'setups') s) AS pe_legs_counted
 FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
-WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%'
+WHERE (sv.python_code LIKE '%FLY OI SCN%' OR sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%')
 ORDER BY d.last_evaluated_at DESC NULLS LAST;
 
 \echo
@@ -555,7 +556,7 @@ WITH a AS (
   SELECT (al.created_at AT TIME ZONE 'Asia/Kolkata')::date AS day, al.title, al.message, al.alert_type
   FROM alerts al JOIN paper_native_deployments d ON al.object_type = 'paper_native_deployment' AND al.object_id = d.id::text
   JOIN strategy_versions sv ON sv.id = d.strategy_version_id
-  WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%' AND al.created_at > now() - interval '20 days')
+  WHERE (sv.python_code LIKE '%FLY OI SCN%' OR sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%') AND al.created_at > now() - interval '20 days')
 SELECT day,
        max((regexp_match(message, 'Scanned (\d+) F&O stocks'))[1]::int) AS scanned,
        max((regexp_match(message, 'Below the >2% move: (\d+)'))[1]::int) AS below_2pct,
@@ -564,6 +565,11 @@ SELECT day,
        max((regexp_match(message, 'rejected \((\d+)\):'))[1]::int) AS rejected_after_2pct,
        sum((regexp_match(message, 'CE \((\d+)/\d+ strikes\)'))[1]::int) AS ce_counted, sum((regexp_match(message, 'CE \(\d+/(\d+) strikes\)'))[1]::int) AS ce_listed,
        sum((regexp_match(message, 'PE \((\d+)/\d+ strikes\)'))[1]::int) AS pe_counted, sum((regexp_match(message, 'PE \(\d+/(\d+) strikes\)'))[1]::int) AS pe_listed,
+       count(*) FILTER (WHERE message ~ 'CE \(all strikes\): 0 ->') AS ce_yesterday_zero, count(*) FILTER (WHERE message ~ 'PE \(all strikes\): 0 ->') AS pe_yesterday_zero,
+       count(*) FILTER (WHERE message ~ 'Futures: 0 ->') AS fut_yesterday_zero,
+       min((regexp_match(message, '\(([+-][0-9.]+)%, threshold >7%\)'))[1]::numeric) AS min_oi_pct,
+       percentile_disc(0.5) WITHIN GROUP (ORDER BY (regexp_match(message, '\(([+-][0-9.]+)%, threshold >7%\)'))[1]::numeric) AS median_oi_pct,
+       max((regexp_match(message, '\(([+-][0-9.]+)%, threshold >7%\)'))[1]::numeric) AS max_oi_pct,
        count(*) FILTER (WHERE title LIKE '% closed') AS closes, count(*) FILTER (WHERE title LIKE '%3:10pm report') AS reports
 FROM a GROUP BY day ORDER BY day;
 
@@ -576,7 +582,7 @@ SELECT count(*) AS trades, count(*) FILTER (WHERE t.pnl > 0) AS wins, count(*) F
        min((t.opened_at AT TIME ZONE 'Asia/Kolkata')::date) AS first_trade, max((t.opened_at AT TIME ZONE 'Asia/Kolkata')::date) AS last_trade
 FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id
 JOIN strategy_versions sv ON sv.id = d.strategy_version_id
-WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%';
+WHERE (sv.python_code LIKE '%FLY OI SCN%' OR sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%');
 
 \echo
 \echo '== M. Database and table sizes'
