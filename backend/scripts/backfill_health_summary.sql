@@ -585,6 +585,41 @@ JOIN strategy_versions sv ON sv.id = d.strategy_version_id
 WHERE (sv.python_code LIKE '%FLY OI SCN%' OR sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%');
 
 \echo
+\echo '== F5. What the 9:20 scan could see, per session: candles it needs, when they were saved, and yesterday OI on file (counts only)'
+WITH nifty AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50' AND exchange = 'NSE' ORDER BY id LIMIT 1),
+days AS (
+  SELECT d, prev FROM (
+    SELECT d, lag(d) OVER (ORDER BY d) AS prev FROM (
+      SELECT DISTINCT (c.ts AT TIME ZONE 'Asia/Kolkata')::date AS d FROM ohlcv_candles c JOIN nifty ON c.instrument_id = nifty.id
+      WHERE c.timeframe = '5m' AND c.ts > now() - interval '12 days') x) y
+  WHERE prev IS NOT NULL ORDER BY d DESC LIMIT 4),
+fut AS (
+  SELECT DISTINCT ON (i.underlying_instrument_id) i.underlying_instrument_id AS eq, i.id AS fut_id, i.expiry
+  FROM instruments i WHERE i.instrument_type = 'future' AND i.underlying_instrument_id IS NOT NULL
+    AND i.expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY i.underlying_instrument_id, i.expiry),
+opt AS (SELECT o.id FROM instruments o JOIN fut ON o.underlying_instrument_id = fut.eq AND o.expiry = fut.expiry WHERE o.instrument_type = 'option')
+SELECT days.d AS session,
+  (SELECT to_char(min(c.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') FROM ohlcv_candles c JOIN nifty ON c.instrument_id = nifty.id
+     WHERE c.timeframe = '5m' AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata') AS nifty_915_saved_at,
+  (SELECT count(*) FROM fut) AS fno_stocks,
+  (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.eq AND c.timeframe = '5m'
+     AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata'
+     WHERE c.created_at < (days.d + time '09:21') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_by_921,
+  (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.eq AND c.timeframe = '5m'
+     AND c.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata') AS stock_915_saved_ever,
+  (SELECT count(*) FROM fut
+     JOIN ohlcv_candles t ON t.instrument_id = fut.eq AND t.timeframe = '5m' AND t.ts = (days.d + time '09:15') AT TIME ZONE 'Asia/Kolkata'
+     JOIN ohlcv_candles p ON p.instrument_id = fut.eq AND p.timeframe = '5m' AND p.ts = (days.prev + time '15:25') AT TIME ZONE 'Asia/Kolkata'
+     WHERE abs(t.close / NULLIF(p.close, 0) - 1) > 0.02) AS moved_over_2pct_at_920,
+  (SELECT count(*) FROM fut JOIN ohlcv_candles c ON c.instrument_id = fut.fut_id AND c.timeframe = '1d'
+     AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = days.prev AND c.open_interest IS NOT NULL) AS futures_with_yesterday_oi,
+  (SELECT count(*) FROM opt) AS current_month_options,
+  (SELECT count(*) FROM opt JOIN ohlcv_candles c ON c.instrument_id = opt.id AND c.timeframe = '1d'
+     AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = days.prev) AS options_with_yesterday_oi
+FROM days ORDER BY days.d;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
