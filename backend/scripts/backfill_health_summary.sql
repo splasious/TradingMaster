@@ -496,6 +496,25 @@ SELECT count(DISTINCT p.session_date) AS sessions, count(DISTINCT p.id) AS recor
 FROM pcr_snapshots p LEFT JOIN pcr_strike_oi o ON o.snapshot_id = p.id;
 
 \echo
+\echo '== Z. Stock options per stock (F&O opening momentum, Step 3 Total OI): contracts per stock, current month vs all live expiries'
+WITH so AS (
+  SELECT s.underlying_symbol AS u, s.expiry FROM bf_symbols s
+  WHERE s.source = 'zerodha_nfo' AND s.option_type IN ('CE', 'PE')
+    AND s.underlying_symbol NOT IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX')),
+cur AS (SELECT u, min(expiry) AS e FROM so WHERE expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date GROUP BY u),
+per AS (
+  SELECT so.u, count(*) FILTER (WHERE so.expiry = cur.e) AS cur_contracts,
+         count(*) FILTER (WHERE so.expiry >= cur.e) AS live_contracts,
+         count(DISTINCT so.expiry) FILTER (WHERE so.expiry >= cur.e) AS live_expiries,
+         count(*) FILTER (WHERE so.expiry < cur.e) AS expired_contracts
+  FROM so JOIN cur USING (u) GROUP BY so.u)
+SELECT count(*) AS stocks,
+       round(avg(cur_contracts)) AS avg_current_month, percentile_disc(0.5) WITHIN GROUP (ORDER BY cur_contracts) AS median_current_month,
+       min(cur_contracts) AS min_current_month, max(cur_contracts) AS max_current_month,
+       round(avg(live_contracts)) AS avg_all_live, max(live_expiries) AS live_expiries, sum(expired_contracts) AS expired_contracts_kept
+FROM per;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
