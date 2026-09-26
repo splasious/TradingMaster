@@ -64,6 +64,18 @@ jobs:
                              'IntegrityError|UniqueViolation' 'StringDataRightTruncation|value too long'; do
                 printf '%-40s %s\n' "$pattern" "$(grep -ciE "$pattern" /tmp/backend-72h.log || true)"
               done
+              # Where tracebacks came from: our own file/function names, the
+              # exception type and the time -- never the message text.
+              echo "-- Traceback times (UTC):"
+              compose logs --since 72h --no-color --timestamps backend 2>/dev/null | grep -F 'Traceback' \
+                | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' | head -10 || true
+              echo "-- Frames in our code (count, file, function):"
+              grep -oE 'File "(/app/app/[A-Za-z0-9_/]+\.py|<native-strategy:[0-9a-f-]+>)", line [0-9]+, in [A-Za-z0-9_<>]+' /tmp/backend-72h.log \
+                | sed -E 's#File "/app/##; s#File "<native-strategy:[0-9a-f-]+>#native strategy code#; s#", line [0-9]+, in #  #' \
+                | sort | uniq -c | sort -rn | head -12 || true
+              echo "-- Exception types (count):"
+              grep -oE '\| ([A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_]*(Error|Exception|Timeout|Refused|Interrupt)[A-Za-z]*:' /tmp/backend-72h.log \
+                | sed -E 's/^\| //; s/:$//' | sort | uniq -c | sort -rn | head -8 || true
               rm -f /tmp/backend-72h.log
               ;;
           esac
