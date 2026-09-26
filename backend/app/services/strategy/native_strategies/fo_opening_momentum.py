@@ -1,186 +1,134 @@
 """
-F&O Opening-Candle Momentum Scanner (native, unsandboxed)
-===========================================================
+F&O Opening-Candle Momentum Scanner -- FLY OI SCN, version 6 (native)
+=====================================================================
 
-Ported from the standalone "FLY OI SCN" paper-trading scanner (see that
-project's PRD.md) into TradingMaster's native-strategy runner. Same
-Steps 1-12, now scanning every stock in the platform's own F&O futures
-catalog (Instrument rows with instrument_type == "future") instead of a
-hardcoded list, so the universe stays in sync with whatever's been
-backfilled.
+Scans every F&O stock (each stock with an unexpired NFO future, ~212) at
+the open, buys a ~2% OTM option of the stocks that break out of their
+09:15-09:25 range, and trails the trade with the stock's 8-SMA.
 
-  Step 1  Universe:     every stock with an active NFO stock-futures
-                         contract in the catalog (excludes index futures,
-                         which have no underlying_instrument_id equity).
-  Step 2  9:20 + 9:25 scan: |% move vs previous close| > 2%, checked
-                         twice -- once at 9:20, and again at 9:25 per
-                         instruction, to catch any stock that crosses the
-                         threshold a few minutes later than the first
-                         pass. The 9:25 pass only ever ADDS newly-
-                         qualifying stocks to the shortlist; nothing
-                         already shortlisted at 9:20 is re-validated or
-                         removed even if its numbers have since slipped
-                         back below threshold.
-  Step 3  OI confirm:    Total OI % change > 7%, where Total OI = the
-                         near-month future's own OI + every CE strike's
-                         OI + every PE strike's OI for that SAME current
-                         running-month expiry (cross-checked against
-                         NSE's own OI Spurts methodology, per
-                         instruction -- this replaced a futures-OI-only
-                         reading, which is still shown broken out in the
-                         alert for reference, just no longer the gate on
-                         its own). Yesterday's EOD ("1d" candle) reading
-                         vs the latest available now, for every leg.
-                         Re-checked on the 9:25 pass the same way as
-                         Step 2.
-  Step 4  Removed -- previously required Open == Low (CE) / Open == High
-                         (PE) within 0.05% on the 9:15-9:20 5m candle;
-                         dropped per instruction. The 9:15-9:20 candle
-                         itself is still fetched and used by Step 5 below.
-  Step 5  Retracement:   reject if the candle's own close has retraced
-                         >= 50% of (High-Low) from the defining extreme.
-  Step 6  Nifty filter:  green Nifty 9:15-9:20 candle keeps gainers+
-                         losers; red Nifty keeps losers only.
-  Step 7  Breakout marks: each shortlisted stock's 9:15-9:25 High/Low.
-  Step 8  Entry:          break above/below the 9:25 level -> buy ~2%
-                         OTM Call/Put, current-month expiry.
-  Step 9  Trigger cutoff: no breakout by 10:30 -> "no_trigger".
-  Step 10 Exit:           8-SMA (5m closes) exit -- 2 consecutive closes
-                         below (CE) / above (PE) the SMA; force-closed at
-                         3:10 PM regardless.
-  Step 11 Expiry blackout: no entry within 2 trading days either side of
-                         the stock's current-month expiry.
-  Step 12 Sizing:         fixed 1 lot per triggered setup.
+  09:20:07  Watchlist. Every stock's price and previous close from one Kite
+            quote pass, then for the stocks that moved:
+              1. Move      |move vs Kite's previous close| > 2%
+                           (up -> CE, down -> PE)
+              2. Total OI  current-month future + every CE + every PE of
+                           that expiry: live now vs yesterday's close
+                           (captured at 15:31, services/fo_scan/oi_store.py)
+                           -- must have RISEN by more than 7%
+              3. Candle    the 09:15-09:20 candle mustn't have given back 50%
+                           or more of its range (close vs its high for a CE,
+                           vs its low for a PE)
+            A stock whose 09:15 candle isn't published yet is retried every
+            3 seconds until 09:25:07.
+  09:25:07  Final shortlist.
+              4. Nifty     the 09:15-09:25 candle: green (close > open)
+                           keeps gainers and losers, otherwise losers only
+            Then the same scan again for stocks that weren't on the
+            watchlist (a late mover can still qualify), and each shortlisted
+            stock's 09:15-09:25 high and low -- its breakout levels.
+  09:25-10:30  Every 5 seconds, one quote pass over the shortlist:
+              5. Breakout  above the high (CE) / below the low (PE) -> buy
+                           1 lot of the current-month option nearest 2% OTM
+                           at its live price
+              6. Limit     3 trades a day, the first three breakouts
+              7. Blackout  no trade on expiry day, the 2 trading days
+                           before it or the 2 after the previous one
+            No breakout by 10:30 -> no trade.
+  Exit      Two consecutive 5-minute closes of the stock on the wrong side
+            of its 8-SMA (below for a CE, above for a PE), the SMA taken as
+            a chart draws it -- over the last 8 candles, yesterday's
+            included -- and both candles closing after the entry. Checked 7
+            seconds after every 5-minute close. Anything still open is
+            closed at 15:10.
 
-Additionally, informational only (never used to filter/reject a setup --
-Step 8's actual entry logic in _try_enter is unchanged, always re-picking
-the strike fresh at real breakout time):
-  - Each shortlisted stock gets the near-month expiry's Call and Put
-    strikes with the most open interest within MAX_OI_STRIKE_BAND_PCT of
-    the current spot ("highest OI strike, same stock"), surfaced in the
-    shortlist alert as context on where OI is concentrated near the
-    breakout.
-  - Each shortlisted stock also gets a preview of the ~2% OTM strike
-    Step 8's trade setup would buy if evaluated right now (same
-    _pick_otm_option logic Step 8 itself uses) -- a preview only, since
-    the underlying can keep moving between the scan and the real
-    breakout, at which point _try_enter re-picks the strike against
-    whatever price is current then.
+The runner calls evaluate() every 10 seconds; the exact times above come
+from ctx.wake_at (services/paper_trading/scheduler.py). Every read is live
+Kite data, paced to Kite's limits (services/fo_scan/pacing.py): one /quote
+request a second, three history requests.
 
-Every alert/Telegram message this module sends (shortlist at 9:20 and
-9:25, exit, 3:10pm report) leads with an explicit "As of <IST timestamp>"
-line, and each shortlisted row spells out both the underlying's actual
-cash (spot) price move (previous close, current price, resulting %) and
-the full Total OI breakdown (futures/CE/PE, yesterday vs today) --
-rather than just the computed percentages -- so Step 2's >2% momentum
-condition and Step 3's >7% Total OI condition can both be verified
-against the raw numbers by eye.
+Alerts (in-app + Telegram), each led by an "As of <IST time>" line: one per
+stock put on the watchlist, a 09:20 summary with every stock that moved but
+was rejected and why, the 09:25 final shortlist, each entry and exit, and
+the 15:10 report. Every stock's result in each scan is saved to
+fo_scan_results (models/fo_scan.py) for later analysis.
 
-The 9:20 and 9:25 shortlist alerts are sent one-per-stock (_send_shortlist_alert),
-not bundled into a single combined message -- per instruction, so each
-stock gets its own physically separate Telegram notification instead of
-one message listing several stocks together. Alongside those, the 9:20
-scan always sends one scan-summary message (_send_scan_summary): how many
-stocks were scanned, where the live data came from, and every stock that
-cleared Step 2's >2% move but was then rejected, with the actual failing
-gate(s) and numbers -- so a stock that "should have been caught" shows
-up there with the reason it wasn't, instead of vanishing silently. The
-9:25 pass sends a summary only when it has something new to say (newly
-shortlisted or newly rejected symbols).
-
-Live data (why this module talks to Kite directly): nothing else in the
-platform keeps this scanner's inputs current. active_timeframe_sync_scheduler
-only refreshes candles for regular PaperDeployment (instrument, timeframe)
-pairs, the OI snapshot job only writes 15m bars for options the Kite
-WebSocket happens to stream, and TickEngine serves a stale DB close (then
-a simulated random walk off it) for any equity it isn't already tracking
--- which, right after a process restart, is every stock at 9:20. So,
-whenever a Zerodha account is connected and this isn't a backtest replay:
-  - Step 2 reads last price and previous close from one batched Kite
-    /quote call for the whole universe (previous close = the quote's own
-    ohlc.close, not "the last stored 5m bar before today").
-  - Step 3 reads each leg's current OI from Kite /quote too, and fetches
-    the future's own previous-day daily candle from Kite if it isn't
-    stored yet. A leg only counts toward Total OI when both yesterday's
-    and today's reading are known, so a leg with a reading on one side
-    only can't skew the % change; the alert shows how many strikes had
-    both.
-  - Today's 5m candles for Nifty (Step 6), each shortlisted stock's
-    opening candle and breakout range (Steps 5/7) and the SMA exit's
-    closes (Step 10) are fetched from Kite's historical API and stored in
-    ohlcv_candles, only when the latest completed candle isn't already
-    stored.
-With no connected account (or in a backtest), every read falls back to
-the stored-candle/TickEngine path this module always used.
-
-State (`ctx.state`) is a flat JSON-safe dict keyed by IST session date --
-switching to a new trading day resets everything. Each shortlisted
-stock's own sub-state lives under state["setups"][symbol], deliberately
-a plain dict (not a dataclass) for the same JSON-persistence reason
-nifty_pcr_credit_spread.py's `position` is.
-
-Runs through services/paper_trading/native_runner.py; see that module's
-docstring for why "native" strategies run trusted/unsandboxed. The
-9:20 shortlist and 3:10 report are pushed via the platform's own Alert
-system (app.services.alerts.service.create_alert) rather than
-ctx.record_trade's spread-oriented alert, since this is a single-leg
-long option buy, not a 2-leg spread.
+Needs a connected Zerodha account; a historical replay (backtest) isn't
+supported -- the rules run on live quotes and on OI history that only
+exists from the day the OI store started capturing.
 """
 
-import asyncio
 import logging
 import uuid
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from app.core.time import as_aware_utc
 from app.models.alert import AlertSeverity, AlertType
+from app.models.fo_scan import FoScanResult
 from app.models.instrument import Instrument
-from app.models.market_data import OhlcvCandle
-from app.models.paper_trading import PaperNativeTrade
 from app.services.alerts.service import create_alert
+from app.services.backfill_platform.coverage import is_trading_day, previous_trading_day
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
+from app.services.broker.zerodha_broker import IST, KiteAPIError, ZerodhaKiteBroker
+from app.services.fo_scan import oi_store
+from app.services.fo_scan.pacing import kite_history, kite_quotes
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.telegram import send_telegram
-from app.services.broker.zerodha_broker import IST, KiteAPIError, ZerodhaKiteBroker
 
 logger = logging.getLogger(__name__)
 
+VERSION = 6
+
 # ---------------------------------------------------------------------
-# Thresholds & timings (PRD.md / scanner/config.py in the source project)
+# Rules
 # ---------------------------------------------------------------------
 MOMENTUM_PCT = 2.0
-OI_CHANGE_PCT = 7.0
+OI_RISE_PCT = 7.0
 MAX_RETRACEMENT_PCT = 50.0
 OTM_PCT = 2.0
-MAX_OI_STRIKE_BAND_PCT = 10.0  # informational max-OI-near-spot lookup, see module docstring
+MAX_OI_STRIKE_BAND_PCT = 10.0  # informational "highest OI strike near spot"
 SMA_PERIOD = 8
 SMA_CONFIRM = 2
 EXPIRY_BLACKOUT_DAYS = 2
+MAX_TRADES_PER_DAY = 3
 LOTS_PER_SETUP = 1
 DEFAULT_LOT_SIZE = 1
 
+# ---------------------------------------------------------------------
+# Times (IST)
+# ---------------------------------------------------------------------
 MARKET_OPEN = dtime(9, 15)
-OPENING_CANDLE_END = dtime(9, 20)
-BREAKOUT_LEVEL_TIME = dtime(9, 25)
+WARM_UP = dtime(9, 19, 30)  # Kite's NSE instrument list, so 09:20:07 doesn't wait for it
+FIRST_SCAN = dtime(9, 20, 7)
+SECOND_SCAN = dtime(9, 25, 7)
+NIFTY_GIVE_UP = dtime(9, 30)
 BREAKOUT_CUTOFF = dtime(10, 30)
 REPORT_TIME = dtime(15, 10)
-CANDLE_TIMEFRAME = "5m"
-CANDLE_STEP = timedelta(minutes=5)
-SESSION_CANDLES = 75  # 09:15-15:30 in 5m candles
+CANDLE = timedelta(minutes=5)
+CANDLE_SETTLE = timedelta(seconds=7)
+BREAKOUT_POLL = timedelta(seconds=5)
+RETRY = timedelta(seconds=3)
+# How far back the exit's SMA reaches for yesterday's candles.
+SMA_HISTORY_FROM = dtime(14, 15)
 NIFTY_SYMBOL = "NIFTY 50"
 
-# Kite rate limits: /quote ~1 req/s (and at most 500 instruments per
-# call), historical ~3 req/s -- paced below so a busy scan doesn't burn
-# _request()'s bounded 429 retries.
-KITE_QUOTE_BATCH = 250
-KITE_QUOTE_PACING_SECONDS = 1.0
-KITE_HISTORICAL_PACING_SECONDS = 0.35
+SCAN_1 = "09:20"
+SCAN_2 = "09:25"
+
+# Setup statuses.
+WATCHLIST = "watchlist"  # passed 09:20/09:25 rules 1-3, waiting for the Nifty bias
+WATCHING = "watching"  # final shortlist, waiting for a breakout
+DROPPED_NIFTY = "dropped_nifty"
+NO_TRIGGER = "no_trigger"
+BLACKOUT = "blackout"
+LIMIT_REACHED = "limit_reached"
+TRIGGERED = "triggered"
+EXITED = "exited"
+EOD_CLOSED = "eod_closed"
 
 
 # ---------------------------------------------------------------------
-# Pure filter math (ported verbatim from scanner/filters.py & positions.py)
+# Rules as plain functions
 # ---------------------------------------------------------------------
 def momentum_direction(pct_change: float) -> str:
     return "CE" if pct_change > 0 else "PE"
@@ -190,80 +138,151 @@ def passes_momentum(pct_change: float) -> bool:
     return abs(pct_change) > MOMENTUM_PCT
 
 
-def passes_oi_change(oi_pct_change: float | None) -> bool:
-    if oi_pct_change is None:
-        return False
-    return abs(oi_pct_change) > OI_CHANGE_PCT
+def passes_oi_rise(oi_pct_change: float | None) -> bool:
+    """Only a RISE counts: rising OI is new positions being built."""
+    return oi_pct_change is not None and oi_pct_change > OI_RISE_PCT
 
 
-def retracement_pct(h: float, l: float, c: float, direction: str) -> float:
-    candle_range = h - l
+def retracement_pct(high: float, low: float, close: float, direction: str) -> float:
+    """How much of the candle's range its close gave back from the extreme
+    in the trade's direction (the high for a CE, the low for a PE)."""
+    candle_range = high - low
     if candle_range <= 0:
         return 0.0
     if direction == "CE":
-        return (h - c) / candle_range * 100.0
-    return (c - l) / candle_range * 100.0
+        return (high - close) / candle_range * 100.0
+    return (close - low) / candle_range * 100.0
 
 
-def passes_retracement(h: float, l: float, c: float, direction: str) -> bool:
-    return retracement_pct(h, l, c, direction) < MAX_RETRACEMENT_PCT
+def passes_retracement(high: float, low: float, close: float, direction: str) -> bool:
+    return retracement_pct(high, low, close, direction) < MAX_RETRACEMENT_PCT
 
 
-def nifty_filter_allows(direction: str, nifty_open: float, nifty_close: float) -> bool:
-    nifty_green = nifty_close > nifty_open
-    return nifty_green or direction == "PE"
+def nifty_bias(open_: float, close: float) -> str:
+    return "green" if close > open_ else "red"
+
+
+def nifty_allows(direction: str, bias: str) -> bool:
+    return bias == "green" or direction == "PE"
 
 
 def sma_series(closes: list[float], period: int = SMA_PERIOD) -> list[float | None]:
     out: list[float | None] = []
     for i in range(len(closes)):
-        if i + 1 < period:
-            out.append(None)
-        else:
-            out.append(sum(closes[i + 1 - period : i + 1]) / period)
+        out.append(None if i + 1 < period else sum(closes[i + 1 - period : i + 1]) / period)
     return out
 
 
-def sma_exit_triggered(direction: str, closes: list[float], period: int = SMA_PERIOD, confirm: int = SMA_CONFIRM) -> bool:
-    sma = sma_series(closes, period)
-    if len(sma) < confirm or any(v is None for v in sma[-confirm:]):
+def sma_exit_due(direction: str, bars: list[dict], entered_at: datetime) -> bool:
+    """True when the last SMA_CONFIRM completed 5-minute candles all closed
+    on the wrong side of the SMA and all closed after `entered_at`.
+    `bars`: [{"ts": candle start, "close": ...}], oldest first, yesterday's
+    included so the SMA is the one a chart shows."""
+    if len(bars) < SMA_PERIOD + SMA_CONFIRM - 1:
         return False
-    recent_closes, recent_sma = closes[-confirm:], sma[-confirm:]
+    sma = sma_series([b["close"] for b in bars])
+    recent = list(zip(bars[-SMA_CONFIRM:], sma[-SMA_CONFIRM:]))
+    if any(s is None or as_aware_utc(b["ts"]) + CANDLE <= as_aware_utc(entered_at) for b, s in recent):
+        return False
     if direction == "CE":
-        return all(c < s for c, s in zip(recent_closes, recent_sma))
-    return all(c > s for c, s in zip(recent_closes, recent_sma))
+        return all(b["close"] < s for b, s in recent)
+    return all(b["close"] > s for b, s in recent)
 
 
-def in_expiry_blackout(as_of: date, expiry: date, blackout_days: int = EXPIRY_BLACKOUT_DAYS) -> bool:
-    """Trading-day-aware (weekends only, exchange holidays not modeled --
-    same approximation scanner/kite_client.py's pd.bdate_range made)."""
-    if as_of == expiry:
+def trading_days_between(start: date, end: date) -> int:
+    """Trading days after `start`, up to and including `end`."""
+    n, d = 0, start
+    while d < end:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n
+
+
+def in_expiry_blackout(today: date, expiry: date, previous_expiry: date | None, days: int = EXPIRY_BLACKOUT_DAYS) -> bool:
+    """Expiry day, the `days` trading days before it, and the `days` after
+    the previous expiry. NSE holidays aren't trading days."""
+    if today == expiry or trading_days_between(today, expiry) <= days:
         return True
-    step = timedelta(days=1) if as_of < expiry else timedelta(days=-1)
-    d, trading_days = as_of, 0
-    while d != expiry:
-        d += step
-        if d.weekday() < 5:
-            trading_days += 1
-    return trading_days <= blackout_days
+    return previous_expiry is not None and trading_days_between(previous_expiry, today) <= days
 
 
-# ---------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------
-def _ist_to_utc(d: date, t: dtime) -> datetime:
-    return datetime.combine(d, t, tzinfo=IST).astimezone(timezone.utc)
+def monthly_expiry(year: int, month: int) -> date:
+    """NSE's monthly stock-derivative expiry: the last Tuesday of the month,
+    the trading day before it when that's a holiday."""
+    d = (date(year + (month == 12), month % 12 + 1, 1)) - timedelta(days=1)
+    while d.weekday() != 1:
+        d -= timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
 
 
-# ---------------------------------------------------------------------
-# Live Kite reads (see module docstring's "Live data" section)
-# ---------------------------------------------------------------------
-async def _live_broker(ctx) -> ZerodhaKiteBroker | None:
-    """The one connected Zerodha session, or None in a backtest replay or
-    when no account is connected -- every caller then falls back to the
-    stored-candle/TickEngine reads."""
-    if getattr(ctx, "is_backtest", False):
+def last_monthly_expiry_before(today: date) -> date:
+    e = monthly_expiry(today.year, today.month)
+    if e < today:
+        return e
+    first = today.replace(day=1) - timedelta(days=1)
+    return monthly_expiry(first.year, first.month)
+
+
+def total_oi(legs: list[oi_store.Contract], prev: dict, now: dict) -> dict | None:
+    """Total OI = future + every CE + every PE. A contract counts only when
+    both its readings are known -- one with only today's OI would move the
+    total by its whole OI, not by its change. None without a baseline."""
+    sums = {"FUT": [0.0, 0.0], "CE": [0.0, 0.0], "PE": [0.0, 0.0]}
+    counted = {"FUT": 0, "CE": 0, "PE": 0}
+    for leg in legs:
+        p, n = prev.get(leg.instrument_id), now.get(leg.instrument_id)
+        if p is None or n is None:
+            continue
+        sums[leg.kind][0] += p
+        sums[leg.kind][1] += n
+        counted[leg.kind] += 1
+    prev_total = sum(v[0] for v in sums.values())
+    now_total = sum(v[1] for v in sums.values())
+    if not prev_total:
         return None
+    listed = {k: sum(1 for leg in legs if leg.kind == k) for k in sums}
+    return {
+        "pct_change": (now_total - prev_total) / prev_total * 100.0, "prev_total": prev_total, "now_total": now_total,
+        "fut_prev": sums["FUT"][0], "fut_now": sums["FUT"][1], "ce_prev": sums["CE"][0], "ce_now": sums["CE"][1],
+        "pe_prev": sums["PE"][0], "pe_now": sums["PE"][1],
+        "fut_counted": counted["FUT"], "ce_counted": counted["CE"], "ce_listed": listed["CE"],
+        "pe_counted": counted["PE"], "pe_listed": listed["PE"],
+        "counted": sum(counted.values()), "listed": len(legs),
+    }
+
+
+def pick_otm(options: list, direction: str, spot: float):
+    """The option (Instrument or Contract) whose strike is nearest ~2% OTM."""
+    target = spot * (1 + OTM_PCT / 100.0) if direction == "CE" else spot * (1 - OTM_PCT / 100.0)
+    candidates = [o for o in options if o.strike is not None]
+    return min(candidates, key=lambda o: abs(o.strike - target)) if candidates else None
+
+
+def max_oi_strike_near_spot(legs: list[oi_store.Contract], now: dict, spot: float, kind: str) -> tuple[float, float] | None:
+    lo, hi = spot * (1 - MAX_OI_STRIKE_BAND_PCT / 100.0), spot * (1 + MAX_OI_STRIKE_BAND_PCT / 100.0)
+    best = None
+    for leg in legs:
+        if leg.kind == kind and leg.strike is not None and lo <= leg.strike <= hi and now.get(leg.instrument_id) is not None:
+            if best is None or now[leg.instrument_id] > best[1]:
+                best = (leg.strike, now[leg.instrument_id])
+    return best
+
+
+# ---------------------------------------------------------------------
+# Kite and catalog reads
+# ---------------------------------------------------------------------
+def _at(d: date, t: dtime) -> datetime:
+    return datetime.combine(d, t, tzinfo=IST)
+
+
+def _key(instrument: Instrument) -> str:
+    return f"{instrument.exchange}:{instrument.external_ref}"
+
+
+async def _live_broker(ctx) -> ZerodhaKiteBroker | None:
     creds = await find_connected_zerodha_credentials(ctx.db)
     if creds is None:
         return None
@@ -273,746 +292,625 @@ async def _live_broker(ctx) -> ZerodhaKiteBroker | None:
     return broker
 
 
-async def _fetch_quotes(broker: ZerodhaKiteBroker, keys: list[str]) -> tuple[dict[str, dict], str | None]:
-    """Batched Kite /quote reads -- ({"EXCHANGE:SYMBOL": quote}, error or
-    None). A failed batch is skipped (its keys just come back missing), with
-    the last error returned so the scan summary can say so."""
-    quotes: dict[str, dict] = {}
-    error: str | None = None
-    batches = [keys[i : i + KITE_QUOTE_BATCH] for i in range(0, len(keys), KITE_QUOTE_BATCH)]
-    for i, batch in enumerate(batches):
-        if i:
-            await asyncio.sleep(KITE_QUOTE_PACING_SECONDS)
-        try:
-            quotes.update(await broker.get_quote_batch(batch))
-        except KiteAPIError as exc:
-            error = str(exc)
-            logger.warning("F&O Opening Momentum: Kite quote batch failed (%d instruments): %s", len(batch), exc)
-    return quotes, error
+async def _candles(broker, instrument: Instrument, start: datetime, end: datetime) -> dict[datetime, dict]:
+    """5-minute candles by start time (UTC); {} if Kite fails."""
+    try:
+        bars = await kite_history(broker, instrument.external_ref, "5m", start, end, instrument.exchange)
+    except KiteAPIError as exc:
+        logger.warning("FLY OI SCN: 5m candles failed for %s: %s", instrument.symbol, exc)
+        return {}
+    return {as_aware_utc(b["ts"]).astimezone(timezone.utc): b for b in bars}
 
 
-async def _store_candles(ctx, instrument_id: uuid.UUID, timeframe: str, bars: list[dict]) -> None:
-    """Inserts Kite bars into ohlcv_candles, skipping any (instrument,
-    timeframe, ts) already stored -- ON CONFLICT DO NOTHING rather than
-    select-then-insert, since active_timeframe_sync_scheduler may be
-    writing the same pair concurrently from its own session."""
-    if not bars:
-        return
-    rows = [
-        {
-            "id": uuid.uuid4(), "instrument_id": instrument_id, "timeframe": timeframe,
-            "ts": as_aware_utc(bar["ts"]).astimezone(timezone.utc),
-            "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"],
-            "volume": bar.get("volume"), "open_interest": bar.get("open_interest"), "source": "zerodha_kite",
-        }
-        for bar in bars
-    ]
-    if ctx.db.get_bind().dialect.name == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert
-    else:
-        from sqlalchemy.dialects.sqlite import insert
-    await ctx.db.execute(
-        insert(OhlcvCandle).values(rows).on_conflict_do_nothing(index_elements=["instrument_id", "timeframe", "ts"])
+async def _universe(ctx, today: date) -> list[tuple[Instrument, Instrument]]:
+    """(equity, nearest unexpired future) for every F&O stock."""
+    futures = await oi_store.stock_futures(ctx.db, today)
+    if not futures:
+        return []
+    equities = (await ctx.db.execute(select(Instrument).where(Instrument.id.in_(list(futures))))).scalars().all()
+    return sorted(((eq, futures[eq.id][0]) for eq in equities), key=lambda pair: pair[0].symbol)
+
+
+async def _options(ctx, equity_id: uuid.UUID, expiry: date, option_type: str) -> list[Instrument]:
+    return list(
+        (
+            await ctx.db.execute(
+                select(Instrument).where(
+                    Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
+                    Instrument.expiry == expiry, Instrument.option_type == option_type, Instrument.strike.is_not(None),
+                )
+            )
+        ).scalars().all()
     )
 
 
-async def _sync_today_5m(ctx, broker: ZerodhaKiteBroker | None, instrument: Instrument, today: date, now_ist: datetime) -> None:
-    """Pulls today's completed 5m candles for one instrument from Kite into
-    ohlcv_candles -- a no-op when the latest completed candle is already
-    stored, so calling it every tick costs one indexed lookup, not a Kite
-    call. Only completed candles are stored: a still-forming one would be
-    kept forever by the insert's duplicate-skip, frozen mid-candle."""
-    if broker is None:
-        return
-    session_open = datetime.combine(today, MARKET_OPEN, tzinfo=IST)
-    closed = min(int((now_ist - session_open) / CANDLE_STEP), SESSION_CANDLES)
-    if closed < 1:
-        return
-    latest_closed_start = session_open + CANDLE_STEP * (closed - 1)
-    already_stored = (
+async def _previous_expiry(ctx, equity_id: uuid.UUID, today: date) -> date:
+    known = (
         await ctx.db.execute(
-            select(OhlcvCandle.id)
-            .where(
-                OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == CANDLE_TIMEFRAME,
-                OhlcvCandle.ts == latest_closed_start.astimezone(timezone.utc),
+            select(func.max(Instrument.expiry)).where(
+                Instrument.instrument_type == "future", Instrument.underlying_instrument_id == equity_id, Instrument.expiry < today,
             )
-            .limit(1)
         )
-    ).first()
-    if already_stored:
-        return
-    try:
-        bars = await broker.get_historical_data(instrument.external_ref, CANDLE_TIMEFRAME, session_open, now_ist, instrument.exchange)
-    except KiteAPIError as exc:
-        logger.warning("F&O Opening Momentum: Kite 5m fetch failed for %s: %s", instrument.symbol, exc)
-        return
-    finally:
-        await asyncio.sleep(KITE_HISTORICAL_PACING_SECONDS)
-    completed = [
-        bar for bar in bars
-        if as_aware_utc(bar["ts"]) >= session_open and as_aware_utc(bar["ts"]) + CANDLE_STEP <= now_ist
-    ]
-    await _store_candles(ctx, instrument.id, CANDLE_TIMEFRAME, completed)
+    ).scalar_one_or_none()
+    return known or last_monthly_expiry_before(today)
 
 
-async def _ensure_prev_day_oi(ctx, broker: ZerodhaKiteBroker | None, future: Instrument, today: date) -> None:
-    """Fetches the future's recent daily candles (with OI) from Kite when
-    no previous-day "1d" reading is stored yet -- Step 3's baseline for the
-    futures leg. One call per shortlisting candidate, only when missing."""
-    if broker is None or await _prev_day_oi(ctx, future.id, today) is not None:
-        return
-    start = datetime.combine(today - timedelta(days=10), dtime(0, 0), tzinfo=IST)
-    end = datetime.combine(today, MARKET_OPEN, tzinfo=IST)
-    try:
-        bars = await broker.get_historical_data(future.external_ref, "1d", start, end, future.exchange)
-    except KiteAPIError as exc:
-        logger.warning("F&O Opening Momentum: Kite daily OI fetch failed for %s: %s", future.symbol, exc)
-        return
-    finally:
-        await asyncio.sleep(KITE_HISTORICAL_PACING_SECONDS)
-    today_start = datetime.combine(today, dtime(0, 0), tzinfo=IST)
-    await _store_candles(ctx, future.id, "1d", [bar for bar in bars if as_aware_utc(bar["ts"]) < today_start])
+async def _ltp(broker, instrument: Instrument) -> float | None:
+    quotes, _ = await kite_quotes(broker, [_key(instrument)])
+    price = (quotes.get(_key(instrument)) or {}).get("last_price")
+    return float(price) if price else None
+
+
+# ---------------------------------------------------------------------
+# State, alerts, records
+# ---------------------------------------------------------------------
+def _fresh_state(today: date) -> dict:
+    return {
+        "version": VERSION, "session_date": today.isoformat(), "warmed": False,
+        "scans": {SCAN_1: {"status": "pending"}, SCAN_2: {"status": "pending"}},
+        "nifty": None, "setups": {}, "trades_today": 0, "last_poll_at": None, "last_exit_check": None,
+        "report_sent": False, "login_alert_sent": False,
+    }
+
+
+def _stamp(now_ist: datetime) -> str:
+    return f"As of {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST"
 
 
 async def _notify(ctx, title: str, message: str, *, alert_type: str = AlertType.STRATEGY_SIGNAL.value, severity: AlertSeverity = AlertSeverity.INFO) -> None:
-    """In-app alert + Telegram push -- skipped in a backtest replay, which
-    would otherwise push a notification for every replayed day."""
-    if getattr(ctx, "is_backtest", False):
-        return
     await create_alert(
-        ctx.db, user_id=ctx.portfolio.user_id, alert_type=alert_type, severity=severity,
-        title=title, message=message, object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
+        ctx.db, user_id=ctx.portfolio.user_id, alert_type=alert_type, severity=severity, title=title[:200], message=message[:1000],
+        object_type="paper_native_deployment", object_id=str(ctx.deployment.id),
     )
     await send_telegram(title, message)
 
 
-async def _candle_range(ctx, instrument_id: uuid.UUID, start_ist: datetime, end_ist: datetime) -> dict | None:
-    """Aggregates every stored 5m bar in [start, end) into one OHLC
-    reading, matching scanner/pipeline.py's `_candle_from_df` (which did
-    the same over possibly-multi-bar Kite historical responses)."""
-    rows = (
-        await ctx.db.execute(
-            select(OhlcvCandle)
-            .where(
-                OhlcvCandle.instrument_id == instrument_id,
-                OhlcvCandle.timeframe == CANDLE_TIMEFRAME,
-                OhlcvCandle.ts >= start_ist.astimezone(timezone.utc),
-                OhlcvCandle.ts < end_ist.astimezone(timezone.utc),
-            )
-            .order_by(OhlcvCandle.ts)
-        )
-    ).scalars().all()
+async def _save_rows(ctx, today: date, scan: str, rows: dict[str, dict]) -> None:
+    """One fo_scan_results row per stock of this scan (replacing any from
+    an earlier, interrupted attempt)."""
     if not rows:
-        return None
-    return {
-        "open": rows[0].open, "high": max(r.high for r in rows), "low": min(r.low for r in rows),
-        "close": rows[-1].close, "bars": len(rows),
-    }
+        return
+    await ctx.db.execute(
+        delete(FoScanResult)
+        .where(
+            FoScanResult.deployment_id == ctx.deployment.id, FoScanResult.session_date == today,
+            FoScanResult.scan == scan, FoScanResult.symbol.in_(list(rows)),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    for symbol, row in rows.items():
+        ctx.db.add(FoScanResult(deployment_id=ctx.deployment.id, session_date=today, scan=scan, symbol=symbol, **row))
 
 
-async def _prev_close(ctx, instrument_id: uuid.UUID, today: date) -> float | None:
+async def _update_row(ctx, today: date, symbol: str, setup: dict, **fields) -> None:
     row = (
         await ctx.db.execute(
-            select(OhlcvCandle.close)
-            .where(
-                OhlcvCandle.instrument_id == instrument_id,
-                OhlcvCandle.timeframe == CANDLE_TIMEFRAME,
-                OhlcvCandle.ts < _ist_to_utc(today, MARKET_OPEN),
+            select(FoScanResult).where(
+                FoScanResult.deployment_id == ctx.deployment.id, FoScanResult.session_date == today,
+                FoScanResult.scan == setup["scan"], FoScanResult.symbol == symbol,
             )
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
         )
     ).scalar_one_or_none()
-    return row
+    if row is not None:
+        for name, value in fields.items():
+            setattr(row, name, value)
 
 
-async def _prev_day_oi(ctx, instrument_id: uuid.UUID, today: date) -> float | None:
-    """Yesterday's EOD open interest for one contract -- its own daily
-    ("1d") candle OI, the actual EOD reading, not a 5m/15m bar that merely
-    happens to fall before today's open (which an intraday series can't
-    guarantee is genuinely the session's last real print, e.g. across a
-    gap in the ticker's own coverage)."""
+def _fmt_oi(oi: dict | None) -> str:
+    if not oi:
+        return "Total OI: no baseline (yesterday's close OI not on file)"
     return (
-        await ctx.db.execute(
-            select(OhlcvCandle.open_interest)
-            .where(
-                OhlcvCandle.instrument_id == instrument_id,
-                OhlcvCandle.timeframe == "1d",
-                OhlcvCandle.ts < _ist_to_utc(today, MARKET_OPEN),
-                OhlcvCandle.open_interest.is_not(None),
-            )
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-
-async def _expiry_options(ctx, equity_id: uuid.UUID, expiry: date, option_type: str | None = None) -> list[Instrument]:
-    query = select(Instrument).where(
-        Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
-        Instrument.expiry == expiry, Instrument.strike.is_not(None),
+        f"Total OI (future + all CE + all PE, current month): yesterday {oi['prev_total']:,.0f} -> now {oi['now_total']:,.0f} "
+        f"({oi['pct_change']:+.1f}%, needs a rise above {OI_RISE_PCT:.0f}%)"
+        f"\n  Future: {oi['fut_prev']:,.0f} -> {oi['fut_now']:,.0f} | "
+        f"CE ({oi['ce_counted']}/{oi['ce_listed']} strikes): {oi['ce_prev']:,.0f} -> {oi['ce_now']:,.0f} | "
+        f"PE ({oi['pe_counted']}/{oi['pe_listed']} strikes): {oi['pe_prev']:,.0f} -> {oi['pe_now']:,.0f}"
     )
-    if option_type is not None:
-        query = query.where(Instrument.option_type == option_type)
-    return list((await ctx.db.execute(query)).scalars().all())
 
 
-async def _leg_oi(ctx, instrument_id: uuid.UUID, today: date, live_oi: dict | None) -> tuple[float | None, float | None]:
-    """(yesterday's EOD OI, today's latest OI) for one contract. With live
-    quotes available (live_oi not None) today's reading comes only from
-    them -- never a stale stored bar -- so a contract Kite returned no
-    quote for reads as unknown rather than as yesterday's number again."""
-    prev = await _prev_day_oi(ctx, instrument_id, today)
-    latest = live_oi.get(instrument_id) if live_oi is not None else await _latest_oi(ctx, instrument_id)
-    return prev, latest
-
-
-async def _sum_options_oi(
-    ctx, equity_id: uuid.UUID, expiry: date, option_type: str, today: date, live_oi: dict | None = None,
-) -> tuple[float, float, int, int]:
-    """(yesterday_total, today_total, strikes_counted, strikes_listed) OI
-    across every strike of one option_type ("CE" or "PE") for the given
-    (current running month) expiry. A strike only counts when BOTH
-    readings are known -- adding a strike's today-OI with no matching
-    yesterday-OI (or vice versa) would move the % change by that strike's
-    whole OI, not by its change."""
-    options = await _expiry_options(ctx, equity_id, expiry, option_type)
-    prev_total = 0.0
-    latest_total = 0.0
-    counted = 0
-    for option in options:
-        prev, latest = await _leg_oi(ctx, option.id, today, live_oi)
-        if prev is None or latest is None:
-            continue
-        prev_total += prev
-        latest_total += latest
-        counted += 1
-    return prev_total, latest_total, counted, len(options)
-
-
-async def _total_oi_pct_change(
-    ctx, equity_id: uuid.UUID, future_instrument_id: uuid.UUID, expiry: date, today: date, live_oi: dict | None = None,
-) -> dict | None:
-    """Total OI = the near-month future's own OI + every CE strike's OI +
-    every PE strike's OI, all for that SAME current-running-month expiry --
-    per instruction (cross-checked against NSE's own OI Spurts
-    methodology), yesterday's EOD reading vs today's latest, exactly the
-    same EOD-to-now convention the futures-only reading used before this
-    replaced it as Step 3's actual >7% gate. `live_oi` ({instrument_id:
-    oi} from Kite /quote) supplies today's side when given. Each leg
-    counts only when both of its readings are known (see
-    _sum_options_oi). Returns None if the yesterday total is unavailable
-    or zero (nothing to compare against); the full per-leg breakdown is
-    returned alongside the total so the notification can show its
-    components, not just the combined number."""
-    fut_prev, fut_latest = await _leg_oi(ctx, future_instrument_id, today, live_oi)
-    if fut_prev is None or fut_latest is None:
-        fut_prev = fut_latest = None
-    ce_prev, ce_latest, ce_counted, ce_listed = await _sum_options_oi(ctx, equity_id, expiry, "CE", today, live_oi)
-    pe_prev, pe_latest, pe_counted, pe_listed = await _sum_options_oi(ctx, equity_id, expiry, "PE", today, live_oi)
-
-    prev_total = (fut_prev or 0.0) + ce_prev + pe_prev
-    latest_total = (fut_latest or 0.0) + ce_latest + pe_latest
-    if not prev_total:
-        return None
-    return {
-        "pct_change": (latest_total - prev_total) / prev_total * 100.0,
-        "prev_total": prev_total, "latest_total": latest_total,
-        "fut_prev": fut_prev or 0.0, "fut_latest": fut_latest or 0.0, "fut_counted": fut_prev is not None,
-        "ce_prev": ce_prev, "ce_latest": ce_latest, "ce_counted": ce_counted, "ce_listed": ce_listed,
-        "pe_prev": pe_prev, "pe_latest": pe_latest, "pe_counted": pe_counted, "pe_listed": pe_listed,
-    }
-
-
-async def _nearest_future(ctx, equity_id: uuid.UUID, today: date) -> Instrument | None:
-    return (
-        await ctx.db.execute(
-            select(Instrument)
-            .where(
-                Instrument.instrument_type == "future", Instrument.underlying_instrument_id == equity_id,
-                Instrument.expiry.is_not(None), Instrument.expiry >= today,
-            )
-            .order_by(Instrument.expiry)
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-
-async def _pick_otm_option(ctx, equity_id: uuid.UUID, expiry: date, direction: str, spot: float) -> Instrument | None:
-    target = spot * (1 + OTM_PCT / 100.0) if direction == "CE" else spot * (1 - OTM_PCT / 100.0)
-    options = (
-        await ctx.db.execute(
-            select(Instrument).where(
-                Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
-                Instrument.expiry == expiry, Instrument.option_type == direction, Instrument.strike.is_not(None),
-            )
-        )
-    ).scalars().all()
-    if not options:
-        return None
-    return min(options, key=lambda o: abs(o.strike - target))
-
-
-async def _latest_oi(ctx, instrument_id: uuid.UUID) -> float | None:
-    """Most recent open_interest on file for one option contract, at
-    whatever timeframe last carried it -- mirrors NativeContext.get_price's
-    own "any timeframe, latest wins" convention rather than assuming a
-    specific one, since which timeframe actually gets OI written to it
-    depends on which scheduler/backfill last touched this contract."""
-    return (
-        await ctx.db.execute(
-            select(OhlcvCandle.open_interest)
-            .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.open_interest.is_not(None))
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-
-async def _max_oi_strike_near_spot(
-    ctx, equity_id: uuid.UUID, expiry: date, spot: float, option_type: str, live_oi: dict | None = None,
-) -> tuple[float, float] | None:
-    """The strike within MAX_OI_STRIKE_BAND_PCT of spot carrying the most
-    open interest, for one option_type ("CE" or "PE") -- (strike, oi) or
-    None if no strike in that band has any OI on file. Informational only,
-    see module docstring: never filters a setup or influences which
-    strike Step 8 actually buys."""
-    lo, hi = spot * (1 - MAX_OI_STRIKE_BAND_PCT / 100.0), spot * (1 + MAX_OI_STRIKE_BAND_PCT / 100.0)
-    options = (
-        await ctx.db.execute(
-            select(Instrument).where(
-                Instrument.instrument_type == "option", Instrument.underlying_instrument_id == equity_id,
-                Instrument.expiry == expiry, Instrument.option_type == option_type,
-                Instrument.strike.is_not(None), Instrument.strike >= lo, Instrument.strike <= hi,
-            )
-        )
-    ).scalars().all()
-    best: tuple[float, float] | None = None
-    for option in options:
-        oi = live_oi.get(option.id) if live_oi is not None else await _latest_oi(ctx, option.id)
-        if oi is not None and (best is None or oi > best[1]):
-            best = (option.strike, oi)
-    return best
-
-
-# ---------------------------------------------------------------------
-# Phase A: the 9:20 / 9:25 scan (Steps 1-6)
-# ---------------------------------------------------------------------
-async def _universe(ctx, today: date) -> list[tuple[Instrument, Instrument]]:
-    """Step 1: (equity, its nearest unexpired future), one pair per stock --
-    the catalog can hold several months' futures (and lapsed ones) for the
-    same underlying, and scanning per contract would evaluate, and alert
-    on, the same stock more than once."""
-    futures = (
-        await ctx.db.execute(
-            select(Instrument)
-            .where(
-                Instrument.instrument_type == "future", Instrument.underlying_instrument_id.is_not(None),
-                Instrument.expiry.is_not(None), Instrument.expiry >= today,
-            )
-            .order_by(Instrument.expiry)
-        )
-    ).scalars().all()
-    nearest: dict[uuid.UUID, Instrument] = {}
-    for fut in futures:
-        nearest.setdefault(fut.underlying_instrument_id, fut)
-    if not nearest:
-        return []
-    equities = (await ctx.db.execute(select(Instrument).where(Instrument.id.in_(list(nearest))))).scalars().all()
-    return sorted(((equity, nearest[equity.id]) for equity in equities), key=lambda pair: pair[0].symbol)
-
-
-async def _run_scan(ctx, today: date, now_ist: datetime, broker: ZerodhaKiteBroker | None) -> dict:
-    """Steps 1-6 over the whole universe. Returns:
-      setups       -- shortlisted stocks' sub-state, keyed by symbol
-      shortlisted  -- alert rows for those same stocks
-      rejected     -- every stock that cleared Step 2's >2% move but
-                      failed a later gate, with the gate(s) and numbers
-      counts, data_source -- for the scan summary
-      error        -- set (with everything else empty) when the scan
-                      can't run at all, e.g. no Nifty 9:15-9:20 candle
-                      yet: Step 6 can't be judged without it."""
-    result = {"setups": {}, "shortlisted": [], "rejected": [], "counts": None, "data_source": None, "error": None}
-    nifty = (
-        await ctx.db.execute(select(Instrument).where(Instrument.symbol == NIFTY_SYMBOL, Instrument.exchange == "NSE"))
-    ).scalar_one_or_none()
-    if nifty is None:
-        result["error"] = f"no {NIFTY_SYMBOL} instrument in the catalog"
-        return result
-    await _sync_today_5m(ctx, broker, nifty, today, now_ist)
-    nifty_candle = await _candle_range(
-        ctx, nifty.id, datetime.combine(today, MARKET_OPEN, tzinfo=IST), datetime.combine(today, OPENING_CANDLE_END, tzinfo=IST),
-    )
-    if nifty_candle is None:
-        result["error"] = f"no {NIFTY_SYMBOL} 9:15-9:20 candle available" + ("" if broker else " (no connected Zerodha account to fetch it)")
-        return result
-
-    universe = await _universe(ctx, today)
-    quotes: dict[str, dict] = {}
-    data_source = "stored candles/TickEngine (no connected Zerodha account)"
-    if broker is not None and universe:
-        quotes, quote_error = await _fetch_quotes(broker, [f"{equity.exchange}:{equity.external_ref}" for equity, _ in universe])
-        if not quotes:
-            data_source = f"stored candles/TickEngine (Kite quotes failed: {quote_error or 'none returned'})"
-        else:
-            data_source = "Kite live quotes" + (f" (some batches failed: {quote_error})" if quote_error else "")
-    # Every later Kite read in this scan is skipped too once quotes have
-    # failed outright -- same broken session, no point retrying per stock.
-    kite = broker if quotes else None
-
-    counts = {"scanned": len(universe), "no_price": 0, "below_momentum": 0}
-    candidates: list[tuple[Instrument, Instrument, float, float, float]] = []
-    for equity, future in universe:
-        if kite is not None:
-            quote = quotes.get(f"{equity.exchange}:{equity.external_ref}") or {}
-            price = quote.get("last_price")
-            prev_close = (quote.get("ohlc") or {}).get("close")
-        else:
-            price = await ctx.get_price(equity.id)
-            prev_close = await _prev_close(ctx, equity.id, today)
-        if not price or not prev_close:
-            counts["no_price"] += 1
-            continue
-        price, prev_close = float(price), float(prev_close)
-        pct_change = (price - prev_close) / prev_close * 100.0
-        if not passes_momentum(pct_change):
-            counts["below_momentum"] += 1
-            continue
-        candidates.append((equity, future, price, prev_close, pct_change))
-
-    # Today's OI for every leg of every candidate, in as few /quote calls
-    # as possible, rather than whatever OI happens to be stored.
-    live_oi: dict[uuid.UUID, float] | None = None
-    if kite is not None and candidates:
-        contract_ids: dict[str, uuid.UUID] = {}
-        for equity, future, *_ in candidates:
-            contract_ids[f"{future.exchange}:{future.external_ref}"] = future.id
-            for option in await _expiry_options(ctx, equity.id, future.expiry):
-                contract_ids[f"{option.exchange}:{option.external_ref}"] = option.id
-        oi_quotes, _ = await _fetch_quotes(kite, list(contract_ids))
-        live_oi = {
-            contract_ids[key]: float(quote["oi"]) for key, quote in oi_quotes.items()
-            if key in contract_ids and quote.get("oi") is not None
-        } or None
-
-    for equity, future, price, prev_close, pct_change in candidates:
-        symbol = equity.symbol
-        direction = momentum_direction(pct_change)
-
-        await _ensure_prev_day_oi(ctx, kite, future, today)
-        oi_result = await _total_oi_pct_change(ctx, equity.id, future.id, future.expiry, today, live_oi)
-        oi_pct_change = oi_result["pct_change"] if oi_result else None
-
-        await _sync_today_5m(ctx, kite, equity, today, now_ist)
-        opening = await _candle_range(
-            ctx, equity.id, datetime.combine(today, MARKET_OPEN, tzinfo=IST), datetime.combine(today, OPENING_CANDLE_END, tzinfo=IST),
-        )
-
-        reasons = []
-        if oi_result is None:
-            reasons.append("no Total OI baseline (yesterday's OI not on file)")
-        elif not passes_oi_change(oi_pct_change):
-            reasons.append(f"Total OI {oi_pct_change:+.1f}% (needs beyond +/-{OI_CHANGE_PCT:.0f}%)")
-        if opening is None:
-            reasons.append("no 9:15-9:20 candle")
-        elif not passes_retracement(opening["high"], opening["low"], opening["close"], direction):
-            retraced = retracement_pct(opening["high"], opening["low"], opening["close"], direction)
-            reasons.append(f"9:15-9:20 candle retraced {retraced:.0f}% (needs <{MAX_RETRACEMENT_PCT:.0f}%)")
-        if not nifty_filter_allows(direction, nifty_candle["open"], nifty_candle["close"]):
-            reasons.append("Nifty 9:15-9:20 candle red -- gainers excluded")
-
-        if reasons:
-            result["rejected"].append({
-                "symbol": symbol, "direction": direction, "prev_close": prev_close, "price": price,
-                "pct_change": pct_change, "oi_pct_change": oi_pct_change, "reasons": reasons,
-            })
-            continue
-
-        if kite is not None:
-            # Seeds the price _try_enter's breakout check reads -- otherwise
-            # its first ctx.get_price() on a freshly restarted process is a
-            # stale stored close, until kite_rest_price_feed's next poll.
-            tick_engine.set_real_price(equity.id, price, "kite_rest")
-        max_oi_ce = await _max_oi_strike_near_spot(ctx, equity.id, future.expiry, price, "CE", live_oi)
-        max_oi_pe = await _max_oi_strike_near_spot(ctx, equity.id, future.expiry, price, "PE", live_oi)
-        # Preview only -- the strike Step 8 actually buys is re-picked at
-        # real breakout time in _try_enter, against the price at that
-        # moment, which can differ from this scan-time preview if the
-        # underlying keeps moving between now and the real breakout.
-        setup_option = await _pick_otm_option(ctx, equity.id, future.expiry, direction, price)
-
-        result["setups"][symbol] = {
-            "equity_instrument_id": str(equity.id),
-            "direction": direction,
-            "status": "watching",
-            "prev_close": prev_close,
-            "price_at_scan": price,
-            "pct_change": pct_change,
-            "oi_pct_change": oi_pct_change,
-            "prev_oi": oi_result["prev_total"],
-            "latest_oi": oi_result["latest_total"],
-            "oi_detail": oi_result,
-            "setup_option_symbol": setup_option.symbol if setup_option else None,
-            "setup_option_strike": setup_option.strike if setup_option else None,
-            "max_oi_ce_strike": max_oi_ce[0] if max_oi_ce else None,
-            "max_oi_ce_oi": max_oi_ce[1] if max_oi_ce else None,
-            "max_oi_pe_strike": max_oi_pe[0] if max_oi_pe else None,
-            "max_oi_pe_oi": max_oi_pe[1] if max_oi_pe else None,
-            "breakout_high": None,
-            "breakout_low": None,
-            "underlying_closes": [],
-            "last_candle_ts": None,
-            "trigger_time": None,
-            "trigger_spot": None,
-            "option_instrument_id": None,
-            "option_symbol": None,
-            "lot_size": None,
-            "entry_premium": None,
-            "exit_time": None,
-            "exit_premium": None,
-            "exit_reason": None,
-            "pnl": None,
-        }
-        result["shortlisted"].append({
-            "symbol": symbol, "direction": direction, "prev_close": prev_close, "price": price,
-            "pct_change": pct_change, "oi_pct_change": oi_pct_change, "oi_detail": oi_result,
-            "setup_option_symbol": setup_option.symbol if setup_option else None,
-            "setup_option_strike": setup_option.strike if setup_option else None,
-            "max_oi_ce": max_oi_ce, "max_oi_pe": max_oi_pe,
-        })
-
-    # Nearest misses first (fewest failed gates, then biggest move) -- the
-    # in-app copy of the summary is cut to the alert column's length.
-    result["rejected"].sort(key=lambda r: (len(r["reasons"]), -abs(r["pct_change"])))
-    result["counts"] = counts
-    result["data_source"] = data_source
-    return result
-
-
-def _timestamp_line(now_ist: datetime) -> str:
-    return f"As of {now_ist.strftime('%Y-%m-%d %H:%M:%S')} IST"
-
-
-def _format_shortlist_row(r: dict) -> str:
-    # Cash (equity/spot) price movement spelled out explicitly -- prev
-    # close, current price, and the resulting % move -- so the >2%
-    # momentum condition (Step 2) can be verified by eye against the raw
-    # numbers, not just trusted from the computed percentage alone.
+def _fmt_stock(symbol: str, s: dict) -> str:
     line = (
-        f"{r['symbol']} {r['direction']}: cash {r['prev_close']:.2f} -> {r['price']:.2f} "
-        f"({r['pct_change']:+.2f}%, threshold >2%)"
+        f"{symbol} {s['direction']}: cash {s['prev_close']:.2f} -> {s['price_at_scan']:.2f} "
+        f"({s['move_pct']:+.2f}%, needs beyond +/-{MOMENTUM_PCT:.0f}%)\n  {_fmt_oi(s.get('oi'))}"
     )
-
-    # Total OI = futures + every CE strike + every PE strike, all for the
-    # current running-month expiry (cross-checked against NSE's own OI
-    # Spurts methodology, per instruction) -- this combined number is
-    # what Step 3's >7% gate actually checks now, not futures OI alone;
-    # the per-leg breakdown is shown so each component is independently
-    # verifiable, not just the combined total.
-    detail = r.get("oi_detail")
-    if detail:
-        fut_note = "" if detail.get("fut_counted", True) else " (not counted: a reading is missing)"
-        ce_strikes = f"{detail['ce_counted']}/{detail['ce_listed']} strikes" if "ce_counted" in detail else "all strikes"
-        pe_strikes = f"{detail['pe_counted']}/{detail['pe_listed']} strikes" if "pe_counted" in detail else "all strikes"
-        line += (
-            f"\n  OI (Total = Futures+CE+PE, current month): yesterday {detail['prev_total']:,.0f} -> "
-            f"today {detail['latest_total']:,.0f} ({r['oi_pct_change']:+.1f}%, threshold >7%)"
-            f"\n  Futures: {detail['fut_prev']:,.0f} -> {detail['fut_latest']:,.0f}{fut_note} | "
-            f"CE ({ce_strikes}): {detail['ce_prev']:,.0f} -> {detail['ce_latest']:,.0f} | "
-            f"PE ({pe_strikes}): {detail['pe_prev']:,.0f} -> {detail['pe_latest']:,.0f}"
-        )
-
-    if r.get("setup_option_symbol"):
-        line += f"\n  Trade setup strike: {r['setup_option_symbol']} ({r['setup_option_strike']:.0f}, ~2% OTM as of scan time)"
-
-    max_oi_ce, max_oi_pe = r.get("max_oi_ce"), r.get("max_oi_pe")
-    if max_oi_ce or max_oi_pe:
-        ce_part = f"CE {max_oi_ce[0]:.0f}({max_oi_ce[1]:.0f})" if max_oi_ce else "CE --"
-        pe_part = f"PE {max_oi_pe[0]:.0f}({max_oi_pe[1]:.0f})" if max_oi_pe else "PE --"
-        line += f"\n  Highest OI strike (same stock, near spot): {ce_part} {pe_part}"
+    if s.get("retrace_pct") is not None:
+        line += f"\n  9:15-9:20 candle retraced {s['retrace_pct']:.0f}% (needs under {MAX_RETRACEMENT_PCT:.0f}%)"
+    if s.get("preview_option"):
+        line += f"\n  Trade strike now: {s['preview_option']} (~2% OTM at scan price)"
+    ce, pe = s.get("max_oi_ce"), s.get("max_oi_pe")
+    if ce or pe:
+        line += "\n  Highest OI strike near spot: " + (f"CE {ce[0]:.0f} ({ce[1]:,.0f})" if ce else "CE --") + " " + (f"PE {pe[0]:.0f} ({pe[1]:,.0f})" if pe else "PE --")
+    if s.get("blackout"):
+        line += "\n  Expiry blackout today: scanned and recorded, no trade"
     return line
 
 
-def _format_rejected_row(r: dict) -> str:
-    oi_part = f"Total OI {r['oi_pct_change']:+.1f}%" if r["oi_pct_change"] is not None else "Total OI n/a"
-    return (
-        f"{r['symbol']} {r['direction']}: cash {r['prev_close']:.2f} -> {r['price']:.2f} ({r['pct_change']:+.2f}%), "
-        f"{oi_part} -- rejected: {'; '.join(r['reasons'])}"
-    )
+def _fmt_rejected(symbol: str, row: dict) -> str:
+    oi = f"Total OI {row['oi_change_pct']:+.1f}%" if row.get("oi_change_pct") is not None else "Total OI n/a"
+    return f"{symbol} {row.get('direction') or ''}: {row['move_pct']:+.2f}%, {oi} -- {'; '.join(row['reasons'])}"
 
 
-async def _send_shortlist_alert(ctx, now_ist: datetime, row: dict, *, title_suffix: str = "shortlisted") -> None:
-    """One alert/Telegram message per stock -- per instruction, a stock
-    shortlisted alongside others no longer gets bundled into one combined
-    message; each gets its own, titled with that stock's own symbol."""
-    message = f"{_timestamp_line(now_ist)}\n\n{_format_shortlist_row(row)}"
-    await _notify(ctx, f"F&O Opening Momentum: {row['symbol']} {title_suffix}", message)
+# ---------------------------------------------------------------------
+# Scans (09:20:07 and 09:25:07)
+# ---------------------------------------------------------------------
+def _base_row(equity: Instrument, now: datetime) -> dict:
+    return {"underlying_id": equity.id, "passed_move": False, "outcome": "rejected", "reasons": [], "scanned_at": now}
 
 
-async def _send_scan_summary(ctx, now_ist: datetime, label: str, scan: dict, shortlisted: list[str], rejected: list[dict]) -> None:
-    """The per-scan diagnostic message (see module docstring): what was
-    scanned, from which data, and why each stock that cleared the >2%
-    move didn't make the shortlist."""
-    lines = [_timestamp_line(now_ist), ""]
-    if scan["error"]:
-        lines.append(f"Scan could not run: {scan['error']}")
-    else:
-        counts = scan["counts"]
-        lines.append(f"Scanned {counts['scanned']} F&O stocks -- data: {scan['data_source']}")
-        lines.append(f"Below the >2% move: {counts['below_momentum']} | No price/previous close: {counts['no_price']}")
-    lines.append("")
-    lines.append(f"Shortlisted ({len(shortlisted)}): {', '.join(shortlisted) if shortlisted else 'none'}")
+async def _scan(ctx, broker, today: date, now_ist: datetime, scan: str) -> dict:
+    """Rules 1-3 over every F&O stock not already on the list. Returns
+    {"rows", "listed", "pending", "counts", "data_source"}: `listed` are the
+    stocks that passed, `pending` the movers whose 09:15 candle Kite hasn't
+    published yet (their row still open)."""
+    now_utc = now_ist.astimezone(timezone.utc)
+    setups = ctx.state["setups"]
+    universe = [(eq, fut) for eq, fut in await _universe(ctx, today) if eq.symbol not in setups]
+    quotes, quote_error = await kite_quotes(broker, [_key(eq) for eq, _ in universe])
+    counts = {"scanned": len(universe), "no_price": 0, "below_move": 0, "movers": 0}
+    data_source = "Kite live quotes" + (f" (some requests failed: {quote_error})" if quote_error else "")
+    if universe and not quotes:
+        return {"rows": {}, "listed": {}, "pending": {}, "counts": counts, "data_source": f"no Kite quotes ({quote_error or 'none returned'})", "failed": True}
+
+    rows: dict[str, dict] = {}
+    movers: list[tuple[Instrument, Instrument, dict]] = []
+    for equity, future in universe:
+        row = _base_row(equity, now_utc)
+        rows[equity.symbol] = row
+        q = quotes.get(_key(equity)) or {}
+        price, prev_close = q.get("last_price"), (q.get("ohlc") or {}).get("close")
+        if not price or not prev_close:
+            counts["no_price"] += 1
+            row["reasons"] = ["no live price or previous close"]
+            continue
+        move = (float(price) - float(prev_close)) / float(prev_close) * 100.0
+        row.update(price=float(price), prev_close=float(prev_close), move_pct=move, direction=momentum_direction(move))
+        if not passes_momentum(move):
+            counts["below_move"] += 1
+            row["reasons"] = [f"moved {move:+.2f}% (needs beyond +/-{MOMENTUM_PCT:.0f}%)"]
+            continue
+        row["passed_move"] = True
+        movers.append((equity, future, row))
+    counts["movers"] = len(movers)
+
+    # Rule 2: every mover's current-month future + CE + PE, live, in as few
+    # quote requests as possible; yesterday's side from the OI store.
+    legs_by_stock: dict[uuid.UUID, list[oi_store.Contract]] = {}
+    for leg in await oi_store.stock_contracts(ctx.db, today, underlying_ids={eq.id for eq, _, _ in movers}):
+        legs_by_stock.setdefault(leg.underlying_id, []).append(leg)
+    all_legs = [leg for legs in legs_by_stock.values() for leg in legs]
+    oi_quotes, _ = await kite_quotes(broker, [leg.key for leg in all_legs])
+    now_oi = {
+        leg.instrument_id: float(oi_quotes[leg.key]["oi"])
+        for leg in all_legs if (oi_quotes.get(leg.key) or {}).get("oi") is not None
+    }
+
+    listed: dict[str, dict] = {}
+    pending: dict[str, dict] = {}
+    for equity, future, row in movers:
+        legs = legs_by_stock.get(equity.id, [])
+        prev, baseline = await oi_store.previous_close(ctx.db, today, [leg.instrument_id for leg in legs])
+        if not prev and legs:
+            prev = await oi_store.save_daily_candle_baseline(ctx.db, broker, today, legs)
+            baseline = oi_store.BASELINE_DAILY_CANDLE if prev else None
+        oi = total_oi(legs, prev, now_oi)
+        row.update(oi_baseline=baseline, legs_listed=len(legs), legs_counted=oi["counted"] if oi else 0)
+        if oi:
+            row.update(
+                oi_prev_total=oi["prev_total"], oi_now_total=oi["now_total"], oi_change_pct=oi["pct_change"],
+                fut_prev=oi["fut_prev"], fut_now=oi["fut_now"], ce_prev=oi["ce_prev"], ce_now=oi["ce_now"],
+                pe_prev=oi["pe_prev"], pe_now=oi["pe_now"],
+            )
+        row["passed_oi"] = passes_oi_rise(oi["pct_change"] if oi else None)
+        if oi is None:
+            row["reasons"].append("no Total OI baseline (yesterday's close OI not on file)")
+        elif not row["passed_oi"]:
+            row["reasons"].append(f"Total OI {oi['pct_change']:+.1f}% (needs a rise above {OI_RISE_PCT:.0f}%)")
+
+        expiry = future.expiry
+        previous_expiry = await _previous_expiry(ctx, equity.id, today)
+        setup = {
+            "equity_instrument_id": str(equity.id), "future_expiry": expiry.isoformat(), "scan": scan,
+            "direction": row["direction"], "status": WATCHLIST, "prev_close": row["prev_close"],
+            "price_at_scan": row["price"], "move_pct": row["move_pct"], "oi": oi, "oi_baseline": baseline,
+            "retrace_pct": None, "blackout": in_expiry_blackout(today, expiry, previous_expiry),
+            "breakout_high": None, "breakout_low": None, "trigger_time": None, "trigger_spot": None,
+            "option_instrument_id": None, "option_symbol": None, "lot_size": None, "entry_premium": None,
+            "exit_time": None, "exit_premium": None, "exit_reason": None, "pnl": None,
+            "max_oi_ce": max_oi_strike_near_spot(legs, now_oi, row["price"], "CE"),
+            "max_oi_pe": max_oi_strike_near_spot(legs, now_oi, row["price"], "PE"),
+        }
+        preview = pick_otm([leg for leg in legs if leg.kind == row["direction"]], row["direction"], row["price"])
+        setup["preview_option"] = preview.tradingsymbol if preview else None
+        row["_setup"] = setup
+        if not await _judge_candle(ctx, broker, today, equity, row):
+            row["outcome"] = "pending"
+            pending[equity.symbol] = row
+            continue
+        _close_row(row)
+        if row["outcome"] == WATCHLIST:
+            listed[equity.symbol] = setup
+    return {"rows": rows, "listed": listed, "pending": pending, "counts": counts, "data_source": data_source, "failed": False}
+
+
+async def _judge_candle(ctx, broker, today: date, equity: Instrument, row: dict) -> bool:
+    """Rule 3 on the stock's 09:15-09:20 candle. False if Kite hasn't
+    published it yet."""
+    bars = await _candles(broker, equity, _at(today, MARKET_OPEN), _at(today, dtime(9, 20)))
+    bar = bars.get(_at(today, MARKET_OPEN).astimezone(timezone.utc))
+    if bar is None:
+        return False
+    direction = row["direction"]
+    retraced = retracement_pct(bar["high"], bar["low"], bar["close"], direction)
+    row["retrace_pct"] = retraced
+    row["_setup"]["retrace_pct"] = retraced
+    row["passed_retrace"] = retraced < MAX_RETRACEMENT_PCT
+    if not row["passed_retrace"]:
+        row["reasons"].append(f"9:15-9:20 candle retraced {retraced:.0f}% (needs under {MAX_RETRACEMENT_PCT:.0f}%)")
+    return True
+
+
+def _close_row(row: dict) -> None:
+    """A mover whose three rules are all judged: on the watchlist or not."""
+    row["outcome"] = WATCHLIST if not row["reasons"] else "rejected"
+
+
+def _pending_entry(row: dict) -> dict:
+    """What a mover waiting for its 09:15 candle needs kept in the
+    (JSON) state until the retry."""
+    keys = ("direction", "reasons", "passed_move", "move_pct", "oi_change_pct", "_setup")
+    return {k: row[k] for k in keys if k in row}
+
+
+def _row_for_db(row: dict) -> dict:
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+async def _finish_scan_1(ctx, today: date, now_ist: datetime, result: dict) -> None:
+    info = ctx.state["scans"][SCAN_1]
+    for symbol, setup in result["listed"].items():
+        ctx.state["setups"][symbol] = setup
+        await _notify(ctx, f"FLY OI SCN: {symbol} {setup['direction']} on the watchlist", f"{_stamp(now_ist)}\n\n{_fmt_stock(symbol, setup)}")
+    rows = info.pop("rows_summary", None) or {}
+    rejected = [(s, r) for s, r in rows.items() if r["passed_move"] and r["reasons"]]
+    rejected.sort(key=lambda sr: (len(sr[1]["reasons"]), -abs(sr[1]["move_pct"])))
+    counts = info["counts"]
+    lines = [
+        _stamp(now_ist), "",
+        f"Scanned {counts['scanned']} F&O stocks -- data: {info['data_source']}",
+        f"Moved beyond +/-{MOMENTUM_PCT:.0f}%: {counts['movers']} | below: {counts['below_move']} | no price: {counts['no_price']}",
+        "",
+        f"Watchlist ({len(result['listed'])}): {', '.join(result['listed']) or 'none'} -- final list at 9:25 after the Nifty 9:15-9:25 candle",
+    ]
     if rejected:
-        lines.append("")
-        lines.append(f"Cleared the >2% move but rejected ({len(rejected)}):")
-        lines.extend(_format_rejected_row(r) for r in rejected)
-    title = f"F&O Opening Momentum: {len(shortlisted)} {'more ' if label != '9:20' else ''}shortlisted at {label}"
-    await _notify(ctx, title, "\n".join(lines))
+        lines += ["", f"Moved but rejected ({len(rejected)}):"] + [_fmt_rejected(s, r) for s, r in rejected]
+    await _notify(ctx, f"FLY OI SCN: {len(result['listed'])} on the 9:20 watchlist", "\n".join(lines))
 
 
-def _scan_log_entry(now_ist: datetime, scan: dict) -> dict:
-    """JSON-safe record of one scan pass, kept on ctx.state["scan_log"] so
-    the deployment's own state shows why each candidate was rejected."""
+async def _run_scan_1(ctx, broker, today: date, now_ist: datetime) -> None:
+    info = ctx.state["scans"][SCAN_1]
+    if info["status"] == "pending":
+        info["started_at"] = now_ist.isoformat()
+        result = await _scan(ctx, broker, today, now_ist, SCAN_1)
+        if result["failed"]:
+            info["error"] = result["data_source"]
+            return  # retried in 3 seconds
+        info.update(status="running", counts=result["counts"], data_source=result["data_source"])
+        await _save_rows(ctx, today, SCAN_1, {s: _row_for_db(r) for s, r in result["rows"].items()})
+        info["listed"] = result["listed"]
+        info["pending"] = {s: _pending_entry(r) for s, r in result["pending"].items()}
+        info["rows_summary"] = {s: _summary(r) for s, r in result["rows"].items() if r["passed_move"]}
+    else:
+        # Retry the movers whose 09:15 candle wasn't out yet.
+        still = {}
+        for symbol, row in info["pending"].items():
+            equity = await ctx.db.get(Instrument, uuid.UUID(row["_setup"]["equity_instrument_id"]))
+            if equity is not None and await _judge_candle(ctx, broker, today, equity, row):
+                _close_row(row)
+                if not row["reasons"]:
+                    info["listed"][symbol] = row["_setup"]
+                await _update_row(ctx, today, symbol, row["_setup"], **{k: v for k, v in _row_for_db(row).items() if k in ("retrace_pct", "passed_retrace", "reasons", "outcome")})
+                info["rows_summary"][symbol] = _summary(row)
+            else:
+                still[symbol] = row
+        info["pending"] = still
+    if info["pending"] and now_ist.time() < SECOND_SCAN:
+        return
+    for symbol, row in info["pending"].items():
+        row["reasons"].append("no 9:15-9:20 candle from Kite by 9:25")
+        info["rows_summary"][symbol] = _summary(row)
+        await _update_row(ctx, today, symbol, row["_setup"], reasons=row["reasons"], outcome="rejected")
+    info["pending"] = {}
+    info.update(status="done", finished_at=now_ist.isoformat())
+    await _finish_scan_1(ctx, today, now_ist, {"listed": info.pop("listed")})
+
+
+def _summary(row: dict) -> dict:
     return {
-        "at": now_ist.isoformat(), "error": scan["error"], "data_source": scan["data_source"], "counts": scan["counts"],
-        "shortlisted": [r["symbol"] for r in scan["shortlisted"]], "rejected": scan["rejected"],
+        "direction": row.get("direction"), "move_pct": row.get("move_pct"), "oi_change_pct": row.get("oi_change_pct"),
+        "reasons": list(row["reasons"]), "passed_move": row["passed_move"],
     }
 
 
-async def _mark_breakout_levels(ctx, setups: dict, today: date, now_ist: datetime, broker: ZerodhaKiteBroker | None) -> None:
-    """Step 7 for every watching setup still missing its levels -- retried
-    each tick until both the 9:15 and 9:20 candles are stored, since a
-    range off the 9:15 candle alone would be narrower than the real
-    9:15-9:25 one."""
-    for setup in setups.values():
-        if setup["status"] != "watching" or setup["breakout_high"] is not None:
+async def _nifty(ctx, broker, today: date) -> dict | None:
+    nifty = (
+        await ctx.db.execute(select(Instrument).where(Instrument.symbol == NIFTY_SYMBOL, Instrument.exchange == "NSE"))
+    ).scalars().first()
+    if nifty is None:
+        return None
+    bars = await _candles(broker, nifty, _at(today, MARKET_OPEN), _at(today, dtime(9, 25)))
+    first = bars.get(_at(today, MARKET_OPEN).astimezone(timezone.utc))
+    second = bars.get(_at(today, dtime(9, 20)).astimezone(timezone.utc))
+    if first is None or second is None:
+        return None
+    return {"bias": nifty_bias(first["open"], second["close"]), "open": first["open"], "close": second["close"]}
+
+
+async def _run_scan_2(ctx, broker, today: date, now_ist: datetime) -> None:
+    info = ctx.state["scans"][SCAN_2]
+    setups = ctx.state["setups"]
+    if ctx.state["nifty"] is None:
+        nifty = await _nifty(ctx, broker, today)
+        if nifty is None:
+            if now_ist.time() < NIFTY_GIVE_UP:
+                return  # retried in 3 seconds
+            nifty = {"bias": "unavailable", "open": None, "close": None}
+        ctx.state["nifty"] = nifty
+    bias = ctx.state["nifty"]["bias"]
+    info["started_at"] = info.get("started_at") or now_ist.isoformat()
+
+    # Late movers: the same rules for stocks not on the watchlist.
+    result = await _scan(ctx, broker, today, now_ist, SCAN_2)
+    if result["failed"]:
+        result = {"rows": {}, "listed": {}, "pending": {}, "counts": {}, "data_source": result["data_source"]}
+    for symbol, row in result["pending"].items():
+        row["reasons"].append("no 9:15-9:20 candle from Kite")
+        row["outcome"] = "rejected"
+    await _save_rows(ctx, today, SCAN_2, {s: _row_for_db(r) for s, r in result["rows"].items()})
+    added = result["listed"]
+    for symbol, setup in added.items():
+        setups[symbol] = setup
+
+    kept, dropped = [], []
+    for symbol, setup in setups.items():
+        if setup["status"] != WATCHLIST:
             continue
-        equity_id = uuid.UUID(setup["equity_instrument_id"])
-        equity = await ctx.db.get(Instrument, equity_id)
-        if equity is not None:
-            await _sync_today_5m(ctx, broker, equity, today, now_ist)
-        rng = await _candle_range(ctx, equity_id, datetime.combine(today, MARKET_OPEN, tzinfo=IST), datetime.combine(today, BREAKOUT_LEVEL_TIME, tzinfo=IST))
-        if rng is None or rng["bars"] < 2:
+        allowed = bias != "unavailable" and nifty_allows(setup["direction"], bias)
+        await _update_row(ctx, today, symbol, setup, nifty_bias=bias, passed_nifty=allowed)
+        if not allowed:
+            setup["status"] = DROPPED_NIFTY
+            dropped.append(symbol)
+            await _update_row(ctx, today, symbol, setup, outcome=DROPPED_NIFTY, reasons=[f"Nifty 9:15-9:25 {bias}: gainers excluded" if bias != "unavailable" else "Nifty 9:15-9:25 candle unavailable"])
             continue
-        setup["breakout_high"] = rng["high"]
-        setup["breakout_low"] = rng["low"]
+        setup["status"] = WATCHING
+        kept.append(symbol)
+        await _update_row(ctx, today, symbol, setup, outcome="shortlisted")
+    await _mark_levels(ctx, broker, today)
+    info.update(status="done", finished_at=now_ist.isoformat(), counts=result["counts"], data_source=result["data_source"])
+
+    nifty = ctx.state["nifty"]
+    head = (
+        f"Nifty 9:15-9:25: {nifty['open']:.2f} -> {nifty['close']:.2f} ({bias}) -- "
+        + ("gainers and losers" if bias == "green" else "losers only")
+        if bias != "unavailable" else "Nifty 9:15-9:25 candle unavailable from Kite -- no trades today"
+    )
+    lines = [_stamp(now_ist), "", head, "", f"Final shortlist ({len(kept)}):"]
+    for symbol in kept:
+        s = setups[symbol]
+        if s["breakout_high"] is None:
+            levels = "levels pending"
+        elif s["direction"] == "CE":
+            levels = f"break above {s['breakout_high']:.2f}"
+        else:
+            levels = f"break below {s['breakout_low']:.2f}"
+        lines.append(f"{symbol} {s['direction']}: {levels}" + (" (added at 9:25)" if symbol in added else "") + (" -- expiry blackout, no trade" if s["blackout"] else ""))
+    if dropped:
+        lines += ["", f"Dropped by the Nifty filter: {', '.join(dropped)}"]
+    late_rejected = [(s, _summary(r)) for s, r in result["rows"].items() if r["passed_move"] and r["reasons"]]
+    if late_rejected:
+        lines += ["", f"Moved by 9:25 but rejected ({len(late_rejected)}):"] + [_fmt_rejected(s, r) for s, r in late_rejected]
+    await _notify(ctx, f"FLY OI SCN: {len(kept)} shortlisted at 9:25", "\n".join(lines))
+    for symbol in added:
+        if setups[symbol]["status"] == WATCHING:
+            await _notify(ctx, f"FLY OI SCN: {symbol} {setups[symbol]['direction']} shortlisted at 9:25", f"{_stamp(now_ist)}\n\n{_fmt_stock(symbol, setups[symbol])}")
+
+
+async def _mark_levels(ctx, broker, today: date) -> None:
+    """Each shortlisted stock's 09:15-09:25 high and low (both candles
+    needed); retried on every breakout poll until they're in."""
+    for symbol, setup in ctx.state["setups"].items():
+        if setup["status"] != WATCHING or setup["breakout_high"] is not None:
+            continue
+        equity = await ctx.db.get(Instrument, uuid.UUID(setup["equity_instrument_id"]))
+        if equity is None:
+            continue
+        bars = await _candles(broker, equity, _at(today, MARKET_OPEN), _at(today, dtime(9, 25)))
+        first = bars.get(_at(today, MARKET_OPEN).astimezone(timezone.utc))
+        second = bars.get(_at(today, dtime(9, 20)).astimezone(timezone.utc))
+        if first is None or second is None:
+            continue
+        setup["breakout_high"] = max(first["high"], second["high"])
+        setup["breakout_low"] = min(first["low"], second["low"])
+        await _update_row(ctx, today, symbol, setup, breakout_high=setup["breakout_high"], breakout_low=setup["breakout_low"])
 
 
 # ---------------------------------------------------------------------
-# Phase B/C: entry, SMA exit, EOD close (Steps 7-11)
+# Entries (09:25-10:30) and exits
 # ---------------------------------------------------------------------
-async def _try_enter(ctx, symbol: str, setup: dict, now_ist: datetime, broker: ZerodhaKiteBroker | None = None) -> None:
-    if setup["status"] != "watching":
+async def _watch_breakouts(ctx, broker, today: date, now_ist: datetime) -> None:
+    setups = ctx.state["setups"]
+    watching = {s: v for s, v in setups.items() if v["status"] == WATCHING}
+    if not watching:
         return
     if now_ist.time() >= BREAKOUT_CUTOFF:
-        setup["status"] = "no_trigger"
+        for symbol, setup in watching.items():
+            setup["status"] = NO_TRIGGER
+            await _update_row(ctx, today, symbol, setup, outcome=NO_TRIGGER)
         return
-    if setup["breakout_high"] is None:
+    last = ctx.state.get("last_poll_at")
+    if last and now_ist - datetime.fromisoformat(last) < BREAKOUT_POLL - timedelta(milliseconds=500):
         return
+    ctx.state["last_poll_at"] = now_ist.isoformat()
+    await _mark_levels(ctx, broker, today)
 
-    equity_id = uuid.UUID(setup["equity_instrument_id"])
-    price = await ctx.get_price(equity_id)
-    if price is None:
-        return
-    direction = setup["direction"]
-    breakout_hit = price > setup["breakout_high"] if direction == "CE" else price < setup["breakout_low"]
-    if not breakout_hit:
-        return
+    equities = {s: await ctx.db.get(Instrument, uuid.UUID(v["equity_instrument_id"])) for s, v in watching.items()}
+    quotes, _ = await kite_quotes(broker, [_key(eq) for eq in equities.values() if eq is not None])
+    broken = []
+    for symbol, setup in watching.items():
+        equity = equities.get(symbol)
+        price = (quotes.get(_key(equity)) or {}).get("last_price") if equity is not None else None
+        if not price or setup["breakout_high"] is None:
+            continue
+        price = float(price)
+        tick_engine.set_real_price(equity.id, price, "kite_rest")
+        if (setup["direction"] == "CE" and price > setup["breakout_high"]) or (setup["direction"] == "PE" and price < setup["breakout_low"]):
+            broken.append((abs(price - setup["prev_close"]) / setup["prev_close"], symbol, price))
+    # Same poll: the strongest move takes the next free slot.
+    for _, symbol, price in sorted(broken, reverse=True):
+        await _enter(ctx, broker, today, now_ist, symbol, setups[symbol], price)
 
-    near_future = await _nearest_future(ctx, equity_id, now_ist.date())
-    expiry = near_future.expiry if near_future else None
-    if expiry is None or in_expiry_blackout(now_ist.date(), expiry):
-        setup["status"] = "blackout"
-        return
 
-    option = await _pick_otm_option(ctx, equity_id, expiry, direction, price)
+async def _enter(ctx, broker, today: date, now_ist: datetime, symbol: str, setup: dict, price: float) -> None:
+    level = setup["breakout_high"] if setup["direction"] == "CE" else setup["breakout_low"]
+    if setup["blackout"]:
+        setup.update(status=BLACKOUT, trigger_time=now_ist.isoformat(), trigger_spot=price)
+        await _update_row(ctx, today, symbol, setup, outcome=BLACKOUT)
+        return
+    if ctx.state["trades_today"] >= MAX_TRADES_PER_DAY:
+        setup.update(status=LIMIT_REACHED, trigger_time=now_ist.isoformat(), trigger_spot=price)
+        await _update_row(ctx, today, symbol, setup, outcome=LIMIT_REACHED)
+        await _notify(ctx, f"FLY OI SCN: {symbol} broke out -- daily limit reached", f"{_stamp(now_ist)}\n\n{symbol} broke {level:.2f} at {price:.2f}, but {MAX_TRADES_PER_DAY} trades are already taken today.")
+        return
+    option = pick_otm(await _options(ctx, uuid.UUID(setup["equity_instrument_id"]), date.fromisoformat(setup["future_expiry"]), setup["direction"]), setup["direction"], price)
     if option is None:
         return
-    if broker is not None:
-        # The option was never read before this instant, so TickEngine has
-        # no live price for it yet -- fill at Kite's actual LTP, not the
-        # last stored candle close.
-        try:
-            ltp = await broker.get_ltp(option.exchange, option.external_ref)
-            tick_engine.set_real_price(option.id, ltp["price"], "kite_rest")
-        except KiteAPIError as exc:
-            logger.warning("F&O Opening Momentum: Kite LTP failed for %s: %s", option.symbol, exc)
-    premium = await ctx.get_price(option.id)
+    premium = await _ltp(broker, option)
     if premium is None:
-        return
-
+        return  # no live price for the option yet: next poll
+    tick_engine.set_real_price(option.id, premium, "kite_rest")
+    await ctx.get_price(option.id)  # keeps the live feed tracking it for the P&L
     lot_size = option.lot_size or DEFAULT_LOT_SIZE
     await ctx.open_leg(option, "buy", float(LOTS_PER_SETUP * lot_size), premium)
-
+    ctx.state["trades_today"] += 1
     setup.update(
-        status="triggered", trigger_time=now_ist.isoformat(), trigger_spot=price,
-        option_instrument_id=str(option.id), option_symbol=option.symbol, lot_size=lot_size, entry_premium=premium,
+        status=TRIGGERED, trigger_time=now_ist.isoformat(), trigger_spot=price, option_instrument_id=str(option.id),
+        option_symbol=option.symbol, lot_size=lot_size, entry_premium=premium,
     )
-    ctx.note("entered", signal=direction, reason=f"{symbol}: broke {setup['breakout_high'] if direction == 'CE' else setup['breakout_low']:.2f}, bought {option.symbol} @ {premium:.2f}")
+    await _update_row(ctx, today, symbol, setup, outcome=TRIGGERED, option_symbol=option.symbol, entry_at=now_ist.astimezone(timezone.utc), entry_premium=premium)
+    await _notify(
+        ctx, f"FLY OI SCN: bought {option.symbol}",
+        f"{_stamp(now_ist)}\n\n{symbol} broke {level:.2f} at {price:.2f} -> bought {LOTS_PER_SETUP} lot ({lot_size}) of {option.symbol} @ {premium:.2f}"
+        f"\nTrade {ctx.state['trades_today']} of {MAX_TRADES_PER_DAY} today. Exit: two 5-min closes {'below' if setup['direction'] == 'CE' else 'above'} the 8-SMA, or 15:10.",
+        alert_type=AlertType.ORDER_EXECUTED.value,
+    )
+    ctx.note("entered", signal=setup["direction"], reason=f"{symbol}: broke {level:.2f}, bought {option.symbol} @ {premium:.2f}")
 
 
-async def _close_position(ctx, symbol: str, setup: dict, now_ist: datetime, exit_reason: str) -> None:
-    option_id = uuid.UUID(setup["option_instrument_id"])
-    option = await ctx.db.get(Instrument, option_id)
-    exit_premium = await ctx.get_price(option_id)
+def _last_closed_boundary(now_ist: datetime) -> datetime:
+    """Start of the newest 5-minute candle closed at least CANDLE_SETTLE ago."""
+    t = now_ist - CANDLE_SETTLE
+    return t.replace(minute=t.minute - t.minute % 5, second=0, microsecond=0) - CANDLE
+
+
+async def _manage_exits(ctx, broker, today: date, now_ist: datetime) -> None:
+    open_trades = {s: v for s, v in ctx.state["setups"].items() if v["status"] == TRIGGERED}
+    if not open_trades:
+        return
+    if now_ist.time() >= REPORT_TIME:
+        for symbol, setup in open_trades.items():
+            await _close(ctx, broker, today, now_ist, symbol, setup, "15:10 IST close")
+        return
+    if broker is None:
+        return
+    boundary = _last_closed_boundary(now_ist).isoformat()
+    if ctx.state.get("last_exit_check") == boundary:
+        return
+    ctx.state["last_exit_check"] = boundary
+    start = _at(previous_trading_day(today), SMA_HISTORY_FROM)
+    for symbol, setup in open_trades.items():
+        equity = await ctx.db.get(Instrument, uuid.UUID(setup["equity_instrument_id"]))
+        if equity is None:
+            continue
+        bars = await _candles(broker, equity, start, now_ist)
+        closed = [b for ts, b in sorted(bars.items()) if ts + CANDLE <= now_ist.astimezone(timezone.utc)]
+        if sma_exit_due(setup["direction"], closed, datetime.fromisoformat(setup["trigger_time"])):
+            side = "below" if setup["direction"] == "CE" else "above"
+            await _close(ctx, broker, today, now_ist, symbol, setup, f"2 consecutive 5-min closes {side} the 8-SMA")
+
+
+async def _close(ctx, broker, today: date, now_ist: datetime, symbol: str, setup: dict, reason: str) -> None:
+    option = await ctx.db.get(Instrument, uuid.UUID(setup["option_instrument_id"]))
+    if option is None:
+        logger.error("FLY OI SCN: %s's option %s is gone from the catalog -- can't close it", symbol, setup["option_symbol"])
+        return
+    exit_premium = await _ltp(broker, option) if broker is not None else None
+    if exit_premium is None:
+        exit_premium = await ctx.get_price(option.id)
     if exit_premium is None:
         exit_premium = setup["entry_premium"]
-
-    lot_size = setup["lot_size"] or DEFAULT_LOT_SIZE
-    quantity = float(LOTS_PER_SETUP * lot_size)
+    quantity = float(LOTS_PER_SETUP * (setup["lot_size"] or DEFAULT_LOT_SIZE))
     await ctx.close_leg(option, "sell", quantity, exit_premium)
-
     pnl = (exit_premium - setup["entry_premium"]) * quantity
-    setup.update(status="exited" if "SMA" in exit_reason else "eod_closed", exit_time=now_ist.isoformat(), exit_premium=exit_premium, exit_reason=exit_reason, pnl=pnl)
-
-    ctx.db.add(
-        PaperNativeTrade(
-            deployment_id=ctx.deployment.id,
-            opened_at=datetime.fromisoformat(setup["trigger_time"]),
-            closed_at=now_ist.astimezone(timezone.utc),
-            legs=[{
-                "instrument_id": str(option_id), "side": "long", "quantity": quantity,
-                "entry_price": setup["entry_premium"], "exit_price": exit_premium,
-            }],
-            pnl=pnl, pnl_pct=(pnl / (setup["entry_premium"] * quantity) * 100.0) if setup["entry_premium"] else 0.0,
-            exit_reason=exit_reason,
-        )
+    pnl_pct = pnl / (setup["entry_premium"] * quantity) * 100.0 if setup["entry_premium"] else 0.0
+    status = EXITED if "SMA" in reason else EOD_CLOSED
+    setup.update(status=status, exit_time=now_ist.isoformat(), exit_premium=exit_premium, exit_reason=reason, pnl=pnl)
+    await ctx.record_trade(
+        legs=[{"instrument_id": setup["option_instrument_id"], "side": "long", "quantity": quantity, "entry_price": setup["entry_premium"], "exit_price": exit_premium}],
+        pnl=pnl, pnl_pct=pnl_pct, exit_reason=f"{symbol}: {reason}", opened_at=datetime.fromisoformat(setup["trigger_time"]),
+        closed_at=now_ist, alert=False,
     )
+    await _update_row(ctx, today, symbol, setup, outcome=status, exit_at=now_ist.astimezone(timezone.utc), exit_premium=exit_premium, exit_reason=reason[:100], pnl=pnl)
     await _notify(
-        ctx, f"{symbol} {setup['direction']} closed", f"{_timestamp_line(now_ist)}\n\n{exit_reason}: P&L {pnl:+.2f}",
+        ctx, f"FLY OI SCN: {symbol} {setup['direction']} closed", f"{_stamp(now_ist)}\n\n{setup['option_symbol']}: {setup['entry_premium']:.2f} -> {exit_premium:.2f}\n{reason}: P&L {pnl:+.2f}",
         alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO if pnl >= 0 else AlertSeverity.WARNING,
     )
-    ctx.note("exited", signal="SELL", reason=f"{symbol}: {exit_reason}, P&L {pnl:+.2f}")
+    ctx.note("exited", signal="SELL", reason=f"{symbol}: {reason}, P&L {pnl:+.2f}")
 
 
-async def _manage_position(ctx, symbol: str, setup: dict, now_ist: datetime, today: date, broker: ZerodhaKiteBroker | None = None) -> None:
-    if setup["status"] != "triggered":
-        return
+async def _report(ctx, now_ist: datetime) -> None:
+    setups = ctx.state["setups"]
+    closed = [s for s in setups.values() if s["status"] in (EXITED, EOD_CLOSED)]
+    wins = [s for s in closed if (s["pnl"] or 0) > 0]
+    losses = [s for s in closed if (s["pnl"] or 0) < 0]
+    total = sum(s["pnl"] or 0 for s in closed)
+    win_rate = len(wins) / (len(wins) + len(losses)) * 100.0 if wins or losses else 0.0
+    shortlisted = [s for s in setups.values() if s["status"] not in (WATCHLIST, DROPPED_NIFTY)]
+    summary = (
+        f"Watchlist {len(setups)} | Shortlisted {len(shortlisted)} | Traded {len(closed)} | "
+        f"Win rate {win_rate:.0f}% ({len(wins)}W/{len(losses)}L) | Total P&L {total:+.2f}"
+    )
+    rows = "\n".join(
+        f"{sym}: {s['status']}" + (f" P&L {s['pnl']:+.2f}" if s.get("pnl") is not None else "") for sym, s in setups.items()
+    ) or "(none)"
+    await _notify(ctx, "FLY OI SCN: 15:10 report", f"{_stamp(now_ist)}\n\n{summary}\n\n{rows}")
+    ctx.state["report_sent"] = True
+    ctx.note("exited", reason=summary)
 
-    equity_id = uuid.UUID(setup["equity_instrument_id"])
-    equity = await ctx.db.get(Instrument, equity_id)
-    if equity is not None:
-        await _sync_today_5m(ctx, broker, equity, today, now_ist)
-    last_ts = datetime.fromisoformat(setup["last_candle_ts"]) if setup["last_candle_ts"] else datetime.fromisoformat(setup["trigger_time"])
-    new_rows = (
-        await ctx.db.execute(
-            select(OhlcvCandle)
-            .where(OhlcvCandle.instrument_id == equity_id, OhlcvCandle.timeframe == CANDLE_TIMEFRAME, OhlcvCandle.ts > last_ts.astimezone(timezone.utc))
-            .order_by(OhlcvCandle.ts)
-        )
-    ).scalars().all()
-    if new_rows:
-        setup["underlying_closes"].extend(r.close for r in new_rows)
-        setup["last_candle_ts"] = new_rows[-1].ts.isoformat()
 
-    if now_ist.time() >= REPORT_TIME:
-        await _close_position(ctx, symbol, setup, now_ist, "3:10pm IST cutoff (marked-to-market)")
-        return
+# ---------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------
+def _next_wake(state: dict, now_ist: datetime) -> datetime | None:
+    today = now_ist.date()
 
-    direction = setup["direction"]
-    if sma_exit_triggered(direction, setup["underlying_closes"]):
-        side = "below" if direction == "CE" else "above"
-        await _close_position(ctx, symbol, setup, now_ist, f"2 consecutive closes {side} 8-SMA")
+    def due(t: dtime) -> datetime:
+        target = _at(today, t)
+        return target if now_ist < target else now_ist + RETRY
+
+    wakes = []
+    if not state["warmed"] and now_ist < _at(today, FIRST_SCAN):
+        wakes.append(due(WARM_UP))
+    if state["scans"][SCAN_1]["status"] != "done":
+        wakes.append(due(FIRST_SCAN))
+    elif state["scans"][SCAN_2]["status"] != "done":
+        wakes.append(due(SECOND_SCAN))
+    statuses = {s["status"] for s in state["setups"].values()}
+    if state["scans"][SCAN_2]["status"] == "done" and WATCHING in statuses and now_ist.time() < BREAKOUT_CUTOFF:
+        wakes.append(now_ist + BREAKOUT_POLL)
+    if TRIGGERED in statuses:
+        wakes.append(_last_closed_boundary(now_ist) + 2 * CANDLE + CANDLE_SETTLE)
+    if not state["report_sent"]:
+        wakes.append(due(REPORT_TIME))
+    return min(wakes) if wakes else None
 
 
 # ---------------------------------------------------------------------
@@ -1021,105 +919,71 @@ async def _manage_position(ctx, symbol: str, setup: dict, now_ist: datetime, tod
 async def evaluate(ctx) -> None:
     now_ist = ctx.now.astimezone(IST)
     today = now_ist.date()
-
-    if ctx.state.get("session_date") != today.isoformat():
+    if ctx.state.get("session_date") != today.isoformat() or ctx.state.get("version") != VERSION:
         ctx.state.clear()
-        ctx.state.update(
-            session_date=today.isoformat(), shortlist_done=False, second_scan_done=False,
-            breakout_marked=False, report_sent=False, setups={}, scan_log={},
-        )
+        ctx.state.update(_fresh_state(today))
 
+    broker = None if getattr(ctx, "is_backtest", False) else await _live_broker(ctx)
     if ctx.state.pop("force_exit", False):
         for symbol, setup in ctx.state["setups"].items():
-            if setup["status"] == "triggered":
-                await _close_position(ctx, symbol, setup, now_ist, "manual")
-        ctx.note("exited", reason="manual exit -- all open positions closed")
+            if setup["status"] == TRIGGERED:
+                await _close(ctx, broker, today, now_ist, symbol, setup, "manual")
+        ctx.note("exited", reason="manual exit -- open trades closed")
+        return
+    if getattr(ctx, "is_backtest", False):
+        ctx.note("skipped", reason="FLY OI SCN v6 runs on live Kite data; a historical replay isn't supported")
+        return
+    if not is_trading_day(today) or now_ist.time() < MARKET_OPEN:
+        ctx.note("skipped", reason="market closed")
         return
 
-    if now_ist.time() < MARKET_OPEN:
-        ctx.note("skipped", reason="before market open")
+    try:
+        await _step(ctx, broker, today, now_ist)
+    finally:
+        wake = _next_wake(ctx.state, now_ist)
+        if wake is not None:
+            ctx.wake_at(wake)
+
+
+async def _skip_day(ctx, now_ist: datetime, reason: str) -> None:
+    """The 09:20 scan couldn't run in time: the rules measure the move at
+    09:20, so a scan run later would pick the wrong stocks. No trades today."""
+    for info in ctx.state["scans"].values():
+        info.update(status="done", skipped=reason)
+    await _notify(ctx, "FLY OI SCN: no scan today", f"{_stamp(now_ist)}\n\n{reason} -- the 9:20 scan can't run late, so no trades today.", severity=AlertSeverity.WARNING)
+
+
+async def _step(ctx, broker, today: date, now_ist: datetime) -> None:
+    t = now_ist.time()
+    scans = ctx.state["scans"]
+    if scans[SCAN_1]["status"] == "pending" and t >= SECOND_SCAN:
+        error = scans[SCAN_1].get("error")
+        await _skip_day(ctx, now_ist, f"Kite quotes weren't available by 9:25 ({error})" if broker is not None and error else "Zerodha wasn't logged in by 9:25")
+    if broker is None:
+        if FIRST_SCAN <= t < SECOND_SCAN and not ctx.state["login_alert_sent"] and scans[SCAN_1]["status"] != "done":
+            ctx.state["login_alert_sent"] = True
+            await _notify(ctx, "FLY OI SCN: waiting for Zerodha login", f"{_stamp(now_ist)}\n\nThe 9:20 scan needs live Kite data -- it runs as soon as Zerodha is logged in.", severity=AlertSeverity.WARNING)
+        await _manage_exits(ctx, None, today, now_ist)
+        if t >= REPORT_TIME and not ctx.state["report_sent"]:
+            await _report(ctx, now_ist)
+        ctx.note("hold", reason="waiting for Zerodha login")
         return
 
-    broker = await _live_broker(ctx) if now_ist.time() >= OPENING_CANDLE_END and not ctx.state["report_sent"] else None
-
-    if not ctx.state["shortlist_done"] and now_ist.time() >= OPENING_CANDLE_END:
-        scan = await _run_scan(ctx, today, now_ist, broker)
-        if scan["error"] and now_ist.time() < BREAKOUT_LEVEL_TIME:
-            # Most often Nifty's 9:15 candle just isn't published yet in the
-            # first seconds after 9:20 -- retry next tick rather than marking
-            # the day's scan done with nothing; past 9:25, give up and say so.
-            ctx.note("hold", reason=f"9:20 scan waiting: {scan['error']}")
-            return
-        ctx.state["setups"] = scan["setups"]
-        ctx.state["shortlist_done"] = True
-        ctx.state.setdefault("scan_log", {})["9:20"] = _scan_log_entry(now_ist, scan)
-        for row in scan["shortlisted"]:
-            await _send_shortlist_alert(ctx, now_ist, row, title_suffix="shortlisted at 9:20")
-        # Always sent, including when nothing qualifies, so a quiet 9:20
-        # scan reads as "ran, found nothing -- and here's why" rather than
-        # being indistinguishable from the scan never having run.
-        await _send_scan_summary(ctx, now_ist, "9:20", scan, [r["symbol"] for r in scan["shortlisted"]], scan["rejected"])
-        ctx.note(
-            "entered" if scan["shortlisted"] else "skipped",
-            reason=f"9:20 scan: {len(scan['shortlisted'])} shortlisted, {len(scan['rejected'])} rejected after the >2% move"
-                   + (f" -- {scan['error']}" if scan["error"] else ""),
-        )
+    if not ctx.state["warmed"] and t >= WARM_UP:
+        ctx.state["warmed"] = True
+        try:
+            await broker.get_instruments("NSE")
+        except KiteAPIError as exc:
+            logger.warning("FLY OI SCN: couldn't preload Kite's NSE instrument list: %s", exc)
+    if scans[SCAN_1]["status"] != "done" and t >= FIRST_SCAN:
+        await _run_scan_1(ctx, broker, today, now_ist)
+    if scans[SCAN_1]["status"] == "done" and scans[SCAN_2]["status"] != "done" and t >= SECOND_SCAN:
+        await _run_scan_2(ctx, broker, today, now_ist)
+    if scans[SCAN_2]["status"] == "done":
+        await _watch_breakouts(ctx, broker, today, now_ist)
+    await _manage_exits(ctx, broker, today, now_ist)
+    if t >= REPORT_TIME and not ctx.state["report_sent"]:
+        await _report(ctx, now_ist)
         return
-
-    # Second pass, per instruction: re-run the exact same scan at 9:25 to
-    # catch any stock that crosses the momentum/OI thresholds a few
-    # minutes later than the 9:20 pass. Only ever ADDS newly-qualifying
-    # symbols to the shortlist -- anything already shortlisted at 9:20
-    # stays, even if its numbers would no longer pass by 9:25 (see module
-    # docstring). Deliberately doesn't `return`, so a freshly-added
-    # symbol's breakout level still gets marked in this same tick, below.
-    if ctx.state["shortlist_done"] and not ctx.state["second_scan_done"] and now_ist.time() >= BREAKOUT_LEVEL_TIME:
-        scan = await _run_scan(ctx, today, now_ist, broker)
-        newly_added = {sym: s for sym, s in scan["setups"].items() if sym not in ctx.state["setups"]}
-        already_reported = set(ctx.state["setups"]) | {r["symbol"] for r in (ctx.state.get("scan_log", {}).get("9:20") or {}).get("rejected", [])}
-        new_rejects = [r for r in scan["rejected"] if r["symbol"] not in already_reported]
-        ctx.state["setups"].update(newly_added)
-        ctx.state["second_scan_done"] = True
-        ctx.state.setdefault("scan_log", {})["9:25"] = _scan_log_entry(now_ist, scan)
-        for row in scan["shortlisted"]:
-            if row["symbol"] in newly_added:
-                await _send_shortlist_alert(ctx, now_ist, row, title_suffix="shortlisted at 9:25")
-        if newly_added or new_rejects:
-            await _send_scan_summary(ctx, now_ist, "9:25", scan, list(newly_added), new_rejects)
-        ctx.note("entered" if newly_added else "hold", reason=f"9:25 second scan: {len(newly_added)} additional shortlisted")
-
-    # Retried each tick for any setup whose 9:15-9:25 range isn't complete
-    # yet (see _mark_breakout_levels) -- a no-op once every setup has one.
-    if ctx.state["shortlist_done"] and now_ist.time() >= BREAKOUT_LEVEL_TIME:
-        if now_ist.time() < BREAKOUT_CUTOFF:
-            await _mark_breakout_levels(ctx, ctx.state["setups"], today, now_ist, broker)
-        ctx.state["breakout_marked"] = True
-
-    if ctx.state["breakout_marked"]:
-        for symbol, setup in ctx.state["setups"].items():
-            await _try_enter(ctx, symbol, setup, now_ist, broker)
-            await _manage_position(ctx, symbol, setup, now_ist, today, broker)
-
-    if now_ist.time() >= REPORT_TIME and not ctx.state["report_sent"]:
-        setups = ctx.state["setups"]
-        triggered = [s for s in setups.values() if s["status"] in ("exited", "eod_closed")]
-        wins = [s for s in triggered if (s["pnl"] or 0) > 0]
-        losses = [s for s in triggered if (s["pnl"] or 0) < 0]
-        total_pnl = sum(s["pnl"] or 0 for s in triggered)
-        win_rate = (len(wins) / (len(wins) + len(losses)) * 100.0) if (wins or losses) else 0.0
-        summary = (
-            f"Shortlisted {len(setups)} | Triggered {len(triggered)} | "
-            f"Win rate {win_rate:.0f}% ({len(wins)}W/{len(losses)}L) | Total P&L {total_pnl:+.2f}"
-        )
-        rows = "\n".join(
-            f"{sym}: {'triggered' if s['status'] in ('exited','eod_closed') else s['status']}"
-            + (f" P&L {s['pnl']:+.2f}" if s.get("pnl") is not None else "")
-            for sym, s in setups.items()
-        ) or "(none)"
-        report_message = f"{_timestamp_line(now_ist)}\n\n{summary}\n\n{rows}"
-        await _notify(ctx, "F&O Opening Momentum: 3:10pm report", report_message)
-        ctx.state["report_sent"] = True
-        ctx.note("exited", reason=summary)
-        return
-
-    ctx.note("hold", reason=f"{len(ctx.state.get('setups', {}))} setups tracked")
+    statuses = [s["status"] for s in ctx.state["setups"].values()]
+    ctx.note("hold", reason=f"{len(statuses)} on the list, {statuses.count(WATCHING)} waiting for a breakout, {statuses.count(TRIGGERED)} open")
