@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -17,6 +18,9 @@ from app.services.paper_trading.native_runner import run_native_strategy
 logger = logging.getLogger(__name__)
 
 EVALUATION_INTERVAL_SECONDS = 10
+# How often due wake-ups (ctx.wake_at) are looked for: a strategy asking
+# for 09:20:07 runs within this much of it.
+WAKE_CHECK_SECONDS = 0.5
 
 
 async def diagnose_evaluation_freshness(db: AsyncSession) -> dict:
@@ -46,6 +50,9 @@ async def diagnose_evaluation_freshness(db: AsyncSession) -> dict:
 class PaperTradingScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        self._wake_task: asyncio.Task | None = None
+        # Native deployment id -> when its strategy asked to run next.
+        self._wakeups: dict[uuid.UUID, datetime] = {}
         self.last_tick_started_at: datetime | None = None
         self.last_tick_completed_at: datetime | None = None
         self.last_tick_evaluated_count: int = 0
@@ -53,11 +60,52 @@ class PaperTradingScheduler:
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run())
+        if self._wake_task is None:
+            self._wake_task = asyncio.create_task(self._run_wakeups())
 
     def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
+        for task in (self._task, self._wake_task):
+            if task is not None:
+                task.cancel()
+        self._task = None
+        self._wake_task = None
+
+    def note_wakeup(self, deployment_id: uuid.UUID, wake_at: datetime | None) -> None:
+        if wake_at is None:
+            self._wakeups.pop(deployment_id, None)
+        else:
+            self._wakeups[deployment_id] = as_aware_utc(wake_at)
+
+    async def _run_wakeups(self) -> None:
+        while True:
+            await asyncio.sleep(WAKE_CHECK_SECONDS)
+            try:
+                await self.run_due_wakeups(datetime.now(timezone.utc))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Native wake-up run failed")
+
+    async def run_due_wakeups(self, now: datetime) -> int:
+        """Runs every native deployment whose requested wake-up has come,
+        on top of the regular cycle -- same market-hours gate."""
+        due = [dep_id for dep_id, at in self._wakeups.items() if at <= now]
+        if not due or not nse_market_open(now):
+            return 0
+        ran = 0
+        async with AsyncSessionLocal() as db:
+            for dep_id in due:
+                self._wakeups.pop(dep_id, None)
+                deployment = await db.get(PaperNativeDeployment, dep_id)
+                if deployment is None or deployment.status != DeploymentStatus.ACTIVE.value:
+                    continue
+                try:
+                    outcome = await run_native_strategy(db, deployment)
+                    self.note_wakeup(dep_id, outcome.wake_at)
+                    ran += 1
+                except Exception:
+                    logger.exception("Native paper deployment %s wake-up failed", dep_id)
+        return ran
 
     async def _run(self) -> None:
         while True:
@@ -104,7 +152,8 @@ class PaperTradingScheduler:
         )
         for native_deployment in native_result.scalars().all():
             try:
-                await run_native_strategy(db, native_deployment)
+                outcome = await run_native_strategy(db, native_deployment)
+                self.note_wakeup(native_deployment.id, outcome.wake_at)
                 evaluated += 1
             except Exception:
                 logger.exception("Native paper deployment %s evaluation failed", native_deployment.id)

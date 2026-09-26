@@ -19,13 +19,14 @@ conventions the single-instrument engine (engine.py) already has stay
 consistent here too.
 """
 
+import asyncio
 import copy
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import as_aware_utc
@@ -50,6 +51,15 @@ class EvaluationOutcome:
     action: str  # "entered" | "exited" | "rolled" | "hold" | "error" | "skipped"
     signal: str | None = None
     reason: str | None = None
+    # When the strategy asked to be run next (ctx.wake_at), if it did.
+    wake_at: datetime | None = None
+
+
+# One native evaluation at a time: the scheduler's 10-second cycle and its
+# exact-time wake-ups (paper_trading/scheduler.py) run in separate sessions,
+# and two evaluations of the same deployment -- or of two deployments
+# sharing a portfolio's cash -- must not interleave.
+_native_lock = asyncio.Lock()
 
 
 class NativeContext:
@@ -79,6 +89,16 @@ class NativeContext:
         self._last_signal: str | None = None
         self._last_reason: str | None = None
         self._last_action: str = "hold"
+        self._wake_at: datetime | None = None
+
+    def wake_at(self, when: datetime) -> None:
+        """Asks to be run again at `when` (to the second), on top of the
+        scheduler's regular 10-second cycle -- for a strategy whose rules
+        fire at exact times (e.g. a scan at 09:20:07). The earliest request
+        of a tick wins; a live-only hint, ignored in a backtest."""
+        when = as_aware_utc(when)
+        if self._wake_at is None or when < self._wake_at:
+            self._wake_at = when
 
     def note(self, action: str, signal: str | None = None, reason: str | None = None) -> None:
         """The strategy calls this once per tick to report what it did --
@@ -184,6 +204,7 @@ class NativeContext:
 
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,
+        alert: bool = True,
     ) -> None:
         """`legs`: [{"instrument_id": str, "side": "short"|"long", "quantity": float, "entry_price": float, "exit_price": float}, ...]
 
@@ -207,6 +228,8 @@ class NativeContext:
                 legs=legs, pnl=pnl, pnl_pct=pnl_pct, charges=charges, exit_reason=exit_reason[:NATIVE_EXIT_REASON_MAX_LEN],
             )
         )
+        if not alert:  # the strategy sends its own
+            return
         strategy_name = self.deployment.strategy_id  # resolved to a name by the caller if it wants a nicer alert title
         await create_alert(
             self.db, user_id=self.portfolio.user_id, alert_type=AlertType.ORDER_EXECUTED.value, severity=AlertSeverity.INFO,
@@ -218,7 +241,19 @@ class NativeContext:
 async def run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployment) -> EvaluationOutcome:
     """Thin wrapper mirroring engine.py::evaluate_deployment: persists
     last_signal/last_signal_reason from whatever happened, regardless of
-    which path produced it."""
+    which path produced it.
+
+    Runs one evaluation at a time (_native_lock), on the deployment as it
+    is in the database now: a caller's copy loaded before another session
+    evaluated it would hand the strategy stale state (a copy the caller has
+    changed but not saved is kept as it is)."""
+    async with _native_lock:
+        if inspect(deployment).persistent and not db.is_modified(deployment):
+            await db.refresh(deployment)
+        return await _run_and_record(db, deployment)
+
+
+async def _run_and_record(db: AsyncSession, deployment: PaperNativeDeployment) -> EvaluationOutcome:
     outcome = await _run_native_strategy(db, deployment)
     label = (outcome.signal or outcome.action.upper())[:20]
     reason = outcome.reason[:500] if outcome.reason else None
@@ -231,7 +266,9 @@ async def run_native_strategy(db: AsyncSession, deployment: PaperNativeDeploymen
 
 async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployment) -> EvaluationOutcome:
     version = await db.get(StrategyVersion, deployment.strategy_version_id)
-    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
+    # Re-read, not the session's cached copy: another session (a wake-up
+    # or the regular cycle) may have moved this portfolio's cash since.
+    portfolio = await db.get(PaperPortfolio, deployment.portfolio_id, populate_existing=True)
     if version is None or portfolio is None:
         return EvaluationOutcome(action="error", reason="deployment references missing data")
     if not version.python_code:
@@ -265,11 +302,11 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
         logger.exception("Native strategy evaluation failed for deployment %s", deployment.id)
         deployment.state = ctx.state
         await db.commit()
-        return EvaluationOutcome(action="error", reason=f"{type(exc).__name__}: {exc}")
+        return EvaluationOutcome(action="error", reason=f"{type(exc).__name__}: {exc}", wake_at=ctx._wake_at)
 
     deployment.state = ctx.state
     await db.commit()
-    return EvaluationOutcome(action=ctx._last_action, signal=ctx._last_signal, reason=ctx._last_reason)
+    return EvaluationOutcome(action=ctx._last_action, signal=ctx._last_signal, reason=ctx._last_reason, wake_at=ctx._wake_at)
 
 
 async def exit_native_deployment_now(db: AsyncSession, deployment: PaperNativeDeployment) -> EvaluationOutcome:
@@ -278,7 +315,10 @@ async def exit_native_deployment_now(db: AsyncSession, deployment: PaperNativeDe
     expected to check at the top of its own exit logic. Simpler than
     trying to generically unwind an arbitrary legs shape from outside the
     strategy's own code, which only the strategy itself truly understands."""
-    state = dict(deployment.state or {})
-    state["force_exit"] = True
-    deployment.state = state
-    return await run_native_strategy(db, deployment)
+    async with _native_lock:
+        if inspect(deployment).persistent:
+            await db.refresh(deployment)
+        state = dict(deployment.state or {})
+        state["force_exit"] = True
+        deployment.state = state
+        return await _run_and_record(db, deployment)
