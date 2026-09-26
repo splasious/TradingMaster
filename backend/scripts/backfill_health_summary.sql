@@ -621,6 +621,22 @@ SELECT days.d AS session,
 FROM days ORDER BY days.d;
 
 \echo
+\echo '== F6. How soon closed 5m candles reached the database (saved within 10 minutes of closing, last 8 days): delay after the candle closed, seconds'
+WITH c AS (
+  SELECT (c.ts AT TIME ZONE 'Asia/Kolkata')::date AS day,
+         extract(epoch FROM c.created_at - (c.ts + interval '5 minutes')) AS delay_s,
+         (c.ts AT TIME ZONE 'Asia/Kolkata')::time = time '09:15' AS first_candle
+  FROM ohlcv_candles c
+  WHERE c.timeframe = '5m' AND c.ts > now() - interval '8 days'
+    AND c.created_at >= c.ts + interval '5 minutes' AND c.created_at < c.ts + interval '15 minutes')
+SELECT day, count(*) AS candles, round(min(delay_s)::numeric, 1) AS min_s,
+       round(percentile_cont(0.1) WITHIN GROUP (ORDER BY delay_s)::numeric, 1) AS p10_s,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY delay_s)::numeric, 1) AS median_s,
+       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY delay_s)::numeric, 1) AS p90_s,
+       count(*) FILTER (WHERE first_candle) AS first_candles, round(min(delay_s) FILTER (WHERE first_candle)::numeric, 1) AS first_candle_min_s
+FROM c GROUP BY day ORDER BY day;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
