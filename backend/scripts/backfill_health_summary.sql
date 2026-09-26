@@ -515,11 +515,11 @@ SELECT count(*) AS stocks,
 FROM per;
 
 \echo
-\echo '== F1. F&O opening momentum (FLY OI SCN): saved code versions and deployments (repo file md5 405136770683983aa9e2dda692d2b5c5)'
+\echo '== F1. F&O opening momentum (FLY OI SCN): saved code versions and deployments (repo file md5 806e4008398d0517889dcd0ce7003c31)'
 SELECT sv.version_number, (sv.created_at AT TIME ZONE 'Asia/Kolkata')::date AS saved_on,
-       md5(replace(sv.python_code, E'\r', '')) = '405136770683983aa9e2dda692d2b5c5' AS same_as_repo,
+       md5(replace(sv.python_code, E'\r', '')) = '806e4008398d0517889dcd0ce7003c31' AS same_as_repo,
        sv.python_code LIKE '%_total_oi_pct_change%' AS total_oi_gate, sv.python_code LIKE '%second_scan_done%' AS scan_925,
-       sv.python_code LIKE '%_fetch_quotes%' AS live_quotes, sv.python_code LIKE '%0, rather than being excluded%' AS missing_oi_as_zero,
+       sv.python_code LIKE '%VERSION = 6%' AS is_v6, sv.python_code LIKE '%0, rather than being excluded%' AS missing_oi_as_zero,
        sv.python_code LIKE '%F&O Spurt%' AS titled_spurt, length(sv.python_code) AS code_chars,
        count(d.id) AS deployments, count(d.id) FILTER (WHERE d.status = 'active') AS active,
        max(d.last_evaluated_at) AS last_evaluated
