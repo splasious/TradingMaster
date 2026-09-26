@@ -712,6 +712,37 @@ SELECT (SELECT count(*) FROM broker_accounts a JOIN brokers b ON b.id = a.broker
        (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'DELTA' OR i.data_source = 'delta_exchange') AS delta_chart_candles;
 
 \echo
+\echo '== OW. Who owns what: users numbered by sign-up order (no names or emails), counts only; saved_fly_v6 = the account that saved FLY OI SCN v6'
+WITH u AS (
+  SELECT u.id, row_number() OVER (ORDER BY u.created_at, u.id) AS user_no, u.is_active,
+         EXISTS (SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id AND r.name = 'administrator') AS is_admin
+  FROM users u
+), fly AS (
+  SELECT DISTINCT strategy_id FROM strategy_versions
+  WHERE python_code LIKE '%FLY OI SCN%' OR python_code LIKE '%F&O Opening-Candle Momentum Scanner%'
+)
+SELECT u.user_no, u.is_admin, u.is_active,
+       EXISTS (SELECT 1 FROM strategy_versions sv JOIN fly ON fly.strategy_id = sv.strategy_id
+               WHERE sv.created_by = u.id AND sv.python_code LIKE '%VERSION = 6%') AS saved_fly_v6,
+       (SELECT count(*) FROM strategies s WHERE s.owner_id = u.id) AS strategies,
+       (SELECT count(*) FROM strategies s JOIN fly ON fly.strategy_id = s.id WHERE s.owner_id = u.id) AS fly_strategies,
+       (SELECT count(*) FROM paper_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id WHERE p.user_id = u.id) AS paper_deployments,
+       (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id WHERE p.user_id = u.id) AS native_deployments,
+       (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id
+         JOIN fly ON fly.strategy_id = d.strategy_id WHERE p.user_id = u.id AND d.status = 'active') AS fly_active,
+       (SELECT count(*) FROM live_deployments l WHERE l.owner_id = u.id) AS live_deployments,
+       (SELECT count(*) FROM bf_watchlists w WHERE w.owner_id = u.id) AS watchlists,
+       (SELECT count(*) FROM bf_watchlists w WHERE w.owner_id = u.id AND w.name LIKE 'NSE Nifty%') AS nse_index_watchlists,
+       (SELECT count(*) FROM broker_accounts a WHERE a.user_id = u.id) AS broker_accounts
+FROM u ORDER BY u.user_no;
+SELECT (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id
+         JOIN strategies s ON s.id = d.strategy_id WHERE s.owner_id <> p.user_id) AS native_on_others_strategy,
+       (SELECT count(*) FROM paper_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id
+         JOIN strategies s ON s.id = d.strategy_id WHERE s.owner_id <> p.user_id) AS paper_on_others_strategy,
+       (SELECT count(*) FROM live_deployments l JOIN strategies s ON s.id = l.strategy_id WHERE s.owner_id <> l.owner_id) AS live_on_others_strategy,
+       (SELECT count(*) FROM live_deployments l JOIN broker_accounts a ON a.id = l.broker_account_id WHERE a.user_id <> l.owner_id) AS live_on_others_broker;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
