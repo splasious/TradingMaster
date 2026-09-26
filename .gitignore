@@ -3,6 +3,7 @@ backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/*.db
+backend/*.db-journal
 backend/backups/
 backend/.env
 backend/.pytest_cache/
