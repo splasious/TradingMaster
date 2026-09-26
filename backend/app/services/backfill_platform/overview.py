@@ -34,7 +34,9 @@ from app.services.backfill_platform.coverage import (
     sessions_behind,
 )
 from app.services.backfill_platform.jobs import INTERRUPTED_PREFIX, unresolved_failures
-from app.services.backfill_platform.topup import RUN_RUNNING, RUN_WAITING_LOGIN, _topup_time, enabled_sources, untraded_active_contracts
+from app.services.backfill_platform.topup import (
+    RUN_RUNNING, RUN_WAITING_LOGIN, _topup_time, enabled_sources, keeps_candles, untraded_active_contracts,
+)
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.bar_periods import BAR_DURATIONS
@@ -300,7 +302,7 @@ async def _attention(db: AsyncSession, now: datetime, segments: list[dict], logi
     empty_total = (
         await db.execute(
             select(func.count()).select_from(BfSymbol)
-            .where(BfSymbol.source == "zerodha_nfo", ~exists().where(BfCoverage.symbol_id == BfSymbol.id))
+            .where(BfSymbol.source == "zerodha_nfo", ~exists().where(BfCoverage.symbol_id == BfSymbol.id), keeps_candles())
         )
     ).scalar_one()
     if empty_total:

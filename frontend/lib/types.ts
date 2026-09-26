@@ -1251,3 +1251,10 @@ export interface BfStocksOut {
   total: number;
   rows: BfStockRow[];
 }
+
+/** A native strategy that ships with the app (GET /strategies/native-builtins). */
+export interface NativeBuiltin {
+  name: string;
+  title: string;
+  version: number | null;
+}

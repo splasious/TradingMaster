@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { CheckCircle2, Plus, Trash2, X, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -16,7 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useIndicatorList, useStrategy } from "@/lib/hooks";
 import { TIMEFRAMES } from "@/lib/types";
-import type { InstrumentOut, RuleNode, ScanCondition, ScanOperator, StrategyOut, ValidateResult } from "@/lib/types";
+import type { InstrumentOut, NativeBuiltin, RuleNode, ScanCondition, ScanOperator, StrategyOut, ValidateResult } from "@/lib/types";
 
 const RAW_FIELDS = ["open", "high", "low", "close", "volume"];
 const OPERATORS: ScanOperator[] = [">", "<", ">=", "<=", "=="];
@@ -347,6 +347,7 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
                   (no instrument or % sizing to pick -- the code decides both), from the Paper Trading page&apos;s
                   Advanced Strategy Deployments section.
                 </p>
+                <BuiltinLoader onLoad={setNativeCode} />
                 <textarea
                   value={nativeCode}
                   onChange={(e) => setNativeCode(e.target.value)}
@@ -446,4 +447,49 @@ export default function StrategyBuilderPage() {
   }
 
   return <StrategyForm key={editId ?? "new"} editId={editId} existing={existing ?? null} />;
+}
+
+/** Loads the code of a strategy that ships with the app into the Advanced
+ * Python editor. Saving then stores it as a new version; a running
+ * deployment keeps the version it was started on. */
+function BuiltinLoader({ onLoad }: { onLoad: (code: string) => void }) {
+  const builtins = useQuery({
+    queryKey: ["native-builtins"],
+    queryFn: () => apiFetch<NativeBuiltin[]>("/api/v1/strategies/native-builtins"),
+  });
+  const [selected, setSelected] = useState("");
+  const [loaded, setLoaded] = useState<string | null>(null);
+  const load = useMutation({
+    mutationFn: (name: string) => apiFetch<NativeBuiltin & { code: string }>(`/api/v1/strategies/native-builtins/${name}`),
+    onSuccess: (b) => {
+      onLoad(b.code);
+      setLoaded(b.version ? `${b.title} (v${b.version})` : b.title);
+    },
+  });
+  if (!builtins.data?.length) return null;
+  return (
+    <div className="space-y-1.5 rounded-md border border-border p-3">
+      <label className="text-xs font-medium text-text-secondary">Built-in strategy code</label>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Select value={selected} onChange={(e) => setSelected(e.target.value)} className="sm:flex-1">
+          <option value="">Choose a built-in strategy...</option>
+          {builtins.data.map((b) => (
+            <option key={b.name} value={b.name}>
+              {b.title}
+              {b.version ? ` (v${b.version})` : ""}
+            </option>
+          ))}
+        </Select>
+        <Button variant="secondary" onClick={() => load.mutate(selected)} disabled={!selected || load.isPending}>
+          {load.isPending ? "Loading..." : "Load into editor"}
+        </Button>
+      </div>
+      <p className="text-xs text-text-muted">
+        {loaded
+          ? `Loaded ${loaded}. Save to store it as a new version, then start a new deployment on the Paper Trading page -- a running deployment keeps its version.`
+          : "Replaces the editor's code with the version that ships with the app."}
+      </p>
+      {load.isError && <p className="text-xs text-negative">Couldn&apos;t load it: {(load.error as Error).message}</p>}
+    </div>
+  );
 }

@@ -62,11 +62,24 @@ _OPEN_JOB_STATUSES = (BfBackfillStatus.PENDING.value, BfBackfillStatus.RUNNING.v
 
 # A contract with no saved bars is retried at the NFO rotation's timeframe.
 EMPTY_CONTRACT_TIMEFRAME = "15m"
+# Index options keep their candles (PCR, the NIFTY strategies). Stock
+# options' candles aren't downloaded any more: the F&O scan reads their open
+# interest live and from its own store (services/fo_scan/oi_store.py), and
+# they were most of the database's daily growth. Stock futures stay.
+INDEX_UNDERLYINGS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
 LOGIN_REMINDER_AT = time(8, 45)
 
 
 class ZerodhaNotConnected(Exception):
     pass
+
+
+def keeps_candles():
+    """An NFO symbol whose candles the top-up downloads: futures and index
+    options, not stock options (see INDEX_UNDERLYINGS)."""
+    return or_(
+        BfSymbol.option_type.is_(None), BfSymbol.option_type.notin_(("CE", "PE")), BfSymbol.underlying_symbol.in_(INDEX_UNDERLYINGS),
+    )
 
 
 def untraded_active_contracts(session):
@@ -75,6 +88,7 @@ def untraded_active_contracts(session):
         BfSymbol.source == "zerodha_nfo",
         or_(BfSymbol.expiry.is_(None), BfSymbol.expiry >= session),
         ~exists().where(BfCoverage.symbol_id == BfSymbol.id),
+        keeps_candles(),
     )
 
 
@@ -152,7 +166,7 @@ async def queue_topup_jobs(
         await db.execute(
             select(BfCoverage, BfSymbol)
             .join(BfSymbol, BfSymbol.id == BfCoverage.symbol_id)
-            .where(BfSymbol.source == run.source, BfCoverage.timeframe.in_(wanted))
+            .where(BfSymbol.source == run.source, BfCoverage.timeframe.in_(wanted), or_(BfSymbol.source != "zerodha_nfo", keeps_candles()))
         )
     ).all()
     queued = len(taken)

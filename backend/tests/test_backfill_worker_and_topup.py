@@ -158,6 +158,32 @@ async def test_the_daily_topup_queues_only_what_is_behind(db_session, sessions):
     assert (runs["zerodha"].jobs_total, runs["zerodha_nfo"].jobs_total) == (2, 2)
 
 
+async def test_stock_options_candles_are_not_downloaded_any_more(db_session, sessions):
+    """The F&O scan reads stock options' OI live and from its own store, so
+    the top-up skips them; index options and stock futures carry on."""
+    db_session.add(BfSettings(id=1, coverage_built_at=datetime.now(timezone.utc)))
+
+    async def nfo(name, underlying, option_type=None):
+        symbol = BfSymbol(source="zerodha_nfo", symbol=name, display_name=name, expiry=date(2026, 9, 29),
+                          underlying_symbol=underlying, option_type=option_type)
+        db_session.add(symbol)
+        await db_session.flush()
+        return symbol
+
+    stock_option = await nfo("RELIANCE26SEP1400CE", "RELIANCE", "CE")
+    await nfo("RELIANCE26SEP1300PE", "RELIANCE", "PE")  # nothing saved yet: not retried either
+    index_option = await nfo("NIFTY26SEP25000CE", "NIFTY", "CE")
+    stock_future = await nfo("RELIANCE26SEPFUT", "RELIANCE")
+    for symbol in (stock_option, index_option, stock_future):
+        await _tracked(db_session, symbol, "15m", ist(2026, 9, 24, 15, 15))
+    await db_session.commit()
+    await _connected_account(db_session)
+
+    await topup.BackfillTopupScheduler().tick(ist(2026, 9, 25, 16, 16))
+    queued = {j.symbol_id for j in (await db_session.execute(select(BfBackfillJob))).scalars().all()}
+    assert queued == {index_option.id, stock_future.id}
+
+
 async def test_the_topup_waits_for_a_zerodha_login_then_runs(db_session, sessions):
     await _topup_fixture(db_session)
     scheduler = topup.BackfillTopupScheduler()

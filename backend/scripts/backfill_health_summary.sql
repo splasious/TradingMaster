@@ -637,6 +637,28 @@ SELECT day, count(*) AS candles, round(min(delay_s)::numeric, 1) AS min_s,
 FROM c GROUP BY day ORDER BY day;
 
 \echo
+\echo '== F7. FLY OI SCN v6 data: OI store readings per session and mark, scan results per session and scan (counts and times only)'
+SELECT to_regclass('public.fo_oi_snapshots') IS NOT NULL AS has_fo_scan \gset
+\if :has_fo_scan
+SELECT session_date, mark, source, count(*) AS contracts, count(oi) AS with_oi, count(DISTINCT underlying_id) AS stocks,
+       to_char(min(captured_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS first_saved,
+       to_char(max(captured_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_saved
+FROM fo_oi_snapshots GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+SELECT count(*) AS total_rows_kept, count(DISTINCT session_date) AS sessions, min(session_date) AS since FROM fo_oi_totals;
+SELECT session_date, scan, count(*) AS stocks, count(*) FILTER (WHERE passed_move) AS moved_2pct,
+       count(*) FILTER (WHERE passed_oi) AS oi_rise_7pct, count(*) FILTER (WHERE passed_retrace) AS candle_ok,
+       count(*) FILTER (WHERE outcome NOT IN ('rejected', 'pending')) AS listed,
+       count(*) FILTER (WHERE outcome IN ('triggered', 'exited', 'eod_closed')) AS traded,
+       count(*) FILTER (WHERE oi_baseline = 'close') AS base_close, count(*) FILTER (WHERE oi_baseline = 'pre_open') AS base_pre_open,
+       count(*) FILTER (WHERE oi_baseline = 'daily_candle') AS base_daily, count(*) FILTER (WHERE passed_move AND oi_baseline IS NULL) AS base_missing,
+       to_char(min(scanned_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS scan_started,
+       to_char(max(scanned_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS scan_saved
+FROM fo_scan_results GROUP BY 1, 2 ORDER BY 1, 2;
+\else
+\echo '(not deployed yet)'
+\endif
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate

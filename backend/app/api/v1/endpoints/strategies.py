@@ -1,4 +1,7 @@
+import ast
+import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import delete, func, select
@@ -118,6 +121,38 @@ async def list_strategies(db: AsyncSession = Depends(get_db), user: User = Depen
         stmt = stmt.where(Strategy.owner_id == user.id)
     result = await db.execute(stmt.order_by(Strategy.created_at.desc()))
     return [_strategy_out(s) for s in result.scalars().all()]
+
+
+_NATIVE_BUILTINS_DIR = Path(__file__).resolve().parents[3] / "services" / "strategy" / "native_strategies"
+
+
+def _native_builtin(name: str) -> dict | None:
+    """A native strategy that ships with the app (native_strategies/<name>.py):
+    its name, the first line of its docstring, its VERSION if it declares
+    one, and its code -- what a deployment runs once it's saved as a
+    strategy version."""
+    path = _NATIVE_BUILTINS_DIR / f"{name}.py"
+    if not re.fullmatch(r"[a-z0-9_]+", name) or name.startswith("_") or not path.is_file():
+        return None
+    code = path.read_text(encoding="utf-8")
+    doc = ast.get_docstring(ast.parse(code)) or ""
+    title = next((line.strip() for line in doc.splitlines() if line.strip()), name)
+    version = re.search(r"^VERSION = (\d+)$", code, re.MULTILINE)
+    return {"name": name, "title": title, "version": int(version.group(1)) if version else None, "code": code}
+
+
+@router.get("/native-builtins")
+async def list_native_builtins(user: User = Depends(get_current_user)) -> list[dict]:
+    builtins = (_native_builtin(p.stem) for p in sorted(_NATIVE_BUILTINS_DIR.glob("*.py")))
+    return [{k: v for k, v in b.items() if k != "code"} for b in builtins if b is not None]
+
+
+@router.get("/native-builtins/{name}")
+async def get_native_builtin(name: str, user: User = Depends(get_current_user)) -> dict:
+    builtin = _native_builtin(name)
+    if builtin is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No built-in strategy by that name")
+    return builtin
 
 
 @router.get("/{strategy_id}", response_model=StrategyOut)
