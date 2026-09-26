@@ -285,7 +285,7 @@ function StrategyGrid({
           <StrategyCard
             key={s.id}
             strategy={s}
-            canEdit={s.owner_id === user?.id || hasRole("administrator")}
+            canEdit={s.owner_id === user?.id}
             canApprove={canApprove}
             canForceApprove={canForceApprove}
             onDelete={() => onDelete(s)}

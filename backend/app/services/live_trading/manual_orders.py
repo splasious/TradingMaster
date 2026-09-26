@@ -71,7 +71,7 @@ async def place_manual_order(
     broker_account = await db.get(BrokerAccount, uuid.UUID(broker_account_id))
     if instrument is None or broker_account is None:
         raise ManualOrderError("Instrument or broker account not found")
-    if broker_account.user_id != user.id and "administrator" not in user.role_names:
+    if broker_account.user_id != user.id:
         raise ManualOrderError("Not your broker account")
     if broker_account.environment != Environment.LIVE.value:
         raise ManualOrderError("Manual orders are only allowed on a 'live' environment broker account")

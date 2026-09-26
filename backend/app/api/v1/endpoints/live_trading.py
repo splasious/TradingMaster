@@ -111,14 +111,14 @@ async def start_live_deployment(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     instrument = await db.get(Instrument, uuid.UUID(payload.instrument_id))
     broker_account = await db.get(BrokerAccount, uuid.UUID(payload.broker_account_id))
     if instrument is None or broker_account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instrument or broker account not found")
-    if broker_account.user_id != user.id and "administrator" not in user.role_names:
+    if broker_account.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your broker account")
 
     account_broker = await db.get(Broker, broker_account.broker_id)
@@ -164,9 +164,7 @@ async def start_live_deployment(
 
 @router.get("/deployments", response_model=list[LiveDeploymentOut])
 async def list_live_deployments(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[LiveDeploymentOut]:
-    stmt = select(LiveDeployment)
-    if "administrator" not in user.role_names:
-        stmt = stmt.where(LiveDeployment.owner_id == user.id)
+    stmt = select(LiveDeployment).where(LiveDeployment.owner_id == user.id)
     result = await db.execute(stmt.order_by(LiveDeployment.created_at.desc()))
     return [await _deployment_out(db, d) for d in result.scalars().all()]
 
@@ -176,7 +174,7 @@ async def stop_live_deployment(deployment_id: str, db: AsyncSession = Depends(ge
     deployment = await db.get(LiveDeployment, uuid.UUID(deployment_id))
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
-    if deployment.owner_id != user.id and "administrator" not in user.role_names:
+    if deployment.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     deployment.status = "stopped"
@@ -192,7 +190,7 @@ async def evaluate_live_deployment_now(deployment_id: str, db: AsyncSession = De
     deployment = await db.get(LiveDeployment, uuid.UUID(deployment_id))
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
-    if deployment.owner_id != user.id and "administrator" not in user.role_names:
+    if deployment.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     outcome = await evaluate_live_deployment(db, deployment)
@@ -236,7 +234,7 @@ async def list_live_orders(
     deployment_id: str | None = None, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[LiveOrderOut]:
     """deployment_id omitted -> every order across the caller's own live
-    deployments plus their own manual orders (admin sees all), for the
+    deployments plus their own manual orders, for the
     cross-deployment Orders page. Still deployment_id-scoped when given,
     for the Live Trading page's existing per-deployment order history.
     Outer joins throughout: a manual order has deployment_id=None, so an
@@ -248,10 +246,9 @@ async def list_live_orders(
         .outerjoin(Strategy, Strategy.id == LiveDeployment.strategy_id)
         .outerjoin(Instrument, Instrument.id == func.coalesce(LiveDeployment.instrument_id, LiveOrder.instrument_id))
     )
+    stmt = stmt.where((LiveDeployment.owner_id == user.id) | (LiveOrder.owner_id == user.id))
     if deployment_id is not None:
         stmt = stmt.where(LiveOrder.deployment_id == uuid.UUID(deployment_id))
-    elif "administrator" not in user.role_names:
-        stmt = stmt.where((LiveDeployment.owner_id == user.id) | (LiveOrder.owner_id == user.id))
     stmt = stmt.order_by(LiveOrder.created_at.desc()).limit(_LIST_LIMIT)
 
     result = await db.execute(stmt)
@@ -271,16 +268,15 @@ async def list_live_orders(
 @router.get("/trades", response_model=list[LiveTradeOut])
 async def list_live_trades(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[LiveTradeOut]:
     """Realized P&L history (closed round-trips) across the caller's own
-    live deployments (admin sees all) -- backs the Portfolio page's
+    live deployments -- backs the Portfolio page's
     realized-P&L totals and mirrors GET /paper-trading/trades' shape."""
     stmt = (
         select(LiveTrade, LiveDeployment, Strategy, Instrument)
         .join(LiveDeployment, LiveDeployment.id == LiveTrade.deployment_id)
         .join(Strategy, Strategy.id == LiveDeployment.strategy_id)
         .join(Instrument, Instrument.id == LiveDeployment.instrument_id)
+        .where(LiveDeployment.owner_id == user.id)
     )
-    if "administrator" not in user.role_names:
-        stmt = stmt.where(LiveDeployment.owner_id == user.id)
     stmt = stmt.order_by(LiveTrade.exit_ts.desc()).limit(_LIST_LIMIT)
 
     result = await db.execute(stmt)
@@ -299,7 +295,7 @@ async def reconcile(broker_account_id: str, db: AsyncSession = Depends(get_db), 
     broker_account = await db.get(BrokerAccount, uuid.UUID(broker_account_id))
     if broker_account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Broker account not found")
-    if broker_account.user_id != user.id and "administrator" not in user.role_names:
+    if broker_account.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your broker account")
     account_broker = await db.get(Broker, broker_account.broker_id)
     if account_broker is not None and not supports_trading(account_broker.code):

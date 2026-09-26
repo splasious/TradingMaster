@@ -59,7 +59,7 @@ async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) 
     portfolio = await db.get(PaperPortfolio, uuid.UUID(portfolio_id))
     if portfolio is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capital pool not found")
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your capital pool")
     return portfolio
 
@@ -300,7 +300,7 @@ async def start_deployment(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     if strategy.code_type == "native":
         raise HTTPException(
@@ -364,7 +364,7 @@ async def stop_deployment(deployment_id: str, db: AsyncSession = Depends(get_db)
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     deployment.status = DeploymentStatus.STOPPED.value
@@ -388,7 +388,7 @@ async def delete_deployment(deployment_id: str, db: AsyncSession = Depends(get_d
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
     if deployment.status == DeploymentStatus.ACTIVE.value:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stop this deployment before deleting it.")
@@ -413,7 +413,7 @@ async def evaluate_deployment_now(deployment_id: str, db: AsyncSession = Depends
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     outcome = await evaluate_deployment(db, deployment)
@@ -430,7 +430,7 @@ async def exit_deployment_now(deployment_id: str, db: AsyncSession = Depends(get
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
 
     outcome = await exit_deployment_now_engine(db, deployment)
@@ -438,9 +438,13 @@ async def exit_deployment_now(deployment_id: str, db: AsyncSession = Depends(get
 
 
 @router.get("/orders", response_model=list[OrderOut])
-async def list_orders(deployment_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[OrderOut]:
+async def list_orders(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[OrderOut]:
     result = await db.execute(
-        select(PaperOrder).where(PaperOrder.deployment_id == uuid.UUID(deployment_id)).order_by(PaperOrder.created_at.desc())
+        select(PaperOrder)
+        .join(PaperDeployment, PaperDeployment.id == PaperOrder.deployment_id)
+        .join(PaperPortfolio, PaperPortfolio.id == PaperDeployment.portfolio_id)
+        .where(PaperOrder.deployment_id == uuid.UUID(deployment_id), PaperPortfolio.user_id == user.id)
+        .order_by(PaperOrder.created_at.desc())
     )
     return [
         OrderOut(id=str(o.id), side=o.side, quantity=o.quantity, price=o.price, status=o.status, reason=o.reason, created_at=o.created_at)
@@ -463,7 +467,11 @@ async def list_trades(
 ) -> list[TradeOut]:
     if deployment_id:
         result = await db.execute(
-            select(PaperTrade).where(PaperTrade.deployment_id == uuid.UUID(deployment_id)).order_by(PaperTrade.exit_ts.desc())
+            select(PaperTrade)
+            .join(PaperDeployment, PaperTrade.deployment_id == PaperDeployment.id)
+            .join(PaperPortfolio, PaperDeployment.portfolio_id == PaperPortfolio.id)
+            .where(PaperTrade.deployment_id == uuid.UUID(deployment_id), PaperPortfolio.user_id == user.id)
+            .order_by(PaperTrade.exit_ts.desc())
         )
         return [_trade_out(t) for t in result.scalars().all()]
 

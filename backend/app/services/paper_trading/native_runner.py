@@ -35,11 +35,13 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import NATIVE_EXIT_REASON_MAX_LEN, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import StrategyVersion
+from app.models.user import Role, UserRole
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.market_data.active_timeframe_sync_scheduler import note_native_candle_demand
 from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.tick_engine import tick_engine
+from app.services.notifications.telegram import telegram_allowed
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
@@ -296,6 +298,7 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
     # state["holdings"]) changed both alike and was never saved -- every
     # tick reloaded the old holdings and sold the same stocks again.
     ctx = NativeContext(db=db, portfolio=portfolio, deployment=deployment, state=copy.deepcopy(deployment.state or {}))
+    telegram_token = telegram_allowed.set(await _is_administrator(db, portfolio.user_id))
     try:
         await evaluate_fn(ctx)
     except Exception as exc:
@@ -303,10 +306,21 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
         deployment.state = ctx.state
         await db.commit()
         return EvaluationOutcome(action="error", reason=f"{type(exc).__name__}: {exc}", wake_at=ctx._wake_at)
+    finally:
+        telegram_allowed.reset(telegram_token)
 
     deployment.state = ctx.state
     await db.commit()
     return EvaluationOutcome(action=ctx._last_action, signal=ctx._last_signal, reason=ctx._last_reason, wake_at=ctx._wake_at)
+
+
+async def _is_administrator(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    return (
+        await db.execute(
+            select(UserRole.user_id).join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user_id, Role.name == "administrator").limit(1)
+        )
+    ).first() is not None
 
 
 async def exit_native_deployment_now(db: AsyncSession, deployment: PaperNativeDeployment) -> EvaluationOutcome:

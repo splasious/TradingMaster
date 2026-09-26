@@ -390,7 +390,7 @@ async def _watchlist_summary(db: AsyncSession, wl: BfWatchlist) -> BfWatchlistOu
 
 async def _load_owned_watchlist(db: AsyncSession, watchlist_id: str, user: User) -> BfWatchlist:
     wl = await db.get(BfWatchlist, uuid.UUID(watchlist_id))
-    if wl is None or (wl.owner_id != user.id and "administrator" not in user.role_names) or await _only_hidden_symbols(db, wl.id):
+    if wl is None or wl.owner_id != user.id or await _only_hidden_symbols(db, wl.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Watchlist not found")
     return wl
 
@@ -408,9 +408,7 @@ async def create_watchlist(
 
 @router.get("/watchlists", response_model=list[BfWatchlistOut])
 async def list_watchlists(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[BfWatchlistOut]:
-    stmt = select(BfWatchlist).order_by(BfWatchlist.created_at)
-    if "administrator" not in user.role_names:
-        stmt = stmt.where(BfWatchlist.owner_id == user.id)
+    stmt = select(BfWatchlist).where(BfWatchlist.owner_id == user.id).order_by(BfWatchlist.created_at)
     watchlists = (await db.execute(stmt)).scalars().all()
     return [await _watchlist_summary(db, wl) for wl in watchlists if not await _only_hidden_symbols(db, wl.id)]
 

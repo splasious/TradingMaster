@@ -13,6 +13,7 @@ from app.models.user import User
 from app.schemas.backtest import BacktestJobCreate, BacktestJobOut, BacktestResultOut, BacktestTradeOut
 from app.services.audit import write_audit_log
 from app.services.backtest.runner import run_backtest_job
+from app.services.ownership import owned_job, require_strategy_owner
 
 router = APIRouter()
 
@@ -37,7 +38,7 @@ async def create_backtest(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     version_result = await db.execute(
@@ -76,17 +77,15 @@ async def create_backtest(
 
 
 @router.get("/{job_id}", response_model=BacktestJobOut)
-async def get_backtest(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> BacktestJobOut:
-    job = await db.get(BacktestJob, uuid.UUID(job_id))
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest job not found")
-    return _job_out(job)
+async def get_backtest(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> BacktestJobOut:
+    return _job_out(await owned_job(db, BacktestJob, job_id, user, "Backtest job not found"))
 
 
 @router.get("", response_model=list[BacktestJobOut])
 async def list_backtests(
-    strategy_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[BacktestJobOut]:
+    await require_strategy_owner(db, strategy_id, user)
     result = await db.execute(
         select(BacktestJob).where(BacktestJob.strategy_id == uuid.UUID(strategy_id)).order_by(BacktestJob.created_at.desc())
     )
@@ -94,7 +93,8 @@ async def list_backtests(
 
 
 @router.get("/{job_id}/result", response_model=BacktestResultOut)
-async def get_backtest_result(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> BacktestResultOut:
+async def get_backtest_result(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> BacktestResultOut:
+    await owned_job(db, BacktestJob, job_id, user, "Backtest job not found")
     result = await db.execute(select(BacktestResult).where(BacktestResult.job_id == uuid.UUID(job_id)))
     row = result.scalar_one_or_none()
     if row is None:
@@ -106,7 +106,8 @@ async def get_backtest_result(job_id: str, db: AsyncSession = Depends(get_db), _
 
 
 @router.get("/{job_id}/trades", response_model=list[BacktestTradeOut])
-async def get_backtest_trades(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[BacktestTradeOut]:
+async def get_backtest_trades(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[BacktestTradeOut]:
+    await owned_job(db, BacktestJob, job_id, user, "Backtest job not found")
     result = await db.execute(
         select(BacktestTrade).where(BacktestTrade.job_id == uuid.UUID(job_id)).order_by(BacktestTrade.entry_ts)
     )
@@ -120,7 +121,7 @@ async def delete_backtest(job_id: str, db: AsyncSession = Depends(get_db), user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest job not found")
 
     strategy = await db.get(Strategy, job.strategy_id)
-    if strategy is not None and strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy is not None and strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     await write_audit_log(

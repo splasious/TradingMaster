@@ -156,7 +156,7 @@ async def _get_owned_portfolio(db: AsyncSession, user: User, portfolio_id: str) 
     portfolio = await db.get(PaperPortfolio, uuid.UUID(portfolio_id))
     if portfolio is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capital pool not found")
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your capital pool")
     return portfolio
 
@@ -166,7 +166,7 @@ async def _get_owned_native_deployment(db: AsyncSession, user: User, deployment_
     if deployment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
     portfolio = await db.get(PaperPortfolio, deployment.portfolio_id)
-    if portfolio.user_id != user.id and "administrator" not in user.role_names:
+    if portfolio.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your deployment")
     return deployment, portfolio
 
@@ -220,7 +220,7 @@ async def start_native_deployment(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     if strategy.code_type != "native":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only Advanced Python (native) strategies deploy this way")

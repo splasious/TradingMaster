@@ -17,6 +17,7 @@ from app.schemas.native_backtest import (
 )
 from app.services.audit import write_audit_log
 from app.services.backtest.native_runner import run_native_backtest_job
+from app.services.ownership import owned_job, require_strategy_owner
 from app.services.paper_trading.trade_record import resolve_leg_details
 
 router = APIRouter()
@@ -40,7 +41,7 @@ async def create_native_backtest(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     if strategy.code_type != "native":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only Advanced Python (native) strategies backtest this way")
@@ -71,17 +72,15 @@ async def create_native_backtest(
 
 
 @router.get("/{job_id}", response_model=NativeBacktestJobOut)
-async def get_native_backtest(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> NativeBacktestJobOut:
-    job = await db.get(NativeBacktestJob, uuid.UUID(job_id))
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Native backtest job not found")
-    return _job_out(job)
+async def get_native_backtest(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> NativeBacktestJobOut:
+    return _job_out(await owned_job(db, NativeBacktestJob, job_id, user, "Native backtest job not found"))
 
 
 @router.get("", response_model=list[NativeBacktestJobOut])
 async def list_native_backtests(
-    strategy_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[NativeBacktestJobOut]:
+    await require_strategy_owner(db, strategy_id, user)
     result = await db.execute(
         select(NativeBacktestJob).where(NativeBacktestJob.strategy_id == uuid.UUID(strategy_id)).order_by(NativeBacktestJob.created_at.desc())
     )
@@ -90,8 +89,9 @@ async def list_native_backtests(
 
 @router.get("/{job_id}/result", response_model=NativeBacktestResultOut)
 async def get_native_backtest_result(
-    job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> NativeBacktestResultOut:
+    await owned_job(db, NativeBacktestJob, job_id, user, "Native backtest job not found")
     result = await db.execute(select(NativeBacktestResult).where(NativeBacktestResult.job_id == uuid.UUID(job_id)))
     row = result.scalar_one_or_none()
     if row is None:
@@ -101,8 +101,9 @@ async def get_native_backtest_result(
 
 @router.get("/{job_id}/trades", response_model=list[NativeBacktestTradeOut])
 async def get_native_backtest_trades(
-    job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[NativeBacktestTradeOut]:
+    await owned_job(db, NativeBacktestJob, job_id, user, "Native backtest job not found")
     result = await db.execute(
         select(NativeBacktestTrade).where(NativeBacktestTrade.job_id == uuid.UUID(job_id)).order_by(NativeBacktestTrade.opened_at)
     )
@@ -124,7 +125,7 @@ async def delete_native_backtest(job_id: str, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Native backtest job not found")
 
     strategy = await db.get(Strategy, job.strategy_id)
-    if strategy is not None and strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy is not None and strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     await write_audit_log(

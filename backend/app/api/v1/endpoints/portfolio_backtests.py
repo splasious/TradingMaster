@@ -18,6 +18,7 @@ from app.schemas.portfolio_backtest import (
 )
 from app.services.audit import write_audit_log
 from app.services.backtest.portfolio_runner import run_portfolio_backtest_job
+from app.services.ownership import owned_job, require_strategy_owner
 
 router = APIRouter()
 
@@ -43,7 +44,7 @@ async def create_portfolio_backtest(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     version_result = await db.execute(
@@ -102,17 +103,15 @@ async def create_portfolio_backtest(
 
 
 @router.get("/{job_id}", response_model=PortfolioBacktestJobOut)
-async def get_portfolio_backtest(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> PortfolioBacktestJobOut:
-    job = await db.get(PortfolioBacktestJob, uuid.UUID(job_id))
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Portfolio backtest job not found")
-    return _job_out(job)
+async def get_portfolio_backtest(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> PortfolioBacktestJobOut:
+    return _job_out(await owned_job(db, PortfolioBacktestJob, job_id, user, "Portfolio backtest job not found"))
 
 
 @router.get("", response_model=list[PortfolioBacktestJobOut])
 async def list_portfolio_backtests(
-    strategy_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[PortfolioBacktestJobOut]:
+    await require_strategy_owner(db, strategy_id, user)
     result = await db.execute(
         select(PortfolioBacktestJob)
         .where(PortfolioBacktestJob.strategy_id == uuid.UUID(strategy_id))
@@ -122,7 +121,8 @@ async def list_portfolio_backtests(
 
 
 @router.get("/{job_id}/result", response_model=PortfolioBacktestResultOut)
-async def get_portfolio_backtest_result(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> PortfolioBacktestResultOut:
+async def get_portfolio_backtest_result(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> PortfolioBacktestResultOut:
+    await owned_job(db, PortfolioBacktestJob, job_id, user, "Portfolio backtest job not found")
     result = await db.execute(select(PortfolioBacktestResult).where(PortfolioBacktestResult.job_id == uuid.UUID(job_id)))
     row = result.scalar_one_or_none()
     if row is None:
@@ -134,7 +134,8 @@ async def get_portfolio_backtest_result(job_id: str, db: AsyncSession = Depends(
 
 
 @router.get("/{job_id}/trades", response_model=list[PortfolioBacktestTradeOut])
-async def get_portfolio_backtest_trades(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[PortfolioBacktestTradeOut]:
+async def get_portfolio_backtest_trades(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[PortfolioBacktestTradeOut]:
+    await owned_job(db, PortfolioBacktestJob, job_id, user, "Portfolio backtest job not found")
     result = await db.execute(
         select(PortfolioBacktestTrade).where(PortfolioBacktestTrade.job_id == uuid.UUID(job_id)).order_by(PortfolioBacktestTrade.entry_ts)
     )
@@ -155,7 +156,7 @@ async def delete_portfolio_backtest(job_id: str, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Portfolio backtest job not found")
 
     strategy = await db.get(Strategy, job.strategy_id)
-    if strategy is not None and strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy is not None and strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     await write_audit_log(

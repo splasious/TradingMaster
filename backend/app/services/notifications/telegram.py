@@ -16,6 +16,7 @@ Ported from the standalone FLY OI SCN scanner's notifiers.py, made async
 to match this backend's httpx convention.
 """
 
+import contextvars
 import html
 import logging
 
@@ -24,6 +25,11 @@ import httpx
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# The bot's chat is the administrator's own, so a strategy another user
+# runs mustn't post to it: the native runner sets this for each evaluation
+# from the strategy owner's role. Their in-app alerts are unaffected.
+telegram_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar("telegram_allowed", default=True)
 
 # Telegram's real per-message cap is 4096 chars; this leaves headroom for
 # the <b>/<pre> wrapper tags added below.
@@ -38,7 +44,7 @@ async def send_telegram(subject: str, body: str) -> None:
     sent at all. A failed push is logged and skipped instead; the in-app
     alert the caller creates alongside it is unaffected."""
     settings = get_settings()
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+    if not settings.telegram_bot_token or not settings.telegram_chat_id or not telegram_allowed.get():
         return
 
     api_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"

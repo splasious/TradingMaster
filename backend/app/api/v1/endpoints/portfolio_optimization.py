@@ -17,6 +17,7 @@ from app.schemas.portfolio_optimization import (
 )
 from app.services.audit import write_audit_log
 from app.services.backtest.portfolio_optimization_runner import run_portfolio_optimization_job
+from app.services.ownership import owned_job, require_strategy_owner
 
 router = APIRouter()
 
@@ -42,7 +43,7 @@ async def create_portfolio_optimization(
     strategy = await db.get(Strategy, uuid.UUID(payload.strategy_id))
     if strategy is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     if strategy.code_type != "python":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Portfolio optimization is only supported for Python strategies")
@@ -84,17 +85,15 @@ async def create_portfolio_optimization(
 
 
 @router.get("/{job_id}", response_model=PortfolioOptimizationJobOut)
-async def get_portfolio_optimization(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> PortfolioOptimizationJobOut:
-    job = await db.get(PortfolioOptimizationJob, uuid.UUID(job_id))
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Portfolio optimization job not found")
-    return _job_out(job)
+async def get_portfolio_optimization(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> PortfolioOptimizationJobOut:
+    return _job_out(await owned_job(db, PortfolioOptimizationJob, job_id, user, "Portfolio optimization job not found"))
 
 
 @router.get("", response_model=list[PortfolioOptimizationJobOut])
 async def list_portfolio_optimizations(
-    strategy_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
+    strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[PortfolioOptimizationJobOut]:
+    await require_strategy_owner(db, strategy_id, user)
     result = await db.execute(
         select(PortfolioOptimizationJob)
         .where(PortfolioOptimizationJob.strategy_id == uuid.UUID(strategy_id))
@@ -104,7 +103,8 @@ async def list_portfolio_optimizations(
 
 
 @router.get("/{job_id}/result", response_model=PortfolioOptimizationResultOut)
-async def get_portfolio_optimization_result(job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> PortfolioOptimizationResultOut:
+async def get_portfolio_optimization_result(job_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> PortfolioOptimizationResultOut:
+    await owned_job(db, PortfolioOptimizationJob, job_id, user, "Portfolio optimization job not found")
     result = await db.execute(select(PortfolioOptimizationResult).where(PortfolioOptimizationResult.job_id == uuid.UUID(job_id)))
     row = result.scalar_one_or_none()
     if row is None:
@@ -119,7 +119,7 @@ async def delete_portfolio_optimization(job_id: str, db: AsyncSession = Depends(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Portfolio optimization job not found")
 
     strategy = await db.get(Strategy, job.strategy_id)
-    if strategy is not None and strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy is not None and strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     await write_audit_log(

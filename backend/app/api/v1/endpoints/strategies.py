@@ -59,7 +59,10 @@ def _version_out(version: StrategyVersion) -> StrategyVersionOut:
 
 
 def _strategy_out(strategy: Strategy) -> StrategyOut:
-    latest = strategy.versions[-1] if strategy.versions else None
+    return _strategy_out_with(strategy, strategy.versions[-1] if strategy.versions else None)
+
+
+def _strategy_out_with(strategy: Strategy, latest: StrategyVersion | None) -> StrategyOut:
     return StrategyOut(
         id=str(strategy.id), name=strategy.name, description=strategy.description, code_type=strategy.code_type,
         status=strategy.status, owner_id=str(strategy.owner_id), created_at=strategy.created_at,
@@ -78,7 +81,7 @@ async def _load_strategy(db: AsyncSession, strategy_id: str) -> Strategy:
 
 
 def _assert_can_edit(strategy: Strategy, user: User) -> None:
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:  # administrators too: each user's strategies are private
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
 
@@ -116,11 +119,30 @@ async def create_strategy(
 
 @router.get("", response_model=list[StrategyOut])
 async def list_strategies(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> list[StrategyOut]:
-    stmt = select(Strategy).options(selectinload(Strategy.versions))
-    if "administrator" not in user.role_names:
-        stmt = stmt.where(Strategy.owner_id == user.id)
-    result = await db.execute(stmt.order_by(Strategy.created_at.desc()))
-    return [_strategy_out(s) for s in result.scalars().all()]
+    """The user's own strategies only -- administrators included -- each with
+    just its latest version (not every saved version's code)."""
+    strategies = (
+        await db.execute(select(Strategy).where(Strategy.owner_id == user.id).order_by(Strategy.created_at.desc()))
+    ).scalars().all()
+    latest_number = (
+        select(StrategyVersion.strategy_id, func.max(StrategyVersion.version_number).label("version_number"))
+        .where(StrategyVersion.strategy_id.in_([s.id for s in strategies]))
+        .group_by(StrategyVersion.strategy_id)
+        .subquery()
+    )
+    latest = {
+        v.strategy_id: v
+        for v in (
+            await db.execute(
+                select(StrategyVersion).join(
+                    latest_number,
+                    (StrategyVersion.strategy_id == latest_number.c.strategy_id)
+                    & (StrategyVersion.version_number == latest_number.c.version_number),
+                )
+            )
+        ).scalars()
+    }
+    return [_strategy_out_with(s, latest.get(s.id)) for s in strategies]
 
 
 _NATIVE_BUILTINS_DIR = Path(__file__).resolve().parents[3] / "services" / "strategy" / "native_strategies"
@@ -160,7 +182,7 @@ async def get_strategy(
     strategy_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> StrategyOut:
     strategy = await _load_strategy(db, strategy_id)
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
     return _strategy_out(strategy)
 
@@ -276,7 +298,7 @@ async def validate_strategy(
     instrument with backfilled data, else a small synthetic sample --
     either way this never touches real risk/order-placement paths."""
     strategy = await _load_strategy(db, strategy_id)
-    if strategy.owner_id != user.id and "administrator" not in user.role_names:
+    if strategy.owner_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not the owner of this strategy")
 
     version = strategy.versions[-1]
