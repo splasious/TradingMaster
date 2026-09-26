@@ -17,7 +17,7 @@ import asyncio
 import logging
 from datetime import datetime, time, timezone
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
@@ -72,6 +72,14 @@ LOGIN_REMINDER_AT = time(8, 45)
 
 class ZerodhaNotConnected(Exception):
     pass
+
+
+def is_stock_option():
+    """An NFO option on a stock (not on an index)."""
+    return and_(
+        BfSymbol.option_type.in_(("CE", "PE")),
+        or_(BfSymbol.underlying_symbol.is_(None), BfSymbol.underlying_symbol.notin_(INDEX_UNDERLYINGS)),
+    )
 
 
 def keeps_candles():

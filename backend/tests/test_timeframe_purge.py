@@ -57,3 +57,39 @@ async def test_purge_deletes_only_the_listed_timeframe(db_engine, db_session: As
     again = purge.TimeframePurge()
     await again.run()
     assert again.started_at is None
+
+
+async def test_purge_deletes_stock_options_candles_only(db_engine, db_session: AsyncSession, monkeypatch):
+    """Stock options' candles go from both tables and bf_coverage; index
+    options, futures and the contracts themselves stay."""
+    monkeypatch.setattr(purge, "AsyncSessionLocal", async_sessionmaker(bind=db_engine, expire_on_commit=False))
+    monkeypatch.setattr(purge, "PAUSE_SECONDS", 0)
+    db_session.add(BfSettings(id=1, purge_stock_options=True))
+    contracts = {
+        "RELIANCE26SEP1400CE": ("RELIANCE", "CE"), "RELIANCE26SEP1300PE": ("RELIANCE", "PE"),
+        "NIFTY26SEP25000CE": ("NIFTY", "CE"), "RELIANCE26SEPFUT": ("RELIANCE", None),
+    }
+    for name, (underlying, option_type) in contracts.items():
+        sym = BfSymbol(source="zerodha_nfo", symbol=name, display_name=name, underlying_symbol=underlying, option_type=option_type)
+        inst = Instrument(exchange="NFO", symbol=name, name=name, instrument_type="option" if option_type else "future",
+                          data_source="zerodha_kite", external_ref=name)
+        db_session.add_all([sym, inst])
+        await db_session.flush()
+        for i in range(4):
+            ts = T0 + timedelta(minutes=15 * i)
+            db_session.add(BfOhlcvBar(symbol_id=sym.id, timeframe="15m", ts=ts, open=1, high=1, low=1, close=1))
+            db_session.add(OhlcvCandle(instrument_id=inst.id, timeframe="15m", ts=ts, open=1, high=1, low=1, close=1, source="kite"))
+        db_session.add(BfCoverage(symbol_id=sym.id, timeframe="15m", first_ts=T0, last_ts=T0, bar_count=4))
+    await db_session.commit()
+
+    job = purge.TimeframePurge()
+    await job.run()
+    assert (job.deleted_backfill_bars, job.deleted_chart_candles, job.last_error) == (8, 8, None)
+
+    kept = (await db_session.execute(select(BfSymbol.symbol).join(BfOhlcvBar, BfOhlcvBar.symbol_id == BfSymbol.id).distinct())).scalars().all()
+    assert sorted(kept) == ["NIFTY26SEP25000CE", "RELIANCE26SEPFUT"]
+    assert (await db_session.execute(select(func.count()).select_from(OhlcvCandle))).scalar_one() == 8
+    assert (await db_session.execute(select(func.count()).select_from(BfCoverage))).scalar_one() == 2
+    assert (await db_session.execute(select(func.count()).select_from(BfSymbol))).scalar_one() == 4  # contracts kept
+    await db_session.refresh(await db_session.get(BfSettings, 1))
+    assert (await db_session.get(BfSettings, 1)).purge_stock_options is False

@@ -25,6 +25,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
     Uuid,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -212,6 +213,9 @@ class BfSettings(Base):
     # Timeframes whose saved candles are still being deleted in the
     # background (purge.py); emptied once they are gone.
     purge_timeframes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Stock options' saved candles are being deleted in the background
+    # (purge.py): they aren't downloaded any more (topup.INDEX_UNDERLYINGS).
+    purge_stock_options: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     # Set once bf_coverage has been built from the stored bars (coverage.py);
     # null means the build hasn't finished, so it runs again at startup.
     coverage_built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
