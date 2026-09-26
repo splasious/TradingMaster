@@ -515,6 +515,70 @@ SELECT count(*) AS stocks,
 FROM per;
 
 \echo
+\echo '== F1. F&O opening momentum (FLY OI SCN): saved code versions and deployments (repo file md5 405136770683983aa9e2dda692d2b5c5)'
+SELECT sv.version_number, (sv.created_at AT TIME ZONE 'Asia/Kolkata')::date AS saved_on,
+       md5(replace(sv.python_code, E'\r', '')) = '405136770683983aa9e2dda692d2b5c5' AS same_as_repo,
+       sv.python_code LIKE '%_total_oi_pct_change%' AS total_oi_gate, sv.python_code LIKE '%second_scan_done%' AS scan_925,
+       sv.python_code LIKE '%_fetch_quotes%' AS live_quotes,
+       count(d.id) AS deployments, count(d.id) FILTER (WHERE d.status = 'active') AS active,
+       max(d.last_evaluated_at) AS last_evaluated
+FROM strategy_versions sv LEFT JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
+WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%'
+GROUP BY sv.id, sv.version_number, sv.created_at, sv.python_code ORDER BY sv.created_at;
+
+\echo
+\echo '== F2. Its last session per deployment: 9:20/9:25 scan counts, rejection reasons, setup outcomes, OI legs counted'
+SELECT d.status, d.state->>'session_date' AS session,
+       d.state->'scan_log'->'9:20'->>'data_source' LIKE 'Kite live quotes%' AS live_quotes_920,
+       (d.state->'scan_log'->'9:20'->'counts'->>'scanned')::int AS scanned,
+       (d.state->'scan_log'->'9:20'->'counts'->>'below_momentum')::int AS below_2pct,
+       (d.state->'scan_log'->'9:20'->'counts'->>'no_price')::int AS no_price,
+       json_array_length(d.state->'scan_log'->'9:20'->'shortlisted') AS shortlisted_920,
+       json_array_length(d.state->'scan_log'->'9:25'->'shortlisted') AS shortlisted_925,
+       json_array_length(d.state->'scan_log'->'9:20'->'rejected') AS rejected_920,
+       (SELECT count(*) FROM json_array_elements(d.state->'scan_log'->'9:20'->'rejected') r WHERE r::text LIKE '%no Total OI baseline%') AS rej_no_oi_baseline,
+       (SELECT count(*) FROM json_array_elements(d.state->'scan_log'->'9:20'->'rejected') r WHERE r::text LIKE '%needs beyond%') AS rej_oi_below_7pct,
+       (SELECT count(*) FROM json_array_elements(d.state->'scan_log'->'9:20'->'rejected') r WHERE r::text LIKE '%retraced%') AS rej_retraced,
+       (SELECT count(*) FROM json_array_elements(d.state->'scan_log'->'9:20'->'rejected') r WHERE r::text LIKE '%Nifty 9:15-9:20 candle red%') AS rej_nifty_red,
+       (SELECT count(*) FROM json_each(d.state->'setups') s WHERE s.value->>'status' IN ('triggered', 'exited', 'eod_closed')) AS setups_triggered,
+       (SELECT count(*) FROM json_each(d.state->'setups') s WHERE s.value->>'status' = 'no_trigger') AS setups_no_trigger,
+       (SELECT count(*) FROM json_each(d.state->'setups') s WHERE s.value->>'status' = 'blackout') AS setups_blackout,
+       (SELECT sum((s.value->'oi_detail'->>'ce_counted')::int) || '/' || sum((s.value->'oi_detail'->>'ce_listed')::int) FROM json_each(d.state->'setups') s) AS ce_legs_counted,
+       (SELECT sum((s.value->'oi_detail'->>'pe_counted')::int) || '/' || sum((s.value->'oi_detail'->>'pe_listed')::int) FROM json_each(d.state->'setups') s) AS pe_legs_counted
+FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%'
+ORDER BY d.last_evaluated_at DESC NULLS LAST;
+
+\echo
+\echo '== F3. Its alerts per day (last 20 days): scan summary numbers, per-stock shortlists, option OI legs counted in them, trade closes'
+WITH a AS (
+  SELECT (al.created_at AT TIME ZONE 'Asia/Kolkata')::date AS day, al.title, al.message, al.alert_type
+  FROM alerts al JOIN paper_native_deployments d ON al.object_type = 'paper_native_deployment' AND al.object_id = d.id::text
+  JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+  WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%' AND al.created_at > now() - interval '20 days')
+SELECT day,
+       max((regexp_match(message, 'Scanned (\d+) F&O stocks'))[1]::int) AS scanned,
+       max((regexp_match(message, 'Below the >2% move: (\d+)'))[1]::int) AS below_2pct,
+       bool_or(message LIKE '%data: Kite live quotes%') AS live_quotes,
+       count(*) FILTER (WHERE title ~ 'shortlisted at' AND title !~ ': \d+ (more )?shortlisted at') AS stock_shortlists,
+       max((regexp_match(message, 'rejected \((\d+)\):'))[1]::int) AS rejected_after_2pct,
+       sum((regexp_match(message, 'CE \((\d+)/\d+ strikes\)'))[1]::int) AS ce_counted, sum((regexp_match(message, 'CE \(\d+/(\d+) strikes\)'))[1]::int) AS ce_listed,
+       sum((regexp_match(message, 'PE \((\d+)/\d+ strikes\)'))[1]::int) AS pe_counted, sum((regexp_match(message, 'PE \(\d+/(\d+) strikes\)'))[1]::int) AS pe_listed,
+       count(*) FILTER (WHERE title LIKE '% closed') AS closes, count(*) FILTER (WHERE title LIKE '%3:10pm report') AS reports
+FROM a GROUP BY day ORDER BY day;
+
+\echo
+\echo '== F4. Its closed paper trades (counts only)'
+SELECT count(*) AS trades, count(*) FILTER (WHERE t.pnl > 0) AS wins, count(*) FILTER (WHERE t.pnl < 0) AS losses,
+       count(*) FILTER (WHERE t.exit_reason LIKE '%SMA%') AS sma_exits, count(*) FILTER (WHERE t.exit_reason LIKE '3:10pm%') AS exits_310pm,
+       count(*) FILTER (WHERE t.exit_reason = 'manual') AS manual_exits,
+       count(DISTINCT (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date) AS trade_days,
+       min((t.opened_at AT TIME ZONE 'Asia/Kolkata')::date) AS first_trade, max((t.opened_at AT TIME ZONE 'Asia/Kolkata')::date) AS last_trade
+FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id
+JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+WHERE sv.python_code LIKE '%F&O Opening-Candle Momentum Scanner%';
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
