@@ -26,6 +26,7 @@ from app.models.backtest import (
     PortfolioOptimizationResult,
 )
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
+from app.models.fo_scan import FoOiSnapshot, FoOiTotal, FoScanResult
 from app.models.instrument import Instrument
 from app.models.live_trading import KillSwitch, LiveDeployment, LiveOrder, LivePosition, LiveTrade
 from app.models.market_data import BackfillJob, OhlcvCandle
@@ -58,6 +59,9 @@ __all__ = [
     "BackfillJob",
     "BacktestJob",
     "BacktestResult",
+    "FoOiSnapshot",
+    "FoOiTotal",
+    "FoScanResult",
     "BacktestTrade",
     "Broker",
     "BrokerAccount",

@@ -15,6 +15,7 @@ from app.services.backfill_platform.topup import backfill_topup_scheduler
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import kite_ticker_service
+from app.services.fo_scan.oi_store_scheduler import fo_oi_store_scheduler
 from app.services.live_trading.scheduler import live_trading_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
@@ -49,11 +50,13 @@ async def lifespan(app: FastAPI):
     active_timeframe_sync_scheduler.start()
     oi_snapshot_scheduler.start()
     pcr_snapshot_scheduler.start()
+    fo_oi_store_scheduler.start()
     kite_session_monitor_scheduler.start()
     kite_ticker_service.start()
     yield
     kite_ticker_service.stop()
     kite_session_monitor_scheduler.stop()
+    fo_oi_store_scheduler.stop()
     pcr_snapshot_scheduler.stop()
     oi_snapshot_scheduler.stop()
     active_timeframe_sync_scheduler.stop()
