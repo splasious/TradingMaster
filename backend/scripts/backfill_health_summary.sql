@@ -693,6 +693,25 @@ SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS s
 FROM pg_stat_user_tables WHERE relname IN ('bf_ohlcv_bars', 'ohlcv_candles') ORDER BY 1;
 
 \echo
+\echo '== H. Delta Exchange usage (counts only): instruments, deployments, backtests, watchlists, broker link, candles held'
+WITH di AS (SELECT id, is_active FROM instruments WHERE exchange = 'DELTA' OR data_source = 'delta_exchange'),
+ds AS (SELECT id FROM bf_symbols WHERE source = 'delta')
+SELECT (SELECT count(*) FROM di) AS delta_instruments, (SELECT count(*) FROM di WHERE is_active) AS active_instruments,
+       (SELECT count(*) FROM paper_deployments p JOIN di ON p.instrument_id = di.id) AS paper_deployments,
+       (SELECT count(*) FROM paper_deployments p JOIN di ON p.instrument_id = di.id WHERE p.status = 'active') AS paper_active,
+       (SELECT count(*) FROM live_deployments l JOIN di ON l.instrument_id = di.id) AS live_deployments,
+       (SELECT count(*) FROM live_deployments l JOIN di ON l.instrument_id = di.id WHERE l.status = 'active') AS live_active,
+       (SELECT count(*) FROM backtest_jobs b JOIN di ON b.instrument_id = di.id) AS backtests,
+       (SELECT count(*) FROM ds) AS backfill_symbols,
+       (SELECT count(*) FROM bf_watchlist_items w JOIN ds ON w.symbol_id = ds.id) AS watchlist_items,
+       (SELECT count(DISTINCT w.watchlist_id) FROM bf_watchlist_items w JOIN ds ON w.symbol_id = ds.id) AS watchlists_with_delta;
+SELECT (SELECT count(*) FROM broker_accounts a JOIN brokers b ON b.id = a.broker_id WHERE b.code = 'delta_exchange') AS delta_broker_accounts,
+       (SELECT count(*) FROM broker_connections c JOIN broker_accounts a ON a.id = c.broker_account_id JOIN brokers b ON b.id = a.broker_id
+         WHERE b.code = 'delta_exchange' AND c.status = 'connected') AS delta_connected,
+       (SELECT count(*) FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id WHERE s.source = 'delta') AS delta_backfill_bars,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'DELTA' OR i.data_source = 'delta_exchange') AS delta_chart_candles;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
