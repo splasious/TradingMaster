@@ -27,6 +27,7 @@ from app.services.broker.zerodha_broker import KiteAPIError
 from app.services.market_data.bar_periods import is_complete
 from app.services.market_data.base import Bar, MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
+from app.services.visibility import hidden_bf_sources
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,8 @@ INTERRUPTED_PREFIX = "Interrupted by a server restart"
 def unresolved_failures(now: datetime, days: int = 7):
     """Conditions for failed jobs of the last `days` that nothing later has
     redone -- no newer job for the same symbol and timeframe that completed
-    or is queued. What "Needs attention" counts and "Retry" re-queues."""
+    or is queued. What "Needs attention" counts and "Retry" re-queues.
+    Hidden sources' failures (see services/visibility.py) are left out."""
     later = aliased(BfBackfillJob)
     redone = exists().where(and_(
         later.symbol_id == BfBackfillJob.symbol_id, later.timeframe == BfBackfillJob.timeframe,
@@ -81,6 +83,7 @@ def unresolved_failures(now: datetime, days: int = 7):
     return (
         BfBackfillJob.status == BfBackfillStatus.FAILED.value,
         BfBackfillJob.completed_at >= now - timedelta(days=days),
+        BfBackfillJob.source.not_in(hidden_bf_sources()),
         ~redone,
     )
 

@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol, BfWatchlistItem
+from app.services.visibility import bf_source_visible, hidden_bf_sources
 
 _HEADER = ["Timestamp (UTC)", "Open", "High", "Low", "Close", "Volume"]
 
@@ -76,7 +77,7 @@ async def export_watchlist(db: AsyncSession, watchlist_id, timeframe: str | None
     symbol_bars: list[tuple[BfSymbol, list[BfOhlcvBar]]] = []
     for item in items:
         symbol = await db.get(BfSymbol, item.symbol_id)
-        if symbol is None:
+        if symbol is None or not bf_source_visible(symbol.source):
             continue
         bars = await _bars_for_symbol(db, symbol.id, timeframe)
         symbol_bars.append((symbol, bars))
@@ -92,7 +93,7 @@ async def export_watchlist(db: AsyncSession, watchlist_id, timeframe: str | None
 
 
 async def export_all(db: AsyncSession) -> bytes:
-    symbols = list((await db.execute(select(BfSymbol))).scalars().all())
+    symbols = list((await db.execute(select(BfSymbol).where(BfSymbol.source.not_in(hidden_bf_sources())))).scalars().all())
     wb = Workbook()
     summary_rows = []
     symbol_bars: list[tuple[BfSymbol, list[BfOhlcvBar]]] = []

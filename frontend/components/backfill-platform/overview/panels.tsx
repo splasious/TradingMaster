@@ -7,6 +7,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ApiError } from "@/lib/api";
+import { DELTA_VISIBLE } from "@/lib/features";
 import type { BfAttentionItem, BfQueue, BfSchedule, BfTimeframe } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -221,7 +222,9 @@ function ScheduleForm({ schedule, canEdit }: { schedule: BfSchedule; canEdit: bo
   const rows = [
     { key: "auto_topup_zerodha" as const, title: "Zerodha NSE", detail: `Every trading day ${draft.topup_time} IST · ${next}` },
     { key: "auto_topup_zerodha_nfo" as const, title: "Zerodha NFO", detail: `${draft.topup_time} IST · active contracts only (not expired)` },
-    { key: "delta_enabled" as const, title: "Delta Exchange", detail: draft.delta_enabled ? "Live 1-minute sync on" : "Frozen -- data kept, nothing fetched" },
+    ...(DELTA_VISIBLE
+      ? [{ key: "delta_enabled" as const, title: "Delta Exchange", detail: draft.delta_enabled ? "Live 1-minute sync on" : "Frozen -- data kept, nothing fetched" }]
+      : []),
   ];
   return (
     <Card id="automatic-schedule">

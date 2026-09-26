@@ -2,11 +2,14 @@ import asyncio
 import io
 
 import httpx
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.backfill_platform.worker import drain_queue
 from app.services.market_data import delta_source as delta_source_module
+
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
 
 _original_request = httpx.AsyncClient.request
 _original_get = httpx.AsyncClient.get

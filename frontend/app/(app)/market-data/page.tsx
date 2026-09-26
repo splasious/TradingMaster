@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, Tbody, Td } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useBackfillJob, useInstruments, useQuality } from "@/lib/hooks";
 import { TIMEFRAMES, type BackfillJobOut, type InstrumentOut, type InstrumentSyncResult } from "@/lib/types";
 
@@ -235,7 +236,7 @@ export default function MarketDataPage() {
               source (deliberately not merged, per that module&apos;s own spec).
             </p>
 
-            {hasRole("administrator") && <SyncInstrumentCatalog />}
+            {DELTA_VISIBLE && hasRole("administrator") && <SyncInstrumentCatalog />}
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
               <InstrumentPicker

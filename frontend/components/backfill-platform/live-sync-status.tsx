@@ -2,6 +2,7 @@
 
 import { Radio, TriangleAlert } from "lucide-react";
 
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfLiveSyncStatus, useCatalogSyncStatus } from "@/lib/hooks";
 
 export function LiveSyncStatus() {
@@ -12,24 +13,27 @@ export function LiveSyncStatus() {
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center gap-2 rounded-md border border-border bg-surface-elevated px-3 py-2 text-xs">
-        {status.running ? (
-          <Radio className="h-3.5 w-3.5 shrink-0 text-positive" />
-        ) : (
-          <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-warning" />
-        )}
-        <span className="text-text-secondary">
-          Live sync engine: <span className={status.running ? "text-positive" : "text-warning"}>{status.running ? "running" : "stopped"}</span>
-          {status.last_sync_at && (
-            <>
-              {" "}-- last polled {status.last_synced_count} symbol{status.last_synced_count === 1 ? "" : "s"} at{" "}
-              {new Date(status.last_sync_at).toLocaleTimeString()}
-            </>
+      {/* The live sync engine only polls Delta Exchange. */}
+      {DELTA_VISIBLE && (
+        <div className="flex items-center gap-2 rounded-md border border-border bg-surface-elevated px-3 py-2 text-xs">
+          {status.running ? (
+            <Radio className="h-3.5 w-3.5 shrink-0 text-positive" />
+          ) : (
+            <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-warning" />
           )}
-          {status.last_error && <span className="text-negative"> -- last error: {status.last_error}</span>}
-        </span>
-        <span className="ml-auto text-text-muted">Delta polled every 60s. NSE backfills from Zerodha instead (no background live sync, on demand from the UI).</span>
-      </div>
+          <span className="text-text-secondary">
+            Live sync engine: <span className={status.running ? "text-positive" : "text-warning"}>{status.running ? "running" : "stopped"}</span>
+            {status.last_sync_at && (
+              <>
+                {" "}-- last polled {status.last_synced_count} symbol{status.last_synced_count === 1 ? "" : "s"} at{" "}
+                {new Date(status.last_sync_at).toLocaleTimeString()}
+              </>
+            )}
+            {status.last_error && <span className="text-negative"> -- last error: {status.last_error}</span>}
+          </span>
+          <span className="ml-auto text-text-muted">Delta polled every 60s. NSE backfills from Zerodha instead (no background live sync, on demand from the UI).</span>
+        </div>
+      )}
 
       {catalogStatus && (
         <div className="flex items-center gap-2 rounded-md border border-border bg-surface-elevated px-3 py-2 text-xs">

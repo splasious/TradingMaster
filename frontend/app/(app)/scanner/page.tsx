@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useIndicatorList, useStrategies } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
 import { TIMEFRAMES } from "@/lib/types";
@@ -163,7 +164,7 @@ export default function ScannerPage() {
                     <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-36">
                       <option value="">All Markets</option>
                       <option value="NSE">NSE Markets</option>
-                      <option value="DELTA">Delta Markets</option>
+                      {DELTA_VISIBLE && <option value="DELTA">Delta Markets</option>}
                     </Select>
                   </div>
                   <div className="space-y-1.5">
@@ -351,7 +352,7 @@ export default function ScannerPage() {
                   <Select value={strategyExchange} onChange={(e) => setStrategyExchange(e.target.value)} className="w-36">
                     <option value="">All Markets</option>
                     <option value="NSE">NSE Markets</option>
-                    <option value="DELTA">Delta Markets</option>
+                    {DELTA_VISIBLE && <option value="DELTA">Delta Markets</option>}
                   </Select>
                 </div>
                 <div className="space-y-1.5">

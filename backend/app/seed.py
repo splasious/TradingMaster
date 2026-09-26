@@ -122,7 +122,8 @@ async def seed() -> None:
 
         await db.flush()
 
-        if settings.delta_api_key and settings.delta_api_secret:
+        # Not while Delta Exchange is hidden from the site (services/visibility.py).
+        if settings.show_delta_exchange and settings.delta_api_key and settings.delta_api_secret:
             await _provision_delta_account(db, admin)
 
         await db.commit()

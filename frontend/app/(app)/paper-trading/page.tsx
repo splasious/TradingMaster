@@ -73,12 +73,12 @@ function CreatePoolModal({ onClose, onCreated }: { onClose: () => void; onCreate
     <Modal open onClose={onClose} title="New Capital Pool">
       <div className="space-y-4">
         <p className="text-sm text-text-secondary">
-          A named, currency-scoped pool of capital -- e.g. one INR pool for NSE strategies, one USD pool for Delta
-          Exchange strategies. Pools are tracked independently with no currency conversion between them.
+          A named, currency-scoped pool of capital -- e.g. one INR pool for NSE strategies. Pools are tracked
+          independently with no currency conversion between them.
         </p>
         <div className="space-y-1.5">
           <label className="text-sm font-medium text-text-secondary">Name</label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Delta USD Pool" />
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. NSE Intraday Pool" />
         </div>
         <div className="flex gap-4">
           <div className="space-y-1.5">

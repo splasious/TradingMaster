@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { fmtDay, fmtSavedUpTo, fmtTime, TIMEFRAME_NAMES } from "@/components/backfill-platform/overview/format";
 import { behindLabel, FreshBadge, type FreshKind } from "@/components/backfill-platform/overview/fresh-status";
 import { Card } from "@/components/ui/card";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfFreshness } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
@@ -84,9 +85,11 @@ export function ZerodhaDataCard() {
               <Fact icon={Layers} label="Coverage">
                 {data.symbols.zerodha.toLocaleString("en-IN")} NSE · {data.symbols.zerodha_nfo.toLocaleString("en-IN")} NFO
               </Fact>
-              <Fact icon={PauseCircle} label="Delta Exchange" className="text-neutral">
-                {data.delta_paused ? "Paused" : "Live"}
-              </Fact>
+              {DELTA_VISIBLE && (
+                <Fact icon={PauseCircle} label="Delta Exchange" className="text-neutral">
+                  {data.delta_paused ? "Paused" : "Live"}
+                </Fact>
+              )}
             </div>
             <p className="mt-2.5 text-[11.5px] text-text-muted">
               Live data {data.live_window.start}-{data.live_window.end} IST · top-up after close · checked {fmtTime(data.as_of)}

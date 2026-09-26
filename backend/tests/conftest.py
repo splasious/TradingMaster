@@ -47,6 +47,15 @@ def _reset_native_candle_demand():
     active_timeframe_sync_scheduler._native_demand.clear()
 
 
+@pytest.fixture
+def show_delta(monkeypatch):
+    """Delta Exchange is hidden from the site by default (services/
+    visibility.py); tests of its still-present code paths switch it back on."""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "show_delta_exchange", True)
+
+
 @pytest_asyncio.fixture
 async def db_engine():
     db_path = f"./test_{uuid.uuid4().hex}.db"

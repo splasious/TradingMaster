@@ -409,7 +409,7 @@ export default function LiveTradingPage() {
       <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Live Trading</h1>
-          <p className="text-sm text-text-muted">Real orders through the connected Delta Exchange broker, gated by the safety checklist and risk engine.</p>
+          <p className="text-sm text-text-muted">Real orders through a connected broker, gated by the safety checklist and risk engine.</p>
         </div>
         <Button variant="destructive" onClick={() => setModalOpen(true)}>
           <Play className="h-3.5 w-3.5" /> Go Live

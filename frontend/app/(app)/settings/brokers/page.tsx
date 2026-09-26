@@ -24,7 +24,7 @@ const HDFC_PENDING_ACCOUNT_KEY = "tm_hdfc_pending_account_id";
 // Brokers whose auth needs an interactive browser login after the initial
 // api_key/api_secret connect step (registry.py's _INTERACTIVE_AUTH_BROKERS,
 // mirrored here) -- Kotak Neo is NOT here: its TOTP+MPIN credentials
-// authenticate in a single step, same as Delta.
+// authenticate in a single step.
 const INTERACTIVE_AUTH_BROKERS = new Set(["zerodha_kite", "hdfc_securities"]);
 
 const BROKER_LABELS: Record<string, string> = {
@@ -221,8 +221,8 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
         )}
 
         <p className="text-xs text-text-muted">
-          All brokers use real adapters -- real API credentials are required. Delta Exchange, Kotak Neo, Angel One
-          and Dhan authenticate immediately. Angel One and Dhan are connected for login and funds only for now --
+          All brokers use real adapters -- real API credentials are required. Kotak Neo, Angel One and Dhan
+          authenticate immediately. Angel One and Dhan are connected for login and funds only for now --
           orders can&apos;t be placed through them yet. Zerodha Kite and HDFC Securities need one more step after this: an interactive
           browser login (neither supports key/secret-only auth) -- you&apos;ll get a &quot;Login with...&quot; button
           for the account once it&apos;s created. Kotak Neo needs TOTP registration completed on their own site first
@@ -481,9 +481,8 @@ export default function BrokersSettingsPage() {
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
           <p className="text-sm text-text-muted">
-            Zerodha Kite, Delta Exchange, HDFC Securities, Kotak Neo, Angel One and Dhan all use real adapters --
-            HMAC-signed for Delta, session-token auth via interactive login for Kite and HDFC, TOTP for Kotak Neo,
-            Angel One and Dhan. Angel One and Dhan are connected for login and funds only for now.
+            Zerodha Kite, HDFC Securities, Kotak Neo, Angel One and Dhan all use real adapters -- session-token
+            auth via interactive login for Kite and HDFC, TOTP for Kotak Neo, Angel One and Dhan. Angel One and Dhan are connected for login and funds only for now.
           </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}

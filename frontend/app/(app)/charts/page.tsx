@@ -18,6 +18,7 @@ import { Select } from "@/components/ui/select";
 import { MarketContextBar } from "@/components/trading/market-context-bar";
 import { apiFetch, ApiError } from "@/lib/api";
 import { syncChartTimeScales } from "@/lib/chart-sync";
+import { DELTA_VISIBLE } from "@/lib/features";
 import {
   CATEGORY_OPTIONS,
   useCategoryMap,
@@ -367,7 +368,7 @@ export default function ChartsPage() {
           <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
             <option value="">All Markets</option>
             <option value="NSE">{marketLabel("NSE")}</option>
-            <option value="DELTA">{marketLabel("DELTA")}</option>
+            {DELTA_VISIBLE && <option value="DELTA">{marketLabel("DELTA")}</option>}
           </Select>
           <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
             <option value="">All Categories</option>
@@ -422,7 +423,7 @@ export default function ChartsPage() {
                 <Select value={exchange} onChange={(e) => setExchange(e.target.value)}>
                   <option value="">All Markets</option>
                   <option value="NSE">{marketLabel("NSE")}</option>
-                  <option value="DELTA">{marketLabel("DELTA")}</option>
+                  {DELTA_VISIBLE && <option value="DELTA">{marketLabel("DELTA")}</option>}
                 </Select>
                 <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
                   <option value="">All Categories</option>

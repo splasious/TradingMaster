@@ -5,8 +5,11 @@ import types
 import uuid
 
 import httpx
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
 
 _original_request = httpx.AsyncClient.request
 _DELTA_HOST = "api.india.delta.exchange"

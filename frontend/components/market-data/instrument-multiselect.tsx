@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useInstruments } from "@/lib/hooks";
 import type { InstrumentOut } from "@/lib/types";
 
@@ -12,7 +13,7 @@ const EXCHANGES = [
   { value: "", label: "All Markets" },
   { value: "NSE", label: "NSE Markets" },
   { value: "NFO", label: "NFO Markets (F&O)" },
-  { value: "DELTA", label: "Delta Markets" },
+  ...(DELTA_VISIBLE ? [{ value: "DELTA", label: "Delta Markets" }] : []),
 ];
 
 function contractSuffix(i: InstrumentOut): string | null {

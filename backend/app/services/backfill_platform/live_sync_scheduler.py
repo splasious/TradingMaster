@@ -29,6 +29,7 @@ from app.services.backfill_platform.jobs import save_bars
 from app.services.market_data.bar_periods import is_complete
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
+from app.services.visibility import delta_visible
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,8 @@ class BfLiveSyncScheduler:
     async def _sync_once(self) -> int:
         now = datetime.now(timezone.utc)
         async with AsyncSessionLocal() as db:
-            if not (await get_settings(db)).delta_enabled:
-                return 0  # Delta Exchange paused on the Data Backfill page -- saved data kept
+            if not delta_visible() or not (await get_settings(db)).delta_enabled:
+                return 0  # Delta Exchange hidden, or paused on the Data Backfill page -- saved data kept
             targets = (await db.execute(select(BfSymbol.id, BfSymbol.symbol).where(BfSymbol.source == "delta"))).all()
         synced = 0
         for symbol_id, name in targets:

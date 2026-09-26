@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     delta_api_key: str | None = None
     delta_api_secret: str | None = None
 
+    # Delta Exchange is hidden from the site: its saved data stays in the
+    # database, but no page or API lists, serves or accepts it (see
+    # app/services/visibility.py). True brings it back, together with
+    # DELTA_VISIBLE in frontend/lib/features.ts.
+    show_delta_exchange: bool = False
+
     # Optional: pushes native-strategy alerts (scanner shortlist, trade
     # entries/exits, EOD report) to a Telegram chat via a bot, in addition
     # to the in-app Alerts panel. A bot can't message a phone number

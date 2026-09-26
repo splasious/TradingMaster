@@ -1,6 +1,7 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "./api";
+import { DELTA_VISIBLE } from "./features";
 import type {
   AlertOut,
   AlertSeverity,
@@ -693,7 +694,7 @@ const NSE_CATEGORY_LABELS: Record<string, string> = {
 // so they can't drift from the labels useCategoryMap actually assigns.
 export const DELTA_CATEGORY_OPTIONS = Object.values(DELTA_CATEGORY_LABELS);
 export const NSE_CATEGORY_OPTIONS = Object.values(NSE_CATEGORY_LABELS);
-export const CATEGORY_OPTIONS = [...DELTA_CATEGORY_OPTIONS, ...NSE_CATEGORY_OPTIONS];
+export const CATEGORY_OPTIONS = DELTA_VISIBLE ? [...DELTA_CATEGORY_OPTIONS, ...NSE_CATEGORY_OPTIONS] : NSE_CATEGORY_OPTIONS;
 
 /** Symbol -> short category label, derived from live membership of a set of
  * curated Data Backfill Platform watchlists (matched by exact name) --
@@ -754,6 +755,7 @@ export function useBfTimeframes(source: BfSource) {
   return useQuery({
     queryKey: ["bf-timeframes", source],
     queryFn: () => apiFetch<TimeframeOptionOut[]>(`/api/v1/backfill-platform/sources/${source}/timeframes`),
+    enabled: DELTA_VISIBLE || source !== "delta",
   });
 }
 

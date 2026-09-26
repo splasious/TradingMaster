@@ -19,6 +19,7 @@ from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
 from app.services.market_data.oi_snapshot_scheduler import oi_snapshot_scheduler
 from app.services.monitoring.service import get_application_metrics, get_infra_metrics, get_trading_metrics
 from app.services.paper_trading.scheduler import diagnose_evaluation_freshness, paper_trading_scheduler
+from app.services.visibility import delta_visible
 
 router = APIRouter()
 
@@ -69,12 +70,13 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     except Exception:
         components["broker_engine"] = "error"
 
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get("https://api.india.delta.exchange/v2/products", params={"page_size": "1"})
-        components["market_data_delta"] = "healthy" if resp.status_code == 200 else "unreachable"
-    except Exception:
-        components["market_data_delta"] = "unreachable"
+    if delta_visible():
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get("https://api.india.delta.exchange/v2/products", params={"page_size": "1"})
+            components["market_data_delta"] = "healthy" if resp.status_code == 200 else "unreachable"
+        except Exception:
+            components["market_data_delta"] = "unreachable"
 
     # Non-core, same as market_data_delta above -- the platform is fine
     # without a live NFO/NSE stream (F&O/equities just fall back to

@@ -10,6 +10,7 @@ import { EmptyState, LoadingState } from "@/components/ui/data-state";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch } from "@/lib/api";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfJobs } from "@/lib/hooks";
 import type { BfBackfillJobOut, BfSource } from "@/lib/types";
 
@@ -22,7 +23,7 @@ const STATUS_ICON: Record<BfBackfillJobOut["status"], React.ReactNode> = {
 
 const SOURCE_TABS: { value: string; label: string; source?: BfSource }[] = [
   { value: "all", label: "All Sources" },
-  { value: "delta", label: "Delta Exchange", source: "delta" },
+  ...(DELTA_VISIBLE ? [{ value: "delta", label: "Delta Exchange", source: "delta" as const }] : []),
   { value: "zerodha", label: "Zerodha Kite", source: "zerodha" },
   { value: "zerodha_nfo", label: "Zerodha NFO", source: "zerodha_nfo" },
 ];

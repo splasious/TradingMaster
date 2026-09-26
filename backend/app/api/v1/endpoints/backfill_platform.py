@@ -55,15 +55,49 @@ from app.services.backfill_platform.live_sync_scheduler import bf_live_sync_sche
 from app.services.backfill_platform.timeframes import timeframes_for_source
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.resample import resample_candles
+from app.services.visibility import bf_source_visible, hidden_bf_sources
 
 router = APIRouter()
 
-_VALID_SOURCES = ("delta", "zerodha", "zerodha_nfo")
+_ALL_SOURCES = ("delta", "zerodha", "zerodha_nfo")
+
+
+def _valid_sources() -> tuple[str, ...]:
+    return tuple(s for s in _ALL_SOURCES if bf_source_visible(s))
 
 
 def _check_source(source: str) -> None:
-    if source not in _VALID_SOURCES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"source must be one of {_VALID_SOURCES}")
+    if source not in _valid_sources():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"source must be one of {_valid_sources()}")
+
+
+async def _watchlist_items(db: AsyncSession, watchlist_id: uuid.UUID) -> list[tuple[BfWatchlistItem, BfSymbol]]:
+    """A watchlist's items with their symbols, leaving out hidden sources."""
+    rows = (
+        await db.execute(
+            select(BfWatchlistItem, BfSymbol)
+            .join(BfSymbol, BfSymbol.id == BfWatchlistItem.symbol_id)
+            .where(BfWatchlistItem.watchlist_id == watchlist_id)
+        )
+    ).all()
+    return [(item, symbol) for item, symbol in rows if bf_source_visible(symbol.source)]
+
+
+async def _only_hidden_symbols(db: AsyncSession, watchlist_id: uuid.UUID) -> bool:
+    """True for a watchlist whose every symbol is from a hidden source --
+    e.g. the curated Delta token lists -- which is hidden along with it."""
+    hidden = hidden_bf_sources()
+    if not hidden:
+        return False
+    sources = (
+        await db.execute(
+            select(BfSymbol.source)
+            .join(BfWatchlistItem, BfWatchlistItem.symbol_id == BfSymbol.id)
+            .where(BfWatchlistItem.watchlist_id == watchlist_id)
+            .distinct()
+        )
+    ).scalars().all()
+    return bool(sources) and all(s in hidden for s in sources)
 
 
 # ---------------------------------------------------------------- status --
@@ -252,7 +286,7 @@ async def get_backfill_job(
     job_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
 ) -> BfBackfillJobOut:
     job = await db.get(BfBackfillJob, uuid.UUID(job_id))
-    if job is None:
+    if job is None or not bf_source_visible(job.source):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     symbol = await db.get(BfSymbol, job.symbol_id)
     return _job_out(job, symbol)
@@ -266,6 +300,8 @@ async def list_backfill_jobs(
     if source:
         _check_source(source)
         stmt = stmt.where(BfBackfillJob.source == source)
+    if hidden_bf_sources():
+        stmt = stmt.where(BfBackfillJob.source.not_in(hidden_bf_sources()))
     jobs = (await db.execute(stmt)).scalars().all()
     out = []
     for job in jobs:
@@ -281,7 +317,7 @@ async def retry_backfill_job(
     user: User = Depends(require_role("administrator", "trader", "analyst")),
 ) -> BfBackfillJobOut:
     original = await db.get(BfBackfillJob, uuid.UUID(job_id))
-    if original is None:
+    if original is None or not bf_source_visible(original.source):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     symbol = await db.get(BfSymbol, original.symbol_id)
 
@@ -325,7 +361,7 @@ async def get_completeness(
 
 
 async def _watchlist_summary(db: AsyncSession, wl: BfWatchlist) -> BfWatchlistOut:
-    items = (await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id))).scalars().all()
+    items = [item for item, _symbol in await _watchlist_items(db, wl.id)]
     never_backfilled = 0
     last_backfill_at: datetime | None = None
     for item in items:
@@ -354,7 +390,7 @@ async def _watchlist_summary(db: AsyncSession, wl: BfWatchlist) -> BfWatchlistOu
 
 async def _load_owned_watchlist(db: AsyncSession, watchlist_id: str, user: User) -> BfWatchlist:
     wl = await db.get(BfWatchlist, uuid.UUID(watchlist_id))
-    if wl is None or (wl.owner_id != user.id and "administrator" not in user.role_names):
+    if wl is None or (wl.owner_id != user.id and "administrator" not in user.role_names) or await _only_hidden_symbols(db, wl.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Watchlist not found")
     return wl
 
@@ -376,7 +412,7 @@ async def list_watchlists(db: AsyncSession = Depends(get_db), user: User = Depen
     if "administrator" not in user.role_names:
         stmt = stmt.where(BfWatchlist.owner_id == user.id)
     watchlists = (await db.execute(stmt)).scalars().all()
-    return [await _watchlist_summary(db, wl) for wl in watchlists]
+    return [await _watchlist_summary(db, wl) for wl in watchlists if not await _only_hidden_symbols(db, wl.id)]
 
 
 @router.patch("/watchlists/{watchlist_id}", response_model=BfWatchlistOut)
@@ -403,14 +439,8 @@ async def list_watchlist_items(
     watchlist_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> list[BfWatchlistItemOut]:
     await _load_owned_watchlist(db, watchlist_id, user)
-    items = (
-        await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == uuid.UUID(watchlist_id)))
-    ).scalars().all()
     out = []
-    for item in items:
-        symbol = await db.get(BfSymbol, item.symbol_id)
-        if symbol is None:
-            continue
+    for item, symbol in await _watchlist_items(db, uuid.UUID(watchlist_id)):
         bar_count = (
             await db.execute(select(func.count()).select_from(BfOhlcvBar).where(BfOhlcvBar.symbol_id == symbol.id))
         ).scalar_one()
@@ -528,13 +558,9 @@ async def sync_watchlist_to_catalog(
     become usable in Charts, Strategy Builder, Backtesting, and
     Optimization -- an explicit, user-triggered action, never automatic."""
     wl = await _load_owned_watchlist(db, watchlist_id, user)
-    items = (await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == wl.id))).scalars().all()
 
     results: list[CatalogSyncItemOut] = []
-    for item in items:
-        symbol = await db.get(BfSymbol, item.symbol_id)
-        if symbol is None:
-            continue
+    for _item, symbol in await _watchlist_items(db, wl.id):
         try:
             sync_result = await sync_symbol_to_catalog(db, symbol)
         except CatalogSyncError as exc:
@@ -591,7 +617,7 @@ async def backfill_watchlist(
     jobs_out = []
     for item in items:
         symbol = await db.get(BfSymbol, item.symbol_id)
-        if symbol is None:
+        if symbol is None or not bf_source_visible(symbol.source):
             continue
         native_timeframes = {o.value for o in timeframes_for_source(symbol.source) if o.native}
         if timeframe not in native_timeframes:
@@ -620,16 +646,11 @@ async def export_watchlist_csv(
     watchlist_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
 ) -> Response:
     await _load_owned_watchlist(db, watchlist_id, user)
-    items = (
-        await db.execute(select(BfWatchlistItem).where(BfWatchlistItem.watchlist_id == uuid.UUID(watchlist_id)))
-    ).scalars().all()
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(["source", "symbol", "display_name"])
-    for item in items:
-        symbol = await db.get(BfSymbol, item.symbol_id)
-        if symbol is not None:
-            writer.writerow([symbol.source, symbol.symbol, symbol.display_name])
+    for _item, symbol in await _watchlist_items(db, uuid.UUID(watchlist_id)):
+        writer.writerow([symbol.source, symbol.symbol, symbol.display_name])
     return Response(content=buffer.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=watchlist.csv"})
 
 
@@ -647,7 +668,7 @@ async def import_watchlist_csv(
         source = (row.get("source") or "").strip().lower()
         symbol_code = (row.get("symbol") or "").strip()
         display_name = (row.get("display_name") or symbol_code).strip()
-        if source not in _VALID_SOURCES or not symbol_code:
+        if source not in _valid_sources() or not symbol_code:
             skipped += 1
             continue
         symbol = await symbols_service.get_or_create_symbol(db, source, symbol_code, display_name)

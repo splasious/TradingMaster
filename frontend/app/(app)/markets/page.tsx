@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { CATEGORY_OPTIONS, useCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
 import { getCategory, marketLabel } from "@/lib/market";
 import type { InstrumentOut } from "@/lib/types";
@@ -139,7 +140,7 @@ export default function MarketsPage() {
       <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Markets</h1>
-          <p className="text-sm text-text-muted">Delta Markets (real history, public API).</p>
+          <p className="text-sm text-text-muted">{DELTA_VISIBLE ? "NSE and Delta Markets." : "NSE Markets."}</p>
         </div>
         <div className="flex items-center gap-3">
           {latencyMs !== null && <span className="font-financial text-xs text-text-muted">{latencyMs}ms</span>}
@@ -152,7 +153,7 @@ export default function MarketsPage() {
         <Select value={exchange} onChange={(e) => setExchange(e.target.value)} className="w-40">
           <option value="">All Markets</option>
           <option value="NSE">{marketLabel("NSE")}</option>
-          <option value="DELTA">{marketLabel("DELTA")}</option>
+          {DELTA_VISIBLE && <option value="DELTA">{marketLabel("DELTA")}</option>}
         </Select>
         <Select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="w-40">
           <option value="">All Categories</option>

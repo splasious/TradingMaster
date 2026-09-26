@@ -21,6 +21,7 @@ from app.services.audit import write_audit_log
 from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
 from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth, supports_trading
 from app.services.broker.zerodha_broker import ZerodhaKiteBroker
+from app.services.visibility import broker_visible, hidden_broker_codes
 
 router = APIRouter()
 
@@ -46,7 +47,7 @@ def _account_out(account: BrokerAccount) -> BrokerAccountOut:
 
 @router.get("", response_model=list[BrokerOut])
 async def list_brokers(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)) -> list[BrokerOut]:
-    result = await db.execute(select(Broker).order_by(Broker.name))
+    result = await db.execute(select(Broker).where(Broker.code.not_in(hidden_broker_codes())).order_by(Broker.name))
     return [_broker_out(b) for b in result.scalars().all()]
 
 
@@ -60,7 +61,7 @@ async def list_broker_accounts(
         .where(BrokerAccount.user_id == user.id)
         .order_by(BrokerAccount.created_at)
     )
-    return [_account_out(a) for a in result.scalars().all()]
+    return [_account_out(a) for a in result.scalars().all() if broker_visible(a.broker.code)]
 
 
 async def _authenticate_and_set_status(connection: BrokerConnection, broker_code: str, credentials: dict) -> None:
@@ -102,7 +103,7 @@ async def connect_broker_account(
 ) -> BrokerAccountOut:
     broker_result = await db.execute(select(Broker).where(Broker.code == payload.broker_code))
     broker = broker_result.scalar_one_or_none()
-    if broker is None or not broker.is_enabled:
+    if broker is None or not broker.is_enabled or not broker_visible(broker.code):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown or disabled broker")
 
     account = BrokerAccount(

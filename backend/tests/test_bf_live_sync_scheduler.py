@@ -11,6 +11,8 @@ from app.models.backfill_platform import BfOhlcvBar, BfSettings, BfSymbol
 from app.services.backfill_platform.live_sync_scheduler import BfLiveSyncScheduler
 from app.services.market_data.hours import nse_market_open
 
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
+
 _original_get = httpx.AsyncClient.get
 
 

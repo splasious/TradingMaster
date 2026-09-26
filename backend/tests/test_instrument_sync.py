@@ -1,9 +1,12 @@
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
 from app.services.market_data import delta_source as delta_source_module
+
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
 
 
 async def _login(client: AsyncClient, email: str, password: str) -> str:

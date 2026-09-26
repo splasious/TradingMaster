@@ -12,6 +12,7 @@ import { Card } from "@/components/ui/card";
 import { ErrorState, LoadingState } from "@/components/ui/data-state";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfOverview } from "@/lib/hooks";
 import type { BfStorage } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -113,7 +114,7 @@ export function DataBackfillDashboard() {
         <Section title="Manual backfill" hint="pick symbols, timeframes and a date range" right={<span className="text-xs text-text-muted">Advanced</span>}>
           <SourceBlock source="zerodha" />
           <SourceBlock source="zerodha_nfo" />
-          <SourceBlock source="delta" />
+          {DELTA_VISIBLE && <SourceBlock source="delta" />}
           <LiveSyncStatus />
         </Section>
         <Section title="Watchlists">

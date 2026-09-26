@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.instrument import InstrumentOut, InstrumentSyncResult
 from app.services.market_data.base import MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
+from app.services.visibility import DELTA_DATA_SOURCE, delta_visible, instrument_visible, visible_instruments
 
 router = APIRouter()
 
@@ -39,7 +40,7 @@ async def get_instrument(
     _: User = Depends(get_current_user),
 ) -> InstrumentOut:
     instrument = await db.get(Instrument, uuid.UUID(instrument_id))
-    if instrument is None or not instrument.is_active:
+    if instrument is None or not instrument.is_active or not instrument_visible(instrument):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instrument not found")
     return _out(instrument)
 
@@ -52,7 +53,7 @@ async def list_instruments(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> list[InstrumentOut]:
-    stmt = select(Instrument).where(Instrument.is_active.is_(True))
+    stmt = select(Instrument).where(Instrument.is_active.is_(True), visible_instruments())
     if exchange:
         stmt = stmt.where(Instrument.exchange == exchange)
     if q:
@@ -73,7 +74,7 @@ async def sync_instruments(
     existing = {(row[0], row[1]) for row in existing_result.all()}
 
     created = 0
-    if data_source == "delta_exchange":
+    if data_source == DELTA_DATA_SOURCE and delta_visible():
         try:
             products = await DeltaExchangeDataSource().list_rwa_token_products()
         except MarketDataSourceError as exc:

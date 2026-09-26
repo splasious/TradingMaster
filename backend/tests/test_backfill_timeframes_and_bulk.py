@@ -1,10 +1,13 @@
 from datetime import date, datetime, timezone
 
 import httpx
+import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.backfill_platform.timeframes import timeframes_for_source
+
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
 
 _original_get = httpx.AsyncClient.get
 

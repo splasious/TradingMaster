@@ -23,6 +23,7 @@ from app.schemas.scanner import (
     StrategySignalMatch,
 )
 from app.services.scanner import evaluate_condition, run_python_strategy_scan
+from app.services.visibility import visible_instruments
 
 router = APIRouter()
 
@@ -31,7 +32,7 @@ router = APIRouter()
 async def run_scan(
     payload: ScanRequest, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)
 ) -> ScanResponse:
-    stmt = select(Instrument).where(Instrument.is_active.is_(True))
+    stmt = select(Instrument).where(Instrument.is_active.is_(True), visible_instruments())
     if payload.exchange:
         stmt = stmt.where(Instrument.exchange == payload.exchange)
     instruments = (await db.execute(stmt)).scalars().all()
@@ -97,7 +98,7 @@ async def run_strategy_scan(
     if version is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Strategy has no versions")
 
-    stmt = select(Instrument).where(Instrument.is_active.is_(True))
+    stmt = select(Instrument).where(Instrument.is_active.is_(True), visible_instruments())
     if payload.exchange:
         stmt = stmt.where(Instrument.exchange == payload.exchange)
     instruments = (await db.execute(stmt)).scalars().all()

@@ -40,6 +40,7 @@ from app.services.backfill_platform.topup import (
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.bar_periods import BAR_DURATIONS
+from app.services.visibility import delta_visible
 
 SEGMENTS = {"zerodha": "NSE Equity", "zerodha_nfo": "NFO Options & Futures", "delta": "Delta Exchange"}
 UNIT = {"zerodha": "stocks", "zerodha_nfo": "contracts", "delta": "symbols"}
@@ -363,7 +364,7 @@ async def build_overview(db: AsyncSession) -> dict:
         now = datetime.now(timezone.utc)
         settings = await get_settings(db)
         session = last_completed_session(now)
-        pairs = await _pairs(db, now, ("zerodha", "zerodha_nfo", "delta"))
+        pairs = await _pairs(db, now, ("zerodha", "zerodha_nfo", "delta") if delta_visible() else ("zerodha", "zerodha_nfo"))
         updating = await _updating_pairs(db)
         segments = []
         for source in ("zerodha", "zerodha_nfo"):
@@ -374,11 +375,12 @@ async def build_overview(db: AsyncSession) -> dict:
                 "enabled": getattr(settings, "auto_topup_" + source),
                 "cells": [_cell([p for p in mine if p.timeframe == tf], tf, (source, tf) in updating) for tf in TIMEFRAMES],
             })
-        delta = [p for p in pairs if p.source == "delta"]
-        segments.append({
-            "source": "delta", "label": SEGMENTS["delta"], "unit": UNIT["delta"], "paused": not settings.delta_enabled,
-            "symbols": len({p.symbol_id for p in delta}), "last_saved_at": max((p.last_ts for p in delta), default=None), "cells": [],
-        })
+        if delta_visible():
+            delta = [p for p in pairs if p.source == "delta"]
+            segments.append({
+                "source": "delta", "label": SEGMENTS["delta"], "unit": UNIT["delta"], "paused": not settings.delta_enabled,
+                "symbols": len({p.symbol_id for p in delta}), "last_saved_at": max((p.last_ts for p in delta), default=None), "cells": [],
+            })
         login = await _zerodha_login(db)
         live = _live_today(now, await _nse_instrument_ids(db))
         return {

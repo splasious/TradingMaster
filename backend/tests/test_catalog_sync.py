@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +10,8 @@ from app.models.backfill_platform import BfOhlcvBar, BfSymbol, BfWatchlist, BfWa
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.backfill_platform.catalog_sync import CatalogSyncError, sync_symbol_to_catalog
+
+pytestmark = pytest.mark.usefixtures("show_delta")  # Delta Exchange is hidden by default
 
 
 async def _login(client: AsyncClient, email: str, password: str) -> str:

@@ -20,6 +20,7 @@ from app.services.backfill_platform.coverage import get_settings
 from app.services.backfill_platform.jobs import requeue_failed
 from app.services.backfill_platform.topup import RUN_RUNNING, ZerodhaNotConnected, cancel_run, start_manual_topup
 from app.services.backfill_platform.worker import backfill_worker
+from app.services.visibility import delta_visible
 
 router = APIRouter()
 
@@ -77,11 +78,14 @@ async def put_schedule(
 ) -> dict[str, Any]:
     settings = await get_settings(db)
     before = overview_service.schedule_out(settings, datetime.now(timezone.utc))
-    for field, value in payload.model_dump().items():
+    changes = payload.model_dump()
+    if not delta_visible():
+        changes["delta_enabled"] = settings.delta_enabled  # hidden from the site, so not switchable from it
+    for field, value in changes.items():
         setattr(settings, field, value)
     await write_audit_log(
         db, user_id=user.id, action="BF_SCHEDULE_UPDATED", object_type="bf_settings", object_id="1",
-        previous_value={k: before[k] for k in payload.model_dump()}, new_value=payload.model_dump(),
+        previous_value={k: before[k] for k in changes}, new_value=changes,
     )
     await db.commit()
     overview_service.clear_cache()

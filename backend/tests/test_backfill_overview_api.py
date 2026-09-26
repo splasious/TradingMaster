@@ -94,9 +94,7 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     assert "1m" not in nse  # 1-minute is no longer kept
     nfo15 = {c["timeframe"]: c for c in body["segments"][1]["cells"]}["15m"]
     assert (nfo15["status"], nfo15["symbols"], nfo15["expired"]) == ("ok", 0, 1)
-    assert body["segments"][2] | {"last_saved_at": None} == {
-        "source": "delta", "label": "Delta Exchange", "unit": "symbols", "paused": True, "symbols": 0, "last_saved_at": None, "cells": [],
-    }
+    assert [seg["source"] for seg in body["segments"]] == ["zerodha", "zerodha_nfo"]  # Delta Exchange is hidden
 
     # The daily bars are current, 15m is not: headline = the daily's close, flagged.
     headline = body["headline"]
