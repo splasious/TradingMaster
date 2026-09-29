@@ -121,11 +121,14 @@ async def _topup_fixture(db: AsyncSession) -> dict:
     live_option = await _symbol(db, "NIFTY26929C", "zerodha_nfo", expiry=date(2026, 9, 29))
     never_traded = await _symbol(db, "NEVERTRADED", "zerodha_nfo", expiry=date(2026, 9, 29))  # active, no bars saved yet
     await _symbol(db, "EXPIREDEMPTY", "zerodha_nfo", expiry=date(2026, 9, 22))  # expired, no bars: Kite has none
+    # expired 22 Sep; a far strike whose last trade was 17 Sep -- behind, but Kite no longer lists it
+    stopped_early = await _symbol(db, "NIFTY26922FAR", "zerodha_nfo", expiry=date(2026, 9, 22))
     await _tracked(db, behind, "15m", ist(2026, 9, 21, 15, 15))
     await _tracked(db, behind, "1d", ist(2026, 9, 24))  # Thursday's daily: current until Friday's close
     await _tracked(db, current, "15m", ist(2026, 9, 25, 15, 15))
     await _tracked(db, expired, "15m", ist(2026, 9, 22, 15, 15))
     await _tracked(db, live_option, "5m", ist(2026, 9, 24, 15, 25))
+    await _tracked(db, stopped_early, "15m", ist(2026, 9, 17, 15, 15))
     await db.commit()
     return {"behind": behind, "live_option": live_option, "never_traded": never_traded}
 

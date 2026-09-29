@@ -182,8 +182,12 @@ async def queue_topup_jobs(
         if (symbol.id, coverage.timeframe) in taken:
             continue
         last_day = ist_date(coverage.last_ts)
-        if symbol.expiry is not None and symbol.expiry <= last_day:
-            continue  # expired contract: nothing trades after its last saved day
+        if symbol.expiry is not None and (symbol.expiry <= last_day or symbol.expiry < run.session_date):
+            # Expired: nothing trades after its last saved day, and once past
+            # its expiry Kite no longer lists it -- a far strike whose trading
+            # stopped days before expiry used to be queued (and fail "not
+            # found") every day after.
+            continue
         if sessions_behind(coverage.last_ts, coverage.timeframe, now, coverage.checked_through) == 0:
             continue
         db.add(BfBackfillJob(
