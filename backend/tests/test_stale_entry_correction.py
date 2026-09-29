@@ -117,7 +117,7 @@ async def test_open_macd_holdings_outside_the_real_range_get_the_real_price(db_e
         "AMBER": {"instrument_id": str(amber.id), "quantity": 56.0, "entry_price": 6911.50,
                   "opened_at": "2026-09-28T06:30:00+00:00", "rsi_at_entry": 60.6},
     }
-    deployment, portfolio = await _deployment(db_session, "MACD - RSI - 15 MIN", {"holdings": holdings})
+    deployment, portfolio = await _deployment(db_session, "MACD - RSI - 15 MIN ", {"holdings": holdings})  # stored with a trailing space
     await db_session.commit()
     deployment_id, portfolio_id = deployment.id, portfolio.id
 

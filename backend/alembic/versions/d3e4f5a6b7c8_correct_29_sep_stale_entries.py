@@ -127,7 +127,8 @@ def upgrade() -> None:
     for strategy_name, targets in TARGETS.items():
         rows = bind.execute(
             sa.select(deployments.c.id, deployments.c.portfolio_id, deployments.c.state)
-            .join(strategies, strategies.c.id == deployments.c.strategy_id).where(strategies.c.name == strategy_name)
+            .join(strategies, strategies.c.id == deployments.c.strategy_id)
+            .where(sa.func.trim(strategies.c.name) == strategy_name)  # the MACD one is stored with a trailing space
         ).all()
         earliest = min(targets.values())
         for deployment_id, portfolio_id, state in rows:
