@@ -9,9 +9,9 @@ for (instrument, timeframe, ts) is left alone."""
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
@@ -32,6 +32,12 @@ UNDERLYING_NAME_ALIASES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
 
 # Bars copied per INSERT -- well under Postgres' 32,767 bind-parameter cap.
 _PAGE_SIZE = 1000
+# A chart candle from the last REPLACE_DAYS that differs from the backfill
+# copy -- Kite's final candle -- is replaced by it: one saved during the day
+# (the live open-interest snapshot, oi_snapshot_scheduler.py, or one saved
+# before its period ended) otherwise kept its partial values for good.
+# Health check R3 found both. Older history is left as it is.
+REPLACE_DAYS = 21
 
 
 class CatalogSyncError(Exception):
@@ -134,14 +140,16 @@ async def sync_symbol_to_catalog(
             # whenever it re-syncs an existing row.
             instrument.data_source = data_source
 
-    # Copied a page at a time with ON CONFLICT DO NOTHING: memory stays flat
-    # however much history the symbol has (a 60-day 1-minute backfill is
-    # ~17k bars), and a candle the live sync wrote in the meantime is
-    # skipped instead of failing the whole copy on the unique constraint.
+    # Copied a page at a time as an upsert: memory stays flat however much
+    # history the symbol has (a 60-day 1-minute backfill is ~17k bars), and
+    # a candle already in the chart table isn't a unique-constraint failure
+    # -- it is left alone when it matches (or is older than REPLACE_DAYS)
+    # and replaced by Kite's final values when it doesn't.
     if db.get_bind().dialect.name == "postgresql":
         from sqlalchemy.dialects.postgresql import insert
     else:
         from sqlalchemy.dialects.sqlite import insert
+    replace_from = datetime.now(timezone.utc) - timedelta(days=REPLACE_DAYS)
     synced = 0
     skipped = 0
     after: tuple[str, datetime] | None = None
@@ -164,9 +172,24 @@ async def sync_symbol_to_catalog(
             }
             for bar in page
         ]
-        result = await db.execute(
-            insert(OhlcvCandle).values(rows).on_conflict_do_nothing(index_elements=["instrument_id", "timeframe", "ts"])
+        stmt = insert(OhlcvCandle).values(rows)
+        final = stmt.excluded
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["instrument_id", "timeframe", "ts"],
+            set_={
+                "open": final.open, "high": final.high, "low": final.low, "close": final.close, "volume": final.volume,
+                "open_interest": func.coalesce(final.open_interest, OhlcvCandle.open_interest), "source": final.source,
+            },
+            where=and_(
+                OhlcvCandle.ts >= replace_from,
+                or_(
+                    OhlcvCandle.open != final.open, OhlcvCandle.high != final.high, OhlcvCandle.low != final.low,
+                    OhlcvCandle.close != final.close, OhlcvCandle.volume.is_distinct_from(final.volume),
+                    and_(final.open_interest.is_not(None), OhlcvCandle.open_interest.is_distinct_from(final.open_interest)),
+                ),
+            ),
         )
+        result = await db.execute(stmt)
         synced += result.rowcount
         skipped += len(rows) - result.rowcount
         after = (page[-1].timeframe, page[-1].ts)
