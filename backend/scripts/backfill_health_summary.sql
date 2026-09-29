@@ -850,6 +850,10 @@ FROM priced p JOIN strategies s ON s.id = p.strategy_id
 ORDER BY 1, p.at;
 
 \echo
+\echo '-- Advanced-strategy names as stored (exact bytes), with their closed trades'
+SELECT s.name, length(s.name) AS chars, encode(convert_to(s.name, 'UTF8'), 'hex') AS utf8_hex,
+       (SELECT count(*) FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id WHERE d.strategy_id = s.id) AS closed_trades
+FROM strategies s WHERE s.code_type = 'native' ORDER BY 1;
 \echo '== Q5. MACD - RSI - 15 MIN closed trades: each entry and exit vs the real 5m candle at that minute (no stock names or prices)'
 WITH legs AS (
   SELECT t.id AS trade_id, t.opened_at, t.closed_at, t.pnl,
@@ -860,7 +864,7 @@ WITH legs AS (
   FROM paper_native_trades t
   JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
   CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
-  WHERE s.name = 'MACD - RSI - 15 MIN' AND jsonb_typeof(l.value) = 'object'
+  WHERE s.name ILIKE 'MACD%RSI%15%MIN%' AND jsonb_typeof(l.value) = 'object'
 ), m5 AS (
   SELECT legs.*, i.symbol,
          date_trunc('hour', legs.opened_at) + floor(extract(minute FROM legs.opened_at) / 5) * interval '5 min' AS entry_ts,
