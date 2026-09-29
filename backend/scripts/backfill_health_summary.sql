@@ -850,6 +850,53 @@ FROM priced p JOIN strategies s ON s.id = p.strategy_id
 ORDER BY 1, p.at;
 
 \echo
+\echo '== Q5. MACD - RSI - 15 MIN closed trades: each entry and exit vs the real 5m candle at that minute (no stock names or prices)'
+WITH legs AS (
+  SELECT t.id AS trade_id, t.opened_at, t.closed_at, t.pnl,
+         CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id,
+         CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS entry_price,
+         CASE WHEN l.value->>'exit_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'exit_price')::numeric END AS exit_price,
+         CASE WHEN l.value->>'quantity' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'quantity')::numeric END AS quantity
+  FROM paper_native_trades t
+  JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE s.name = 'MACD - RSI - 15 MIN' AND jsonb_typeof(l.value) = 'object'
+), m5 AS (
+  SELECT legs.*, i.symbol,
+         date_trunc('hour', legs.opened_at) + floor(extract(minute FROM legs.opened_at) / 5) * interval '5 min' AS entry_ts,
+         date_trunc('hour', legs.closed_at) + floor(extract(minute FROM legs.closed_at) / 5) * interval '5 min' AS exit_ts
+  FROM legs JOIN instruments i ON i.id = legs.instrument_id
+), real AS (
+  SELECT m5.*, e.open AS e_open, e.low AS e_low, e.high AS e_high, x.open AS x_open, x.low AS x_low, x.high AS x_high
+  FROM m5
+  LEFT JOIN LATERAL (
+    SELECT * FROM (
+      SELECT c.open::numeric, c.low::numeric, c.high::numeric, 1 AS pref FROM ohlcv_candles c
+      WHERE c.instrument_id = m5.instrument_id AND c.timeframe = '5m' AND c.ts = m5.entry_ts
+      UNION ALL
+      SELECT b.open::numeric, b.low::numeric, b.high::numeric, 2 FROM bf_ohlcv_bars b JOIN bf_symbols bs ON bs.id = b.symbol_id
+      WHERE bs.source = 'zerodha' AND bs.symbol = m5.symbol AND b.timeframe = '5m' AND b.ts = m5.entry_ts
+    ) q ORDER BY pref LIMIT 1) e ON true
+  LEFT JOIN LATERAL (
+    SELECT * FROM (
+      SELECT c.open::numeric, c.low::numeric, c.high::numeric, 1 AS pref FROM ohlcv_candles c
+      WHERE c.instrument_id = m5.instrument_id AND c.timeframe = '5m' AND c.ts = m5.exit_ts
+      UNION ALL
+      SELECT b.open::numeric, b.low::numeric, b.high::numeric, 2 FROM bf_ohlcv_bars b JOIN bf_symbols bs ON bs.id = b.symbol_id
+      WHERE bs.source = 'zerodha' AND bs.symbol = m5.symbol AND b.timeframe = '5m' AND b.ts = m5.exit_ts
+    ) q ORDER BY pref LIMIT 1) x ON true
+)
+SELECT row_number() OVER (ORDER BY opened_at) AS trade_no,
+       to_char(opened_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS bought_ist,
+       round((entry_price - e_open) / nullif(e_open, 0) * 100, 2) AS entry_pct_off_5m_open,
+       entry_price BETWEEN e_low AND e_high AS entry_in_real_range,
+       to_char(closed_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS sold_ist,
+       round((exit_price - x_open) / nullif(x_open, 0) * 100, 2) AS exit_pct_off_5m_open,
+       exit_price BETWEEN x_low AND x_high AS exit_in_real_range,
+       round(((exit_price - entry_price) - (x_open - e_open)) / nullif(e_open, 0) * 100, 2) AS pnl_error_pct_of_cost
+FROM real ORDER BY opened_at;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
