@@ -803,6 +803,50 @@ SELECT b.symbol, b.side, to_char(b.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:
 FROM bucket b ORDER BY b.opened_at, b.symbol;
 
 \echo
+\echo '== Q4. Prices advanced strategies recorded today (IST) -- entries and exits of closed trades, entries of open holdings/legs -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
+WITH closed AS (
+  SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
+  FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE jsonb_typeof(l.value) = 'object' AND (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+  UNION ALL
+  SELECT d.strategy_id, 'trade exit', t.closed_at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END, CASE WHEN l.value->>'exit_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'exit_price')::numeric END
+  FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE jsonb_typeof(l.value) = 'object' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), open_legs AS (
+  SELECT d.strategy_id, 'open leg entry' AS kind, CASE WHEN d.state::jsonb->'position'->>'opened_at' ~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}' THEN (d.state::jsonb->'position'->>'opened_at')::timestamptz END AS at,
+         CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
+  FROM paper_native_deployments d
+  CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb->'position'->'legs') = 'object' THEN d.state::jsonb->'position'->'legs' ELSE '{}'::jsonb END) l
+  WHERE d.status = 'active' AND jsonb_typeof(l.value) = 'object'
+  UNION ALL
+  SELECT d.strategy_id, 'open holding entry', CASE WHEN h.value->>'opened_at' ~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}' THEN (h.value->>'opened_at')::timestamptz END, CASE WHEN h.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (h.value->>'instrument_id')::uuid END, CASE WHEN h.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (h.value->>'entry_price')::numeric END
+  FROM paper_native_deployments d
+  CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb->'holdings') = 'object' THEN d.state::jsonb->'holdings' ELSE '{}'::jsonb END) h
+  WHERE d.status = 'active' AND jsonb_typeof(h.value) = 'object'
+), ev AS (
+  SELECT * FROM closed UNION ALL SELECT * FROM open_legs
+), today AS (
+  SELECT ev.*, i.instrument_type, i.symbol,
+         date_trunc('hour', ev.at) + floor(extract(minute FROM ev.at) / 5) * interval '5 min' AS m5_ts
+  FROM ev JOIN instruments i ON i.id = ev.instrument_id
+  WHERE (ev.at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), priced AS (
+  SELECT t.*,
+         coalesce((SELECT c.open::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.timeframe = '5m' AND c.ts = t.m5_ts),
+                  (SELECT x.open::numeric FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+                    WHERE s.symbol = t.symbol AND s.source IN ('zerodha', 'zerodha_nfo') AND x.timeframe = '5m' AND x.ts = t.m5_ts)) AS real_open,
+         (SELECT c.close::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.created_at <= t.at ORDER BY c.ts DESC LIMIT 1) AS last_close,
+         (SELECT to_char(c.ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.created_at <= t.at ORDER BY c.ts DESC LIMIT 1) AS last_close_candle
+  FROM today t
+)
+SELECT s.name AS strategy, p.kind, p.instrument_type, to_char(p.at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS at_ist,
+       round((p.price - p.real_open) / nullif(p.real_open, 0) * 100, 2) AS pct_off_real_5m_open,
+       p.last_close_candle AS last_stored_candle_then, abs(p.price - p.last_close) < 0.01 AS price_is_that_stored_close,
+       round((p.price - p.last_close) / nullif(p.last_close, 0) * 100, 2) AS pct_off_that_close
+FROM priced p JOIN strategies s ON s.id = p.strategy_id
+ORDER BY 1, p.at;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
