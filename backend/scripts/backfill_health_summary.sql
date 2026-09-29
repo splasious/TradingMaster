@@ -832,6 +832,8 @@ WITH closed AS (
   WHERE ev.kind LIKE 'open%' OR (ev.at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
 ), priced AS (
   SELECT t.*,
+         (SELECT c.low::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.timeframe = '5m' AND c.ts = t.m5_ts) AS real_low,
+         (SELECT c.high::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.timeframe = '5m' AND c.ts = t.m5_ts) AS real_high,
          coalesce((SELECT c.open::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.timeframe = '5m' AND c.ts = t.m5_ts),
                   (SELECT x.open::numeric FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
                     WHERE s.symbol = t.symbol AND s.source IN ('zerodha', 'zerodha_nfo') AND x.timeframe = '5m' AND x.ts = t.m5_ts)) AS real_open,
@@ -841,6 +843,7 @@ WITH closed AS (
 )
 SELECT s.name AS strategy, p.kind, p.instrument_type, to_char(p.at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS at_ist,
        round((p.price - p.real_open) / nullif(p.real_open, 0) * 100, 2) AS pct_off_real_5m_open,
+       p.price BETWEEN p.real_low AND p.real_high AS within_real_5m_range,
        p.last_close_candle AS last_stored_candle_then, abs(p.price - p.last_close) < 0.01 AS price_is_that_stored_close,
        round((p.price - p.last_close) / nullif(p.last_close, 0) * 100, 2) AS pct_off_that_close
 FROM priced p JOIN strategies s ON s.id = p.strategy_id
