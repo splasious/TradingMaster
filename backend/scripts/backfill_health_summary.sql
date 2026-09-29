@@ -955,6 +955,123 @@ SELECT row_number() OVER (ORDER BY opened_at) AS trade_no,
 FROM real ORDER BY opened_at;
 
 \echo
+\echo '== R1. Backfill Step 3 check: 15m/30m/60m candles built from the saved 5m candles vs Kite''s own, last 14 days (counts only)'
+WITH tf(timeframe, mins) AS (VALUES ('15m', 15), ('30m', 30), ('60m', 60)),
+five AS (
+  SELECT b.symbol_id, b.ts, b.open, b.high, b.low, b.close, b.volume, b.open_interest,
+         date_trunc('day', b.ts) + interval '9 hours 15 minutes' AS day_open
+  FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+  WHERE s.source IN ('zerodha', 'zerodha_nfo') AND b.timeframe = '5m' AND b.ts >= date_trunc('day', now()) - interval '14 days'
+), built AS (
+  SELECT f.symbol_id, tf.timeframe,
+         f.day_open + floor(extract(epoch FROM f.ts - f.day_open) / 60 / tf.mins) * tf.mins * interval '1 minute' AS ts,
+         (array_agg(f.open ORDER BY f.ts))[1] AS open, max(f.high) AS high, min(f.low) AS low,
+         (array_agg(f.close ORDER BY f.ts DESC))[1] AS close, sum(f.volume) AS volume,
+         (array_agg(f.open_interest ORDER BY f.ts DESC))[1] AS oi
+  FROM five f CROSS JOIN tf
+  GROUP BY 1, 2, 3
+), kite AS (
+  SELECT b.symbol_id, b.timeframe, b.ts, b.open, b.high, b.low, b.close, b.volume, b.open_interest AS oi
+  FROM bf_ohlcv_bars b
+  WHERE b.timeframe IN ('15m', '30m', '60m') AND b.ts >= date_trunc('day', now()) - interval '14 days'
+    AND b.symbol_id IN (SELECT DISTINCT symbol_id FROM five)
+), kdays AS (
+  SELECT DISTINCT symbol_id, timeframe, ts::date AS d FROM kite
+), fdays AS (
+  SELECT DISTINCT symbol_id, ts::date AS d FROM five
+), b AS (  -- only days Kite has this timeframe for too
+  SELECT built.* FROM built JOIN kdays USING (symbol_id, timeframe) WHERE kdays.d = built.ts::date
+), k AS (  -- only days with saved 5m candles
+  SELECT kite.* FROM kite JOIN fdays USING (symbol_id) WHERE fdays.d = kite.ts::date
+), cmp AS (
+  SELECT coalesce(b.symbol_id, k.symbol_id) AS symbol_id, coalesce(b.timeframe, k.timeframe) AS timeframe, coalesce(b.ts, k.ts) AS ts,
+         b.ts IS NOT NULL AS has_built, k.ts IS NOT NULL AS has_kite,
+         abs(b.open - k.open) < 0.001 AS o_eq, abs(b.high - k.high) < 0.001 AS h_eq, abs(b.low - k.low) < 0.001 AS l_eq,
+         abs(b.close - k.close) < 0.001 AS c_eq, b.volume IS NOT DISTINCT FROM k.volume AS v_eq, b.oi IS NOT DISTINCT FROM k.oi AS oi_eq
+  FROM b FULL JOIN k ON k.symbol_id = b.symbol_id AND k.timeframe = b.timeframe AND k.ts = b.ts
+)
+SELECT s.source, CASE WHEN s.option_type IN ('CE', 'PE') THEN 'option' WHEN s.source = 'zerodha_nfo' THEN 'future' ELSE 'stock/index' END AS kind,
+       c.timeframe, count(DISTINCT c.symbol_id) AS symbols, count(DISTINCT c.ts::date) AS days,
+       count(*) FILTER (WHERE has_kite) AS kite_candles, count(*) FILTER (WHERE has_built) AS built_candles,
+       count(*) FILTER (WHERE has_kite AND NOT has_built) AS only_kite, count(*) FILTER (WHERE has_built AND NOT has_kite) AS only_built,
+       count(*) FILTER (WHERE o_eq AND h_eq AND l_eq AND c_eq) AS ohlc_same,
+       count(*) FILTER (WHERE o_eq AND h_eq AND l_eq AND c_eq AND v_eq) AS ohlcv_same,
+       count(*) FILTER (WHERE o_eq AND h_eq AND l_eq AND c_eq AND v_eq AND oi_eq) AS all_same,
+       count(*) FILTER (WHERE NOT o_eq) AS open_diff, count(*) FILTER (WHERE NOT h_eq) AS high_diff, count(*) FILTER (WHERE NOT l_eq) AS low_diff,
+       count(*) FILTER (WHERE NOT c_eq) AS close_diff, count(*) FILTER (WHERE NOT v_eq) AS volume_diff, count(*) FILTER (WHERE NOT oi_eq) AS oi_diff
+FROM cmp c JOIN bf_symbols s ON s.id = c.symbol_id
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+
+\echo
+\echo '-- R1b. Where the differences are: candle start time (IST) of candles that differ or exist on one side only, top 12'
+WITH tf(timeframe, mins) AS (VALUES ('15m', 15), ('30m', 30), ('60m', 60)),
+five AS (
+  SELECT b.symbol_id, b.ts, b.open, b.high, b.low, b.close, b.volume, b.open_interest,
+         date_trunc('day', b.ts) + interval '9 hours 15 minutes' AS day_open
+  FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+  WHERE s.source IN ('zerodha', 'zerodha_nfo') AND b.timeframe = '5m' AND b.ts >= date_trunc('day', now()) - interval '14 days'
+), built AS (
+  SELECT f.symbol_id, tf.timeframe,
+         f.day_open + floor(extract(epoch FROM f.ts - f.day_open) / 60 / tf.mins) * tf.mins * interval '1 minute' AS ts,
+         (array_agg(f.open ORDER BY f.ts))[1] AS open, max(f.high) AS high, min(f.low) AS low,
+         (array_agg(f.close ORDER BY f.ts DESC))[1] AS close, sum(f.volume) AS volume
+  FROM five f CROSS JOIN tf
+  GROUP BY 1, 2, 3
+), kite AS (
+  SELECT b.symbol_id, b.timeframe, b.ts, b.open, b.high, b.low, b.close, b.volume
+  FROM bf_ohlcv_bars b
+  WHERE b.timeframe IN ('15m', '30m', '60m') AND b.ts >= date_trunc('day', now()) - interval '14 days'
+    AND b.symbol_id IN (SELECT DISTINCT symbol_id FROM five)
+), kdays AS (
+  SELECT DISTINCT symbol_id, timeframe, ts::date AS d FROM kite
+), fdays AS (
+  SELECT DISTINCT symbol_id, ts::date AS d FROM five
+), b AS (
+  SELECT built.* FROM built JOIN kdays USING (symbol_id, timeframe) WHERE kdays.d = built.ts::date
+), k AS (
+  SELECT kite.* FROM kite JOIN fdays USING (symbol_id) WHERE fdays.d = kite.ts::date
+)
+SELECT coalesce(b.timeframe, k.timeframe) AS timeframe, to_char(coalesce(b.ts, k.ts), 'HH24:MI') AS candle_ist,
+       count(*) FILTER (WHERE b.ts IS NULL) AS only_kite, count(*) FILTER (WHERE k.ts IS NULL) AS only_built,
+       count(*) FILTER (WHERE b.ts IS NOT NULL AND k.ts IS NOT NULL) AS differ
+FROM b FULL JOIN k ON k.symbol_id = b.symbol_id AND k.timeframe = b.timeframe AND k.ts = b.ts
+WHERE b.ts IS NULL OR k.ts IS NULL
+   OR NOT (abs(b.open - k.open) < 0.001 AND abs(b.high - k.high) < 0.001 AND abs(b.low - k.low) < 0.001 AND abs(b.close - k.close) < 0.001
+           AND b.volume IS NOT DISTINCT FROM k.volume)
+GROUP BY 1, 2 ORDER BY count(*) DESC LIMIT 12;
+
+\echo
+\echo '== R2. NFO top-up jobs failed "not found" in the latest scheduled run: by underlying, kind and expiry (counts; example contracts for index underlyings only)'
+WITH runs AS (
+  SELECT id, row_number() OVER (ORDER BY created_at DESC) AS n FROM bf_backfill_runs WHERE source = 'zerodha_nfo' AND kind = 'scheduled'
+), failed AS (
+  SELECT j.symbol_id, j.timeframe, j.start_date, r.n FROM bf_backfill_jobs j JOIN runs r ON r.id = j.run_id
+  WHERE r.n <= 2 AND j.status = 'failed' AND j.error_message ILIKE '%not found%'
+)
+SELECT s.underlying_symbol, coalesce(s.option_type, 'FUT') AS kind, s.expiry, to_char(s.expiry, 'Dy') AS expiry_day, f.timeframe,
+       count(*) AS jobs, count(DISTINCT s.id) AS contracts,
+       count(*) FILTER (WHERE f.start_date IS NULL) AS never_had_bars,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM failed p WHERE p.n = 2 AND p.symbol_id = f.symbol_id)) AS failed_run_before_too,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM instruments i WHERE i.exchange = 'NFO' AND i.symbol = s.symbol AND i.is_active)) AS active_in_app_catalog,
+       min(s.created_at)::date AS added_first, max(s.created_at)::date AS added_last,
+       CASE WHEN s.underlying_symbol IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50')
+            THEN (array_agg(s.symbol ORDER BY s.symbol))[1] || ' .. ' || (array_agg(s.symbol ORDER BY s.symbol DESC))[1] END AS examples
+FROM failed f JOIN bf_symbols s ON s.id = f.symbol_id
+WHERE f.n = 1
+GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2;
+
+\echo
+\echo '-- R2b. The same failures in the NSE top-up (counts only)'
+SELECT j.timeframe, count(*) AS jobs, count(DISTINCT j.symbol_id) AS symbols,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM instruments i WHERE i.exchange = 'NSE' AND i.symbol = s.symbol AND i.is_active)) AS active_in_app_catalog,
+       max(c.last_ts)::date AS last_saved_bar
+FROM bf_backfill_jobs j JOIN bf_symbols s ON s.id = j.symbol_id
+LEFT JOIN bf_coverage c ON c.symbol_id = j.symbol_id AND c.timeframe = j.timeframe
+WHERE j.run_id = (SELECT id FROM bf_backfill_runs WHERE source = 'zerodha' AND kind = 'scheduled' ORDER BY created_at DESC LIMIT 1)
+  AND j.status = 'failed'
+GROUP BY 1 ORDER BY 1;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
