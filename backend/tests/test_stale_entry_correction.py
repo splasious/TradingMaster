@@ -54,13 +54,15 @@ async def _deployment(db, name: str, state: dict) -> tuple[PaperNativeDeployment
     return deployment, portfolio
 
 
-async def _instrument(db, symbol: str, price: float | None) -> Instrument:
+async def _instrument(db, symbol: str, price: float | None, *, ts: datetime = CANDLE, spread: float = 0.0) -> Instrument:
+    """With a real 5m candle at `ts` opening at `price`, ranging price +- spread."""
     inst = Instrument(exchange="NFO" if symbol.startswith("NIFTY") else "NSE", symbol=symbol, name=symbol,
                       instrument_type="option" if symbol.startswith("NIFTY") else "equity", data_source="zerodha_kite", external_ref=symbol)
     db.add(inst)
     await db.flush()
     if price is not None:
-        db.add(OhlcvCandle(instrument_id=inst.id, timeframe="5m", ts=CANDLE, open=price, high=price, low=price, close=price, source="bf"))
+        db.add(OhlcvCandle(instrument_id=inst.id, timeframe="5m", ts=ts, open=price, high=price + spread, low=price - spread,
+                           close=price, source="bf"))
     return inst
 
 
@@ -98,13 +100,21 @@ async def test_the_closed_options_trade_and_cash_get_the_real_0945_prices(db_eng
     assert len(logs) == 1 and logs[0].new_value["entries"] == {"NIFTY26O0622800CE": 131.25, "NIFTY26O0623000CE": 64.10}
 
 
-async def test_the_open_macd_holding_gets_the_real_0945_price(db_engine, db_session):
-    stock = await _instrument(db_session, "ACUTAAS", 3262.90)
-    other = await _instrument(db_session, "AMBER", 6900.0)
+async def test_open_macd_holdings_outside_the_real_range_get_the_real_price(db_engine, db_session):
+    acutaas = await _instrument(db_session, "ACUTAAS", 3262.90, spread=10)
+    delhivery = await _instrument(db_session, "DELHIVERY", 452.40, ts=datetime(2026, 9, 29, 5, 0, tzinfo=timezone.utc), spread=1.5)
+    lauruslabs = await _instrument(db_session, "LAURUSLABS", 2002.00, ts=datetime(2026, 9, 28, 6, 0, tzinfo=timezone.utc), spread=5)
+    amber = await _instrument(db_session, "AMBER", 6900.0)
     holdings = {
-        "ACUTAAS": {"instrument_id": str(stock.id), "quantity": 122.0, "entry_price": 3203.20,
+        "ACUTAAS": {"instrument_id": str(acutaas.id), "quantity": 122.0, "entry_price": 3203.20,
                     "opened_at": "2026-09-29T04:15:50.123456+00:00", "rsi_at_entry": 63.1},
-        "AMBER": {"instrument_id": str(other.id), "quantity": 56.0, "entry_price": 6911.50,
+        "DELHIVERY": {"instrument_id": str(delhivery.id), "quantity": 800.0, "entry_price": 449.80,
+                      "opened_at": "2026-09-29T05:01:12+00:00", "rsi_at_entry": 58.0},
+        # recorded inside the real candle's range: a genuine price, left alone
+        "LAURUSLABS": {"instrument_id": str(lauruslabs.id), "quantity": 196.0, "entry_price": 2001.00,
+                       "opened_at": "2026-09-28T06:00:30+00:00", "rsi_at_entry": 54.2},
+        # not a target at all
+        "AMBER": {"instrument_id": str(amber.id), "quantity": 56.0, "entry_price": 6911.50,
                   "opened_at": "2026-09-28T06:30:00+00:00", "rsi_at_entry": 60.6},
     }
     deployment, portfolio = await _deployment(db_session, "MACD - RSI - 15 MIN", {"holdings": holdings})
@@ -117,9 +127,14 @@ async def test_the_open_macd_holding_gets_the_real_0945_price(db_engine, db_sess
     db_session.expire_all()
     state = (await db_session.get(PaperNativeDeployment, deployment_id)).state
     assert state["holdings"]["ACUTAAS"] == {**holdings["ACUTAAS"], "entry_price": 3262.90}
-    assert state["holdings"]["AMBER"] == holdings["AMBER"]  # yesterday's buy: untouched
-    # Bought 122 at 3203.20; at the real 3262.90 it cost 122 x 59.70 more.
-    assert round((await db_session.get(PaperPortfolio, portfolio_id)).cash, 2) == round(500000.0 - (3262.90 - 3203.20) * 122, 2)
+    assert state["holdings"]["DELHIVERY"] == {**holdings["DELHIVERY"], "entry_price": 452.40}
+    assert state["holdings"]["LAURUSLABS"] == holdings["LAURUSLABS"]
+    assert state["holdings"]["AMBER"] == holdings["AMBER"]
+    # Each buy debited qty x recorded price; at the real price it costs qty x the difference more.
+    expected = 500000.0 - (3262.90 - 3203.20) * 122 - (452.40 - 449.80) * 800
+    assert round((await db_session.get(PaperPortfolio, portfolio_id)).cash, 2) == round(expected, 2)
+    logs = (await db_session.execute(select(AuditLog).where(AuditLog.action == "PAPER_NATIVE_ENTRY_CORRECTED"))).scalars().all()
+    assert sorted(next(iter(log.new_value["entries"])) for log in logs) == ["ACUTAAS", "DELHIVERY"]
 
 
 async def test_nothing_changes_without_the_real_candles(db_engine, db_session):
