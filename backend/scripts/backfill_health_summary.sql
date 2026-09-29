@@ -778,6 +778,31 @@ WHERE i.exchange = 'NFO' AND i.symbol LIKE 'NIFTY%'
 GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo
+\echo '== Q3. Advanced trades opened today (IST), per leg: the real 5m candle open at the entry minute, in the chart table and the backfill copy; does the recorded entry match it (entry price not printed)'
+WITH legs AS (
+  SELECT t.opened_at, t.closed_at, t.exit_reason, l.value->>'side' AS side,
+         (l.value->>'instrument_id')::uuid AS instrument_id, (l.value->>'entry_price')::numeric AS entry_price
+  FROM paper_native_trades t CROSS JOIN LATERAL jsonb_array_elements(t.legs::jsonb) l
+  WHERE (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), bucket AS (
+  SELECT legs.*, i.symbol,
+         date_trunc('hour', legs.opened_at) + floor(extract(minute FROM legs.opened_at) / 5) * interval '5 min' AS m5_ts
+  FROM legs JOIN instruments i ON i.id = legs.instrument_id
+  WHERE i.symbol LIKE 'NIFTY%' OR i.symbol LIKE 'BANKNIFTY%'
+)
+SELECT b.symbol, b.side, to_char(b.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist,
+       to_char(b.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS closed_ist, b.exit_reason,
+       to_char(b.m5_ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS m5_candle,
+       (SELECT round(c.open::numeric, 2) FROM ohlcv_candles c WHERE c.instrument_id = b.instrument_id AND c.timeframe = '5m' AND c.ts = b.m5_ts) AS chart_open,
+       (SELECT round(x.open::numeric, 2) FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+         WHERE s.source = 'zerodha_nfo' AND s.symbol = b.symbol AND x.timeframe = '5m' AND x.ts = b.m5_ts) AS backfill_open,
+       abs(b.entry_price - coalesce(
+         (SELECT c.open::numeric FROM ohlcv_candles c WHERE c.instrument_id = b.instrument_id AND c.timeframe = '5m' AND c.ts = b.m5_ts),
+         (SELECT x.open::numeric FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+           WHERE s.source = 'zerodha_nfo' AND s.symbol = b.symbol AND x.timeframe = '5m' AND x.ts = b.m5_ts))) < 0.01 AS entry_matches_real
+FROM bucket b ORDER BY b.opened_at, b.symbol;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
