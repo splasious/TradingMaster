@@ -1115,6 +1115,28 @@ WHERE saved_after_s < 300
 GROUP BY 1, 2, 3 ORDER BY count(*) DESC LIMIT 15;
 
 \echo
+\echo '-- R3c. Chart candles that differ from Kite''s final, by writer (source), timeframe and how soon after closing they were saved; which fields differ (counts only)'
+WITH tfm(timeframe, mins) AS (VALUES ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)),
+paired AS (
+  SELECT c.timeframe, c.source, i.exchange, i.instrument_type,
+         extract(epoch FROM c.created_at - (c.ts + tfm.mins * interval '1 minute')) AS saved_after_s,
+         abs(c.open - b.open) >= 0.001 AS o_diff, abs(c.high - b.high) >= 0.001 AS h_diff, abs(c.low - b.low) >= 0.001 AS l_diff,
+         abs(c.close - b.close) >= 0.001 AS c_diff, c.volume IS DISTINCT FROM b.volume AS v_diff
+  FROM ohlcv_candles c JOIN tfm USING (timeframe) JOIN instruments i ON i.id = c.instrument_id
+  JOIN bf_symbols s ON s.source = CASE WHEN i.exchange = 'NFO' THEN 'zerodha_nfo' ELSE 'zerodha' END AND s.symbol = i.symbol
+  JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = c.timeframe AND b.ts = c.ts
+  WHERE i.exchange IN ('NSE', 'NFO') AND i.data_source = 'zerodha_kite' AND c.ts >= date_trunc('day', now()) - interval '8 days'
+)
+SELECT timeframe, source, exchange, instrument_type,
+       CASE WHEN saved_after_s < 0 THEN '0: before it closed' WHEN saved_after_s < 60 THEN '1: within a minute' WHEN saved_after_s < 3600 THEN '2: within the hour'
+            ELSE '3: later' END AS saved_after_close,
+       count(*) AS candles, count(*) FILTER (WHERE o_diff OR h_diff OR l_diff OR c_diff OR v_diff) AS differ,
+       count(*) FILTER (WHERE o_diff) AS open_d, count(*) FILTER (WHERE h_diff) AS high_d, count(*) FILTER (WHERE l_diff) AS low_d,
+       count(*) FILTER (WHERE c_diff) AS close_d, count(*) FILTER (WHERE v_diff) AS volume_d
+FROM paired GROUP BY 1, 2, 3, 4, 5 HAVING count(*) FILTER (WHERE o_diff OR h_diff OR l_diff OR c_diff OR v_diff) > 0
+ORDER BY 7 DESC LIMIT 20;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
