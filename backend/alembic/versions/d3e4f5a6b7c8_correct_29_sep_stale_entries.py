@@ -5,9 +5,10 @@ runner handed them an old or simulated one (see native_runner get_price,
 fixed in market_data/live_price.py): AM OP TRD 15 MIN's two NIFTY option
 legs at 29 Sep 09:45 got 28 Sep's close, and its 11:15 straddle legs stale prices too; MACD - RSI - 15 MIN's first buys
 of a stock -- the open holdings ACUTAAS (29 Sep 09:45), DELHIVERY
-(29 Sep 10:31) and LAURUSLABS (28 Sep 11:30), and six since-closed trades
-bought 25 Sep 09:15 and 12:15 and 28 Sep 12:00, 13:30 and 14:00 -- got
-prices outside the real market range (health check Q4/Q5).
+(29 Sep 10:31), LAURUSLABS (28 Sep 11:30, sold 29 Sep), the three buys of
+29 Sep 11:15 and 13:00, and six since-closed trades bought 25 Sep 09:15
+and 12:15 and 28 Sep 12:00, 13:30 and 14:00 -- got prices outside the real
+market range (health check Q4/Q5).
 
 Each such entry becomes the real price when it was bought -- the open of
 the 5-minute candle it was bought in -- wherever it is recorded now: a
@@ -53,6 +54,8 @@ TARGETS = {
         datetime(2026, 9, 28, 8, 30, tzinfo=UTC),  # 28 Sep 14:00 IST: closed trade 13
         datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 29 Sep 09:45 IST: ACUTAAS
         datetime(2026, 9, 29, 5, 0, tzinfo=UTC),  # 29 Sep 10:30 IST: DELHIVERY
+        datetime(2026, 9, 29, 5, 45, tzinfo=UTC),  # 29 Sep 11:15 IST: two buys
+        datetime(2026, 9, 29, 7, 30, tzinfo=UTC),  # 29 Sep 13:00 IST: one buy
     ],
 }
 CANDLE = timedelta(minutes=5)
