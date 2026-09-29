@@ -1072,6 +1072,49 @@ WHERE j.run_id = (SELECT id FROM bf_backfill_runs WHERE source = 'zerodha' AND k
 GROUP BY 1 ORDER BY 1;
 
 \echo
+\echo '== R3. Chart-table candles (what strategies read) vs Kite''s final candle (the backfill copy downloaded in the evening), last 8 days: by how soon after closing the chart candle was saved (counts only)'
+WITH tfm(timeframe, mins) AS (VALUES ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)),
+paired AS (
+  SELECT c.timeframe, c.source, c.ts, c.open, c.high, c.low, c.close, c.volume,
+         extract(epoch FROM c.created_at - (c.ts + tfm.mins * interval '1 minute')) AS saved_after_s,
+         b.open AS b_open, b.high AS b_high, b.low AS b_low, b.close AS b_close, b.volume AS b_volume
+  FROM ohlcv_candles c JOIN tfm USING (timeframe) JOIN instruments i ON i.id = c.instrument_id
+  JOIN bf_symbols s ON s.source = CASE WHEN i.exchange = 'NFO' THEN 'zerodha_nfo' ELSE 'zerodha' END AND s.symbol = i.symbol
+  JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = c.timeframe AND b.ts = c.ts
+  WHERE i.exchange IN ('NSE', 'NFO') AND i.data_source = 'zerodha_kite' AND c.ts >= date_trunc('day', now()) - interval '8 days'
+)
+SELECT timeframe,
+       CASE WHEN saved_after_s < 10 THEN '1: under 10 s' WHEN saved_after_s < 60 THEN '2: 10-60 s' WHEN saved_after_s < 300 THEN '3: 1-5 min'
+            WHEN saved_after_s < 3600 THEN '4: 5-60 min' ELSE '5: later' END AS saved_after_close,
+       count(*) AS candles,
+       count(*) FILTER (WHERE NOT (abs(open - b_open) < 0.001 AND abs(high - b_high) < 0.001 AND abs(low - b_low) < 0.001 AND abs(close - b_close) < 0.001)) AS price_differs,
+       count(*) FILTER (WHERE abs(close - b_close) >= 0.001) AS close_differs,
+       count(*) FILTER (WHERE abs(high - b_high) >= 0.001 OR abs(low - b_low) >= 0.001) AS high_low_differs,
+       count(*) FILTER (WHERE volume IS DISTINCT FROM b_volume) AS volume_differs,
+       round(avg(abs(close - b_close) / nullif(b_close, 0) * 100) FILTER (WHERE abs(close - b_close) >= 0.001)::numeric, 3) AS avg_close_diff_pct,
+       round(max(abs(close - b_close) / nullif(b_close, 0) * 100)::numeric, 3) AS max_close_diff_pct
+FROM paired GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '-- R3b. Chart candles saved within 5 minutes of closing whose price differs from Kite''s final: by writer (source) and candle time (IST), top 15'
+WITH tfm(timeframe, mins) AS (VALUES ('5m', 5), ('15m', 15), ('30m', 30), ('60m', 60)),
+paired AS (
+  SELECT c.timeframe, c.source, c.ts, c.open, c.high, c.low, c.close,
+         extract(epoch FROM c.created_at - (c.ts + tfm.mins * interval '1 minute')) AS saved_after_s,
+         b.open AS b_open, b.high AS b_high, b.low AS b_low, b.close AS b_close
+  FROM ohlcv_candles c JOIN tfm USING (timeframe) JOIN instruments i ON i.id = c.instrument_id
+  JOIN bf_symbols s ON s.source = CASE WHEN i.exchange = 'NFO' THEN 'zerodha_nfo' ELSE 'zerodha' END AND s.symbol = i.symbol
+  JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = c.timeframe AND b.ts = c.ts
+  WHERE i.exchange IN ('NSE', 'NFO') AND i.data_source = 'zerodha_kite' AND c.ts >= date_trunc('day', now()) - interval '8 days'
+)
+SELECT timeframe, source, to_char(ts, 'HH24:MI') AS candle_ist, count(*) AS candles,
+       round(avg(saved_after_s)::numeric, 1) AS avg_saved_after_s
+FROM paired
+WHERE saved_after_s < 300
+  AND NOT (abs(open - b_open) < 0.001 AND abs(high - b_high) < 0.001 AND abs(low - b_low) < 0.001 AND abs(close - b_close) < 0.001)
+GROUP BY 1, 2, 3 ORDER BY count(*) DESC LIMIT 15;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
