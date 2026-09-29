@@ -137,6 +137,42 @@ async def test_open_macd_holdings_outside_the_real_range_get_the_real_price(db_e
     assert sorted(next(iter(log.new_value["entries"])) for log in logs) == ["ACUTAAS", "DELHIVERY"]
 
 
+async def test_closed_macd_trades_bought_at_a_wrong_price_are_corrected(db_engine, db_session):
+    open_915 = datetime(2026, 9, 25, 3, 45, tzinfo=timezone.utc)  # 25 Sep 09:15 IST, a listed candle
+    wrong = await _instrument(db_session, "STOCKA", 1000.0, ts=open_915, spread=4)
+    right = await _instrument(db_session, "STOCKB", 500.0, ts=open_915, spread=2)
+    unlisted = await _instrument(db_session, "STOCKC", 200.0, ts=datetime(2026, 9, 25, 4, 30, tzinfo=timezone.utc), spread=1)
+    deployment, portfolio = await _deployment(db_session, "MACD - RSI - 15 MIN ", {"holdings": {}})
+
+    def trade(inst, opened, entry, exit_price, qty):
+        return PaperNativeTrade(
+            deployment_id=deployment.id, opened_at=opened, closed_at=opened.replace(hour=9), exit_reason="signal",
+            legs=[{"instrument_id": str(inst.id), "side": "long", "quantity": qty, "entry_price": entry, "exit_price": exit_price}],
+            pnl=(exit_price - entry) * qty, pnl_pct=0.0,
+        )
+
+    at_915 = datetime(2026, 9, 25, 3, 45, 3, tzinfo=timezone.utc)
+    trades = [
+        trade(wrong, at_915, 989.60, 1010.0, 100.0),  # outside 996-1004: corrected to 1000
+        trade(right, at_915, 500.80, 505.0, 200.0),  # inside 498-502: left alone
+        trade(unlisted, datetime(2026, 9, 25, 4, 30, 5, tzinfo=timezone.utc), 190.0, 199.0, 50.0),  # not a listed candle
+    ]
+    db_session.add_all(trades)
+    await db_session.commit()
+    ids, portfolio_id = [t.id for t in trades], portfolio.id
+
+    await _run_migration(db_engine)
+    await _run_migration(db_engine)
+
+    db_session.expire_all()
+    fixed, kept, untouched = [await db_session.get(PaperNativeTrade, i) for i in ids]
+    assert fixed.legs[0]["entry_price"] == 1000.0 and round(fixed.pnl, 2) == round((1010.0 - 1000.0) * 100, 2)
+    assert kept.legs[0]["entry_price"] == 500.80
+    assert untouched.legs[0]["entry_price"] == 190.0
+    # The buy debited 100 x 989.60; at the real 1000 it cost 100 x 10.40 more.
+    assert round((await db_session.get(PaperPortfolio, portfolio_id)).cash, 2) == round(500000.0 - (1000.0 - 989.60) * 100, 2)
+
+
 async def test_nothing_changes_without_the_real_candles(db_engine, db_session):
     portfolio_id, trade_id = await _options_trade(db_session, with_candles=False)
 

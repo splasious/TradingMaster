@@ -1,17 +1,20 @@
-"""Correct the entries that read stale prices (28-29 Sep)
+"""Correct the entries that read stale prices (25-29 Sep)
 
 These entries had no live price on file for the contract/stock yet, so the
 runner handed them an old or simulated one (see native_runner get_price,
 fixed in market_data/live_price.py): AM OP TRD 15 MIN's two NIFTY option
-legs at 29 Sep 09:45 got 28 Sep's close; MACD - RSI - 15 MIN's buys of
-ACUTAAS (29 Sep 09:45), DELHIVERY (29 Sep 10:31) and LAURUSLABS
-(28 Sep 11:30) got prices outside the real market range.
+legs at 29 Sep 09:45 got 28 Sep's close; MACD - RSI - 15 MIN's first buys
+of a stock -- the open holdings ACUTAAS (29 Sep 09:45), DELHIVERY
+(29 Sep 10:31) and LAURUSLABS (28 Sep 11:30), and six since-closed trades
+bought 25 Sep 09:15 and 12:15 and 28 Sep 12:00, 13:30 and 14:00 -- got
+prices outside the real market range (health check Q4/Q5).
 
 Each such entry becomes the real price when it was bought -- the open of
 the 5-minute candle it was bought in -- wherever it is recorded now: a
 closed trade (P&L recomputed), an open position's legs or an open holding.
 The pool's cash moves by the difference (quantities kept) and each
-correction goes to audit_logs. An entry is only changed if its recorded
+correction goes to audit_logs. Only entries made inside the listed
+5-minute candles are looked at, and one is only changed if its recorded
 price lies outside that real candle's low-high range, so a correct price
 is never touched and a second run changes nothing; an entry whose candle
 isn't on file is left as it is.
@@ -35,17 +38,21 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 UTC = timezone.utc
-# strategy name -> {symbol: start of the 5-minute candle (UTC) the entry was made in}
+# strategy name -> starts (UTC) of the 5-minute candles the wrong entries were made in
 TARGETS = {
-    "AM OP TRD 15 MIN": {
-        "NIFTY26O0622800CE": datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 09:45 IST
-        "NIFTY26O0623000CE": datetime(2026, 9, 29, 4, 15, tzinfo=UTC),
-    },
-    "MACD - RSI - 15 MIN": {
-        "ACUTAAS": datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 09:45 IST
-        "DELHIVERY": datetime(2026, 9, 29, 5, 0, tzinfo=UTC),  # 10:30 IST
-        "LAURUSLABS": datetime(2026, 9, 28, 6, 0, tzinfo=UTC),  # 28 Sep 11:30 IST
-    },
+    "AM OP TRD 15 MIN": [
+        datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 29 Sep 09:45 IST: both option legs
+    ],
+    "MACD - RSI - 15 MIN": [
+        datetime(2026, 9, 25, 3, 45, tzinfo=UTC),  # 25 Sep 09:15 IST: closed trades 1 and 3
+        datetime(2026, 9, 25, 6, 45, tzinfo=UTC),  # 25 Sep 12:15 IST: closed trade 8
+        datetime(2026, 9, 28, 6, 0, tzinfo=UTC),  # 28 Sep 11:30 IST: LAURUSLABS
+        datetime(2026, 9, 28, 6, 30, tzinfo=UTC),  # 28 Sep 12:00 IST: closed trade 11
+        datetime(2026, 9, 28, 8, 0, tzinfo=UTC),  # 28 Sep 13:30 IST: closed trade 12
+        datetime(2026, 9, 28, 8, 30, tzinfo=UTC),  # 28 Sep 14:00 IST: closed trade 13
+        datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 29 Sep 09:45 IST: ACUTAAS
+        datetime(2026, 9, 29, 5, 0, tzinfo=UTC),  # 29 Sep 10:30 IST: DELHIVERY
+    ],
 }
 CANDLE = timedelta(minutes=5)
 
@@ -99,16 +106,18 @@ def _when(value) -> datetime | None:
     return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
-def _correct(bind, legs: list[dict], opened_at, targets: dict[str, datetime]) -> tuple[list[dict], float, dict]:
+def _correct(bind, legs: list[dict], opened_at, targets: list[datetime]) -> tuple[list[dict], float, dict]:
     """(legs with real entries, cash change, {symbol: (was, now)})."""
     opened = _when(opened_at)
+    candle_ts = next((ts for ts in targets if opened and ts <= opened < ts + CANDLE), None)
+    if candle_ts is None:
+        return legs, 0.0, {}
     ids = [uuid.UUID(str(leg["instrument_id"])) for leg in legs if leg.get("instrument_id")]
     symbols = {str(i): s for i, s in bind.execute(sa.select(instruments.c.id, instruments.c.symbol).where(instruments.c.id.in_(ids))).all()}
     new_legs, cash_change, changed = [], 0.0, {}
     for leg in legs:
         symbol = symbols.get(str(leg.get("instrument_id")))
-        candle_ts = targets.get(symbol)
-        real = _real_candle(bind, symbol, candle_ts) if candle_ts and opened and candle_ts <= opened < candle_ts + CANDLE else None
+        real = _real_candle(bind, symbol, candle_ts) if symbol else None
         was = float(leg["entry_price"])
         if real is None or real[1] <= was <= real[2]:
             new_legs.append(leg)
@@ -130,7 +139,7 @@ def upgrade() -> None:
             .join(strategies, strategies.c.id == deployments.c.strategy_id)
             .where(sa.func.trim(strategies.c.name) == strategy_name)  # the MACD one is stored with a trailing space
         ).all()
-        earliest = min(targets.values())
+        earliest = min(targets)
         for deployment_id, portfolio_id, state in rows:
             user_id = bind.execute(sa.select(portfolios.c.user_id).where(portfolios.c.id == portfolio_id)).scalar()
             corrections = []  # (where, cash_change, changed)
