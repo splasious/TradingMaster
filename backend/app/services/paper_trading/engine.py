@@ -26,6 +26,7 @@ from app.services.audit import write_audit_log
 from app.services.backtest.candle_source import load_candles
 from app.services.backtest.engine import PositionSizing, quantity_for
 from app.services.market_data.freshness import check_freshness
+from app.services.market_data.live_price import live_price, needs_live_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.ranking import basket_breadth, get_universe_ranks
@@ -112,9 +113,12 @@ async def _evaluate_deployment(db: AsyncSession, deployment: PaperDeployment) ->
     # rather than a raw query that silently returns nothing for those.
     candles = (await load_candles(db, instrument.id, deployment.timeframe))[-LOOKBACK_BARS:]
 
-    current_price = tick_engine.get_current_price(instrument.id)
-    if current_price is None:
-        current_price = candles[-1].close if candles else None
+    if needs_live_price(instrument, now):
+        current_price = await live_price(db, instrument, now)  # live or none while NSE is open
+    else:
+        current_price = tick_engine.get_current_price(instrument.id)
+        if current_price is None:
+            current_price = candles[-1].close if candles else None
     if current_price is None:
         await db.commit()
         return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
@@ -259,20 +263,24 @@ async def exit_deployment_now(db: AsyncSession, deployment: PaperDeployment) -> 
     if position is None:
         return EvaluationOutcome(action="error", reason="no open position to exit")
 
-    current_price = tick_engine.get_current_price(instrument.id)
-    if current_price is None:
-        candles_result = await db.execute(
-            select(OhlcvCandle)
-            .where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == deployment.timeframe)
-            .order_by(OhlcvCandle.ts.desc())
-            .limit(1)
-        )
-        latest = candles_result.scalar_one_or_none()
-        current_price = latest.close if latest else None
+    now = datetime.now(timezone.utc)
+    if needs_live_price(instrument, now):
+        current_price = await live_price(db, instrument, now)  # live or none while NSE is open
+    else:
+        current_price = tick_engine.get_current_price(instrument.id)
+        if current_price is None:
+            candles_result = await db.execute(
+                select(OhlcvCandle)
+                .where(OhlcvCandle.instrument_id == instrument.id, OhlcvCandle.timeframe == deployment.timeframe)
+                .order_by(OhlcvCandle.ts.desc())
+                .limit(1)
+            )
+            latest = candles_result.scalar_one_or_none()
+            current_price = latest.close if latest else None
     if current_price is None:
         return EvaluationOutcome(action="skipped", reason="no price data available for this instrument")
 
-    return await _exit_position(db, deployment, portfolio, position, current_price, datetime.now(timezone.utc), "manual")
+    return await _exit_position(db, deployment, portfolio, position, current_price, now, "manual")
 
 
 async def _pool_equity(db: AsyncSession, portfolio: PaperPortfolio) -> float:

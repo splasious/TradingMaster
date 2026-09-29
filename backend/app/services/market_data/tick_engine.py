@@ -25,7 +25,7 @@ with no simulated fallback -- see set_real_oi/get_current_oi.
 import asyncio
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 TICK_INTERVAL_SECONDS = 1.5
 # Every tick cycle broadcasts one message per GLOBALLY active instrument to
@@ -48,6 +48,7 @@ class TickEngine:
         self._last_price: dict[uuid.UUID, float] = {}
         self._real_price: dict[uuid.UUID, float] = {}
         self._real_price_source: dict[uuid.UUID, str] = {}
+        self._real_price_at: dict[uuid.UUID, datetime] = {}
         # Open interest -- F&O only, no simulated fallback (unlike price,
         # an instrument with no real OI on file just has none, ever).
         self._real_oi: dict[uuid.UUID, float] = {}
@@ -87,12 +88,22 @@ class TickEngine:
         if RealPriceFeed has one on file, simulated fallback otherwise."""
         return self._real_price.get(instrument_id, self._last_price.get(instrument_id))
 
+    def get_fresh_real_price(self, instrument_id: uuid.UUID, max_age: timedelta, now: datetime) -> float | None:
+        """The real price, only if it arrived within `max_age` of `now` --
+        never the simulated walk, and never one held over from earlier
+        (e.g. yesterday's last tick)."""
+        at = self._real_price_at.get(instrument_id)
+        if at is None or now - at > max_age:
+            return None
+        return self._real_price.get(instrument_id)
+
     def set_real_price(self, instrument_id: uuid.UUID, price: float, source: str) -> None:
         """Called by RealPriceFeed with a genuine price polled from Delta.
         Once set, this instrument is served from here (flat between polls,
         never randomly perturbed) instead of the simulated random walk."""
         self._real_price[instrument_id] = price
         self._real_price_source[instrument_id] = source
+        self._real_price_at[instrument_id] = datetime.now(timezone.utc)
         self._last_price[instrument_id] = price
 
     def set_real_oi(self, instrument_id: uuid.UUID, open_interest: float) -> None:

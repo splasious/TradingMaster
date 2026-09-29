@@ -40,6 +40,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.market_data.active_timeframe_sync_scheduler import note_native_candle_demand
 from app.services.market_data.bar_periods import load_closed_candles
+from app.services.market_data.live_price import live_price, needs_live_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.telegram import telegram_allowed
 from app.services.options.pcr import compute_effective_pcr
@@ -121,20 +122,29 @@ class NativeContext:
         paper_trading/scheduler.py's existing loop already makes for its
         one fixed instrument; TickEngine only ever reads this as
         count > 0, so calling it every tick (rather than tracking whether
-        we already did) matches that existing convention exactly."""
+        we already did) matches that existing convention exactly.
+
+        While NSE is open a Kite-priced instrument gets a live price or
+        None -- never a stored close or the simulated walk, which is what
+        a first read of an untracked contract used to trade at (see
+        market_data/live_price.py)."""
+        instrument = await self.db.get(Instrument, instrument_id)
+        if instrument is not None and needs_live_price(instrument, self.now):
+            price = await live_price(self.db, instrument, self.now)
+            tick_engine.subscribe(instrument_id, seed_price=price or (await self._stored_close(instrument_id)) or 0.0)
+            return price
         price = tick_engine.get_current_price(instrument_id)
         if price is None:
-            row = (
-                await self.db.execute(
-                    select(OhlcvCandle.close)
-                    .where(OhlcvCandle.instrument_id == instrument_id)
-                    .order_by(OhlcvCandle.ts.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            price = row
+            price = await self._stored_close(instrument_id)
         tick_engine.subscribe(instrument_id, seed_price=price or 0.0)
         return price
+
+    async def _stored_close(self, instrument_id: uuid.UUID) -> float | None:
+        return (
+            await self.db.execute(
+                select(OhlcvCandle.close).where(OhlcvCandle.instrument_id == instrument_id).order_by(OhlcvCandle.ts.desc()).limit(1)
+            )
+        ).scalar_one_or_none()
 
     async def get_candles(self, instrument_id: uuid.UUID | str, timeframe: str, limit: int = 300) -> list[dict]:
         """The `limit` most recent *finished* candles for one instrument,

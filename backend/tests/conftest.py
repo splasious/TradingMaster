@@ -56,6 +56,17 @@ def show_delta(monkeypatch):
     monkeypatch.setattr(get_settings(), "show_delta_exchange", True)
 
 
+@pytest.fixture(autouse=True)
+def _live_price_rule_off(monkeypatch):
+    """Strategies' live-only pricing (market_data/live_price.py) applies
+    while NSE is open, which the real clock may or may not be during a test
+    run; off by default so results don't depend on the time of day. Tests
+    of the rule itself switch it on."""
+    from app.services.market_data import live_price
+
+    monkeypatch.setattr(live_price, "nse_market_open", lambda now: False)
+
+
 @pytest_asyncio.fixture
 async def db_engine():
     db_path = f"./test_{uuid.uuid4().hex}.db"
