@@ -803,6 +803,60 @@ SELECT b.symbol, b.side, to_char(b.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:
 FROM bucket b ORDER BY b.opened_at, b.symbol;
 
 \echo
+\echo '== Q3b. The same legs vs the real 15m candle -- NIFTY weekly options are backfilled at 15m only; an entry in the first 5 minutes of a 15m candle has that candle''s open as its 5m open (entry price not printed)'
+WITH legs AS (
+  SELECT t.opened_at, l.value->>'side' AS side,
+         CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id,
+         CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS entry_price
+  FROM paper_native_trades t CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE jsonb_typeof(l.value) = 'object' AND (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), b AS (
+  SELECT legs.*, i.symbol, date_trunc('hour', legs.opened_at) + floor(extract(minute FROM legs.opened_at) / 15) * interval '15 min' AS m15_ts
+  FROM legs JOIN instruments i ON i.id = legs.instrument_id
+  WHERE i.symbol LIKE 'NIFTY%' OR i.symbol LIKE 'BANKNIFTY%'
+), r AS (
+  SELECT b.*, c.open::numeric AS o, c.low::numeric AS lo, c.high::numeric AS hi,
+         (SELECT x.open::numeric FROM bf_ohlcv_bars x JOIN bf_symbols s ON s.id = x.symbol_id
+           WHERE s.source = 'zerodha_nfo' AND s.symbol = b.symbol AND x.timeframe = '15m' AND x.ts = b.m15_ts) AS bf_open
+  FROM b LEFT JOIN ohlcv_candles c ON c.instrument_id = b.instrument_id AND c.timeframe = '15m' AND c.ts = b.m15_ts
+)
+SELECT symbol, side, to_char(opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist,
+       to_char(m15_ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS m15_candle, opened_at - m15_ts < interval '5 min' AS in_first_5_min,
+       round(o, 2) AS chart_open, round(lo, 2) AS chart_low, round(hi, 2) AS chart_high, round(bf_open, 2) AS backfill_open,
+       round((entry_price - o) / nullif(o, 0) * 100, 2) AS entry_pct_off_open, entry_price BETWEEN lo AND hi AS entry_in_15m_range
+FROM r ORDER BY opened_at, symbol;
+
+\echo
+\echo '== Q6. AM OP TRD 15 MIN closed trades, per leg: entry and exit vs the real 15m candle at that minute (no prices)'
+WITH legs AS (
+  SELECT t.opened_at, t.closed_at, l.value->>'side' AS side,
+         CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id,
+         CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS entry_price,
+         CASE WHEN l.value->>'exit_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'exit_price')::numeric END AS exit_price
+  FROM paper_native_trades t
+  JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND jsonb_typeof(l.value) = 'object'
+), m AS (
+  SELECT legs.*,
+         date_trunc('hour', legs.opened_at) + floor(extract(minute FROM legs.opened_at) / 15) * interval '15 min' AS e_ts,
+         date_trunc('hour', legs.closed_at) + floor(extract(minute FROM legs.closed_at) / 15) * interval '15 min' AS x_ts
+  FROM legs
+), r AS (
+  SELECT m.*, e.open::numeric AS e_open, e.low::numeric AS e_low, e.high::numeric AS e_high,
+         x.open::numeric AS x_open, x.low::numeric AS x_low, x.high::numeric AS x_high
+  FROM m
+  LEFT JOIN ohlcv_candles e ON e.instrument_id = m.instrument_id AND e.timeframe = '15m' AND e.ts = m.e_ts
+  LEFT JOIN ohlcv_candles x ON x.instrument_id = m.instrument_id AND x.timeframe = '15m' AND x.ts = m.x_ts
+)
+SELECT dense_rank() OVER (ORDER BY opened_at) AS trade_no, side,
+       to_char(opened_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS bought_ist, opened_at - e_ts < interval '5 min' AS entry_in_first_5_min,
+       round((entry_price - e_open) / nullif(e_open, 0) * 100, 2) AS entry_pct_off_15m_open, entry_price BETWEEN e_low AND e_high AS entry_in_15m_range,
+       to_char(closed_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS closed_ist,
+       round((exit_price - x_open) / nullif(x_open, 0) * 100, 2) AS exit_pct_off_15m_open, exit_price BETWEEN x_low AND x_high AS exit_in_15m_range
+FROM r ORDER BY opened_at, side;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
