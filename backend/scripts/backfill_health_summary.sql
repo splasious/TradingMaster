@@ -1137,6 +1137,25 @@ FROM paired GROUP BY 1, 2, 3, 4, 5 HAVING count(*) FILTER (WHERE o_diff OR h_dif
 ORDER BY 7 DESC LIMIT 20;
 
 \echo
+\echo '-- R3d. NSE 15m chart candles saved before their candle closed (last 8 days): minutes after the candle opened when saved, by day and candle time; how far their close is from Kite''s final (counts only)'
+WITH early AS (
+  SELECT c.ts, c.created_at, c.instrument_id, extract(epoch FROM c.created_at - c.ts) / 60 AS saved_min, c.close, b.close AS b_close
+  FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+  JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = i.symbol
+  JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = '15m' AND b.ts = c.ts
+  WHERE i.exchange = 'NSE' AND c.timeframe = '15m' AND c.source = i.data_source AND i.data_source = 'zerodha_kite'
+    AND c.ts >= date_trunc('day', now()) - interval '8 days' AND c.created_at < c.ts + interval '15 minutes'
+)
+SELECT ts::date AS day, count(*) AS candles, count(DISTINCT instrument_id) AS stocks,
+       count(*) FILTER (WHERE saved_min < 0) AS saved_before_open, count(*) FILTER (WHERE saved_min >= 0 AND saved_min < 5) AS in_min_0_5,
+       count(*) FILTER (WHERE saved_min >= 5 AND saved_min < 10) AS in_min_5_10, count(*) FILTER (WHERE saved_min >= 10) AS in_min_10_15,
+       round(avg(saved_min)::numeric, 1) AS avg_min, round(min(saved_min)::numeric, 1) AS min_min,
+       to_char(min(created_at), 'HH24:MI') AS first_saved, to_char(max(created_at), 'HH24:MI') AS last_saved,
+       count(*) FILTER (WHERE abs(close - b_close) >= 0.001) AS close_differs,
+       round(avg(abs(close - b_close) / nullif(b_close, 0) * 100)::numeric, 3) AS avg_close_diff_pct
+FROM early GROUP BY 1 ORDER BY 1;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
