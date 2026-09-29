@@ -4,10 +4,11 @@ into 15-minute `OhlcvCandle` bars for every tracked NFO option contract, so
 stale instead of whatever a one-off backfill captured and then never
 revisited.
 
-`kite_ticker_service.py` already subscribes to every NFO option
-`Instrument` row in the catalog (MODE_FULL, which is the mode that carries
-OI) and keeps `TickEngine`'s in-memory `_real_oi`/`_real_price` current for
-each of them on every tick. `nfo_expiry_rotation_scheduler.py` in turn
+`kite_ticker_service.py` streams index options of the nearest expiries,
+and any option something is reading (MODE_FULL, which is the mode that
+carries OI), and keeps `TickEngine`'s in-memory `_real_oi`/`_real_price`
+current for each of them on every tick -- an option not streamed simply
+has no live OI to snapshot. `nfo_expiry_rotation_scheduler.py` in turn
 keeps that catalog itself covering exactly the nearest `EXPIRIES_TO_MAINTAIN`
 (4) weekly expiries -- matching `compute_effective_pcr`'s own
 `num_expiries=4` default. The one missing link was persistence: nothing

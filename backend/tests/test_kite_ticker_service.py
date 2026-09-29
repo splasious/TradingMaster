@@ -457,44 +457,112 @@ async def test_refresh_subscribes_nfo_and_nse_in_different_modes(db_session: Asy
     assert engine.get_current_oi(equity.id) is None
 
 
-async def test_refresh_trims_nse_tokens_to_fit_subscription_cap_after_nfo(db_session: AsyncSession, monkeypatch):
-    """NFO always gets priority within Kite's per-connection subscription
-    cap -- NSE equities fill whatever budget remains instead of the whole
-    connection failing outright once the combined catalog grows past it."""
+def _dump_row(symbol: str, token: int, **fields) -> dict:
+    return {"tradingsymbol": symbol, "instrument_token": str(token), "name": "", "instrument_type": "", "expiry": "", "segment": "", **fields}
+
+
+LIVE_ORDER_ROWS = {
+    "NFO": [
+        _dump_row("RELIANCE26SEP3000CE", 101, name="RELIANCE", instrument_type="CE", expiry="2026-09-29", segment="NFO-OPT"),
+        _dump_row("NIFTY26OCT23000CE", 102, name="NIFTY", instrument_type="CE", expiry="2026-10-13", segment="NFO-OPT"),  # 5th expiry
+        _dump_row("RELIANCE26SEPFUT", 103, name="RELIANCE", instrument_type="FUT", expiry="2026-09-29", segment="NFO-FUT"),
+        _dump_row("NIFTY2691523000CE", 104, name="NIFTY", instrument_type="CE", expiry="2026-09-15", segment="NFO-OPT"),
+        *[_dump_row(f"NIFTY26{d}23000PE", 110 + n, name="NIFTY", instrument_type="PE", expiry=f"2026-09-{d}", segment="NFO-OPT")
+          for n, d in enumerate(("16", "22", "29"))],
+    ],
+    "NSE": [
+        _dump_row("INFY", 201, instrument_type="EQ", segment="NSE"),
+        _dump_row("NIFTY 50", 202, name="NIFTY 50", instrument_type="EQ", segment="INDICES"),
+    ],
+}
+
+
+async def _live_order_fixture(db_session, monkeypatch) -> dict[str, Instrument]:
     _FakeTicker.instances.clear()
     monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
     monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
-    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 2)
+    monkeypatch.setattr(svc, "_in_reactor", lambda fn: fn())
     await _seed_connected_account(db_session, connected=True, access_token="tok_a")
-    option = Instrument(
-        exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
-        data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE",
-    )
-    equity_a = Instrument(exchange="NSE", symbol="INFY", name="Infosys", instrument_type="equity", data_source="zerodha_kite", external_ref="INFY")
-    equity_b = Instrument(exchange="NSE", symbol="TCS", name="TCS", instrument_type="equity", data_source="zerodha_kite", external_ref="TCS")
-    db_session.add_all([option, equity_a, equity_b])
+    instruments = {}
+    for segment, rows in LIVE_ORDER_ROWS.items():
+        for row in rows:
+            symbol = row["tradingsymbol"]
+            instruments[symbol] = Instrument(
+                exchange=segment, symbol=symbol, name=symbol, instrument_type="option" if row["instrument_type"] in ("CE", "PE") else "equity",
+                data_source="zerodha_kite", external_ref=symbol,
+            )
+    db_session.add_all(instruments.values())
     await db_session.commit()
 
     async def fake_get_instruments(self, segment="NSE"):
-        if segment == "NFO":
-            return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
-        return [
-            {"tradingsymbol": "INFY", "instrument_token": "777"},
-            {"tradingsymbol": "TCS", "instrument_token": "888"},
-        ]
+        return LIVE_ORDER_ROWS[segment]
 
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+    return instruments
 
-    engine = TickEngine()
-    service = svc.KiteTickerService(engine)
+
+async def test_refresh_streams_what_is_read_live_first_and_no_idle_stock_options(db_session: AsyncSession, monkeypatch):
+    """Kite's cap is filled in streaming order -- the indices, index options
+    of the 4 nearest expiries, NSE stocks, stock futures -- and a stock
+    option nothing reads isn't streamed: tens of thousands of them used to
+    fill the cap by row order, leaving no NIFTY option or NSE stock on it."""
+    await _live_order_fixture(db_session, monkeypatch)
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 7)
+
+    service = svc.KiteTickerService(TickEngine())
     await service._refresh(now=MARKET_OPEN_NOW)
 
     ticker = _FakeTicker.instances[0]
-    # Budget is MAX_SUBSCRIBE_TOKENS(2) - len(nfo)(1) = 1 NSE slot only.
-    assert len(ticker.subscribed) == 2
-    assert 555 in ticker.subscribed
-    nse_subscribed = [t for t in ticker.subscribed if t != 555]
-    assert len(nse_subscribed) == 1
+    # NIFTY 50; the NIFTY options of the 4 nearest expiries (15, 16, 22, 29 Sep); INFY; the stock
+    # future. Not the NIFTY option of the 5th expiry (no room left) nor the stock option (nothing reads it).
+    assert sorted(ticker.subscribed) == [103, 104, 110, 111, 112, 201, 202]
+    assert [(mode, sorted(tokens)) for mode, tokens in ticker.mode_calls] == [("full", [103, 104, 110, 111, 112]), ("ltp", [201, 202])]
+
+
+async def test_a_stock_option_a_strategy_reads_is_streamed_first(db_session: AsyncSession, monkeypatch):
+    instruments = await _live_order_fixture(db_session, monkeypatch)
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 2)
+    engine = TickEngine()
+    engine.subscribe(instruments["RELIANCE26SEP3000CE"].id, seed_price=50.0)
+
+    service = svc.KiteTickerService(engine)
+    await service._refresh(now=MARKET_OPEN_NOW)
+
+    assert sorted(_FakeTicker.instances[0].subscribed) == [101, 202]  # the one being read, then NIFTY 50
+
+
+async def test_an_instrument_read_after_connecting_is_added_without_reconnecting(db_session: AsyncSession, monkeypatch):
+    instruments = await _live_order_fixture(db_session, monkeypatch)
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh(now=MARKET_OPEN_NOW)
+    ticker = _FakeTicker.instances[0]
+    assert 101 not in ticker.subscribed
+
+    engine.subscribe(instruments["RELIANCE26SEP3000CE"].id, seed_price=50.0)  # a strategy opens a leg on it
+    await service._refresh(now=MARKET_OPEN_NOW)
+
+    assert len(_FakeTicker.instances) == 1  # same connection
+    assert ticker.subscribed == [101] and ticker.mode_calls[-1] == ("full", [101])
+    ticker.on_connect(ticker, {})  # Kite's own reconnect keeps it
+    assert 101 in ticker.subscribed
+    ticker.on_ticks(ticker, [{"instrument_token": 101, "last_price": 55.5, "oi": 1200}])
+    assert engine.get_current_price(instruments["RELIANCE26SEP3000CE"].id) == 55.5
+
+
+async def test_nothing_is_added_past_the_cap(db_session: AsyncSession, monkeypatch):
+    instruments = await _live_order_fixture(db_session, monkeypatch)
+    monkeypatch.setattr(svc, "MAX_SUBSCRIBE_TOKENS", 3)
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    await service._refresh(now=MARKET_OPEN_NOW)
+    ticker = _FakeTicker.instances[0]
+    calls = len(ticker.mode_calls)
+
+    engine.subscribe(instruments["RELIANCE26SEP3000CE"].id, seed_price=50.0)
+    await service._refresh(now=MARKET_OPEN_NOW)
+
+    assert len(ticker.mode_calls) == calls and len(service._subscribed) == 3
 
 
 async def test_refresh_trims_nfo_tokens_that_alone_exceed_subscription_cap(db_session: AsyncSession, monkeypatch):

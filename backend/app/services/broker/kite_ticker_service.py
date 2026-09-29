@@ -12,9 +12,15 @@ Subscribes two segments in the same connection: NFO (options/futures,
 MODE_FULL -- the only mode that carries open interest) and NSE (equities/
 indices, MODE_LTP -- cheaper, and equities have no OI to carry here
 anyway). Kite's own per-connection subscription cap (documented at 3000
-instruments) is enforced with NFO given priority, since OI/F&O is this
-service's original purpose -- NSE equities fill whatever budget remains
-rather than failing the whole connection outright (see MAX_SUBSCRIBE_TOKENS).
+instruments) is filled in order of what's read live (see _select_tokens):
+anything a strategy or an open page is reading, the indices, index
+options of the nearest expiries and index futures, NSE stocks, stock
+futures. Stock options aren't streamed unless something reads them -- the
+F&O scan takes their open interest from Kite quotes and its own store --
+since tens of thousands of them used to fill the cap by row order, leaving
+no room for NIFTY options or any NSE stock. Something that starts reading
+an instrument during the day is added to the open connection within a
+minute (_add_in_use).
 
 `KiteTicker` runs on Twisted's reactor, a process-wide singleton that can
 only ever be started once per process: `connect(threaded=True)` starts it
@@ -56,28 +62,33 @@ from app.core.encryption import decrypt_payload
 from app.db.session import AsyncSessionLocal
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, ConnectionStatus
 from app.models.instrument import Instrument
-from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker, resolve_tradingsymbol_with_be_fallback
+from app.services.broker.zerodha_broker import IST, KiteAPIError, ZerodhaKiteBroker, resolve_tradingsymbol_with_be_fallback
 from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import TickEngine, tick_engine
 
 logger = logging.getLogger(__name__)
 
 # How often to check for a fresher access_token (the day's "Login with
-# Zerodha") and re-resolve the NFO/NSE instrument set (a newly-backfilled
-# contract or equity) -- not how often ticks arrive, that's push-driven by
-# Kite itself and can be many times a second.
-REFRESH_INTERVAL_SECONDS = 300
+# Zerodha"), a dead connection, and instruments something started reading
+# that aren't streamed yet -- not how often ticks arrive, that's push-driven
+# by Kite itself and can be many times a second.
+REFRESH_INTERVAL_SECONDS = 60
+# At most this often, an instrument being read that isn't in the resolved
+# catalog yet (newly added) triggers re-reading the catalog.
+RESOLVE_AGAIN_SECONDS = 300
 
-# The segments this service subscribes to in one WS connection, and the
-# order in which they're prioritized when trimming to fit Kite's
-# per-connection subscription cap (NFO first -- see MAX_SUBSCRIBE_TOKENS).
+# The segments this service subscribes to in one WS connection.
 KITE_SUBSCRIBED_EXCHANGES = ("NFO", "NSE")
 
-# Kite's documented per-WebSocket-connection subscription ceiling. NFO
-# (OI, this service's original purpose) always gets priority within this
-# budget; NSE equities fill whatever's left rather than the whole
-# connection failing outright once the combined catalog grows past it.
+# Kite's documented per-WebSocket-connection subscription ceiling, filled
+# in _select_tokens' order.
 MAX_SUBSCRIBE_TOKENS = 3000
+
+# Index underlyings (Kite's NFO "name"): their options of the nearest
+# INDEX_EXPIRIES_LIVE expiries and their futures are streamed ahead of NSE
+# stocks -- PCR, the NIFTY strategies and the Options page read them.
+INDEX_NAMES = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50")
+INDEX_EXPIRIES_LIVE = 4
 
 
 async def find_connected_zerodha_account(db) -> BrokerAccount | None:
@@ -198,24 +209,88 @@ async def _resolve_kite_token_map(db, api_key: str) -> dict[str, dict[int, uuid.
     return token_maps
 
 
-def _prioritize_actively_used(items: list[tuple[int, uuid.UUID]], subscriber_counts: dict[uuid.UUID, int]) -> list[tuple[int, uuid.UUID]]:
-    """Puts every (token, instrument_id) pair a real strategy is currently
-    reading -- TickEngine's own subscriber_counts, the exact signal
-    kite_rest_price_feed.py already keys its own polling off of -- ahead
-    of the rest of the backfilled catalog. A stable sort, so ties (all
-    active, or all idle) keep their original relative order.
+async def _kite_rows_by_token(api_key: str) -> dict[int, dict]:
+    """Kite's instrument-dump row for every token, both segments -- its
+    "name" (an F&O contract's underlying), "instrument_type" (CE/PE/FUT/EQ),
+    "expiry" and "segment" ("INDICES" for an index) decide the streaming
+    order. The dumps are cached (zerodha_broker.get_instruments)."""
+    broker = ZerodhaKiteBroker()
+    broker._api_key = api_key
+    rows: dict[int, dict] = {}
+    for segment in KITE_SUBSCRIBED_EXCHANGES:
+        try:
+            dump = await broker.get_instruments(segment)
+        except KiteAPIError:
+            continue
+        for row in dump:
+            if row.get("instrument_token"):
+                rows[int(row["instrument_token"])] = row
+    return rows
 
-    Exists because trimming to MAX_SUBSCRIBE_TOKENS previously kept
-    whatever happened to come first in the DB's (unordered) row order --
-    once a broad scanner's backfilled catalog alone exceeds the cap, that
-    silently drops instruments a live strategy is actually evaluating
-    every tick (e.g. the NIFTY spot + option legs a PCR-driven spread
-    strategy needs) in favor of catalog rows nothing is using yet, purely
-    by chance of row order. Prioritizing "in current use" first means the
-    WS push stream always covers what's actually driving a live decision;
-    only the cold long tail gets trimmed once the catalog outgrows Kite's
-    per-connection cap."""
-    return sorted(items, key=lambda kv: 0 if subscriber_counts.get(kv[1], 0) > 0 else 1)
+
+def _select_tokens(
+    token_maps: dict[str, dict[int, uuid.UUID]], subscriber_counts: dict[uuid.UUID, int], rows: dict[int, dict], today: str,
+) -> dict[int, str]:
+    """The tokens to stream, token -> segment, at most MAX_SUBSCRIBE_TOKENS,
+    in this order:
+      0. anything a strategy or an open page is reading right now
+         (TickEngine's subscriber counts -- kite_rest_price_feed.py keys its
+         polling off the same signal);
+      1. NSE indices;
+      2. index options of each index's nearest INDEX_EXPIRIES_LIVE expiries,
+         and index futures;
+      3. NSE stocks;
+      4. stock futures;
+      5. the rest (farther index options, rows Kite's dump doesn't describe).
+    Stock options are left out unless something reads them. Within a tier,
+    the catalog's own order."""
+    nearest: dict[str, list[str]] = {}
+    for token in token_maps.get("NFO", {}):
+        row = rows.get(token) or {}
+        if row.get("name") in INDEX_NAMES and row.get("instrument_type") in ("CE", "PE") and (row.get("expiry") or "") >= today:
+            nearest.setdefault(row["name"], []).append(row["expiry"])
+    nearest = {name: sorted(set(expiries))[:INDEX_EXPIRIES_LIVE] for name, expiries in nearest.items()}
+
+    def tier(token: int, segment: str, instrument_id: uuid.UUID) -> int | None:
+        if subscriber_counts.get(instrument_id, 0) > 0:
+            return 0
+        row = rows.get(token)
+        if row is None:
+            return 5
+        if segment == "NSE":
+            return 1 if row.get("segment") == "INDICES" else 3
+        kind, name = row.get("instrument_type"), row.get("name")
+        if name in INDEX_NAMES:
+            if kind == "FUT" or (kind in ("CE", "PE") and row.get("expiry") in nearest.get(name, ())):
+                return 2
+            return 5
+        if kind == "FUT":
+            return 4
+        if kind in ("CE", "PE"):
+            return None  # a stock option nothing reads
+        return 5
+
+    ranked = []
+    for segment in KITE_SUBSCRIBED_EXCHANGES:
+        for token, instrument_id in token_maps.get(segment, {}).items():
+            rank = tier(token, segment, instrument_id)
+            if rank is not None:
+                ranked.append((rank, len(ranked), token, segment))
+    ranked.sort()
+    if len(ranked) > MAX_SUBSCRIBE_TOKENS:
+        logger.warning(
+            "%d instruments to stream, Kite allows %d per connection -- the %d last in streaming order are left out",
+            len(ranked), MAX_SUBSCRIBE_TOKENS, len(ranked) - MAX_SUBSCRIBE_TOKENS,
+        )
+    return {token: segment for _, _, token, segment in ranked[:MAX_SUBSCRIBE_TOKENS]}
+
+
+def _in_reactor(fn) -> None:
+    """KiteTicker's socket belongs to Twisted's reactor thread; a call into
+    it from the asyncio loop is handed over rather than made here."""
+    from twisted.internet import reactor
+
+    reactor.callFromThread(fn)
 
 
 class KiteTickerService:
@@ -224,7 +299,10 @@ class KiteTickerService:
         self._supervisor_task: asyncio.Task | None = None
         self._ticker: KiteTicker | None = None
         self._current_access_token: str | None = None
-        self._token_map: dict[int, uuid.UUID] = {}
+        self._token_map: dict[int, uuid.UUID] = {}  # every resolved token -> instrument
+        self._candidates: dict[uuid.UUID, tuple[int, str]] = {}  # instrument -> (token, segment)
+        self._subscribed: dict[int, str] = {}  # streamed token -> segment
+        self._resolved_at: datetime | None = None
         self.last_connected_at: datetime | None = None
         self.last_error: str | None = None
 
@@ -288,12 +366,16 @@ class KiteTickerService:
             # there with is_connected() == False forever, freezing OI at
             # whatever the last real tick was, hours before an expired
             # token would ever have been the actual explanation. Checking
-            # is_connected() here makes every 300s cycle self-healing
+            # is_connected() here makes every cycle self-healing
             # regardless of why the WS died, not just recoverable via a
             # fresh "Login with Zerodha".
             if access_token == self._current_access_token and self._ticker is not None and self._ticker.is_connected():
-                return  # already streaming with the current token, nothing to do
+                # Already streaming with the current token: just add what
+                # started being read since.
+                await self._add_in_use(db, creds["api_key"])
+                return
             token_maps = await _resolve_kite_token_map(db, creds["api_key"])
+            rows = await _kite_rows_by_token(creds["api_key"])
 
         nfo_map = token_maps.get("NFO", {})
         nse_map = token_maps.get("NSE", {})
@@ -301,49 +383,18 @@ class KiteTickerService:
             self.last_error = "No NFO/NSE instruments to subscribe to (backfill one first)"
             return
 
-        # NFO itself must be capped here too -- otherwise, once the tracked
-        # NFO catalog alone grows past MAX_SUBSCRIBE_TOKENS (e.g. after
-        # adding a scanner that tracks many underlyings), budget below goes
-        # to 0 for NSE as intended, but the full oversized nfo_map still
-        # gets subscribed uncapped. Kite's server then either rejects the
-        # oversized subscribe request or streams a tick batch too large for
-        # the client to read, both surfacing here as on_error's "Message
-        # too big" -- an immediate-reconnect loop that looks identical to a
-        # dead connection but never actually recovers on its own, since
-        # every reconnect re-requests the same oversized subscription.
-        #
-        # Both segments are sorted actively-used-first before trimming --
-        # see _prioritize_actively_used's docstring for why: a large
-        # scanner's catalog can outgrow the cap on its own, and whichever
-        # rows the trim below drops must be the currently-idle ones, never
-        # an instrument a running strategy is reading this very tick.
-        subscriber_counts = self._engine._subscriber_counts
-        nfo_items = _prioritize_actively_used(list(nfo_map.items()), subscriber_counts)
-        if len(nfo_items) > MAX_SUBSCRIBE_TOKENS:
-            logger.warning(
-                "NFO token count (%d) exceeds Kite's %d-token per-connection subscription cap -- "
-                "subscribing to the %d most actively-used first",
-                len(nfo_items), MAX_SUBSCRIBE_TOKENS, MAX_SUBSCRIBE_TOKENS,
-            )
-            nfo_items = nfo_items[:MAX_SUBSCRIBE_TOKENS]
-        nfo_map = dict(nfo_items)
-
-        nse_items = _prioritize_actively_used(list(nse_map.items()), subscriber_counts)
-        budget = max(0, MAX_SUBSCRIBE_TOKENS - len(nfo_map))
-        if len(nse_items) > budget:
-            logger.warning(
-                "NSE token count (%d) exceeds the remaining subscription budget (%d of Kite's %d-token cap, "
-                "after %d NFO) -- subscribing to the %d most actively-used first",
-                len(nse_items), budget, MAX_SUBSCRIBE_TOKENS, len(nfo_map), budget,
-            )
-            nse_items = nse_items[:budget]
-        nse_map = dict(nse_items)
+        # Capped to Kite's per-connection limit: an oversized subscribe gets
+        # the connection killed ("Message too big"), and every reconnect
+        # re-requests the same list, so it never recovers on its own.
+        today = (now or datetime.now(timezone.utc)).astimezone(IST).date().isoformat()
+        selected = _select_tokens(token_maps, self._engine._subscriber_counts, rows, today)
+        self._remember(token_maps)
+        self._subscribed = selected
 
         old_ticker = self._ticker
-        self._token_map = {**nfo_map, **nse_map}
         new_ticker = KiteTicker(creds["api_key"], access_token)
         new_ticker.on_ticks = self._on_ticks
-        new_ticker.on_connect = self._make_on_connect(list(nfo_map.keys()), list(nse_map.keys()))
+        new_ticker.on_connect = self._on_connect
         new_ticker.on_close = self._on_close
         new_ticker.on_error = self._on_error
         new_ticker.connect(threaded=True)
@@ -353,19 +404,50 @@ class KiteTickerService:
         if old_ticker is not None:
             old_ticker.close()
 
-    def _make_on_connect(self, nfo_tokens: list[int], nse_tokens: list[int]):
-        def _on_connect(ws, response) -> None:
-            all_tokens = nfo_tokens + nse_tokens
-            if all_tokens:
-                ws.subscribe(all_tokens)
-            if nfo_tokens:
-                ws.set_mode(ws.MODE_FULL, nfo_tokens)  # Full mode is what carries OI for F&O
-            if nse_tokens:
-                ws.set_mode(ws.MODE_LTP, nse_tokens)  # Equities: last price only, no OI to carry
-            self.last_connected_at = datetime.now(timezone.utc)
-            self.last_error = None
+    def _remember(self, token_maps: dict[str, dict[int, uuid.UUID]]) -> None:
+        self._token_map = {token: iid for segment in token_maps.values() for token, iid in segment.items()}
+        self._candidates = {iid: (token, seg) for seg, segment in token_maps.items() for token, iid in segment.items()}
+        self._resolved_at = datetime.now(timezone.utc)
 
-        return _on_connect
+    @staticmethod
+    def _stream(ws, tokens: dict[int, str]) -> None:
+        nfo = [t for t, seg in tokens.items() if seg == "NFO"]
+        nse = [t for t, seg in tokens.items() if seg == "NSE"]
+        if nfo or nse:
+            ws.subscribe(nfo + nse)
+        if nfo:
+            ws.set_mode(ws.MODE_FULL, nfo)  # Full mode is what carries OI for F&O
+        if nse:
+            ws.set_mode(ws.MODE_LTP, nse)  # Equities: last price only, no OI to carry
+
+    def _on_connect(self, ws, response) -> None:
+        # Everything streamed so far, additions included -- so a reconnect
+        # keeps them.
+        self._stream(ws, dict(self._subscribed))
+        self.last_connected_at = datetime.now(timezone.utc)
+        self.last_error = None
+
+    async def _add_in_use(self, db, api_key: str) -> None:
+        """Adds instruments a strategy or page started reading since the
+        connection opened (a new option leg, a chart) to the open connection,
+        while there's room under the cap."""
+        in_use = [iid for iid, count in list(self._engine._subscriber_counts.items()) if count > 0]
+        unknown = [iid for iid in in_use if iid not in self._candidates]
+        now = datetime.now(timezone.utc)
+        if unknown and (self._resolved_at is None or (now - self._resolved_at).total_seconds() >= RESOLVE_AGAIN_SECONDS):
+            self._remember(await _resolve_kite_token_map(db, api_key))  # a newly added instrument
+        room = MAX_SUBSCRIBE_TOKENS - len(self._subscribed)
+        add: dict[int, str] = {}
+        for iid in in_use:
+            token, segment = self._candidates.get(iid, (None, None))
+            if token is not None and token not in self._subscribed and token not in add and len(add) < room:
+                add[token] = segment
+        if not add:
+            return
+        self._subscribed = {**self._subscribed, **add}
+        ticker = self._ticker
+        _in_reactor(lambda: self._stream(ticker, add))
+        logger.info("Kite ticker: streaming %d more instrument(s) something started reading", len(add))
 
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         # Runs on KiteTicker's own (Twisted reactor) thread -- see module
