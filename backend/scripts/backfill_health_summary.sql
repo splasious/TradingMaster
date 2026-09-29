@@ -803,7 +803,7 @@ SELECT b.symbol, b.side, to_char(b.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:
 FROM bucket b ORDER BY b.opened_at, b.symbol;
 
 \echo
-\echo '== Q4. Prices advanced strategies recorded today (IST) -- entries and exits of closed trades, entries of open holdings/legs -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
+\echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
   FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
@@ -829,7 +829,7 @@ WITH closed AS (
   SELECT ev.*, i.instrument_type, i.symbol,
          date_trunc('hour', ev.at) + floor(extract(minute FROM ev.at) / 5) * interval '5 min' AS m5_ts
   FROM ev JOIN instruments i ON i.id = ev.instrument_id
-  WHERE (ev.at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+  WHERE ev.kind LIKE 'open%' OR (ev.at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
 ), priced AS (
   SELECT t.*,
          coalesce((SELECT c.open::numeric FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.timeframe = '5m' AND c.ts = t.m5_ts),
@@ -839,7 +839,7 @@ WITH closed AS (
          (SELECT to_char(c.ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = t.instrument_id AND c.created_at <= t.at ORDER BY c.ts DESC LIMIT 1) AS last_close_candle
   FROM today t
 )
-SELECT s.name AS strategy, p.kind, p.instrument_type, to_char(p.at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS at_ist,
+SELECT s.name AS strategy, p.kind, p.instrument_type, to_char(p.at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS at_ist,
        round((p.price - p.real_open) / nullif(p.real_open, 0) * 100, 2) AS pct_off_real_5m_open,
        p.last_close_candle AS last_stored_candle_then, abs(p.price - p.last_close) < 0.01 AS price_is_that_stored_close,
        round((p.price - p.last_close) / nullif(p.last_close, 0) * 100, 2) AS pct_off_that_close
