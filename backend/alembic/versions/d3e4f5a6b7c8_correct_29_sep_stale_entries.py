@@ -3,7 +3,7 @@
 These entries had no live price on file for the contract/stock yet, so the
 runner handed them an old or simulated one (see native_runner get_price,
 fixed in market_data/live_price.py): AM OP TRD 15 MIN's two NIFTY option
-legs at 29 Sep 09:45 got 28 Sep's close; MACD - RSI - 15 MIN's first buys
+legs at 29 Sep 09:45 got 28 Sep's close, and its 11:15 straddle legs stale prices too; MACD - RSI - 15 MIN's first buys
 of a stock -- the open holdings ACUTAAS (29 Sep 09:45), DELHIVERY
 (29 Sep 10:31) and LAURUSLABS (28 Sep 11:30), and six since-closed trades
 bought 25 Sep 09:15 and 12:15 and 28 Sep 12:00, 13:30 and 14:00 -- got
@@ -41,7 +41,8 @@ UTC = timezone.utc
 # strategy name -> starts (UTC) of the 5-minute candles the wrong entries were made in
 TARGETS = {
     "AM OP TRD 15 MIN": [
-        datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 29 Sep 09:45 IST: both option legs
+        datetime(2026, 9, 29, 4, 15, tzinfo=UTC),  # 29 Sep 09:45 IST: bearish call spread, both legs
+        datetime(2026, 9, 29, 5, 45, tzinfo=UTC),  # 29 Sep 11:15 IST: sideways straddle, 22700 CE and PE
     ],
     "MACD - RSI - 15 MIN": [
         datetime(2026, 9, 25, 3, 45, tzinfo=UTC),  # 25 Sep 09:15 IST: closed trades 1 and 3
