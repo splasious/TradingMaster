@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { DELTA_VISIBLE } from "@/lib/features";
 import { useInstruments } from "@/lib/hooks";
+import { expiryDay } from "@/lib/time";
 import type { InstrumentOut } from "@/lib/types";
 
 const EXCHANGES = [
@@ -18,7 +19,7 @@ const EXCHANGES = [
 
 function contractSuffix(i: InstrumentOut): string | null {
   if (!i.expiry) return null;
-  const expiry = new Date(i.expiry).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" });
+  const expiry = expiryDay(i.expiry);
   const detail = i.option_type ? `${i.strike} ${i.option_type}` : "FUT";
   return `${expiry} · ${detail}${i.lot_size ? ` · lot ${i.lot_size}` : ""}`;
 }

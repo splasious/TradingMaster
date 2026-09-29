@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfTimeframes, useBfWatchlists } from "@/lib/hooks";
-import { istDateTime } from "@/lib/time";
+import { expiryDay, istDateTime } from "@/lib/time";
 import type { BfBackfillJobOut, BfSource, BulkBackfillResult, SymbolSearchResultOut } from "@/lib/types";
 
 const SOURCE_LABEL: Record<BfSource, string> = { delta: "Delta Exchange", zerodha: "Zerodha Kite", zerodha_nfo: "Zerodha NFO (F&O)" };
@@ -25,7 +25,7 @@ const BULK_LABEL: Record<BfSource, string> = {
 
 function contractLabel(r: SymbolSearchResultOut): string | null {
   if (!r.expiry) return null;
-  const expiry = new Date(r.expiry).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" });
+  const expiry = expiryDay(r.expiry);
   return r.option_type ? `${expiry} · ${r.strike} ${r.option_type}` : `${expiry} FUT`;
 }
 

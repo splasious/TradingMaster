@@ -30,7 +30,7 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
-import { istDateTime, istShortDateTime } from "@/lib/time";
+import { istDateTime, istShortDateTime, istShortTime } from "@/lib/time";
 import type {
   InstrumentOut,
   NativeDeploymentOut,
@@ -1222,7 +1222,8 @@ function metricText(value: number | string | boolean | null | undefined): string
   if (typeof value === "boolean") return value ? "Yes" : "No";
   if (typeof value === "number") return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+    const [year, month, day] = value.split("-");
+    return MONTHS[Number(month) - 1] ? `${day} ${MONTHS[Number(month) - 1]} ${year}` : value;
   }
   return value;
 }
@@ -1413,11 +1414,10 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
   const pnlPct = pnl != null && position.trade_value ? (pnl / Math.abs(position.trade_value)) * 100 : null;
   const regime = position.bias ?? "in a trade";
   const regimeTone = regime === "bullish" ? "positive" : regime === "bearish" ? "negative" : "neutral";
-  const opened = new Date(position.opened_at);
   const openedText =
-    opened.toDateString() === new Date().toDateString()
-      ? opened.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-      : opened.toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    istDate(position.opened_at) === istDate(new Date().toISOString())
+      ? istShortTime(position.opened_at)
+      : istShortDateTime(position.opened_at);
 
   const pcrAtEntry = typeof metrics.pcr_at_entry === "number" ? metrics.pcr_at_entry : null;
   const exitBelow = typeof metrics.pcr_exit_below === "number" ? metrics.pcr_exit_below : null;
@@ -1445,7 +1445,7 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
           <Badge tone={regimeTone} className="capitalize">
             {regime}
           </Badge>{" "}
-          <span className="text-xs text-text-muted" title={opened.toISOString()}>
+          <span className="text-xs text-text-muted" title={istDateTime(position.opened_at)}>
             since {openedText}
           </span>
         </SummaryField>
