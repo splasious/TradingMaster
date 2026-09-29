@@ -81,6 +81,19 @@ class KiteAPIError(Exception):
 
 _INSTRUMENTS_CACHE: dict[str, dict[str, Any]] = {}  # segment -> {"rows": ..., "fetched_at": ...}
 _INSTRUMENTS_CACHE_TTL = timedelta(minutes=30)
+# segment -> (the dump's rows, tradingsymbol -> row): built once per dump
+# download rather than on every get_historical_data call -- the NFO dump is
+# tens of thousands of rows, and a top-up looks up thousands of contracts.
+_SYMBOL_INDEX: dict[str, tuple[list, dict[str, dict[str, Any]]]] = {}
+
+
+def _symbol_index(segment: str, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    cached = _SYMBOL_INDEX.get(segment)
+    if cached is not None and cached[0] is rows:
+        return cached[1]
+    by_symbol = {row["tradingsymbol"]: row for row in rows if row.get("tradingsymbol")}
+    _SYMBOL_INDEX[segment] = (rows, by_symbol)
+    return by_symbol
 
 
 def resolve_tradingsymbol_with_be_fallback(by_symbol: dict, symbol: str):
@@ -118,6 +131,20 @@ class ZerodhaKiteBroker(BrokerInterface):
         self._api_secret: str | None = None
         self._access_token: str | None = None
         self._connected = False
+        # Set by keep_connection_open(): one HTTP connection reused for every
+        # request instead of a new one (and TLS handshake) per request.
+        self._client: httpx.AsyncClient | None = None
+
+    def keep_connection_open(self) -> None:
+        """For a broker reused across many requests (the backfill's): keeps
+        one connection to Kite open. Close it with aclose()."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=15.0)
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     @classmethod
     def build_login_url(cls, api_key: str) -> str:
@@ -146,17 +173,29 @@ class ZerodhaKiteBroker(BrokerInterface):
             headers["Authorization"] = f"token {self._api_key}:{self._access_token}"
 
         attempt = 0
+        reconnected = False
         while True:
             try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    # Kite's API takes form-encoded bodies, not JSON, for
-                    # every write endpoint -- confirmed in their docs,
-                    # unlike Delta's JSON API.
-                    resp = await client.request(method, f"{self.BASE_URL}{path}", headers=headers, params=params, data=data)
+                # Kite's API takes form-encoded bodies, not JSON, for every
+                # write endpoint -- confirmed in their docs, unlike Delta's
+                # JSON API.
+                if self._client is not None:
+                    resp = await self._client.request(method, f"{self.BASE_URL}{path}", headers=headers, params=params, data=data)
+                else:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        resp = await client.request(method, f"{self.BASE_URL}{path}", headers=headers, params=params, data=data)
             except httpx.ConnectError as exc:
                 raise KiteAPIError("Could not reach Zerodha Kite's API.") from exc
             except httpx.TimeoutException as exc:
                 raise KiteAPIError("Zerodha Kite API request timed out.") from exc
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError):
+                # A kept-open connection Kite closed in the meantime: a read
+                # is asked once more, on a fresh connection. Never a write --
+                # it may have gone through.
+                if self._client is None or method != "GET" or reconnected:
+                    raise
+                reconnected = True
+                continue
 
             # Only 429 is retried -- everything else keeps today's
             # behavior exactly (raise, caller decides). This codebase has
@@ -328,8 +367,7 @@ class ZerodhaKiteBroker(BrokerInterface):
         if instrument_token is not None:
             token = instrument_token
         else:
-            instruments = await self.get_instruments(segment)
-            by_symbol = {row["tradingsymbol"]: row for row in instruments if row.get("tradingsymbol")}
+            by_symbol = _symbol_index(segment, await self.get_instruments(segment))
             match = resolve_tradingsymbol_with_be_fallback(by_symbol, symbol)
             if match is None:
                 raise KiteAPIError(f"'{symbol}' not found in Kite's {segment} instrument list")

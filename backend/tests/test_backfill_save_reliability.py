@@ -76,6 +76,7 @@ def use_kite(monkeypatch, kite: FakeKite) -> FakeKite:
     async def broker(db, user_id):
         return kite
     monkeypatch.setattr(jobs, "get_authenticated_kite_broker", broker)
+    jobs._kite_brokers.clear()  # jobs reuse a logged-in session; this fake replaces it
     return kite
 
 

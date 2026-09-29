@@ -19,7 +19,7 @@ from app.services.backtest import native_runner as native_backtest_runner
 from app.services.backtest import optimization_runner
 from app.services.backtest import portfolio_optimization_runner
 from app.services.backtest import portfolio_runner
-from app.services.broker.zerodha_broker import _INSTRUMENTS_CACHE
+from app.services.broker.zerodha_broker import _INSTRUMENTS_CACHE, _SYMBOL_INDEX
 from app.services.market_data import backfill as market_data_backfill
 
 
@@ -31,8 +31,25 @@ def _reset_kite_instruments_cache():
     leak a mocked instrument list from one test into the next, since pytest
     runs every test in the same process."""
     _INSTRUMENTS_CACHE.clear()
+    _SYMBOL_INDEX.clear()
     yield
     _INSTRUMENTS_CACHE.clear()
+    _SYMBOL_INDEX.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_backfill_kite_session(monkeypatch):
+    """Backfill jobs reuse one logged-in Kite session per user
+    (jobs._kite_brokers) and queue each request on the app-wide Kite limit:
+    one test's fake Kite must not serve the next, and tests don't wait out
+    the limit."""
+    from app.services.fo_scan import pacing
+
+    backfill_platform_jobs._kite_brokers.clear()
+    monkeypatch.setattr(pacing.history_pacer, "interval", 0)
+    monkeypatch.setattr(backfill_platform_jobs._delta_pacer, "interval", 0)
+    yield
+    backfill_platform_jobs._kite_brokers.clear()
 
 
 @pytest.fixture(autouse=True)

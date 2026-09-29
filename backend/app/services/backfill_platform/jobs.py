@@ -1,9 +1,8 @@
 """Runs one Data Backfill Platform job: fetches the requested range from
 its source, saves the finished candles (skipping any already stored) and
 updates the symbol's coverage row. Jobs are queued in the database and run
-one at a time by BackfillWorker (worker.py)."""
+by BackfillWorker (worker.py), a few at a time."""
 
-import asyncio
 import logging
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
@@ -23,7 +22,8 @@ from app.services.backfill_platform.coverage import (
     recompute_coverage,
 )
 from app.services.backfill_platform.kite_auth import get_authenticated_kite_broker
-from app.services.broker.zerodha_broker import KiteAPIError
+from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.fo_scan.pacing import Pacer, history_pacer
 from app.services.market_data.bar_periods import is_complete
 from app.services.market_data.base import Bar, MarketDataSourceError
 from app.services.market_data.delta_source import DeltaExchangeDataSource
@@ -150,7 +150,10 @@ def _to_datetime(d: date | None, end_of_day: bool = False) -> datetime | None:
 # days for the interval ("interval exceeds max limit") -- its documented
 # limits, less a day of margin. A longer backfill is fetched window by window.
 _KITE_WINDOW_DAYS = {"1m": 59, "5m": 99, "15m": 199, "30m": 199, "60m": 399, "1d": 1999}
-_KITE_PACING_SECONDS = 0.35  # Kite allows 3 historical requests a second
+# Kite's own limit (3 history requests a second) is history_pacer, shared
+# with everything else in the app that asks Kite for candles. Delta's public
+# API gets the same spacing.
+_delta_pacer = Pacer(0.35)
 # Delta returns at most this many candles per request.
 _DELTA_MAX_CANDLES = 2000
 _DELTA_BAR_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "4h": 240, "1d": 1440, "1wk": 10080}
@@ -178,16 +181,45 @@ def _windows(source: str, timeframe: str, start: datetime | None, end: datetime 
     return windows or [(start, end)]
 
 
+# One logged-in Kite session per user, reused by every job, with its
+# connection kept open -- rather than a fresh login check (an extra request
+# to Kite) and new connections for every job. Dropped when Kite rejects its
+# token, e.g. after the next daily login, and built again.
+_kite_brokers: dict = {}
+
+
+async def _kite_broker(db: AsyncSession, user_id) -> ZerodhaKiteBroker:
+    broker = _kite_brokers.get(user_id)
+    if broker is None:
+        fresh = await get_authenticated_kite_broker(db, user_id)
+        broker = _kite_brokers.setdefault(user_id, fresh)  # another job may have just logged in too
+        if broker is fresh and hasattr(broker, "keep_connection_open"):
+            broker.keep_connection_open()
+    return broker
+
+
+def _forget_kite_broker(user_id, broker) -> None:
+    if _kite_brokers.get(user_id) is broker:
+        del _kite_brokers[user_id]
+
+
 async def _fetch_bars(db: AsyncSession, source: str, symbol: str, timeframe: str, start: datetime | None, end: datetime | None, user_id) -> list[Bar]:
     if source == "delta":
+        await _delta_pacer.wait()
         return await DeltaExchangeDataSource().get_historical_data(symbol, timeframe, start, end)
     if source in ("zerodha", "zerodha_nfo"):
         segment = "NFO" if source == "zerodha_nfo" else "NSE"
-        try:
-            broker = await get_authenticated_kite_broker(db, user_id)
-            return await broker.get_historical_data(symbol, timeframe, start, end, segment)  # type: ignore[return-value]
-        except KiteAPIError as exc:
-            raise MarketDataSourceError(str(exc)) from exc
+        for attempt in range(2):
+            try:
+                broker = await _kite_broker(db, user_id)
+                await history_pacer.wait()
+                return await broker.get_historical_data(symbol, timeframe, start, end, segment)  # type: ignore[return-value]
+            except KiteAPIError as exc:
+                if attempt == 0 and "tokenexception" in str(exc).lower() and user_id in _kite_brokers:
+                    # The reused session expired or was replaced: log in again, once.
+                    _forget_kite_broker(user_id, _kite_brokers[user_id])
+                    continue
+                raise MarketDataSourceError(str(exc)) from exc
     raise MarketDataSourceError(f"Unknown source '{source}'")
 
 
@@ -262,8 +294,6 @@ async def _run_job(job_id: uuid.UUID) -> None:
         fetch_error: str | None = None
         windows = _windows(job.source, job.timeframe, _to_datetime(job.start_date), _to_datetime(job.end_date, end_of_day=True))
         for n, (start, end) in enumerate(windows):
-            if n and job.source in KITE_SOURCES:
-                await asyncio.sleep(_KITE_PACING_SECONDS)
             try:
                 bars += await _fetch_bars(db, job.source, symbol_row.symbol, job.timeframe, start, end, job.requested_by)
             except MarketDataSourceError as exc:

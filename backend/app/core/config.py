@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     # DELTA_VISIBLE in frontend/lib/features.ts.
     show_delta_exchange: bool = False
 
+    # Data Backfill downloads run this many at a time, all under Kite's
+    # shared limit of 3 history requests a second (fo_scan/pacing.py) -- so
+    # one waiting on Kite's answer doesn't hold the others up. 1 runs them
+    # one after another, as before.
+    backfill_parallel: int = 3
+
     # Optional: pushes native-strategy alerts (scanner shortlist, trade
     # entries/exits, EOD report) to a Telegram chat via a bot, in addition
     # to the in-app Alerts panel. A bot can't message a phone number
