@@ -743,6 +743,41 @@ SELECT (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p 
        (SELECT count(*) FROM live_deployments l JOIN broker_accounts a ON a.id = l.broker_account_id WHERE a.user_id <> l.owner_id) AS live_on_others_broker;
 
 \echo
+\echo '== Q2. Open option legs of active advanced deployments (index options only): the price a strategy could read at entry vs the real 5m candle (entry price itself not printed)'
+WITH legs AS (
+  SELECT (d.state::jsonb->'position'->>'opened_at')::timestamptz AS opened_at, l.key AS leg,
+         (l.value->>'instrument_id')::uuid AS instrument_id, (l.value->>'entry_price')::numeric AS entry_price
+  FROM paper_native_deployments d
+  CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb->'position'->'legs') = 'object'
+                                     THEN d.state::jsonb->'position'->'legs' ELSE '{}'::jsonb END) l
+  WHERE d.status = 'active'
+)
+SELECT i.symbol, legs.leg, to_char(legs.opened_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS opened_ist,
+       pre.timeframe AS last_stored_tf, to_char(pre.ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_stored_candle,
+       round(pre.close::numeric, 2) AS last_stored_close, pre.source AS last_stored_source,
+       to_char(m.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS m5_at_entry, round(m.low::numeric, 2) AS m5_low, round(m.high::numeric, 2) AS m5_high,
+       legs.entry_price BETWEEN m.low::numeric * 0.98 AND m.high::numeric * 1.02 AS entry_in_real_range,
+       legs.entry_price = round(pre.close::numeric, 2) AS entry_equals_last_stored_close
+FROM legs JOIN instruments i ON i.id = legs.instrument_id
+LEFT JOIN LATERAL (SELECT c.timeframe, c.ts, c.close, c.source FROM ohlcv_candles c
+                   WHERE c.instrument_id = legs.instrument_id AND c.created_at <= legs.opened_at
+                   ORDER BY c.ts DESC LIMIT 1) pre ON true
+LEFT JOIN LATERAL (SELECT c.ts, c.low, c.high FROM ohlcv_candles c
+                   WHERE c.instrument_id = legs.instrument_id AND c.timeframe = '5m' AND c.ts <= legs.opened_at
+                   ORDER BY c.ts DESC LIMIT 1) m ON true
+WHERE i.symbol LIKE 'NIFTY%' OR i.symbol LIKE 'BANKNIFTY%'
+ORDER BY 1;
+\echo '-- NIFTY option candles saved today (IST) 09:15-10:15 per 5-min saving window and source (did live data flow at entry time?)'
+SELECT to_char(date_trunc('hour', c.created_at AT TIME ZONE 'Asia/Kolkata')
+               + floor(extract(minute FROM c.created_at AT TIME ZONE 'Asia/Kolkata') / 5) * interval '5 min', 'HH24:MI') AS saved_window,
+       c.source, count(*) AS candles
+FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+WHERE i.exchange = 'NFO' AND i.symbol LIKE 'NIFTY%'
+  AND (c.created_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+  AND (c.created_at AT TIME ZONE 'Asia/Kolkata')::time BETWEEN '09:15' AND '10:15'
+GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
 \echo '== M. Database and table sizes'
 SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
 SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS size, n_live_tup AS rows_estimate
