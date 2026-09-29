@@ -14,6 +14,7 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { DELTA_VISIBLE } from "@/lib/features";
 import { CATEGORY_OPTIONS, useCategoryMap, useInstruments, useQuotes } from "@/lib/hooks";
 import { getCategory, marketLabel } from "@/lib/market";
+import { istDateTime } from "@/lib/time";
 import type { InstrumentOut } from "@/lib/types";
 import { useMarketDataSocket } from "@/lib/ws";
 
@@ -246,7 +247,7 @@ export default function MarketsPage() {
                       <Td className="text-right text-text-secondary">
                         {tick ? (
                           <span className="font-financial text-xs" title={new Date(tick.ts).toISOString()}>
-                            {new Date(tick.ts).toLocaleDateString()} {new Date(tick.ts).toLocaleTimeString()}
+                            {istDateTime(tick.ts)}
                           </span>
                         ) : (
                           <span className="text-text-muted">--</span>

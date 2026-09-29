@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError, getAccessToken } from "@/lib/api";
 import { useBfTimeframes, useBfWatchlistItems, useBfWatchlists } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 import type {
   BfBackfillJobOut,
   BfSource,
@@ -356,7 +357,7 @@ export function WatchlistsPanel() {
                     <Td className="font-medium">{w.name}</Td>
                     <Td className="text-right font-financial">{w.symbol_count}</Td>
                     <Td className="text-right font-financial">{w.never_backfilled_count}</Td>
-                    <Td className="text-text-muted">{w.last_backfill_at ? new Date(w.last_backfill_at).toLocaleString() : "Never"}</Td>
+                    <Td className="text-text-muted">{w.last_backfill_at ? istDateTime(w.last_backfill_at) : "Never"}</Td>
                     <Td className="text-right" onClick={(e) => e.stopPropagation()}>
                       <Button variant="ghost" size="sm" onClick={() => deleteMutation.mutate(w.id)}>
                         <Trash2 className="h-3.5 w-3.5" />

@@ -12,6 +12,7 @@ import { Select } from "@/components/ui/select";
 import { ConnectionStatusBadge } from "@/components/ui/status-badge";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { useOptionChain, useOptionExpiries, useOptionHistoryDepth, useOptionPcr, useOptionUnderlyings } from "@/lib/hooks";
+import { istDate } from "@/lib/time";
 import type { OptionLegOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useMarketDataSocket } from "@/lib/ws";
@@ -75,7 +76,7 @@ function mergeLeg(leg: OptionLegOut | null | undefined, live: { price: number; o
 }
 
 function fmtDate(ts: string | null): string {
-  return ts ? new Date(ts).toLocaleDateString() : "--";
+  return ts ? istDate(ts) : "--";
 }
 
 /** Answers "how much historical data is really there" by asking Kite's

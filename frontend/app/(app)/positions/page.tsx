@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { useLiveDeployments, useQuotes } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 
 export default function PositionsPage() {
   const { data: deployments, isLoading, isError } = useLiveDeployments();
@@ -70,7 +71,7 @@ export default function PositionsPage() {
                           <span className="text-text-muted">--</span>
                         )}
                       </Td>
-                      <Td className="text-text-muted">{new Date(position.opened_at).toLocaleString()}</Td>
+                      <Td className="text-text-muted">{istDateTime(position.opened_at)}</Td>
                     </tr>
                   );
                 })}

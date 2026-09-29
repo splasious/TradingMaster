@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { useAllLiveOrders } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 
 const STATUS_TONE: Record<string, Tone> = {
   created: "neutral",
@@ -82,8 +83,8 @@ export default function OrdersPage() {
                       {o.reason && <p className="mt-1 max-w-xs text-xs text-text-muted">{o.reason}</p>}
                     </Td>
                     <Td className="font-financial text-text-muted">{o.broker_order_id ?? "--"}</Td>
-                    <Td className="text-text-muted">{new Date(o.created_at).toLocaleString()}</Td>
-                    <Td className="text-text-muted">{o.confirmed_at ? new Date(o.confirmed_at).toLocaleString() : "--"}</Td>
+                    <Td className="text-text-muted">{istDateTime(o.created_at)}</Td>
+                    <Td className="text-text-muted">{o.confirmed_at ? istDateTime(o.confirmed_at) : "--"}</Td>
                   </tr>
                 ))}
               </Tbody>

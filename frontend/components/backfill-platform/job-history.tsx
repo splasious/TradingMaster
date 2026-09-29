@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { apiFetch } from "@/lib/api";
 import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfJobs } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 import type { BfBackfillJobOut, BfSource } from "@/lib/types";
 
 const STATUS_ICON: Record<BfBackfillJobOut["status"], React.ReactNode> = {
@@ -60,7 +61,7 @@ function JobHistoryTable({ source }: { source?: BfSource }) {
             <Td className="text-xs text-text-muted">
               {job.status === "completed" ? `${job.inserted_count} new, ${job.duplicate_count} dup` : job.status === "failed" ? job.error_message : "--"}
             </Td>
-            <Td className="text-xs text-text-muted">{job.started_at ? new Date(job.started_at).toLocaleString() : "--"}</Td>
+            <Td className="text-xs text-text-muted">{job.started_at ? istDateTime(job.started_at) : "--"}</Td>
             <Td className="text-right">
               {job.status === "failed" && (
                 <Button variant="ghost" size="sm" onClick={() => retryMutation.mutate(job.id)} disabled={retryMutation.isPending}>

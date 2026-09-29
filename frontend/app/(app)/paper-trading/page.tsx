@@ -30,6 +30,7 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
+import { istDateTime, istShortDateTime } from "@/lib/time";
 import type {
   InstrumentOut,
   NativeDeploymentOut,
@@ -371,11 +372,11 @@ function DeploymentDetail({ deployment }: { deployment: PaperDeploymentOut }) {
               {trades.map((t) => (
                 <tr key={t.id}>
                   <Td className="font-financial text-xs">
-                    {new Date(t.entry_ts).toLocaleDateString()} {new Date(t.entry_ts).toLocaleTimeString()}
+                    {istDateTime(t.entry_ts)}
                     <span className="ml-1.5 text-text-muted">@ {t.entry_price.toFixed(2)}</span>
                   </Td>
                   <Td className="font-financial text-xs">
-                    {new Date(t.exit_ts).toLocaleDateString()} {new Date(t.exit_ts).toLocaleTimeString()}
+                    {istDateTime(t.exit_ts)}
                     <span className="ml-1.5 text-text-muted">@ {t.exit_price.toFixed(2)}</span>
                   </Td>
                   <Td className="text-right font-financial">{t.quantity}</Td>
@@ -479,8 +480,8 @@ function DeploymentRow({ deployment, onDelete }: { deployment: PaperDeploymentOu
         <Td className="text-text-secondary">
           {deployment.open_position ? (
             <span className="font-financial text-xs" title={new Date(deployment.open_position.opened_at).toISOString()}>
-              {new Date(deployment.open_position.opened_at).toLocaleDateString()}{" "}
-              {new Date(deployment.open_position.opened_at).toLocaleTimeString()}
+              {istDate(deployment.open_position.opened_at)}{" "}
+              {istTime(deployment.open_position.opened_at)}
             </span>
           ) : (
             <span className="text-text-muted">--</span>
@@ -958,11 +959,11 @@ function ClosedTradesPanel() {
                 <Td className="font-medium">{t.strategy_name ?? "--"}</Td>
                 <Td>{t.instrument_symbol ?? "--"}</Td>
                 <Td className="font-financial text-xs">
-                  {new Date(t.entry_ts).toLocaleDateString()} {new Date(t.entry_ts).toLocaleTimeString()}
+                  {istDateTime(t.entry_ts)}
                   <span className="ml-1.5 text-text-muted">@ {t.entry_price.toFixed(2)}</span>
                 </Td>
                 <Td className="font-financial text-xs">
-                  {new Date(t.exit_ts).toLocaleDateString()} {new Date(t.exit_ts).toLocaleTimeString()}
+                  {istDateTime(t.exit_ts)}
                   <span className="ml-1.5 text-text-muted">@ {t.exit_price.toFixed(2)}</span>
                 </Td>
                 <Td className="text-right font-financial">{t.quantity}</Td>
@@ -1324,7 +1325,7 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
               ))}
               <Td className={`${cell} text-text-secondary`} title={h.opened_at ?? undefined}>
                 {h.opened_at
-                  ? new Date(h.opened_at).toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                  ? istShortDateTime(h.opened_at)
                   : "—"}
               </Td>
             </tr>

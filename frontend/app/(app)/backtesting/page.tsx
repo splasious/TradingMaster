@@ -29,6 +29,7 @@ import {
   usePortfolioBacktestTrades,
   useStrategies,
 } from "@/lib/hooks";
+import { istDate, istDateTime } from "@/lib/time";
 import {
   TIMEFRAMES,
   type BacktestJobOut,
@@ -140,7 +141,7 @@ function HistoryRow({
     >
       <Td className="font-medium">{instrument?.symbol ?? "..."}</Td>
       <Td className="text-text-secondary">{job.timeframe}</Td>
-      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td className="text-text-secondary">{istDateTime(job.created_at)}</Td>
       <Td>
         <span
           className={`capitalize ${
@@ -320,8 +321,8 @@ function TradesTable({ trades, showSymbol }: { trades: TaggedTrade[]; showSymbol
           {trades.map((t, i) => (
             <tr key={i}>
               {showSymbol && <Td className="font-medium">{t.symbol}</Td>}
-              <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
-              <Td className="font-financial">{new Date(t.exit_ts).toLocaleDateString()} @ {t.exit_price.toFixed(2)}</Td>
+              <Td className="font-financial">{istDate(t.entry_ts)} @ {t.entry_price.toFixed(2)}</Td>
+              <Td className="font-financial">{istDate(t.exit_ts)} @ {t.exit_price.toFixed(2)}</Td>
               <Td className="text-right font-financial">{Math.round(t.quantity)}</Td>
               <Td className="text-right font-financial">{(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 0 })}</Td>
               <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>{t.pnl.toFixed(2)}</Td>
@@ -361,9 +362,9 @@ function PortfolioTradesTable({ trades }: { trades: PortfolioBacktestTradeOut[] 
                   {t.side === "short" ? "Short" : "Long"}
                 </span>
               </Td>
-              <Td className="font-financial">{new Date(t.entry_ts).toLocaleDateString()} @ {t.entry_price.toFixed(2)}</Td>
+              <Td className="font-financial">{istDate(t.entry_ts)} @ {t.entry_price.toFixed(2)}</Td>
               <Td className="font-financial">
-                {t.exit_ts && t.exit_price !== null ? `${new Date(t.exit_ts).toLocaleDateString()} @ ${t.exit_price.toFixed(2)}` : "--"}
+                {t.exit_ts && t.exit_price !== null ? `${istDate(t.exit_ts)} @ ${t.exit_price.toFixed(2)}` : "--"}
               </Td>
               <Td className="text-right font-financial">{Math.round(t.quantity)}</Td>
               <Td className="text-right font-financial">{(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 0 })}</Td>
@@ -414,7 +415,7 @@ function PortfolioHistoryRow({
     >
       <Td className="font-medium">{job.instrument_ids.length} instruments</Td>
       <Td className="text-text-secondary">{job.timeframe}</Td>
-      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td className="text-text-secondary">{istDateTime(job.created_at)}</Td>
       <Td>
         <span
           className={`capitalize ${
@@ -525,8 +526,8 @@ function NativeBacktestTradesTable({ trades }: { trades: NativeBacktestTradeOut[
       <Tbody>
         {trades.map((t) => (
           <tr key={t.id}>
-            <Td className="font-financial text-xs">{new Date(t.opened_at).toLocaleDateString()} {new Date(t.opened_at).toLocaleTimeString()}</Td>
-            <Td className="font-financial text-xs">{new Date(t.closed_at).toLocaleDateString()} {new Date(t.closed_at).toLocaleTimeString()}</Td>
+            <Td className="font-financial text-xs">{istDateTime(t.opened_at)}</Td>
+            <Td className="font-financial text-xs">{istDateTime(t.closed_at)}</Td>
             <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
               {t.pnl >= 0 ? "+" : ""}
               {t.pnl.toFixed(2)}
@@ -577,7 +578,7 @@ function NativeHistoryRow({
       className={`cursor-pointer ${isFocused ? "bg-active-soft" : "hover:bg-surface-elevated"}`}
     >
       <Td className="font-medium">{job.start_date} &rarr; {job.end_date}</Td>
-      <Td className="text-text-secondary">{new Date(job.created_at).toLocaleString()}</Td>
+      <Td className="text-text-secondary">{istDateTime(job.created_at)}</Td>
       <Td>
         <span
           className={`capitalize ${

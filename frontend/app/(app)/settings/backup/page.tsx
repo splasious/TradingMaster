@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBackups } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 import type { BackupOut } from "@/lib/types";
 
 function formatSize(bytes: number): string {
@@ -72,7 +73,7 @@ export default function BackupSettingsPage() {
                   <tr key={b.filename}>
                     <Td className="font-mono text-xs">{b.filename}</Td>
                     <Td>{formatSize(b.size_bytes)}</Td>
-                    <Td className="text-xs text-text-muted">{new Date(b.created_at).toLocaleString()}</Td>
+                    <Td className="text-xs text-text-muted">{istDateTime(b.created_at)}</Td>
                     <Td className="text-right">
                       <Button variant="ghost" size="sm" onClick={() => apiDownload(`/api/v1/backup/${b.filename}/download`, b.filename)}>
                         <Download className="h-3.5 w-3.5" /> Download

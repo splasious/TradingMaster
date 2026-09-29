@@ -13,6 +13,7 @@ import { Modal } from "@/components/ui/modal";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBacktestResult, useBacktestsForStrategy, useNativeBacktestResult, useNativeBacktestsForStrategy, useStrategies } from "@/lib/hooks";
+import { istDate } from "@/lib/time";
 import type { StrategyOut, StrategyStatus } from "@/lib/types";
 
 const STATUS_TONE: Record<StrategyStatus, Tone> = {
@@ -207,7 +208,7 @@ function StrategyCard({
       )}
 
       <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 text-xs text-text-muted">
-        <span>Updated {new Date(strategy.updated_at).toLocaleDateString()}</span>
+        <span>Updated {istDate(strategy.updated_at)}</span>
         <div className="flex flex-wrap items-center gap-1">
           {strategy.status === "paper_trading" && canEdit && (
             <Button

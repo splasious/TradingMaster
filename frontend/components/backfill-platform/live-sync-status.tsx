@@ -4,6 +4,7 @@ import { Radio, TriangleAlert } from "lucide-react";
 
 import { DELTA_VISIBLE } from "@/lib/features";
 import { useBfLiveSyncStatus, useCatalogSyncStatus } from "@/lib/hooks";
+import { istTime } from "@/lib/time";
 
 export function LiveSyncStatus() {
   const { data: status } = useBfLiveSyncStatus();
@@ -26,7 +27,7 @@ export function LiveSyncStatus() {
             {status.last_sync_at && (
               <>
                 {" "}-- last polled {status.last_synced_count} symbol{status.last_synced_count === 1 ? "" : "s"} at{" "}
-                {new Date(status.last_sync_at).toLocaleTimeString()}
+                {istTime(status.last_sync_at)}
               </>
             )}
             {status.last_error && <span className="text-negative"> -- last error: {status.last_error}</span>}
@@ -48,7 +49,7 @@ export function LiveSyncStatus() {
             {catalogStatus.last_run_at && (
               <>
                 {" "}-- synced {catalogStatus.last_synced_symbols} symbol{catalogStatus.last_synced_symbols === 1 ? "" : "s"} (
-                {catalogStatus.last_synced_bars} bars) into Charts/Strategies at {new Date(catalogStatus.last_run_at).toLocaleTimeString()}
+                {catalogStatus.last_synced_bars} bars) into Charts/Strategies at {istTime(catalogStatus.last_run_at)}
               </>
             )}
             {catalogStatus.last_error && <span className="text-negative"> -- last error: {catalogStatus.last_error}</span>}

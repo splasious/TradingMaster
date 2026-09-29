@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { apiDownload, apiFetch, ApiError } from "@/lib/api";
 import { useBfCompleteness, useBfJobs, useBfSourceStatus, useBfTimeframes, useBfWatchlists } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 import type { BfBackfillJobOut, BfSource, BulkBackfillResult, SymbolSearchResultOut } from "@/lib/types";
 
 const SOURCE_LABEL: Record<BfSource, string> = { delta: "Delta Exchange", zerodha: "Zerodha Kite", zerodha_nfo: "Zerodha NFO (F&O)" };
@@ -169,7 +170,7 @@ export function SourceBlock({ source }: { source: BfSource }) {
         </div>
         {status && <p className="text-xs text-text-muted">{status.detail}</p>}
         {status?.expires_at && (
-          <p className="text-xs text-warning">Session expires (est.) {new Date(status.expires_at).toLocaleString()}</p>
+          <p className="text-xs text-warning">Session expires (est.) {istDateTime(status.expires_at)}</p>
         )}
       </CardHeader>
       <CardContent className="flex-1 space-y-4">

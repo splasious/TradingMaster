@@ -11,6 +11,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state
 import { Select } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
 import { useAlerts } from "@/lib/hooks";
+import { istDateTime } from "@/lib/time";
 import type { AlertOut, AlertSeverity } from "@/lib/types";
 
 const SEVERITY_CONFIG: Record<AlertSeverity, { label: string; tone: Tone; Icon: typeof Info }> = {
@@ -40,7 +41,7 @@ function AlertRow({ alert }: { alert: AlertOut }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm font-medium text-text-primary">{alert.title}</p>
-          <span className="shrink-0 text-xs text-text-muted">{new Date(alert.created_at).toLocaleString()}</span>
+          <span className="shrink-0 text-xs text-text-muted">{istDateTime(alert.created_at)}</span>
         </div>
         <p className="mt-0.5 text-sm text-text-secondary">{alert.message}</p>
       </div>
