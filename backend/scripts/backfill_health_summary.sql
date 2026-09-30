@@ -910,6 +910,18 @@ WHERE i.underlying_instrument_id IN (SELECT id FROM u) AND i.instrument_type = '
 GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo
+\echo '== AM5. Zerodha login: connect/disconnect events (last 2 days IST) and when the saved access token last changed (times only)'
+SELECT to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS at_ist, a.action
+FROM audit_logs a WHERE a.action IN ('BROKER_CONNECTED', 'BROKER_DISCONNECTED') AND a.created_at > now() - interval '2 days'
+ORDER BY a.created_at;
+
+SELECT c.status, to_char(cr.updated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS token_saved_ist,
+       to_char(c.last_heartbeat_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_heartbeat_ist
+FROM broker_accounts ba JOIN brokers b ON b.id = ba.broker_id
+LEFT JOIN broker_connections c ON c.broker_account_id = ba.id LEFT JOIN broker_credentials cr ON cr.broker_account_id = ba.id
+WHERE b.code = 'zerodha_kite';
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
