@@ -290,6 +290,26 @@ async def test_effective_pcr_reads_the_latest_record(db_session: AsyncSession):
     assert await compute_effective_pcr(db_session, num_expiries=2, as_of=at(25, 9, 20)) is None
 
 
+async def test_effective_pcr_is_todays_and_recent_or_none(db_session: AsyncSession):
+    """30 Sep: Zerodha was logged out until 09:51, no record had been made that
+    morning, and a strategy read the previous session's 15:30 PCR at 09:52.
+    Only a record of the same session, at most 30 minutes old, counts now --
+    and a missing one is None, not the roll-up's much lower number."""
+    kite = FakeKite(lambda t: 23500.0)
+    close = await capture(db_session, kite, at(25, 15, 30))
+
+    assert await compute_effective_pcr(db_session, as_of=at(25, 15, 40)) == pytest.approx(close.pcr)
+    assert await compute_effective_pcr(db_session, as_of=at(28, 9, 52)) is None  # Monday, the next session: nothing captured yet
+    assert await compute_effective_pcr(db_session, as_of=at(25, 16, 1)) is None  # 31 minutes on: the capture has stalled
+
+    morning = await capture(db_session, kite, at(28, 10, 0))
+    assert await compute_effective_pcr(db_session, as_of=at(28, 10, 0) + timedelta(seconds=5)) == pytest.approx(morning.pcr)
+    assert await compute_effective_pcr(db_session, as_of=at(28, 10, 29)) == pytest.approx(morning.pcr)  # one missed mark is bridged
+
+    # Before the records began the roll-up still answers (a backtest of older days).
+    assert await compute_effective_pcr(db_session, as_of=at(24, 12, 0)) is None  # no catalog in this test: nothing to roll up
+
+
 async def test_snapshots_endpoint(client, seeded_admin, db_session: AsyncSession):
     resp = await client.post("/api/v1/auth/login", json={"email": seeded_admin["email"], "password": seeded_admin["password"]})
     headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}

@@ -68,6 +68,9 @@ HISTORY_PAUSE_SECONDS = 0.4  # Kite: 3 history requests a second, shared with th
 FILL_DELAY = timedelta(minutes=5)
 FILL_LOOKBACK_SESSIONS = 5
 LOW_COVERAGE = 0.9
+# A strategy reading PCR takes a record at most this old: two marks, so one
+# missed capture is bridged but a stalled capture isn't read as current.
+MAX_RECORD_AGE = timedelta(minutes=30)
 # ΔOI (both sides, absolute) under this share of total OI reads as flat.
 FLAT_FRACTION = 0.001
 # The code version a record was made by. 2: the gap fill takes NIFTY only
@@ -535,12 +538,27 @@ async def snapshot_rows(
     return rows
 
 
+async def first_record_ts(db: AsyncSession, underlying: str) -> datetime | None:
+    """When this underlying's PCR records begin (None: no records at all)."""
+    first = (
+        await db.execute(select(PcrSnapshot.ts).where(PcrSnapshot.underlying == underlying).order_by(PcrSnapshot.ts).limit(1))
+    ).scalar_one_or_none()
+    return as_aware_utc(first) if first is not None else None
+
+
 async def latest_pcr(db: AsyncSession, underlying: str, as_of: datetime) -> float | None:
     """PCR of the latest record at/before `as_of` with enough coverage to
-    trust -- None when there's none yet."""
+    trust, from the same session and at most MAX_RECORD_AGE old -- None when
+    there's none: before the day's first capture, or while captures have
+    stopped (Zerodha logged out). On 30 Sep a strategy opened at 09:52 on the
+    previous session's 15:30 record because none had been made that morning."""
+    as_of = as_aware_utc(as_of)
     snaps = (
         await db.execute(
-            select(PcrSnapshot).where(PcrSnapshot.underlying == underlying, PcrSnapshot.ts <= as_of, PcrSnapshot.pcr.is_not(None))
+            select(PcrSnapshot).where(
+                PcrSnapshot.underlying == underlying, PcrSnapshot.session_date == ist_session(as_of),
+                PcrSnapshot.ts <= as_of, PcrSnapshot.ts >= as_of - MAX_RECORD_AGE, PcrSnapshot.pcr.is_not(None),
+            )
             .order_by(PcrSnapshot.ts.desc()).limit(5)
         )
     ).scalars().all()

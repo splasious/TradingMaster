@@ -26,7 +26,7 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.broker.zerodha_broker import IST
 from app.services.options.pcr_snapshots import EXPIRIES as SNAPSHOT_EXPIRIES
-from app.services.options.pcr_snapshots import UNDERLYINGS, latest_pcr
+from app.services.options.pcr_snapshots import UNDERLYINGS, first_record_ts, latest_pcr
 
 # Index Instrument symbol -> the PCR records' underlying ("NIFTY 50" -> "NIFTY").
 SNAPSHOT_UNDERLYINGS = {index: name for name, index in UNDERLYINGS.items()}
@@ -107,16 +107,20 @@ async def compute_effective_pcr(
     tick (which live callers never pass, so their behavior is unchanged).
 
     For NIFTY's 4 expiries at 15m, the 15-minute PCR record
-    (pcr_snapshots.py: ATM ±40 strikes, captured at each mark) is read
-    first -- the latest one at/before `as_of` or now; the roll-up below
-    is the fallback for instants before those records began.
+    (pcr_snapshots.py: ATM ±40 strikes, captured at each mark) is the
+    answer -- the latest one of the same session, at most 30 minutes old,
+    at/before `as_of` or now; None when there's no such record (none
+    captured yet today, or captures stalled). The roll-up below is only for
+    instants before those records began: it reads far fewer strikes and
+    comes out much lower (0.43 against the record's 0.85 on 30 Sep), so it
+    never stands in for a missing record.
     """
     reference = as_of or datetime.now(timezone.utc)
     snapshot_underlying = SNAPSHOT_UNDERLYINGS.get(underlying_symbol)
     if snapshot_underlying is not None and num_expiries == SNAPSHOT_EXPIRIES and timeframe == "15m":
-        pcr = await latest_pcr(db, snapshot_underlying, reference)
-        if pcr is not None:
-            return pcr
+        first = await first_record_ts(db, snapshot_underlying)
+        if first is not None and first <= as_aware_utc(reference):
+            return await latest_pcr(db, snapshot_underlying, reference)
 
     underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
     if underlying is None:
