@@ -857,6 +857,59 @@ SELECT dense_rank() OVER (ORDER BY opened_at) AS trade_no, side,
 FROM r ORDER BY opened_at, side;
 
 \echo
+\echo '== AM1. AM OP TRD 15 MIN deployments: status, last run, what the last run said (its NIFTY-only messages; an error shows its type only), any open position, its saved code (repo file md5 6386eaee813268e9839408a14fafccb6)'
+SELECT d.status, to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist,
+       round(extract(epoch FROM now() - d.last_evaluated_at)) AS secs_ago, d.last_signal,
+       CASE WHEN d.last_signal = 'ERROR' THEN split_part(d.last_signal_reason, ':', 1) ELSE d.last_signal_reason END AS last_reason,
+       d.state::jsonb -> 'position' ->> 'regime' AS open_regime,
+       to_char((d.state::jsonb -> 'position' ->> 'opened_at')::timestamptz AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS open_since_ist,
+       md5(replace(v.python_code, E'\r', '')) = '6386eaee813268e9839408a14fafccb6' AS same_as_repo,
+       (regexp_match(v.python_code, 'ENTRY_TIME = dtime\(([0-9, ]+)\)'))[1] AS entry_time,
+       (regexp_match(v.python_code, 'SIDEWAYS_LOW = ([0-9.]+)'))[1] || '-' || (regexp_match(v.python_code, 'SIDEWAYS_HIGH = ([0-9.]+)'))[1] AS sideways,
+       (regexp_match(v.python_code, 'BEARISH_ENTRY = ([0-9.]+)'))[1] AS bearish_below, (regexp_match(v.python_code, 'BULLISH_ENTRY = ([0-9.]+)'))[1] AS bullish_above
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' ORDER BY d.created_at;
+
+SELECT count(*) FILTER (WHERE status = 'active') AS active_native_deployments,
+       to_char(max(last_evaluated_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS latest_native_run_ist,
+       (SELECT count(*) FROM instruments WHERE symbol = 'NIFTY 50') AS nifty_50_instruments
+FROM paper_native_deployments;
+
+\echo
+\echo '== AM2. AM OP TRD 15 MIN legs opened/closed per day (audit log, last 3 days IST)'
+SELECT (a.created_at AT TIME ZONE 'Asia/Kolkata')::date AS day_ist, a.action, count(*) AS events,
+       to_char(min(a.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS first_ist,
+       to_char(max(a.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_ist
+FROM audit_logs a JOIN paper_native_deployments d ON a.object_id = d.id::text JOIN strategies s ON s.id = d.strategy_id
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND a.object_type = 'paper_native_deployment' AND a.created_at > now() - interval '3 days'
+GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '== AM3. Today''s PCR records as AM OP TRD reads them (the latest record at/before each run with 90% of contracts priced): regime by its rules -- sideways 0.80-1.20, bullish above 1.25, bearish below 0.75, otherwise buffer (no entry)'
+SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS mark_ist, to_char(captured_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS saved_ist, source,
+       contracts_with_oi || '/' || contracts_expected AS coverage, contracts_expected > 0 AND contracts_with_oi >= 0.9 * contracts_expected AS usable,
+       round(spot::numeric, 1) AS nifty, round(pcr::numeric, 3) AS pcr,
+       CASE WHEN pcr IS NULL THEN 'none' WHEN pcr BETWEEN 0.80 AND 1.20 THEN 'sideways' WHEN pcr > 1.25 THEN 'bullish'
+            WHEN pcr < 0.75 THEN 'bearish' ELSE 'buffer' END AS regime
+FROM pcr_snapshots
+WHERE underlying = 'NIFTY' AND session_date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+ORDER BY ts;
+
+\echo
+\echo '== AM4. NIFTY option contracts it can pick: the next 2 expiries, strikes within 600 of the latest PCR spot'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50'),
+e AS (
+  SELECT DISTINCT expiry FROM instruments
+  WHERE underlying_instrument_id IN (SELECT id FROM u) AND instrument_type = 'option' AND expiry >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+  ORDER BY expiry LIMIT 2)
+SELECT i.expiry, i.data_source, count(*) FILTER (WHERE i.option_type = 'CE') AS ce, count(*) FILTER (WHERE i.option_type = 'PE') AS pe,
+       count(*) FILTER (WHERE i.lot_size IS NULL) AS no_lot_size, min(i.strike) AS min_strike, max(i.strike) AS max_strike
+FROM instruments i JOIN e ON e.expiry = i.expiry
+WHERE i.underlying_instrument_id IN (SELECT id FROM u) AND i.instrument_type = 'option'
+  AND abs(i.strike - (SELECT spot FROM pcr_snapshots WHERE underlying = 'NIFTY' ORDER BY ts DESC LIMIT 1)) <= 600
+GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
