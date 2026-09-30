@@ -37,8 +37,8 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/vps
 
-          # Runs on the VPS: $1 says what to do; for "sql", $2 is the
-          # query file, base64-encoded.
+          # Runs on the VPS: $1 says what to do; for "sql", $2 is the query
+          # file already uploaded there (removed once run).
           cat > "$RUNNER_TEMP/remote.sh" <<'REMOTE'
           set -eu
           cd /opt/tradingmaster
@@ -49,13 +49,14 @@ jobs:
               df -h / | awk 'NR == 2 {print "Disk: " $3 " used of " $2 " (" $5 ")"}'
               ;;
             sql)
+              trap 'rm -f "$2"' EXIT
               db=$(compose ps --services --status running | grep -m1 -ixE 'postgres|postgresql|db|database' || true)
               if [ -z "$db" ]; then
                 db=$(compose ps --format '{{.Service}} {{.Image}}' | awk 'tolower($2) ~ /postgres|timescale|pgvector|postgis/ {print $1; exit}')
               fi
               if [ -z "$db" ]; then echo "No running Postgres container found" >&2; exit 3; fi
-              printf '%s' "$2" | base64 -d | compose exec -T "$db" \
-                sh -c 'psql -X -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}"'
+              compose exec -T "$db" \
+                sh -c 'psql -X -q -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-${POSTGRES_USER:-postgres}}"' < "$2"
               ;;
             log-counts)
               # Counts only -- the lines themselves stay on the server.
@@ -81,15 +82,19 @@ jobs:
           esac
           REMOTE
 
-          remote() {
+          vps() {
             ssh -i ~/.ssh/vps -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR \
-              -o ConnectTimeout=20 "root@$VPS_HOST" bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"
+              -o ConnectTimeout=20 "root@$VPS_HOST" "$@"
           }
+          remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
 
           echo "== Containers"
           remote status
 
-          remote sql "$(base64 -w0 backend/scripts/backfill_health_summary.sql)"
+          # Uploaded over stdin: passed base64-encoded as one argument, the
+          # query file outgrew Linux's 128 KB limit on a single argument.
+          sql_file=$(vps 'f=$(mktemp /tmp/health-XXXXXX.sql) && cat > "$f" && echo "$f"' < backend/scripts/backfill_health_summary.sql)
+          remote sql "$sql_file"
 
           echo
           echo "== Backend log lines in the last 72 hours matching (count)"
