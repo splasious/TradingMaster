@@ -125,3 +125,91 @@ async def test_the_running_macd_deployment_moves_to_the_fresh_cross_version(db_e
 def test_the_built_in_is_the_approved_fresh_cross_code():
     migration = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
     assert hashlib.md5(BUILTIN.read_bytes().replace(b"\r", b"")).hexdigest() == migration.NEW_MD5
+
+
+# ------------------------------------------------- AM OP straddle at 3 PM --
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+async def _am_op(db, email: str, *, status: str, stopped_at, opened_at: datetime, legs: dict) -> tuple[PaperNativeDeployment, PaperPortfolio]:
+    user = User(email=email, hashed_password="x", full_name="AM OP")
+    db.add(user)
+    await db.flush()
+    strategy = Strategy(name="AM OP TRD 15 MIN", owner_id=user.id, code_type="native")
+    db.add(strategy)
+    await db.flush()
+    version = StrategyVersion(strategy_id=strategy.id, version_number=1, timeframe="15m", instrument_ids=[], parameters={},
+                              python_code="#", position_sizing={}, risk_rules={})
+    portfolio = PaperPortfolio(user_id=user.id, name="AM OP", cash=500000.0, initial_capital=500000.0)
+    db.add_all([version, portfolio])
+    await db.flush()
+    position = {"regime": "sideways", "opened_at": opened_at.astimezone(timezone.utc).isoformat(), "legs": legs}
+    deployment = PaperNativeDeployment(portfolio_id=portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id,
+                                       status=status, stopped_at=stopped_at, state={"position": position})
+    db.add(deployment)
+    await db.flush()
+    return deployment, portfolio
+
+
+async def _option(db, symbol: str, option_type: str, open_at_3pm: float | None) -> Instrument:
+    nifty = (await db.execute(select(Instrument).where(Instrument.symbol == "NIFTY 50"))).scalar_one_or_none()
+    if nifty is None:
+        nifty = Instrument(exchange="NSE", symbol="NIFTY 50", name="NIFTY 50", instrument_type="index", data_source="zerodha_kite", external_ref="NIFTY 50")
+        db.add(nifty)
+        await db.flush()
+    from datetime import date
+
+    inst = Instrument(exchange="NFO", symbol=symbol, name=symbol, instrument_type="option", data_source="zerodha_kite", external_ref=symbol,
+                      strike=22700.0, option_type=option_type, expiry=date(2026, 10, 6), lot_size=65, underlying_instrument_id=nifty.id)
+    bf = BfSymbol(source="zerodha_nfo", symbol=symbol, display_name=symbol, option_type=option_type, underlying_symbol="NIFTY")
+    db.add_all([inst, bf])
+    await db.flush()
+    if open_at_3pm is not None:
+        ts = datetime(2026, 9, 30, 15, 0, tzinfo=IST).astimezone(timezone.utc)
+        db.add(BfOhlcvBar(symbol_id=bf.id, timeframe="15m", ts=ts, open=open_at_3pm, high=open_at_3pm + 5, low=open_at_3pm - 5, close=open_at_3pm, volume=1000.0))
+    return inst
+
+
+def _leg(inst: Instrument, entry: float) -> dict:
+    return {"instrument_id": str(inst.id), "strike": 22700.0, "option_type": inst.option_type, "side": "sell", "quantity": 650.0, "entry_price": entry}
+
+
+async def test_the_stopped_am_op_straddle_closes_at_its_3pm_price(db_engine, db_session):
+    from app.models.paper_trading import PaperNativeTrade
+
+    ce = await _option(db_session, "NIFTY26O0622700CE", "CE", 142.5)
+    pe = await _option(db_session, "NIFTY26O0622700PE", "PE", 131.0)
+    opened = datetime(2026, 9, 30, 9, 52, tzinfo=IST)
+    stopped = datetime(2026, 9, 30, 11, 14, 40, tzinfo=IST).astimezone(timezone.utc)  # SQLite keeps no offset: store UTC
+    deployment, portfolio = await _am_op(db_session, "amop_a@tradingmaster.internal", status=DeploymentStatus.STOPPED.value,
+                                         stopped_at=stopped, opened_at=opened, legs={"short_ce": _leg(ce, 150.0), "short_pe": _leg(pe, 125.0)})
+    # Left alone: still running (its own rule closes it), and one whose price at 15:00 isn't on file.
+    running, _ = await _am_op(db_session, "amop_b@tradingmaster.internal", status=DeploymentStatus.ACTIVE.value, stopped_at=None,
+                              opened_at=opened, legs={"short_ce": _leg(ce, 150.0)})
+    no_price = await _option(db_session, "NIFTY26O0622800CE", "CE", None)
+    missing, _ = await _am_op(db_session, "amop_c@tradingmaster.internal", status=DeploymentStatus.STOPPED.value, stopped_at=stopped,
+                              opened_at=opened, legs={"short_ce": _leg(ce, 150.0), "other": _leg(no_price, 90.0)})
+    ids = (deployment.id, portfolio.id, running.id, missing.id)
+    await db_session.commit()
+
+    migration = _load("3cd892aa3d34_close_am_op_straddle_at_3pm")
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run finds nothing to close
+    db_session.expire_all()
+
+    trade = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == ids[0]))).scalar_one()
+    assert trade.exit_reason == "time_cutoff_3pm"
+    assert trade.closed_at.replace(tzinfo=timezone.utc) == datetime(2026, 9, 30, 9, 30, tzinfo=timezone.utc)
+    assert [(leg["instrument_symbol"], leg["side"], leg["exit_price"]) for leg in trade.legs] == [
+        ("NIFTY26O0622700CE", "short", 142.5), ("NIFTY26O0622700PE", "short", 131.0),
+    ]
+    assert trade.pnl == (150.0 - 142.5) * 650 + (125.0 - 131.0) * 650  # +4,875 - 3,900
+    assert trade.charges is not None and trade.charges > 0
+    assert (await db_session.get(PaperPortfolio, ids[1])).cash == 500000.0 - 650 * (142.5 + 131.0)
+    closed = await db_session.get(PaperNativeDeployment, ids[0])
+    assert closed.state["position"] is None and closed.status == "stopped" and closed.last_signal == "COVER"
+
+    for other in ids[2:]:
+        assert (await db_session.get(PaperNativeDeployment, other)).state["position"] is not None
+        assert (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == other))).first() is None
