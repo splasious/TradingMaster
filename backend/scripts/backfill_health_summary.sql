@@ -922,9 +922,9 @@ LEFT JOIN broker_connections c ON c.broker_account_id = ba.id LEFT JOIN broker_c
 WHERE b.code = 'zerodha_kite';
 
 \echo
-\echo '== MR0. MACD - RSI - 15 MIN: saved code versions and their deployments (repo file md5 3e4a8b5ac9c85c20683a74159d793f86)'
+\echo '== MR0. MACD - RSI - 15 MIN: saved code versions and their deployments (fresh-cross version md5 6a2b57d65304c397ea35bd56dcdee0ce; the one before, 3e4a8b5ac9c85c20683a74159d793f86)'
 SELECT sv.version_number, to_char(sv.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS saved_ist,
-       md5(replace(sv.python_code, E'\r', '')) = '3e4a8b5ac9c85c20683a74159d793f86' AS same_as_repo,
+       md5(replace(sv.python_code, E'\r', '')) = '6a2b57d65304c397ea35bd56dcdee0ce' AS fresh_cross_version, md5(replace(sv.python_code, E'\r', '')) = '3e4a8b5ac9c85c20683a74159d793f86' AS version_before,
        sv.python_code LIKE '%buy = (macd.shift() < 0) & (macd > 0)%' AS macd_line_rule,
        (regexp_match(sv.python_code, 'FAST, SLOW = ([0-9]+, [0-9]+)'))[1] AS fast_slow,
        (regexp_match(sv.python_code, 'MIN_BARS = ([0-9]+)'))[1] AS min_bars, (regexp_match(sv.python_code, 'HISTORY_BARS = ([0-9]+)'))[1] AS history_bars,
@@ -937,7 +937,8 @@ ORDER BY sv.created_at, d.created_at;
 
 \echo
 \echo '== MR1/MR2. MACD - RSI - 15 MIN: MACD(12,26) line recomputed as the strategy does (last 300 finished 15m candles, EMAs seeded at the first) at every buy and sell -- from the chart candles it could see then (saved by that moment) and from Kite''s final candles (backfill copy). No stock names or prices.'
-\echo '   buy rule: the latest zero-cross is up (MACD went <0 to >0 and hasn''t crossed down since), 151+ candles; the first fill after deploying (seed) skips it by design'
+\echo '   buy rule until the fresh-cross version: the latest zero-cross is up (MACD went <0 to >0 and hasn''t crossed down since), 151+ candles; the first fill after deploying (seed) skips it by design'
+\echo '   fresh_cross (the rule from the fresh-cross version on): that up-cross is on the newest candle seen, and the buy came before the next candle closed'
 \echo '   sell rule: a down-cross (>0 to <0) on a candle that closed after the buy, and the latest cross is down'
 WITH RECURSIVE ev AS (
   SELECT t.deployment_id, t.opened_at AS entry_at, t.closed_at AS exit_at, 'closed' AS kind,
@@ -1005,6 +1006,7 @@ SELECT n AS trade, kind, what, to_char(at AT TIME ZONE 'Asia/Kolkata', 'DD Mon H
        round(ch_macd::numeric, 3) AS macd_pct, ch_cross AS last_cross, to_char(ch_cross_ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS cross_candle_ist, ch_since AS candles_ago,
        CASE WHEN what = 'buy' THEN seed OR (ch_bars >= 151 AND ch_cross = 'up')
             ELSE ch_cross = 'down' AND ch_sell_at > entry_at END AS rule_ok,
+       CASE WHEN what = 'buy' THEN ch_bars >= 151 AND ch_cross = 'up' AND ch_since = 0 AND at < ch_last + interval '30 min' END AS fresh_cross,
        round(k_macd::numeric, 3) AS kite_macd_pct, k_cross AS kite_last_cross, to_char(k_cross_ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS kite_cross_ist,
        CASE WHEN what = 'buy' THEN seed OR (k_bars >= 151 AND k_cross = 'up')
             ELSE k_cross = 'down' AND k_sell_at > entry_at END AS kite_rule_ok,

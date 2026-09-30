@@ -1,8 +1,9 @@
-"""MACD - RSI - 15 MIN (native_strategies/macd_rsi_15min.py). The case that
-matters: SOLARINDS's MACD line crossed below zero while held, but by the
+"""MACD - RSI - 15 MIN (native_strategies/macd_rsi_15min.py). The exit case
+that matters: SOLARINDS's MACD line crossed below zero while held, but by the
 time a tick looked, the cross was no longer the newest candle -- the old
 exit rule (only the newest candle counts) kept the stock indefinitely and
-so never freed the slot for a replacement."""
+so never freed the slot for a replacement. Entries are the opposite: only
+the newest candle's up-cross counts, and only until the next one closes."""
 
 import math
 import uuid
@@ -45,9 +46,28 @@ def _solarinds_closes() -> tuple[list[float], int]:
     return wave[: cross + 4], cross
 
 
-def _sbin_closes() -> list[float]:
-    """Falls, then rises: one up-cross, still buy-eligible at the end."""
-    return [400 - 0.5 * i for i in range(150)] + [325 + 1.0 * i for i in range(100)]
+def _sbin_closes(length: int) -> list[float]:
+    """Falls, then rises, `length` candles ending on the MACD's up-cross. A
+    flat start of the first close leaves both EMAs (seeded at it) and so the
+    MACD after it unchanged -- it only moves the cross to the last candle."""
+    base = [400 - 0.5 * i for i in range(150)] + [325 + 1.0 * i for i in range(100)]
+    macd = _macd(base)
+    up = next(i for i in range(MIN_BARS - 1, len(base)) if macd[i - 1] < 0 < macd[i])
+    closes = [base[0]] * (length - up - 1) + base[: up + 1]
+    assert len(closes) == length and _macd(closes)[-2] < 0 < _macd(closes)[-1]
+    return closes
+
+
+def _macd(closes: list[float]) -> list[float]:
+    import pandas as pd
+
+    c = pd.Series(closes)
+    return list(c.ewm(span=12, adjust=False, min_periods=12).mean() - c.ewm(span=26, adjust=False, min_periods=26).mean())
+
+
+def _stale(closes: list[float], candles: int) -> list[float]:
+    """The same stock `candles` candles after its up-cross, still rising."""
+    return closes[candles:] + [closes[-1] + 1.0 * (i + 1) for i in range(candles)]
 
 
 def test_last_sell_at_is_the_close_of_the_latest_down_cross_candle():
@@ -79,7 +99,17 @@ def test_not_enough_history():
     assert compute_signal(_bars(_wave(MIN_BARS - 1))) is None
 
 
-async def _setup(db_session: AsyncSession, holding_opened_at: datetime):
+def test_buy_is_the_up_cross_on_the_newest_candle_only():
+    closes = _sbin_closes(250)
+    sig = compute_signal(_bars(closes))
+    assert sig["buy"] and sig["active"]
+    assert sig["closed_at"] == START + len(closes) * BAR_LENGTH
+
+    later = compute_signal(_bars(_stale(closes, 2)))
+    assert later["active"] and not later["buy"]  # still above zero, but the cross is two candles back
+
+
+async def _setup(db_session: AsyncSession, holding_opened_at: datetime, sbin_closes=None, extra: dict | None = None):
     role = Role(name=f"macd_rsi_{uuid.uuid4().hex[:6]}", description="x")
     db_session.add(role)
     await db_session.flush()
@@ -107,7 +137,9 @@ async def _setup(db_session: AsyncSession, holding_opened_at: datetime):
     db_session.add(deployment)
 
     instruments = {}
-    for symbol, closes in (("SOLARINDS", _solarinds_closes()[0]), ("SBIN", _sbin_closes())):
+    solarinds_closes = _solarinds_closes()[0]
+    series = {"SOLARINDS": solarinds_closes, "SBIN": sbin_closes or _sbin_closes(len(solarinds_closes)), **(extra or {})}
+    for symbol, closes in series.items():
         instrument = Instrument(exchange="NSE", symbol=symbol, name=symbol, instrument_type="equity", data_source="zerodha_kite", external_ref=symbol)
         db_session.add(instrument)
         await db_session.flush()
@@ -131,7 +163,6 @@ async def _setup(db_session: AsyncSession, holding_opened_at: datetime):
         "instrument_id": str(solarinds.id), "quantity": 100.0, "entry_price": 510.0, "opened_at": holding_opened_at.isoformat(),
     }
     state = {"seeded": True, "holdings": holdings}
-    solarinds_closes = _solarinds_closes()[0]
     now = START + len(solarinds_closes) * BAR_LENGTH + timedelta(minutes=1)
     ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=state, now=now)
     return ctx, deployment, instruments
@@ -189,7 +220,7 @@ async def test_holding_is_kept_when_the_macd_already_crossed_back_up(db_session:
 async def test_get_candles_leaves_out_the_forming_candle_and_keeps_the_pair_synced(db_session: AsyncSession):
     ctx, _, instruments = await _setup(db_session, START)
     sbin = instruments["SBIN"]
-    closes = _sbin_closes()
+    closes = _sbin_closes(len(_solarinds_closes()[0]))
     forming_ts = START + len(closes) * BAR_LENGTH
     db_session.add(OhlcvCandle(instrument_id=sbin.id, timeframe="15m", ts=forming_ts, open=1, high=1, low=1, close=1, volume=1, source="test"))
     await db_session.commit()
@@ -203,7 +234,7 @@ async def test_get_candles_leaves_out_the_forming_candle_and_keeps_the_pair_sync
     assert (sbin.id, "15m") in sync_module._native_pairs(ctx.now)
 
 
-async def test_repeated_ticks_sell_once_and_buy_the_replacement_once(db_engine, db_session: AsyncSession):
+async def test_repeated_ticks_sell_once_and_buy_the_replacement_once(db_engine, db_session: AsyncSession, monkeypatch):
     """Through the live runner, reloading state from the database every
     tick as the scheduler does: SOLARINDS is sold once and SBIN bought once,
     however many ticks follow. Before the runner deep-copied state, each
@@ -215,8 +246,12 @@ async def test_repeated_ticks_sell_once_and_buy_the_replacement_once(db_engine, 
     import app.services.strategy.native_strategies.macd_rsi_15min as strategy_module
     from app.services.paper_trading.native_runner import run_native_strategy
 
-    _, cross = _solarinds_closes()
-    ctx, deployment, _ = await _setup(db_session, START + (cross - 20) * BAR_LENGTH)
+    import tests.test_macd_rsi_15min as this
+
+    # run_native_strategy runs at the real clock: the candles end a minute ago.
+    closes, cross = _solarinds_closes()
+    monkeypatch.setattr(this, "START", datetime.now(timezone.utc) - timedelta(minutes=1) - len(closes) * BAR_LENGTH)
+    ctx, deployment, _ = await this._setup(db_session, this.START + (cross - 20) * BAR_LENGTH)
     version = await db_session.get(StrategyVersion, deployment.strategy_version_id)
     version.python_code = Path(strategy_module.__file__).read_text()
     deployment.state = ctx.state
@@ -266,3 +301,71 @@ async def test_a_cross_on_the_forming_candle_trades_only_once_that_candle_comple
     await evaluate(next_check)
     assert "SOLARINDS" not in next_check.state["holdings"]
     assert "sold: SOLARINDS" in next_check._last_reason
+
+
+async def _sell_solarinds_setup(db_session: AsyncSession, **kwargs):
+    """SOLARINDS goes out on this tick, so one slot is free for an entry."""
+    _, cross = _solarinds_closes()
+    return await _setup(db_session, START + (cross - 20) * BAR_LENGTH, **kwargs)
+
+
+async def test_an_up_cross_from_earlier_candles_is_not_bought(db_session: AsyncSession):
+    """SBIN's MACD is above zero but crossed two candles ago: the freed slot stays empty."""
+    length = len(_solarinds_closes()[0])
+    ctx, _, _ = await _sell_solarinds_setup(db_session, sbin_closes=_stale(_sbin_closes(length), 2))
+
+    await evaluate(ctx)
+
+    assert "SOLARINDS" not in ctx.state["holdings"]
+    assert "SBIN" not in ctx.state["holdings"]
+    assert "bought" not in ctx._last_reason
+    assert len(ctx.state["holdings"]) == 4
+
+
+async def test_the_up_cross_is_not_bought_once_the_next_candle_has_closed(db_session: AsyncSession):
+    """The cross candle is still the newest stored one, but the candle after it
+    has already closed (just not saved yet): too late to buy."""
+    ctx, _, _ = await _sell_solarinds_setup(db_session)
+    closed_at = compute_signal(await ctx.get_candles((await _instrument(db_session, "SBIN")).id, "15m", 300))["closed_at"]
+    ctx.now = closed_at + BAR_LENGTH + timedelta(seconds=10)
+
+    await evaluate(ctx)
+
+    assert "SBIN" not in ctx.state["holdings"]
+    assert "bought" not in ctx._last_reason
+
+
+async def test_up_crosses_on_the_same_candle_go_to_the_highest_rsi(db_session: AsyncSession):
+    """SBIN and BHEL cross up on the same candle; BHEL's bigger last gain gives
+    it the higher RSI and the one free slot. SBIN is listed as passed over."""
+    length = len(_solarinds_closes()[0])
+    sbin = _sbin_closes(length)
+    bhel = sbin[:-1] + [sbin[-1] + 5.0]
+    assert _macd(bhel)[-2] < 0 < _macd(bhel)[-1]
+    assert compute_signal(_bars(bhel))["rsi"] > compute_signal(_bars(sbin))["rsi"]
+    ctx, _, _ = await _sell_solarinds_setup(db_session, sbin_closes=sbin, extra={"BHEL": bhel})
+
+    await evaluate(ctx)
+
+    assert "BHEL" in ctx.state["holdings"]
+    assert "SBIN" not in ctx.state["holdings"]
+    assert "bought: BHEL (MACD > 0 at" in ctx._last_reason
+    assert "up-cross, no free slot: SBIN" in ctx._last_reason
+
+
+async def test_a_new_deployment_buys_only_on_an_up_cross(db_session: AsyncSession):
+    """No initial seeding: a first run with nothing held buys only stocks
+    crossing up on the newest candle -- not SBIN, two candles past its cross."""
+    length = len(_solarinds_closes()[0])
+    ctx, _, _ = await _setup(db_session, START, sbin_closes=_stale(_sbin_closes(length), 2))
+    ctx.state = {}
+
+    await evaluate(ctx)
+
+    assert ctx.state["holdings"] == {}
+    assert "bought" not in ctx._last_reason
+    assert "seeded" not in ctx.state
+
+
+async def _instrument(db_session: AsyncSession, symbol: str) -> Instrument:
+    return (await db_session.execute(select(Instrument).where(Instrument.symbol == symbol))).scalar_one()

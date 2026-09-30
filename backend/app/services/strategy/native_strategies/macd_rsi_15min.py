@@ -13,7 +13,9 @@ ctx.open_leg/close_leg.
 
 Signal -- zero-cross of the MACD LINE itself:
   MACD = EMA(close, FAST) - EMA(close, SLOW)
-  buy  = MACD crosses from <0 to >0   (entry-eligible from here until sell)
+  buy  = the newest finished candle closes with MACD > 0 and the candle
+         before it closed with MACD < 0 -- a fresh up-cross, bought before
+         the next candle closes or not at all
   sell = MACD crosses from >0 to <0   (exit)
 The MACD signal line (an EMA of MACD) isn't used at all. Until 25-Sep-2026
 this strategy traded the signal line's zero-cross instead; the MACD line is
@@ -21,26 +23,28 @@ the faster of the two, so it crosses zero earlier -- earlier entries and
 exits, and somewhat more trades in choppy markets.
 RSI(14) uses Wilder's smoothing, same as the original's rsi14().
 
-Ranking / sizing: among symbols currently in a "buy-eligible" state (MACD
-zero-crossed positive and hasn't sold since), rank by RSI descending and
-fill up to MAX_POSITIONS slots, equal-weighted at 1/MAX_POSITIONS of this
-strategy's own tracked equity (cash + mark-to-market of current holdings)
-per slot -- same "fixed decision-time equity, shrinking cash cap per fill"
-design as the original run()'s position-sizing comment, just using live
-portfolio equity instead of a fixed simulated CAPITAL constant.
+Ranking / sizing: among symbols with a fresh up-cross, rank by RSI
+descending and fill the free slots up to MAX_POSITIONS, equal-weighted at
+1/MAX_POSITIONS of this strategy's own tracked equity (cash + mark-to-market
+of current holdings) per slot -- same "fixed decision-time equity,
+shrinking cash cap per fill" design as the original run()'s position-sizing
+comment, just using live portfolio equity instead of a fixed simulated
+CAPITAL constant. A fresh up-cross that finds no free slot is passed over
+for good; it's listed in the Last Signal reason.
 
-Initial seeding: a strategy deployed mid-cycle could otherwise sit with
-idle capital for hours or days waiting for an organic MACD zero-cross on
-some watchlist symbol. On the very first evaluation after deployment
-(nothing held yet, and this deployment has never seeded before), every
-open slot is filled immediately with the MAX_POSITIONS highest-RSI
-watchlist symbols that have enough history to rank -- regardless of
-whether each one's own MACD line is currently in a fresh buy-crossed
-state. This fires at most once per deployment (ctx.state["seeded"]
-latches True right after the attempt, even if fewer than MAX_POSITIONS
-symbols had enough history to seed with that tick). Every entry after
-this one -- including refilling a slot a later exit frees up -- follows
-the strategy's normal buy rule (sig["active"]) unchanged.
+Revised 30-Sep-2026 -- buy on the up-cross candle only:
+  - A symbol used to stay buy-eligible from its up-cross until its next
+    down-cross, so a slot freed hours or days later was refilled with a
+    stock whose cross was long past. Now only the newest finished candle's
+    cross counts, and only until the next candle closes: a cross on the
+    day's last candle (15:15-15:30) closes as the market does and isn't
+    bought the next morning; one whose candle is saved too late (Zerodha
+    logged out, say) is missed.
+  - The initial seeding is gone: on its first run a deployment used to fill
+    every slot with the highest-RSI watchlist stocks whatever their MACD.
+    Every buy now follows the rule above. ("seeded" left in an existing
+    deployment's state is no longer read.)
+  - Exits are unchanged.
 
 Revised 24-Sep-2026 -- why SOLARINDS was never sold:
   - Exits used to fire only when the down-cross was the NEWEST stored
@@ -51,8 +55,9 @@ Revised 24-Sep-2026 -- why SOLARINDS was never sold:
     down-cross on a candle that closed AFTER it was bought, so a missed
     moment is caught on the next tick (at the price then). If the MACD
     has already crossed back up since, it's held on rather than sold and
-    bought straight back. A seeded holding bought while the MACD was
-    already below zero still waits for the next down-cross, as before.
+    bought straight back. A holding bought while the MACD was already below
+    zero (the seeding before 30-Sep-2026) still waits for the next
+    down-cross, as before.
   - Candles come from ctx.get_candles(): finished candles only (a candle
     still forming could cross and un-cross), and asking for them keeps
     their 15m candles refreshed in the background -- nothing did that for
@@ -125,6 +130,8 @@ def compute_signal(bars: list[dict]) -> dict | None:
     a dict with "ts" -- when the candle opened -- and "close"). None if there
     isn't enough history yet.
 
+    `buy`: the newest candle is the up-cross (its MACD > 0, the one before
+    < 0); `closed_at` is when that candle closed -- entries use the two.
     `last_sell_at` is when the most recent down-cross candle closed (None if
     there's none past the warm-up) -- exits compare it with each holding's
     entry time. `sell` (the newest candle itself is the down-cross) is kept
@@ -140,6 +147,8 @@ def compute_signal(bars: list[dict]) -> dict | None:
     latest_rsi = rsi.iloc[-1]
     sell_positions = np.flatnonzero(sell.to_numpy()[MIN_BARS - 1 :]) + MIN_BARS - 1
     return {
+        "buy": bool(buy.iloc[-1]),
+        "closed_at": _as_utc(bars[-1]["ts"]) + BAR_LENGTH,
         "sell": bool(sell.iloc[-1]),
         "active": bool(active.iloc[-1]),
         "rsi": float(latest_rsi) if pd.notna(latest_rsi) else None,
@@ -204,29 +213,20 @@ async def evaluate(ctx) -> None:
         price = (await ctx.get_price(uuid.UUID(leg["instrument_id"]))) or leg["entry_price"]
         equity += price * leg["quantity"]
 
-    # --- Entries: buy-eligible symbols, RSI-ranked, up to MAX_POSITIONS. ----
-    # On the very first evaluation after deployment (nothing held yet, and
-    # this deployment has never seeded before), skip the "MACD must be
-    # freshly active" requirement and just fill every slot with the
-    # MAX_POSITIONS highest-RSI watchlist symbols -- see module docstring.
-    # Latches permanently after this one attempt so it never re-fires,
-    # even if positions later get sold back down to zero mid-session.
-    seeded_before = ctx.state.get("seeded", False)
-    did_seed = not seeded_before and not holdings
-    if did_seed:
-        eligible = sorted(
-            (s for s, sig in signals.items() if sig["rsi"] is not None),
-            key=lambda s: (-signals[s]["rsi"], s),
-        )
-        ctx.state["seeded"] = True
-    else:
-        eligible = [s for s, sig in signals.items() if s not in holdings and sig["active"] and sig["rsi"] is not None]
-        eligible.sort(key=lambda s: (-signals[s]["rsi"], s))
+    # --- Entries: a fresh up-cross on the newest finished candle, before the
+    # next candle closes -- highest RSI first, up to MAX_POSITIONS.
+    eligible = [
+        s for s, sig in signals.items()
+        if s not in holdings and sig["buy"] and ctx.now < sig["closed_at"] + BAR_LENGTH and sig["rsi"] is not None
+    ]
+    eligible.sort(key=lambda s: (-signals[s]["rsi"], s))
 
     bought = []
+    no_slot = []
     for symbol in eligible:
         if len(holdings) >= MAX_POSITIONS:
-            break
+            no_slot.append(symbol)
+            continue
         instrument = universe[symbol]
         price = await ctx.get_price(instrument.id)
         if price is None or price <= 0:
@@ -244,17 +244,17 @@ async def evaluate(ctx) -> None:
             "instrument_id": str(instrument.id), "quantity": quantity, "entry_price": price,
             "opened_at": ctx.now.isoformat(), "rsi_at_entry": signals[symbol]["rsi"],
         }
-        bought.append(symbol)
+        bought.append(f"{symbol} (MACD > 0 at {signals[symbol]['closed_at'].astimezone(IST):%d-%b %H:%M})")
 
     ctx.state["holdings"] = holdings
 
     note_bits = []
-    if did_seed:
-        note_bits.append("initial RSI-ranked seed")
     if bought:
         note_bits.append(f"bought: {', '.join(bought)}")
     if sold:
         note_bits.append(f"sold: {', '.join(sold)}")
+    if no_slot:
+        note_bits.append(f"up-cross, no free slot: {', '.join(no_slot)}")
     if missing:
         note_bits.append(f"not found: {', '.join(missing)}")
     if skipped:
