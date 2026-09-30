@@ -52,3 +52,39 @@ async def live_price(db: AsyncSession, instrument: Instrument, now: datetime) ->
         return None
     tick_engine.set_real_price(instrument.id, float(price), source="kite_quote")
     return float(price)
+
+
+# Kite's /quote/ltp takes at most this many instruments a request.
+LTP_BATCH = 500
+
+
+async def live_prices(db: AsyncSession, instruments: list[Instrument], now: datetime) -> dict:
+    """live_price() for many instruments at once -- one Kite request per
+    LTP_BATCH instead of one per instrument, for a strategy that ranks
+    hundreds of stocks at a candle close. {instrument_id: price}; one Kite
+    has no price for (or every one, if Zerodha isn't logged in) is left out."""
+    prices = {}
+    missing = []
+    for instrument in instruments:
+        price = tick_engine.get_fresh_real_price(instrument.id, LIVE_PRICE_MAX_AGE, now)
+        if price is not None:
+            prices[instrument.id] = price
+        else:
+            missing.append(instrument)
+    if not missing:
+        return prices
+    broker = await kite_broker(db)
+    if broker is None:
+        return prices
+    for i in range(0, len(missing), LTP_BATCH):
+        batch = {f"{inst.exchange}:{inst.external_ref}": inst for inst in missing[i : i + LTP_BATCH]}
+        await quote_pacer.wait()
+        try:
+            quotes = await broker.get_ltp_batch(list(batch))
+        except KiteAPIError:
+            continue
+        for key, price in quotes.items():
+            if price:
+                tick_engine.set_real_price(batch[key].id, float(price), source="kite_quote")
+                prices[batch[key].id] = float(price)
+    return prices

@@ -68,6 +68,14 @@ class BacktestNativeContext(NativeContext):
             )
         ).scalar_one_or_none()
 
+    async def get_prices(self, instrument_ids) -> dict[uuid.UUID, float]:
+        prices = {}
+        for instrument_id in instrument_ids:
+            price = await self.get_price(uuid.UUID(str(instrument_id)))
+            if price is not None:
+                prices[uuid.UUID(str(instrument_id))] = price
+        return prices
+
     async def get_candles(self, instrument_id: uuid.UUID | str, timeframe: str, limit: int = 300) -> list[dict]:
         """Candles finished as of the replayed `now` -- nothing to keep
         fresh during a replay, so unlike the live context this doesn't

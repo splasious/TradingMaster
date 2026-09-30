@@ -171,6 +171,14 @@ async def _get_owned_native_deployment(db: AsyncSession, user: User, deployment_
     return deployment, portfolio
 
 
+def _public_state(state: dict | None) -> dict | None:
+    """A strategy's state without its private keys (a leading "_", e.g. a
+    rotation's rolling prices for 500 stocks) -- the card never shows them."""
+    if state is None:
+        return None
+    return {k: v for k, v in state.items() if not k.startswith("_")}
+
+
 async def _deployment_out(db: AsyncSession, deployment: PaperNativeDeployment) -> NativeDeploymentOut:
     return (await _deployment_outs_batch(db, [deployment]))[0]
 
@@ -206,7 +214,7 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
                 id=str(d.id), strategy_id=str(d.strategy_id), strategy_name=strategies[d.strategy_id].name,
                 portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
                 currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
-                last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
+                last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=_public_state(d.state),
                 position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
                 latest_version_number=latest_versions.get(d.strategy_id), can_exit=can_exit.get(d.strategy_version_id, False),
                 created_at=d.created_at, stopped_at=d.stopped_at,

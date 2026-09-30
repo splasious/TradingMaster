@@ -40,7 +40,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.market_data.active_timeframe_sync_scheduler import note_native_candle_demand
 from app.services.market_data.bar_periods import load_closed_candles
-from app.services.market_data.live_price import live_price, needs_live_price
+from app.services.market_data.live_price import live_price, live_prices, needs_live_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.telegram import telegram_allowed
 from app.services.options.pcr import compute_effective_pcr
@@ -138,6 +138,29 @@ class NativeContext:
             price = await self._stored_close(instrument_id)
         tick_engine.subscribe(instrument_id, seed_price=price or 0.0)
         return price
+
+    async def get_prices(self, instrument_ids) -> dict[uuid.UUID, float]:
+        """get_price() for many instruments at once -- {instrument_id:
+        price}, leaving out any with no price. For a strategy that ranks
+        hundreds of stocks at a candle close: while NSE is open, the live
+        feed's recent ticks, and for the rest one Kite request per 500
+        (get_price would be one per stock). Unlike get_price it doesn't keep
+        each instrument on the live feeds -- the NSE stocks stream anyway."""
+        ids = [uuid.UUID(str(i)) for i in instrument_ids]
+        if not ids:
+            return {}
+        instruments = (await self.db.execute(select(Instrument).where(Instrument.id.in_(ids)))).scalars().all()
+        live = [i for i in instruments if needs_live_price(i, self.now)]
+        prices = await live_prices(self.db, live, self.now) if live else {}
+        for instrument in instruments:
+            if instrument.id in prices or instrument in live:
+                continue
+            price = tick_engine.get_current_price(instrument.id)
+            if price is None:
+                price = await self._stored_close(instrument.id)
+            if price is not None:
+                prices[instrument.id] = price
+        return prices
 
     async def _stored_close(self, instrument_id: uuid.UUID) -> float | None:
         return (
