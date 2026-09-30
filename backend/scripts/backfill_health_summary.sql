@@ -1045,6 +1045,13 @@ WHERE sv.python_code ~ '[''"]HEG[''"]'
 GROUP BY s.id, s.name ORDER BY 1;
 
 \echo
+\echo '== HG3. Old symbol''s last daily closes as a ratio of the new symbol''s price today (~238.25, the middle of its 20% circuit band): ~1 = same price level, ~2/~5 = a split or bonus came with the rename'
+SELECT to_char(b.ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') AS day, round((b.close / 238.25)::numeric, 3) AS close_vs_new_price
+FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+WHERE s.source = 'zerodha' AND s.symbol = 'HEG' AND b.timeframe = '1d'
+ORDER BY b.ts DESC LIMIT 5;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
