@@ -167,3 +167,10 @@ async def test_no_nifty_price_waits_and_tries_again_within_the_window(db_session
     assert ctx._last_action == "skipped" and "no live NIFTY 50 price" in ctx._last_reason
     assert "_series" not in ctx.state and ctx.state.get("holdings") is None
     assert ctx.now + timedelta(minutes=1) - at(9, 30) <= rot.DECIDE_WITHIN  # the next tick still falls inside the window
+
+
+def test_it_ranks_the_50_stocks_of_the_macd_rsi_list():
+    from app.services.strategy.native_strategies.macd_rsi_15min import WATCHLIST
+
+    assert len(rot.STOCK_UNIVERSE) == 50 == len(set(rot.STOCK_UNIVERSE))
+    assert rot.STOCK_UNIVERSE == WATCHLIST
