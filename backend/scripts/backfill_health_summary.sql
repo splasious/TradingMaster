@@ -922,6 +922,96 @@ LEFT JOIN broker_connections c ON c.broker_account_id = ba.id LEFT JOIN broker_c
 WHERE b.code = 'zerodha_kite';
 
 \echo
+\echo '== MR0. MACD - RSI - 15 MIN: saved code versions and their deployments (repo file md5 3e4a8b5ac9c85c20683a74159d793f86)'
+SELECT sv.version_number, to_char(sv.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS saved_ist,
+       md5(replace(sv.python_code, E'\r', '')) = '3e4a8b5ac9c85c20683a74159d793f86' AS same_as_repo,
+       sv.python_code LIKE '%buy = (macd.shift() < 0) & (macd > 0)%' AS macd_line_rule,
+       (regexp_match(sv.python_code, 'FAST, SLOW = ([0-9]+, [0-9]+)'))[1] AS fast_slow,
+       (regexp_match(sv.python_code, 'MIN_BARS = ([0-9]+)'))[1] AS min_bars, (regexp_match(sv.python_code, 'HISTORY_BARS = ([0-9]+)'))[1] AS history_bars,
+       d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
+       to_char(d.stopped_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS stopped_ist, d.state::jsonb ->> 'seeded' AS seeded,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS holding_now
+FROM strategies s JOIN strategy_versions sv ON sv.strategy_id = s.id LEFT JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
+WHERE s.name ILIKE 'MACD%RSI%15%MIN%'
+ORDER BY sv.created_at, d.created_at;
+
+\echo
+\echo '== MR1/MR2. MACD - RSI - 15 MIN: MACD(12,26) line recomputed as the strategy does (last 300 finished 15m candles, EMAs seeded at the first) at every buy and sell -- from the chart candles it could see then (saved by that moment) and from Kite''s final candles (backfill copy). No stock names or prices.'
+\echo '   buy rule: the latest zero-cross is up (MACD went <0 to >0 and hasn''t crossed down since), 151+ candles; the first fill after deploying (seed) skips it by design'
+\echo '   sell rule: a down-cross (>0 to <0) on a candle that closed after the buy, and the latest cross is down'
+WITH RECURSIVE ev AS (
+  SELECT t.deployment_id, t.opened_at AS entry_at, t.closed_at AS exit_at, 'closed' AS kind,
+         CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id
+  FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.legs::jsonb) = 'array' THEN t.legs::jsonb ELSE '[]'::jsonb END) l
+  WHERE s.name ILIKE 'MACD%RSI%15%MIN%' AND jsonb_typeof(l.value) = 'object'
+  UNION ALL
+  SELECT d.id, CASE WHEN h.value->>'opened_at' ~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}' THEN (h.value->>'opened_at')::timestamptz END, NULL, 'open',
+         CASE WHEN h.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (h.value->>'instrument_id')::uuid END
+  FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id
+  CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb->'holdings') = 'object' THEN d.state::jsonb->'holdings' ELSE '{}'::jsonb END) h
+  WHERE s.name ILIKE 'MACD%RSI%15%MIN%' AND d.status = 'active' AND jsonb_typeof(h.value) = 'object'
+), e AS (
+  SELECT row_number() OVER (ORDER BY ev.entry_at, ev.instrument_id) AS n, ev.*, i.symbol,
+         ev.entry_at < min(ev.entry_at) OVER (PARTITION BY ev.deployment_id) + interval '1 minute' AS seed
+  FROM ev JOIN instruments i ON i.id = ev.instrument_id
+  WHERE ev.entry_at IS NOT NULL
+), pt AS (
+  SELECT n, 'buy' AS what, entry_at AS at FROM e
+  UNION ALL
+  SELECT n, 'sell', exit_at FROM e WHERE exit_at IS NOT NULL
+), bars AS (
+  SELECT pt.n, pt.what, b.src, b.ts, b.close, row_number() OVER (PARTITION BY pt.n, pt.what, b.src ORDER BY b.ts) AS rn
+  FROM pt JOIN e ON e.n = pt.n
+  CROSS JOIN LATERAL (
+    (SELECT 'chart' AS src, c.ts, c.close::float8 AS close FROM ohlcv_candles c
+      WHERE c.instrument_id = e.instrument_id AND c.timeframe = '15m' AND c.ts + interval '15 min' <= pt.at AND c.created_at <= pt.at
+      ORDER BY c.ts DESC LIMIT 300)
+    UNION ALL
+    (SELECT 'kite', x.ts, x.close::float8 FROM bf_ohlcv_bars x JOIN bf_symbols bs ON bs.id = x.symbol_id
+      WHERE bs.source = 'zerodha' AND bs.symbol = e.symbol AND x.timeframe = '15m' AND x.ts + interval '15 min' <= pt.at
+      ORDER BY x.ts DESC LIMIT 300)
+  ) b
+), ema AS (
+  SELECT n, what, src, rn, ts, close, close AS e12, close AS e26 FROM bars WHERE rn = 1
+  UNION ALL
+  SELECT b.n, b.what, b.src, b.rn, b.ts, b.close,
+         ema.e12 + (b.close - ema.e12) * (2.0::float8 / 13), ema.e26 + (b.close - ema.e26) * (2.0::float8 / 27)
+  FROM ema JOIN bars b ON b.n = ema.n AND b.what = ema.what AND b.src = ema.src AND b.rn = ema.rn + 1
+), m AS (
+  SELECT n, what, src, rn, ts, close, CASE WHEN rn >= 26 THEN e12 - e26 END AS macd FROM ema
+), x AS (
+  SELECT m.*, CASE WHEN lag(macd) OVER w < 0 AND macd > 0 THEN 'up' WHEN lag(macd) OVER w > 0 AND macd < 0 THEN 'down' END AS xing
+  FROM m WINDOW w AS (PARTITION BY n, what, src ORDER BY rn)
+), st AS (
+  SELECT n, what, src, max(rn) AS bars,
+         (array_agg(macd / nullif(close, 0) * 100 ORDER BY rn DESC))[1] AS macd_pct,
+         (array_agg(xing ORDER BY rn DESC) FILTER (WHERE xing IS NOT NULL))[1] AS last_cross,
+         (array_agg(ts ORDER BY rn DESC) FILTER (WHERE xing IS NOT NULL))[1] AS last_cross_ts,
+         max(rn) - (array_agg(rn ORDER BY rn DESC) FILTER (WHERE xing IS NOT NULL))[1] AS candles_since,
+         (array_agg(ts ORDER BY rn DESC) FILTER (WHERE xing = 'down' AND rn >= 151))[1] + interval '15 min' AS last_sell_at,
+         (array_agg(ts ORDER BY rn DESC))[1] AS last_candle_ts
+  FROM x GROUP BY n, what, src
+), v AS (
+  SELECT e.n, e.kind, e.seed, e.entry_at, e.exit_at, p.what, p.at,
+         ch.bars AS ch_bars, ch.last_candle_ts AS ch_last, ch.macd_pct AS ch_macd, ch.last_cross AS ch_cross, ch.last_cross_ts AS ch_cross_ts, ch.candles_since AS ch_since, ch.last_sell_at AS ch_sell_at,
+         k.bars AS k_bars, k.macd_pct AS k_macd, k.last_cross AS k_cross, k.last_cross_ts AS k_cross_ts, k.candles_since AS k_since, k.last_sell_at AS k_sell_at
+  FROM pt p JOIN e ON e.n = p.n
+  LEFT JOIN st ch ON ch.n = p.n AND ch.what = p.what AND ch.src = 'chart'
+  LEFT JOIN st k ON k.n = p.n AND k.what = p.what AND k.src = 'kite'
+)
+SELECT n AS trade, kind, what, to_char(at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS at_ist, seed,
+       to_char(ch_last AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_candle_seen, ch_bars AS candles,
+       round(ch_macd::numeric, 3) AS macd_pct, ch_cross AS last_cross, to_char(ch_cross_ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS cross_candle_ist, ch_since AS candles_ago,
+       CASE WHEN what = 'buy' THEN seed OR (ch_bars >= 151 AND ch_cross = 'up')
+            ELSE ch_cross = 'down' AND ch_sell_at > entry_at END AS rule_ok,
+       round(k_macd::numeric, 3) AS kite_macd_pct, k_cross AS kite_last_cross, to_char(k_cross_ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS kite_cross_ist,
+       CASE WHEN what = 'buy' THEN seed OR (k_bars >= 151 AND k_cross = 'up')
+            ELSE k_cross = 'down' AND k_sell_at > entry_at END AS kite_rule_ok,
+       CASE WHEN what = 'sell' AND ch_sell_at IS NOT NULL THEN round(extract(epoch FROM at - ch_sell_at) / 60) END AS sell_min_after_cross
+FROM v ORDER BY n, what;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
