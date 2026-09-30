@@ -545,3 +545,57 @@ async def test_owner_can_reorder_their_deployment_cards(client: AsyncClient, see
     resp = await client.put("/api/v1/paper-trading/native-deployments/order", json={"deployment_ids": [a, b, c, d]}, headers=other_headers)
     assert resp.status_code == 204
     assert await listed() == [d, c, b, a]
+
+
+EXITING_CODE = (
+    "async def evaluate(ctx):\n"
+    "    if ctx.state.pop('force_exit', False):\n"
+    "        ctx.state['position'] = None\n"
+    "        ctx.note('exited', signal='COVER', reason='manual exit')\n"
+    "        return\n"
+    "    ctx.state['position'] = {'regime': 'test', 'legs': {}, 'opened_at': '2026-09-30T04:22:00+00:00'}\n"
+    "    ctx.note('hold', reason='open')\n"
+)
+HOLDING_CODE = (  # like MACD - RSI: holds stocks, has no exit of its own
+    "async def evaluate(ctx):\n"
+    "    ctx.state['holdings'] = {'SBIN': {'instrument_id': '00000000-0000-0000-0000-000000000001', 'quantity': 1.0, 'entry_price': 800.0, 'opened_at': '2026-09-30T04:22:00+00:00'}}\n"
+    "    ctx.note('hold', reason='holding')\n"
+)
+
+
+async def _deploy_with(client: AsyncClient, headers: dict, name: str, code: str) -> dict:
+    resp = await client.post("/api/v1/strategies", json={"name": name, "version": {"python_code": code, "is_native": True}}, headers=headers)
+    assert resp.status_code == 201, resp.text
+    portfolio_id = await _default_portfolio_id(client, headers)
+    deploy = await client.post("/api/v1/paper-trading/native-deployments", json={"strategy_id": resp.json()["id"], "portfolio_id": portfolio_id}, headers=headers)
+    assert deploy.status_code == 201, deploy.text
+    deployment_id = deploy.json()["id"]
+    assert (await client.post(f"/api/v1/paper-trading/native-deployments/{deployment_id}/evaluate", headers=headers)).status_code == 200
+    return next(d for d in (await client.get("/api/v1/paper-trading/native-deployments", headers=headers)).json() if d["id"] == deployment_id)
+
+
+async def test_stop_can_exit_the_open_position_first(client: AsyncClient, seeded_admin: dict):
+    """30 Sep: AM OP TRD 15 MIN was stopped at 11:14 with its straddle open, and
+    its 3:00 PM close never ran. Stopping can now close positions first."""
+    headers = {"Authorization": f"Bearer {await _login(client, seeded_admin['email'], seeded_admin['password'])}"}
+    deployment = await _deploy_with(client, headers, "Exiting Strategy", EXITING_CODE)
+    assert deployment["can_exit"] is True and deployment["state"]["position"] is not None
+
+    resp = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment['id']}/stop?exit_positions=true", headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "stopped" and resp.json()["state"]["position"] is None
+
+
+async def test_stop_refuses_to_exit_what_the_strategy_cant_close_and_plain_stop_keeps_it(client: AsyncClient, seeded_admin: dict):
+    headers = {"Authorization": f"Bearer {await _login(client, seeded_admin['email'], seeded_admin['password'])}"}
+    deployment = await _deploy_with(client, headers, "Holding Strategy", HOLDING_CODE)
+    assert deployment["can_exit"] is False
+
+    refused = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment['id']}/stop?exit_positions=true", headers=headers)
+    assert refused.status_code == 409 and "can't close its own positions" in refused.json()["detail"]
+    still = next(d for d in (await client.get("/api/v1/paper-trading/native-deployments", headers=headers)).json() if d["id"] == deployment["id"])
+    assert still["status"] == "active"
+
+    kept = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment['id']}/stop", headers=headers)
+    assert kept.status_code == 200 and kept.json()["status"] == "stopped" and "SBIN" in kept.json()["state"]["holdings"]

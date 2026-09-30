@@ -182,12 +182,14 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     portfolio_ids = {d.portfolio_id for d in deployments}
     strategies = {s.id: s for s in (await db.execute(select(Strategy).where(Strategy.id.in_(strategy_ids)))).scalars()}
     portfolios = {p.id: p for p in (await db.execute(select(PaperPortfolio).where(PaperPortfolio.id.in_(portfolio_ids)))).scalars()}
-    running_versions = dict(
-        (await db.execute(
-            select(StrategyVersion.id, StrategyVersion.version_number)
+    running = (
+        await db.execute(
+            select(StrategyVersion.id, StrategyVersion.version_number, StrategyVersion.python_code.like("%force_exit%"))
             .where(StrategyVersion.id.in_({d.strategy_version_id for d in deployments}))
-        )).all()
-    )
+        )
+    ).all()
+    running_versions = {version_id: number for version_id, number, _ in running}
+    can_exit = {version_id: bool(exits) for version_id, _, exits in running}
     latest_versions = dict(
         (await db.execute(
             select(StrategyVersion.strategy_id, func.max(StrategyVersion.version_number))
@@ -206,7 +208,8 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
                 currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=d.state,
                 position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
-                latest_version_number=latest_versions.get(d.strategy_id), created_at=d.created_at, stopped_at=d.stopped_at,
+                latest_version_number=latest_versions.get(d.strategy_id), can_exit=can_exit.get(d.strategy_version_id, False),
+                created_at=d.created_at, stopped_at=d.stopped_at,
             )
         )
     return out
@@ -306,12 +309,44 @@ async def reorder_native_deployments(
     await db.commit()
 
 
+def _has_open_positions(state: dict | None) -> bool:
+    return bool((state or {}).get("position")) or bool((state or {}).get("holdings"))
+
+
 @router.post("/native-deployments/{deployment_id}/stop", response_model=NativeDeploymentOut)
-async def stop_native_deployment(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> NativeDeploymentOut:
+async def stop_native_deployment(
+    deployment_id: str, exit_positions: bool = False, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> NativeDeploymentOut:
+    """A stopped deployment isn't run at all, so whatever it holds is left as
+    it is -- its exit rules, even a 3:00 PM close, don't run until it's
+    restarted (30 Sep: AM OP TRD 15 MIN stopped at 11:14 kept its straddle
+    open past 15:00). With exit_positions, the strategy's own exit closes
+    everything first (at live prices, as the Exit button does); if it can't
+    -- its code has no exit, or a price isn't available -- nothing is
+    stopped and the reason comes back."""
     deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    exited = False
+    if exit_positions and _has_open_positions(deployment.state):
+        version = await db.get(StrategyVersion, deployment.strategy_version_id)
+        if version is None or "force_exit" not in (version.python_code or ""):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This strategy can't close its own positions -- stop it and keep them, or let its exit rules close them first.",
+            )
+        outcome = await exit_native_deployment_now(db, deployment)
+        await db.refresh(deployment)
+        if _has_open_positions(deployment.state):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Couldn't close the open positions ({outcome.reason or outcome.action}) -- the strategy is still running.",
+            )
+        exited = True
     deployment.status = DeploymentStatus.STOPPED.value
     deployment.stopped_at = datetime.now(timezone.utc)
-    await write_audit_log(db, user_id=user.id, action="PAPER_NATIVE_TRADING_STOPPED", object_type="paper_native_deployment", object_id=str(deployment.id))
+    await write_audit_log(
+        db, user_id=user.id, action="PAPER_NATIVE_TRADING_STOPPED", object_type="paper_native_deployment", object_id=str(deployment.id),
+        new_value={"exited_positions": exited, "left_open": _has_open_positions(deployment.state)},
+    )
     await db.commit()
     await db.refresh(deployment)
     return await _deployment_out(db, deployment)

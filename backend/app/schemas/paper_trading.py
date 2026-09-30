@@ -190,6 +190,10 @@ class NativeDeploymentOut(BaseModel):
     # changing what a running deployment executes.
     version_number: int | None = None
     latest_version_number: int | None = None
+    # Its code closes its own positions when asked (it reads state["force_exit"]
+    # -- see native_runner.exit_native_deployment_now): the Exit button, and
+    # "Exit positions, then stop", only work when this is true.
+    can_exit: bool = False
     created_at: datetime
     stopped_at: datetime | None
 

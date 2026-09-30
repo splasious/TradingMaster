@@ -1772,6 +1772,7 @@ function NativeDeploymentCard({
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
   const position = deployment.position;
   // Multi-holding strategies (e.g. the MACD/RSI rotation strategy) have no
   // single position -- each holding is its own independently-opened long,
@@ -1809,9 +1810,18 @@ function NativeDeploymentCard({
     },
   });
 
+  // Stopping leaves open positions to nobody: a stopped strategy isn't run,
+  // so its exits (even a 3:00 PM close) don't happen -- with any open, Stop
+  // asks first (AM OP TRD 15 MIN, 30 Sep).
   const stopMutation = useMutation({
-    mutationFn: () => apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}/stop`, { method: "POST" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["native-deployments"] }),
+    mutationFn: (exitPositions: boolean) =>
+      apiFetch(`/api/v1/paper-trading/native-deployments/${deployment.id}/stop${exitPositions ? "?exit_positions=true" : ""}`, { method: "POST" }),
+    onSuccess: () => {
+      setConfirmStop(false);
+      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
+      queryClient.invalidateQueries({ queryKey: ["native-trades"] });
+    },
   });
 
   const restartMutation = useMutation({
@@ -1888,7 +1898,7 @@ function NativeDeploymentCard({
               <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
                 <Zap className="h-3.5 w-3.5" /> Evaluate Now
               </Button>
-              {position != null && (
+              {position != null && deployment.can_exit && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1899,12 +1909,28 @@ function NativeDeploymentCard({
                   <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
                 </Button>
               )}
-              <Button variant="ghost" size="sm" onClick={() => stopMutation.mutate()} disabled={stopMutation.isPending}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => (position != null || hasHoldings ? setConfirmStop(true) : stopMutation.mutate(false))}
+                disabled={stopMutation.isPending}
+              >
                 <Square className="h-3.5 w-3.5" /> Stop
               </Button>
             </>
           ) : (
             <>
+              {position != null && deployment.can_exit && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => exitMutation.mutate()}
+                  disabled={exitMutation.isPending}
+                  className="text-negative hover:text-negative"
+                >
+                  <LogOut className="h-3.5 w-3.5" /> {exitMutation.isPending ? "Exiting..." : "Exit"}
+                </Button>
+              )}
               <Button variant="ghost" size="sm" onClick={() => restartMutation.mutate()} disabled={restartMutation.isPending}>
                 <Play className="h-3.5 w-3.5" /> {restartMutation.isPending ? "Restarting..." : "Restart"}
               </Button>
@@ -1919,6 +1945,39 @@ function NativeDeploymentCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        <Modal open={confirmStop} onClose={() => setConfirmStop(false)} title={`Stop ${deployment.strategy_name}?`}>
+          <div className="space-y-4 text-sm">
+            <p className="text-text-secondary">
+              It has open positions. A stopped strategy isn&apos;t run at all, so its exit rules -- including a 3:00 PM
+              close -- won&apos;t run until you restart it.
+              {!deployment.can_exit && " This strategy can't close its positions on request; they stay open."}
+            </p>
+            {stopMutation.error && (
+              <div className="rounded-md bg-negative-soft px-3 py-2 text-negative">
+                {stopMutation.error instanceof ApiError ? stopMutation.error.message : "Failed to stop"}
+              </div>
+            )}
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setConfirmStop(false)}>
+                Cancel
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => stopMutation.mutate(false)} disabled={stopMutation.isPending}>
+                Stop, keep positions
+              </Button>
+              {deployment.can_exit && (
+                <Button variant="destructive" size="sm" onClick={() => stopMutation.mutate(true)} disabled={stopMutation.isPending}>
+                  {stopMutation.isPending ? "Exiting..." : "Exit positions, then stop"}
+                </Button>
+              )}
+            </div>
+          </div>
+        </Modal>
+        {deployment.status !== "active" && (position != null || hasHoldings) && (
+          <div className="rounded-md bg-warning-soft px-3 py-2 text-xs text-warning">
+            Stopped with open positions -- nothing manages them while it&apos;s stopped: its exit rules (including any 3:00 PM
+            close) won&apos;t run until you restart it{deployment.can_exit ? " or press Exit" : ""}.
+          </div>
+        )}
         {hasNewerVersion && (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-warning-soft px-3 py-2 text-xs text-warning">
             <span>

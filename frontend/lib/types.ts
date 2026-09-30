@@ -313,6 +313,9 @@ export interface NativeDeploymentOut {
    * saving new code doesn't change what a running deployment executes. */
   version_number: number | null;
   latest_version_number: number | null;
+  /** Its code closes its own positions when asked -- Exit, and "Exit
+   * positions, then stop", only work when true. */
+  can_exit: boolean;
   created_at: string;
   stopped_at: string | null;
 }
