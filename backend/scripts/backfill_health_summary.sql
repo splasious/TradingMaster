@@ -1014,6 +1014,37 @@ SELECT n AS trade, kind, what, to_char(at AT TIME ZONE 'Asia/Kolkata', 'DD Mon H
 FROM v ORDER BY n, what;
 
 \echo
+\echo '== HG1. A renamed NSE stock (old symbol, its -BE form, new symbol): backfill symbols, bars, nightly coverage, watchlists, recent jobs (labels only)'
+WITH names(label, symbol) AS (VALUES ('old', 'HEG'), ('old -BE', 'HEG-BE'), ('new', 'HEGAM'))
+SELECT n.label, s.source, (SELECT count(*) FROM bf_ohlcv_bars b WHERE b.symbol_id = s.id) AS bars,
+       (SELECT to_char(max(b.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') FROM bf_ohlcv_bars b WHERE b.symbol_id = s.id) AS last_bar,
+       (SELECT count(*) FROM bf_coverage c WHERE c.symbol_id = s.id) AS coverage_rows,
+       (SELECT count(*) FROM bf_watchlist_items w WHERE w.symbol_id = s.id) AS in_watchlists,
+       (SELECT count(*) FROM bf_backfill_jobs j WHERE j.symbol_id = s.id AND j.status = 'failed' AND j.created_at > now() - interval '3 days') AS failed_jobs_3d,
+       (SELECT count(*) FROM bf_backfill_jobs j WHERE j.symbol_id = s.id AND j.status = 'completed' AND j.created_at > now() - interval '3 days') AS done_jobs_3d,
+       to_char(s.last_synced_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_to_charts
+FROM names n JOIN bf_symbols s ON s.symbol = n.symbol ORDER BY n.label, s.source;
+
+\echo
+\echo '== HG2. The same in the chart catalog and the strategies (labels only)'
+WITH names(label, symbol) AS (VALUES ('old', 'HEG'), ('old -BE', 'HEG-BE'), ('new', 'HEGAM'))
+SELECT n.label, i.exchange, i.instrument_type, i.is_active,
+       (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id) AS candles,
+       (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') FROM ohlcv_candles c WHERE c.instrument_id = i.id) AS last_candle,
+       (SELECT count(*) FROM paper_native_deployments d
+         WHERE d.status = 'active' AND (d.state::text LIKE '%' || i.id::text || '%')) AS active_deployments_holding_it,
+       (SELECT count(*) FROM paper_deployments pd WHERE pd.instrument_id = i.id AND pd.status = 'active') AS simple_deployments_on_it
+FROM names n JOIN instruments i ON i.symbol = n.symbol ORDER BY n.label, i.exchange;
+
+SELECT s.name AS strategy, count(DISTINCT sv.id) AS versions_listing_old_symbol,
+       max(sv.version_number) FILTER (WHERE sv.python_code ~ '[''"]HEG[''"]') AS latest_version_listing_it,
+       (SELECT max(v2.version_number) FROM strategy_versions v2 WHERE v2.strategy_id = s.id) AS latest_version,
+       (SELECT count(*) FROM paper_native_deployments d WHERE d.strategy_id = s.id AND d.status = 'active') AS active_deployments
+FROM strategies s JOIN strategy_versions sv ON sv.strategy_id = s.id
+WHERE sv.python_code ~ '[''"]HEG[''"]'
+GROUP BY s.id, s.name ORDER BY 1;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
