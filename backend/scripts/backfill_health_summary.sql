@@ -1294,20 +1294,25 @@ FROM paired GROUP BY 1, 2, 3, 4, 5 HAVING count(*) FILTER (WHERE o_diff OR h_dif
 ORDER BY 7 DESC LIMIT 20;
 
 \echo
-\echo '-- R3e. Live-feed (kite_live) option candles still differing from Kite''s final, by candle day: was the contract copied since that backfill bar was saved? (counts only)'
+\echo '-- R3e. Live-feed (kite_live) option candles still differing from Kite''s final, by candle day: was the contract copied after its last download? (counts only)'
+WITH lj AS (
+  SELECT symbol_id, max(completed_at) AS last_download
+  FROM bf_backfill_jobs WHERE status = 'completed' OR inserted_count > 0 GROUP BY symbol_id
+)
 SELECT (c.ts AT TIME ZONE 'Asia/Kolkata')::date AS candle_day, count(*) AS candles, count(DISTINCT c.instrument_id) AS contracts,
        count(*) FILTER (WHERE s.last_synced_at IS NULL) AS never_copied,
-       count(*) FILTER (WHERE b.created_at > s.last_synced_at) AS bar_saved_after_last_copy,
-       count(*) FILTER (WHERE b.created_at <= s.last_synced_at) AS copied_after_bar_saved,
-       to_char(min(b.created_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS bf_bar_first_saved,
-       to_char(max(b.created_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS bf_bar_last_saved,
-       to_char(min(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_first,
-       to_char(max(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_last,
-       count(DISTINCT i.id) FILTER (WHERE (SELECT count(*) FROM instruments i2 WHERE i2.exchange = i.exchange AND i2.symbol = i.symbol) > 1) AS duplicate_catalog_rows,
-       count(*) FILTER (WHERE c.ts < now() - interval '21 days') AS older_than_21_days
+       count(*) FILTER (WHERE lj.last_download > s.last_synced_at) AS downloaded_after_last_copy,
+       count(*) FILTER (WHERE lj.last_download <= s.last_synced_at) AS copied_after_last_download,
+       count(*) FILTER (WHERE lj.last_download IS NULL) AS no_download_job,
+       to_char(min(lj.last_download) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_download_min,
+       to_char(max(lj.last_download) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_download_max,
+       to_char(min(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_min,
+       to_char(max(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_max,
+       count(DISTINCT i.id) FILTER (WHERE (SELECT count(*) FROM instruments i2 WHERE i2.exchange = i.exchange AND i2.symbol = i.symbol) > 1) AS duplicate_catalog_rows
 FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
 JOIN bf_symbols s ON s.source = 'zerodha_nfo' AND s.symbol = i.symbol
 JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = c.timeframe AND b.ts = c.ts
+LEFT JOIN lj ON lj.symbol_id = s.id
 WHERE c.source = 'kite_live' AND c.timeframe = '15m' AND i.exchange = 'NFO' AND c.ts >= date_trunc('day', now()) - interval '8 days'
   AND (abs(c.close - b.close) >= 0.001 OR c.volume IS DISTINCT FROM b.volume)
 GROUP BY 1 ORDER BY 1;
