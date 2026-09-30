@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -11,16 +11,19 @@ from app.core.deps import get_current_user, require_role
 from app.core.encryption import decrypt_payload, encrypt_payload
 from app.db.session import get_db
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
+from app.models.alert import AlertSeverity, AlertType
 from app.models.live_trading import LiveDeployment
-from app.models.user import User
+from app.models.user import Role, User, UserRole
 from app.schemas.broker import (
     BrokerAccountCreate, BrokerAccountOut, BrokerAccountUpdate, BrokerBalanceOut, BrokerOut,
     HDFCCallbackIn, HDFCLoginUrlOut, KiteCallbackIn, KiteLoginUrlOut,
 )
+from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
 from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth, supports_trading
-from app.services.broker.zerodha_broker import ZerodhaKiteBroker
+from app.services.broker.zerodha_broker import IST, ZerodhaKiteBroker
+from app.services.notifications.telegram import send_telegram
 from app.services.visibility import broker_visible, hidden_broker_codes
 
 router = APIRouter()
@@ -313,6 +316,25 @@ async def kite_login_url(
     return KiteLoginUrlOut(login_url=ZerodhaKiteBroker.build_login_url(api_key))
 
 
+# Zerodha ends every Kite session at about 06:00 IST (there is no refresh
+# token), so a login before then stops working within minutes -- on 30 Sep
+# one at 05:52 had ended by the open, and nothing traded until 09:51.
+KITE_SESSION_RESET = time(6, 0)
+
+
+def _ist_now() -> datetime:
+    return datetime.now(IST)
+
+
+async def _is_administrator(db: AsyncSession, user_id: uuid.UUID) -> bool:
+    return (
+        await db.execute(
+            select(UserRole.user_id).join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user_id, Role.name == "administrator").limit(1)
+        )
+    ).first() is not None
+
+
 @router.post("/accounts/{account_id}/kite/callback", response_model=BrokerAccountOut)
 async def kite_callback(
     account_id: str,
@@ -351,7 +373,21 @@ async def kite_callback(
         new_value={"broker_code": "zerodha_kite", "status": account.connection.status},
         ip_address=request.client.host if request.client else None,
     )
+    logged_in_at = _ist_now()
+    early = account.connection.status == ConnectionStatus.CONNECTED.value and logged_in_at.time() < KITE_SESSION_RESET
+    if early:
+        title = "Log in to Zerodha again after 6 AM"
+        message = (
+            f"Logged in at {logged_in_at:%H:%M} IST, but Zerodha ends every session at about 6 AM -- this one will stop "
+            "working within minutes. Log in again after 6 AM, before 09:15."
+        )
+        await create_alert(
+            db, user_id=user.id, alert_type=AlertType.BROKER_DISCONNECTED.value, severity=AlertSeverity.WARNING,
+            title=title, message=message, object_type="broker_account", object_id=str(account.id),
+        )
     await db.commit()
+    if early and await _is_administrator(db, user.id):
+        await send_telegram(title, message)
 
     result = await db.execute(
         select(BrokerAccount)

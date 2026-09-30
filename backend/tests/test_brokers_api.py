@@ -127,6 +127,43 @@ async def test_kite_callback_completes_connection(client: AsyncClient, seeded_ad
     assert resp.json()["connection_status"] == "connected"
 
 
+async def test_a_login_before_6am_warns_to_log_in_again(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession, monkeypatch):
+    """Zerodha ends every session at about 06:00 IST: a 05:52 login (30 Sep)
+    had stopped working by the open. It now warns at once, in the app and on
+    Telegram; a login after 06:00 doesn't."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from app.api.v1.endpoints import brokers
+    from app.models.alert import Alert
+    from app.services.broker.zerodha_broker import IST
+
+    token = await _login(client, seeded_admin["email"], seeded_admin["password"])
+    headers = {"Authorization": f"Bearer {token}"}
+    account = await _connect(client, headers, "zerodha_kite", {"api_key": "kitekey", "api_secret": "kitesecret"})
+    _patch_kite(monkeypatch)
+    telegrams = []
+
+    async def fake_telegram(subject, body):
+        telegrams.append(subject)
+
+    monkeypatch.setattr(brokers, "send_telegram", fake_telegram)
+
+    monkeypatch.setattr(brokers, "_ist_now", lambda: datetime(2026, 9, 30, 5, 52, tzinfo=IST))
+    resp = await client.post(f"/api/v1/brokers/accounts/{account['id']}/kite/callback", json={"request_token": "req_early"}, headers=headers)
+    assert resp.status_code == 200 and resp.json()["connection_status"] == "connected"
+    alerts = (await db_session.execute(select(Alert))).scalars().all()
+    assert [a.title for a in alerts] == ["Log in to Zerodha again after 6 AM"]
+    assert "05:52" in alerts[0].message
+    assert telegrams == ["Log in to Zerodha again after 6 AM"]
+
+    monkeypatch.setattr(brokers, "_ist_now", lambda: datetime(2026, 9, 30, 9, 51, tzinfo=IST))
+    await client.post(f"/api/v1/brokers/accounts/{account['id']}/kite/callback", json={"request_token": "req_later"}, headers=headers)
+    assert len((await db_session.execute(select(Alert))).scalars().all()) == 1
+    assert len(telegrams) == 1
+
+
 async def test_kite_callback_reconnect_uses_fresh_request_token_not_stale_access_token(client: AsyncClient, seeded_admin: dict, monkeypatch):
     """Regression test for a real production bug: after the first
     successful login, the stored credential permanently carries that day's

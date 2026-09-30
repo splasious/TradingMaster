@@ -23,6 +23,7 @@ from app.models.backfill_platform import (
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential, ConnectionStatus
 from app.services.backfill_platform import coverage, jobs, topup, worker
 from app.services.backfill_platform.coverage import last_completed_session, sessions_behind
+from app.services.broker import kite_session_monitor
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -36,7 +37,14 @@ def sessions(db_engine, monkeypatch):
     factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     for module in (jobs, topup, coverage):
         monkeypatch.setattr(module, "AsyncSessionLocal", factory)
+    # The 08:45 login check asks Kite whether the saved session still works:
+    # it does, unless a test says otherwise.
+    monkeypatch.setattr(kite_session_monitor.ZerodhaKiteBroker, "authenticate", _session_ok)
     return factory
+
+
+async def _session_ok(self, credentials) -> None:
+    return None
 
 
 # -------------------------------------------------------------- freshness --
@@ -327,6 +335,38 @@ async def test_admins_are_reminded_to_log_in_to_zerodha_from_0845(db_session, se
 
     await scheduler.tick(ist(2026, 9, 26, 9, 0))  # Saturday: no reminder
     assert len((await db_session.execute(select(Alert))).scalars().all()) == 1
+
+
+async def test_a_session_zerodha_ended_overnight_is_reported_at_0845(db_session, sessions, monkeypatch):
+    """30 Sep: logged in at 05:52, the session ended at ~06:00 but still read
+    CONNECTED. The first check from 08:45 asks Kite, finds it ended, marks it
+    so and reminds -- in the app and on Telegram."""
+    from app.models.alert import Alert
+    from app.models.broker import BrokerConnection
+
+    async def ended(self, credentials):
+        raise RuntimeError("TokenException: Incorrect `api_key` or `access_token`.")
+
+    telegrams = []
+
+    async def fake_telegram(subject, body):
+        telegrams.append(subject)
+
+    monkeypatch.setattr(kite_session_monitor.ZerodhaKiteBroker, "authenticate", ended)
+    monkeypatch.setattr(topup, "send_telegram", fake_telegram)
+    await _topup_fixture(db_session)
+    admin = await _admin(db_session)
+    await _connected_account(db_session)
+    scheduler = topup.BackfillTopupScheduler()
+
+    await scheduler.tick(ist(2026, 9, 30, 8, 46))
+    await scheduler.tick(ist(2026, 9, 30, 8, 47))  # once a day
+
+    alerts = (await db_session.execute(select(Alert))).scalars().all()
+    assert [(a.user_id, a.title) for a in alerts] == [(admin.id, "Log in to Zerodha")]
+    assert telegrams == ["Log in to Zerodha"]
+    connection = (await db_session.execute(select(BrokerConnection).execution_options(populate_existing=True))).scalar_one()
+    assert connection.status == ConnectionStatus.ERROR.value
 
 
 async def test_no_reminder_when_logged_in(db_session, sessions):

@@ -15,7 +15,7 @@ the next run fetches everything after each pair's watermark.
 
 import asyncio
 import logging
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
 from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +47,9 @@ from app.models.user import Role, User, UserRole
 from app.services.alerts.service import create_alert
 from app.services.backfill_platform.timeframes import timeframes_for_source
 from app.services.backfill_platform.worker import backfill_worker
+from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import find_connected_zerodha_account
+from app.services.notifications.telegram import send_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +113,15 @@ async def _admin_ids(db: AsyncSession) -> list:
     )
 
 
-async def _alert_admins(db: AsyncSession, *, key: str, severity: AlertSeverity, alert_type: str, title: str, message: str) -> None:
-    """One in-app alert per administrator, once per `key`."""
+async def _alert_admins(db: AsyncSession, *, key: str, severity: AlertSeverity, alert_type: str, title: str, message: str) -> bool:
+    """One in-app alert per administrator, once per `key` -- False if it was already sent."""
     already = (await db.execute(select(Alert.id).where(Alert.object_type == "bf_backfill", Alert.object_id == key).limit(1))).first()
     if already:
-        return
+        return False
     for user_id in await _admin_ids(db):
         await create_alert(db, user_id=user_id, alert_type=alert_type, severity=severity, title=title, message=message,
                            object_type="bf_backfill", object_id=key)
+    return True
 
 
 def _topup_time(value: str) -> time:
@@ -260,6 +263,7 @@ class BackfillTopupScheduler:
         self._task: asyncio.Task | None = None
         self.last_check_at: datetime | None = None
         self.last_error: str | None = None
+        self._session_checked_on: date | None = None
 
     def start(self) -> None:
         if self._task is None:
@@ -336,19 +340,35 @@ class BackfillTopupScheduler:
         backfill_worker.wake()
 
     async def _remind_login(self, db: AsyncSession, now: datetime) -> None:
-        """From 08:45 IST on a trading day, an in-app alert if Zerodha isn't
-        logged in yet -- the live sync (from 09:00) and the top-up need it."""
+        """From 08:45 IST on a trading day, an alert -- in the app and on
+        Telegram -- if Zerodha isn't logged in: live prices, PCR records and
+        every strategy need it from 09:00, and the evening top-up after.
+
+        The first check of the day asks Kite itself rather than trusting the
+        stored status: Zerodha ends every session at about 06:00, and until
+        the 15-minute session monitor next runs, one ended overnight still
+        reads as connected (30 Sep: a 05:52 login, logged out at the open,
+        not noticed until 09:51)."""
         ist = now.astimezone(IST)
         if not is_trading_day(ist.date()) or ist.time() < LOGIN_REMINDER_AT or ist.time() > time(15, 30):
             return
+        if self._session_checked_on != ist.date():
+            self._session_checked_on = ist.date()
+            await kite_session_monitor_scheduler.check(db)
         if await find_connected_zerodha_account(db) is not None:
             return
-        await _alert_admins(
+        title = "Log in to Zerodha"
+        message = (
+            "Zerodha isn't logged in today. Live prices, PCR records and the strategies need the daily login "
+            "before 09:15, and the evening top-up after -- Settings > Brokers."
+        )
+        sent = await _alert_admins(
             db, key=f"login-{ist.date().isoformat()}", severity=AlertSeverity.WARNING, alert_type=AlertType.BROKER_DISCONNECTED.value,
-            title="Log in to Zerodha",
-            message="Zerodha isn't logged in yet today. Live data (09:00-15:30 IST) and the 16:15 top-up need the daily login -- Settings > Brokers.",
+            title=title, message=message,
         )
         await db.commit()
+        if sent:
+            await send_telegram(title, message)
 
     async def _finish_runs(self, db: AsyncSession, now: datetime) -> None:
         """Marks a running run complete once none of its jobs are left."""
