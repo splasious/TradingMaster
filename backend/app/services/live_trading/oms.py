@@ -79,8 +79,12 @@ class LiveOutcome:
     reason: str | None = None
 
 
-async def get_authenticated_broker(db: AsyncSession, broker_account: BrokerAccount):
-    from app.services.broker.registry import get_broker_adapter, require_trading_support  # local import avoids a cycle at module load
+async def get_authenticated_broker(db: AsyncSession, broker_account: BrokerAccount, for_live_strategies: bool = False):
+    from app.services.broker.registry import (  # local import avoids a cycle at module load
+        get_broker_adapter,
+        require_trading_support,
+        supports_live_strategies,
+    )
 
     credential_result = await db.execute(select(BrokerCredential).where(BrokerCredential.broker_account_id == broker_account.id))
     credential = credential_result.scalar_one_or_none()
@@ -90,7 +94,12 @@ async def get_authenticated_broker(db: AsyncSession, broker_account: BrokerAccou
     broker_row = await db.get(Broker, broker_account.broker_id)
     # Every trading path (live deployments, manual orders, reconciliation)
     # comes through here; connect-only brokers stop before logging in.
-    require_trading_support(broker_row.code, broker_row.name)
+    # Live native strategies (native_scheduler.py) have their own list.
+    if for_live_strategies:
+        if not supports_live_strategies(broker_row.code):
+            raise ValueError(f"Live strategies can't trade through {broker_row.name} yet")
+    else:
+        require_trading_support(broker_row.code, broker_row.name)
     creds = json.loads(decrypt_payload(credential.encrypted_payload))
     broker = get_broker_adapter(broker_row.code)
     await broker.authenticate(creds)

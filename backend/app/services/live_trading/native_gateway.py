@@ -26,7 +26,7 @@ the contract is. Each adapter's place_order() takes the same order dict --
 tradingsymbol / exchange / token / product (Kite's MIS-NRML-CNC) /
 order_type / limit_price -- and translates it to its broker's vocabulary.
 Kotak Neo and HDFC Securities aren't wired for live strategies yet
-(LIVE_BROKERS).
+(registry.supports_live_strategies).
 
 Product by the strategy's style (agreed 1 Oct): intraday -> MIS; overnight
 -> NRML for F&O, CNC for stocks.
@@ -42,6 +42,7 @@ from typing import Any
 from app.models.instrument import Instrument
 from app.models.live_native import PRODUCT_INTRADAY
 from app.services.backfill_platform.coverage import IST
+from app.services.broker.registry import supports_live_strategies
 from app.services.live_trading import broker_contracts
 from app.services.live_trading.broker_contracts import BrokerContract, ContractListError, ContractNotFound
 from app.services.live_trading.order_state_machine import STATE_MAPS, TERMINAL_STATUSES, LiveOrderStatus
@@ -51,8 +52,9 @@ POLL_SECONDS = 0.5
 MARKET_PROTECTION_PCT = 1.0
 FNO_TYPES = ("option", "future")
 
-# Brokers live strategies can trade through.
-LIVE_BROKERS = ("zerodha_kite", "dhan", "angel_one")
+# How often an order's status is asked for while it works: Angel One reads
+# it from the whole order book, so less often.
+_POLL_SECONDS = {"angel_one": 1.0}
 
 # The fill fields of each broker's order report, first match wins: Kite,
 # Kotak Neo, Dhan, Angel One.
@@ -162,7 +164,7 @@ class BrokerGateway:
         self.state_map = STATE_MAPS.get(broker_code, {})
 
     async def contract(self, instrument: Instrument) -> BrokerContract:
-        if self.broker_code not in LIVE_BROKERS:
+        if not supports_live_strategies(self.broker_code):
             raise ContractNotFound(f"live strategies can't trade through {self.broker_code} yet")
         return await broker_contracts.contract_for(self.broker_code, self.broker, instrument, _today())
 
@@ -208,7 +210,7 @@ class BrokerGateway:
                 return Fill(status, filled or 0.0, avg, order_id, reason, limit)
             if time.monotonic() >= deadline:
                 break
-            await asyncio.sleep(POLL_SECONDS)
+            await asyncio.sleep(_POLL_SECONDS.get(self.broker_code, POLL_SECONDS) if POLL_SECONDS else 0)
 
         # Still working: cancel it, then take what filled before the cancel.
         try:

@@ -32,10 +32,16 @@ _REGISTRY: dict[str, type[BrokerInterface]] = {
     "dhan": DhanBroker,
 }
 
-# Connect-and-verify only for now (login, profile, funds): their order,
-# position and order-status calls aren't built yet, so nothing that trades
-# -- Live Trading, manual orders, reconciliation -- may use them.
+# Connect-and-verify only (login, profile, funds) for the older trading
+# paths -- Live Trading deployments, manual orders, reconciliation -- which
+# send Zerodha's contract names. Live native strategies can trade through
+# them (_LIVE_STRATEGY_BROKERS): native_gateway.py sends each broker its
+# own contract (live_trading/broker_contracts.py).
 _CONNECT_ONLY_BROKERS = {"angel_one", "dhan"}
+
+# Brokers live native strategies can trade through. Kotak Neo and HDFC
+# Securities aren't wired for them yet.
+_LIVE_STRATEGY_BROKERS = {"zerodha_kite", "dhan", "angel_one"}
 
 # Brokers whose auth can't complete in a single authenticate() call --
 # they need an interactive browser login first (see the relevant
@@ -62,6 +68,10 @@ def requires_interactive_auth(broker_code: str) -> bool:
 
 def supports_trading(broker_code: str) -> bool:
     return broker_code not in _CONNECT_ONLY_BROKERS
+
+
+def supports_live_strategies(broker_code: str) -> bool:
+    return broker_code in _LIVE_STRATEGY_BROKERS
 
 
 def require_trading_support(broker_code: str, broker_name: str | None = None) -> None:

@@ -43,7 +43,7 @@ async def open_gateway(db: AsyncSession, broker_account_id: uuid.UUID) -> Broker
     if account is None:
         raise RuntimeError("broker account not found")
     broker_row = await db.get(Broker, account.broker_id)
-    return BrokerGateway(broker_row.code, await get_authenticated_broker(db, account))
+    return BrokerGateway(broker_row.code, await get_authenticated_broker(db, account, for_live_strategies=True))
 
 
 class LiveNativeScheduler:

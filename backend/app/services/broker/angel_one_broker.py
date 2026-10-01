@@ -1,8 +1,11 @@
-"""Angel One (formerly Angel Broking) SmartAPI adapter -- Phase 1: connect
-and verify only. It logs in, reads the profile and the funds; order
-placement, positions and order status are not enabled yet (registry.py's
-_CONNECT_ONLY_BROKERS keeps Live Trading, manual orders and reconciliation
-away from it until they are built and checked against a real account).
+"""Angel One (formerly Angel Broking) SmartAPI adapter. It logs in, reads
+the profile and funds, and -- for live native strategies only
+(registry.py's supports_live_strategies) -- places, follows and cancels
+orders and reads positions and holdings. The older trading paths (Live
+Trading deployments, manual orders) still treat it as connect-only: they
+speak Zerodha's contract names, and an Angel One order needs Angel's own
+symbol and token (live_trading/broker_contracts.py supplies them to
+native_gateway.py).
 
 Written against Angel One's own official Python SDK
 (github.com/angel-one/smartapi-python, SmartApi/smartConnect.py), calling
@@ -20,9 +23,27 @@ three calls. Read from that source, not guessed:
   - funds: GET /rest/secure/angelbroking/user/v1/getRMS
   - a failure carries "error_type" + "message", or "status": false
 
+Orders, from the same SDK (SmartApi/smartConnect.py's routes and
+placeOrder / cancelOrder / orderBook / position / holding, and its own
+example order in test/api_test.py), not guessed:
+  - place: POST /rest/secure/angelbroking/order/v1/placeOrder with
+    variety NORMAL, tradingsymbol + symboltoken (Angel's own),
+    transactiontype, exchange (NSE / NFO), ordertype, producttype
+    (INTRADAY / CARRYFORWARD / DELIVERY), duration DAY, and price,
+    quantity, squareoff, stoploss as strings; data.orderid comes back
+  - cancel: POST .../order/v1/cancelOrder {variety, orderid}
+  - order book: GET .../order/v1/getOrderBook -- an order's status is read
+    from its row there (orderid, status, filledshares, averageprice, text)
+  - positions: GET .../order/v1/getPosition; holdings: GET
+    .../portfolio/v1/getHolding (data is null when there are none)
+The order statuses are order_state_machine.ANGEL_ONE_STATE_MAP.
+
 NOT verified against a live account (none available while building this):
-getRMS's field names. They are read defensively below and fail closed --
-0 available -- the same rule as kotak_neo_broker.py.
+getRMS's field names and the order-book / position / holding row fields
+above (from SmartAPI's docs). They are read defensively; the balance fails
+closed -- 0 available -- the same rule as kotak_neo_broker.py, and the
+broker test (Settings > Brokers) runs a one-share order through all of
+them before any strategy can use the account.
 
 Auth is client code + login PIN + a TOTP code derived on each login from
 the stored TOTP secret (pyotp), so there is no daily manual login.
@@ -43,9 +64,17 @@ _ROOT = "https://apiconnect.angelone.in"
 _LOGIN = "/rest/auth/angelbroking/user/v1/loginByPassword"
 _PROFILE = "/rest/secure/angelbroking/user/v1/getProfile"
 _RMS = "/rest/secure/angelbroking/user/v1/getRMS"
+_PLACE = "/rest/secure/angelbroking/order/v1/placeOrder"
+_CANCEL = "/rest/secure/angelbroking/order/v1/cancelOrder"
+_ORDER_BOOK = "/rest/secure/angelbroking/order/v1/getOrderBook"
+_POSITIONS = "/rest/secure/angelbroking/order/v1/getPosition"
+_HOLDINGS = "/rest/secure/angelbroking/portfolio/v1/getHolding"
+# This app's (Kite's) product codes -> Angel One's.
+_PRODUCTS = {"MIS": "INTRADAY", "NRML": "CARRYFORWARD", "CNC": "DELIVERY"}
+_ORDER_TYPES = {"limit": "LIMIT", "market": "MARKET"}
 _TIMEOUT = 15.0
 _MAC = ":".join(re.findall("..", "%012x" % uuid.getnode()))
-_NOT_ENABLED = "Angel One is connected for login and funds only -- trading through it isn't enabled yet"
+_NOT_ENABLED = "Angel One is connected for login, funds and live strategies only"
 
 
 class AngelOneAPIError(Exception):
@@ -168,11 +197,19 @@ class AngelOneBroker(BrokerInterface):
         available = _amount(data.get("availablecash")) or _amount(data.get("net"))
         return {"available_margin": available, "used_margin": _amount(data.get("utiliseddebits")), "currency": "INR"}
 
+    async def _rows(self, path: str) -> list[dict[str, Any]]:
+        self._require_session()
+        data = (await self._call("GET", path)).get("data")
+        return data if isinstance(data, list) else []
+
     async def get_positions(self) -> list[dict[str, Any]]:
-        raise NotImplementedError(_NOT_ENABLED)
+        return await self._rows(_POSITIONS)
+
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        return await self._rows(_HOLDINGS)
 
     async def get_orders(self) -> list[dict[str, Any]]:
-        raise NotImplementedError(_NOT_ENABLED)
+        return await self._rows(_ORDER_BOOK)
 
     async def get_trades(self) -> list[dict[str, Any]]:
         raise NotImplementedError(_NOT_ENABLED)
@@ -190,13 +227,47 @@ class AngelOneBroker(BrokerInterface):
         raise NotImplementedError(_NOT_ENABLED)
 
     async def place_order(self, order: dict[str, Any]) -> dict[str, Any]:
-        raise NotImplementedError(_NOT_ENABLED)
+        """The order dict native_gateway.py sends: `tradingsymbol` and
+        `token` are Angel One's own (broker_contracts.py)."""
+        self._require_session()
+        if not order.get("token") or order.get("exchange") not in ("NSE", "NFO"):
+            raise AngelOneAPIError("An Angel One order needs Angel's own symbol token and exchange")
+        product = _PRODUCTS.get(order.get("product") or "")
+        order_type = _ORDER_TYPES.get(order.get("order_type") or "")
+        if product is None or order_type is None:
+            raise AngelOneAPIError(f"Unsupported product/order type for Angel One: {order.get('product')}/{order.get('order_type')}")
+        price = order.get("limit_price") or 0
+        body = {
+            "variety": "NORMAL",
+            "tradingsymbol": order["tradingsymbol"],
+            "symboltoken": str(order["token"]),
+            "transactiontype": order["side"].upper(),
+            "exchange": order["exchange"],
+            "ordertype": order_type,
+            "producttype": product,
+            "duration": "DAY",
+            "price": f"{float(price):.2f}",
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": str(int(order["quantity"])),
+        }
+        if order.get("client_order_id"):
+            body["ordertag"] = order["client_order_id"][:20]
+        data = (await self._call("POST", _PLACE, body)).get("data") or {}
+        order_id = data.get("orderid")
+        if not order_id:
+            raise AngelOneAPIError("Angel One returned no order id")
+        return {"broker_order_id": str(order_id), "status": "put order req received", "raw": data}
 
     async def modify_order(self, order_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError(_NOT_ENABLED)
 
     async def cancel_order(self, order_id: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
-        raise NotImplementedError(_NOT_ENABLED)
+        self._require_session()
+        data = await self._call("POST", _CANCEL, {"variety": "NORMAL", "orderid": order_id})
+        return {"broker_order_id": str(order_id), "status": "cancel pending", "raw": data.get("data") or {}}
 
     async def get_order_status(self, order_id: str) -> dict[str, Any]:
-        raise NotImplementedError(_NOT_ENABLED)
+        row = next((r for r in await self.get_orders() if str(r.get("orderid")) == str(order_id)), None)
+        status = str((row or {}).get("status") or (row or {}).get("orderstatus") or "unknown").lower()
+        return {"order_id": order_id, "status": status, "raw": row or {}}

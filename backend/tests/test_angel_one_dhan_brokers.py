@@ -11,7 +11,7 @@ from httpx import AsyncClient
 from app.services.broker import angel_one_broker
 from app.services.broker.angel_one_broker import AngelOneAPIError, AngelOneBroker
 from app.services.broker.dhan_broker import DhanAPIError, DhanBroker
-from app.services.broker.registry import require_trading_support, supports_trading
+from app.services.broker.registry import require_trading_support, supports_live_strategies, supports_trading
 
 TOTP_SECRET = "JBSWY3DPEHPK3PXP"  # a valid base32 TOTP secret (pyotp's own example)
 
@@ -120,15 +120,121 @@ async def test_dhan_login_errors_are_shown_and_a_missing_token_is_an_error(monke
         await DhanBroker().authenticate({"client_id": "1100", "pin": "0", "totp_secret": TOTP_SECRET})
 
 
-async def test_neither_broker_places_orders_yet():
-    assert not supports_trading("angel_one") and not supports_trading("dhan")
+async def test_only_live_strategies_trade_through_them():
+    assert not supports_trading("angel_one") and not supports_trading("dhan")  # the older paths: connect-only
     assert supports_trading("zerodha_kite") and supports_trading("kotak_neo")
     with pytest.raises(ValueError, match="Dhan is connected for login and funds only"):
         require_trading_support("dhan", "Dhan")
+    assert supports_live_strategies("dhan") and supports_live_strategies("angel_one") and supports_live_strategies("zerodha_kite")
+    assert not supports_live_strategies("kotak_neo") and not supports_live_strategies("hdfc_securities")
     with pytest.raises(NotImplementedError):
-        await AngelOneBroker().place_order({})
-    with pytest.raises(NotImplementedError):
-        await DhanBroker().get_positions()
+        await DhanBroker().get_trades()
+
+
+async def _dhan(monkeypatch, replies):
+    calls = []
+
+    async def fake_request(self, method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if "generateAccessToken" in url:
+            return _response(200, {"accessToken": "dhan-token"})
+        return replies.pop(0)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    broker = DhanBroker()
+    await broker.authenticate({"client_id": "1100", "pin": "4321", "totp_secret": TOTP_SECRET})
+    calls.clear()
+    return broker, calls
+
+
+async def test_dhan_orders_follow_its_sdk_field_for_field(monkeypatch):
+    broker, calls = await _dhan(monkeypatch, [
+        _response(200, {"orderId": "112111182198", "orderStatus": "PENDING"}),
+        _response(200, {"orderId": "112111182198", "orderStatus": "TRADED", "filledQty": 65, "averageTradedPrice": 150.25}),
+        _response(202, {"orderId": "112111182198", "orderStatus": "CANCELLED"}),
+    ])
+    placed = await broker.place_order({"tradingsymbol": "NIFTY-Oct2026-22700-CE", "exchange": "NSE_FNO", "token": "40001",
+                                       "product": "NRML", "quantity": 65.0, "side": "buy", "order_type": "limit",
+                                       "limit_price": 151.5, "client_order_id": "tmn-0123456789abcdef0123"})
+    assert placed["broker_order_id"] == "112111182198"
+    method, url, kwargs = calls[0]
+    assert (method, url) == ("POST", "https://api.dhan.co/v2/orders")
+    assert json.loads(kwargs["content"]) == {
+        "dhanClientId": "1100", "transactionType": "BUY", "exchangeSegment": "NSE_FNO", "productType": "MARGIN", "orderType": "LIMIT",
+        "validity": "DAY", "securityId": "40001", "quantity": 65, "disclosedQuantity": 0, "price": 151.5, "afterMarketOrder": False,
+        "boProfitValue": None, "boStopLossValue": None, "triggerPrice": 0.0, "correlationId": "tmn-0123456789abcdef",
+    }
+    assert kwargs["headers"]["access-token"] == "dhan-token" and kwargs["headers"]["client-id"] == "1100"
+    status = await broker.get_order_status("112111182198")
+    assert calls[1][:2] == ("GET", "https://api.dhan.co/v2/orders/112111182198")
+    assert status["status"] == "TRADED" and status["raw"]["averageTradedPrice"] == 150.25
+    await broker.cancel_order("112111182198")
+    assert calls[2][:2] == ("DELETE", "https://api.dhan.co/v2/orders/112111182198")
+
+
+async def test_dhan_refuses_an_order_without_its_own_security_id(monkeypatch):
+    broker, calls = await _dhan(monkeypatch, [])
+    with pytest.raises(DhanAPIError, match="Dhan's own security id"):
+        await broker.place_order({"tradingsymbol": "SBIN", "exchange": "NSE", "product": "CNC", "quantity": 1, "side": "buy",
+                                  "order_type": "limit", "limit_price": 800.0})
+    assert calls == []
+
+
+async def test_dhan_positions_and_an_empty_demat_account(monkeypatch):
+    broker, calls = await _dhan(monkeypatch, [
+        _response(200, [{"securityId": "40001", "exchangeSegment": "NSE_FNO", "netQty": -65}]),
+        _response(400, {"errorType": "Data_Error", "errorCode": "DH-1111", "errorMessage": "No holdings available"}),
+    ])
+    assert await broker.get_positions() == [{"securityId": "40001", "exchangeSegment": "NSE_FNO", "netQty": -65}]
+    assert await broker.get_holdings() == []
+    assert [c[1] for c in calls] == ["https://api.dhan.co/v2/positions", "https://api.dhan.co/v2/holdings"]
+
+
+async def _angel(monkeypatch, replies):
+    calls = []
+
+    async def fake_request(self, method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if url.endswith("/loginByPassword"):
+            return _response(200, {"status": True, "data": {"jwtToken": "jwt-1"}})
+        return replies.pop(0)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    broker = AngelOneBroker()
+    await broker.authenticate({"api_key": "key-1", "client_code": "A123", "pin": "1234", "totp_secret": TOTP_SECRET})
+    calls.clear()
+    return broker, calls
+
+
+async def test_angel_one_orders_follow_its_sdk(monkeypatch):
+    broker, calls = await _angel(monkeypatch, [
+        _response(200, {"status": True, "message": "SUCCESS", "data": {"script": "SBIN-EQ", "orderid": "201020000000080",
+                                                                        "uniqueorderid": "34reqfachdfih"}}),
+        _response(200, {"status": True, "data": [
+            {"orderid": "201020000000079", "status": "complete", "filledshares": "5", "averageprice": 10.0},
+            {"orderid": "201020000000080", "status": "complete", "filledshares": "1", "averageprice": 808.05, "text": ""},
+        ]}),
+        _response(200, {"status": True, "data": {"orderid": "201020000000080"}}),
+        _response(200, {"status": True, "data": None}),
+    ])
+    placed = await broker.place_order({"tradingsymbol": "SBIN-EQ", "exchange": "NSE", "token": "3045", "product": "CNC",
+                                       "quantity": 1.0, "side": "buy", "order_type": "limit", "limit_price": 808.0,
+                                       "client_order_id": "tmn-0123456789abcdef0123"})
+    assert placed["broker_order_id"] == "201020000000080"
+    method, url, kwargs = calls[0]
+    assert (method, url) == ("POST", "https://apiconnect.angelone.in/rest/secure/angelbroking/order/v1/placeOrder")
+    assert kwargs["json"] == {
+        "variety": "NORMAL", "tradingsymbol": "SBIN-EQ", "symboltoken": "3045", "transactiontype": "BUY", "exchange": "NSE",
+        "ordertype": "LIMIT", "producttype": "DELIVERY", "duration": "DAY", "price": "808.00", "squareoff": "0", "stoploss": "0",
+        "quantity": "1", "ordertag": "tmn-0123456789abcdef",
+    }
+    assert kwargs["headers"]["Authorization"] == "Bearer jwt-1"
+    status = await broker.get_order_status("201020000000080")
+    assert calls[1][1].endswith("/order/v1/getOrderBook") and status["status"] == "complete"
+    assert status["raw"]["averageprice"] == 808.05
+    await broker.cancel_order("201020000000080")
+    assert calls[2][1].endswith("/order/v1/cancelOrder") and calls[2][2]["json"] == {"variety": "NORMAL", "orderid": "201020000000080"}
+    assert await broker.get_positions() == []  # data: null when there are none
 
 
 async def _headers(client: AsyncClient, admin: dict) -> dict:

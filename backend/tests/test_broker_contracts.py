@@ -158,3 +158,32 @@ async def test_lists_are_fetched_once_a_day_and_a_failed_fetch_falls_back_a_litt
 ])
 def test_the_protected_limit(instrument, side, price, limit):
     assert protected_limit(instrument, side, price) == pytest.approx(limit)
+
+
+class _Holder:
+    def __init__(self, positions, holdings):
+        self.positions, self.holdings = positions, holdings
+
+    async def get_positions(self):
+        return self.positions
+
+    async def get_holdings(self):
+        return self.holdings
+
+
+async def test_positions_and_holdings_are_keyed_as_each_broker_names_contracts():
+    from app.services.live_trading.native_gateway import BrokerGateway
+
+    dhan = BrokerGateway("dhan", _Holder(
+        [{"securityId": "40001", "exchangeSegment": "NSE_FNO", "netQty": -65}, {"securityId": "3045", "exchangeSegment": "NSE_EQ", "netQty": 2}],
+        [{"securityId": "3045", "exchange": "ALL", "totalQty": 10, "t1Qty": 3}],
+    ))
+    assert await dhan.net_positions() == {("NSE_FNO", "40001"): -65.0, ("NSE_EQ", "3045"): 12.0}
+    angel = BrokerGateway("angel_one", _Holder(
+        [{"symboltoken": "40001", "exchange": "NFO", "netqty": "-65"}],
+        [{"symboltoken": "3045", "exchange": "NSE", "quantity": 7, "t1quantity": 3}],
+    ))
+    assert await angel.net_positions() == {("NFO", "40001"): -65.0, ("NSE", "3045"): 10.0}
+    # the same keys the contract lists give them
+    assert ContractIndex(dhan_rows(DHAN_CSV)).match(_option()).key == ("NSE_FNO", "40001")
+    assert ContractIndex(angel_rows(ANGEL)).match(_stock()).key == ("NSE", "3045")
