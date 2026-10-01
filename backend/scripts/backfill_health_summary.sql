@@ -1089,6 +1089,33 @@ SELECT count(*) AS stocks, count(*) FILTER (WHERE c15 >= 151) AS with_151_15m, c
 FROM per;
 
 \echo
+\echo '== NS3. The same 50: 30 Sep 15m chart candles per slot (IST) -- stocks having it, by source -- and the backfill copy (bf 15m) for the same slot'
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL'))
+SELECT to_char(c.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS slot_ist, c.source, count(DISTINCT c.instrument_id) AS stocks
+FROM fifty f JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol
+JOIN ohlcv_candles c ON c.instrument_id = i.id AND c.timeframe = '15m' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-09-30'
+GROUP BY 1, 2 ORDER BY 1, 2;
+
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL'))
+SELECT (SELECT count(*) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol) AS with_bf_symbol,
+       (SELECT count(DISTINCT s.id) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol
+          JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = '15m' AND (b.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-09-30') AS bf_15m_on_30sep,
+       (SELECT count(DISTINCT s.id) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol
+          JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = '5m' AND (b.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-09-30') AS bf_5m_on_30sep,
+       (SELECT to_char(max(b.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol
+          JOIN bf_ohlcv_bars b ON b.symbol_id = s.id AND b.timeframe = '15m') AS bf_15m_last,
+       (SELECT to_char(min(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol) AS oldest_copy_ist,
+       (SELECT to_char(max(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol) AS newest_copy_ist;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
