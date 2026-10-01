@@ -87,9 +87,15 @@ class BacktestNativeContext(NativeContext):
             self.db, underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, as_of=self.now,
         )
 
-    async def _move_cash(self, side: str, quantity: float, price: float, action: str, instrument: Instrument) -> None:
-        notional = quantity * price
-        self.portfolio.cash += notional if side == "sell" else -notional
+    async def _move_cash(
+        self, side: str, quantity: float, price: float, action: str, instrument: Instrument, cash_change: float | None = None,
+    ) -> None:
+        """As the live one (a future books only its profit or loss, see
+        NativeContext.open_leg), without an audit row per simulated fill."""
+        if cash_change is None:
+            notional = quantity * price
+            cash_change = notional if side == "sell" else -notional
+        self.portfolio.cash += cash_change
 
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,

@@ -215,27 +215,43 @@ class NativeContext:
         ).scalars().all()
         return list(rows)
 
-    async def _move_cash(self, side: str, quantity: float, price: float, action: str, instrument: Instrument) -> None:
-        notional = quantity * price
-        self.portfolio.cash += notional if side == "sell" else -notional
+    async def _move_cash(
+        self, side: str, quantity: float, price: float, action: str, instrument: Instrument, cash_change: float | None = None,
+    ) -> None:
+        if cash_change is None:
+            notional = quantity * price
+            cash_change = notional if side == "sell" else -notional
+        self.portfolio.cash += cash_change
         await write_audit_log(
             self.db, user_id=self.portfolio.user_id, action=action, object_type="paper_native_deployment",
             object_id=str(self.deployment.id),
-            new_value={"instrument": instrument.symbol, "side": side, "quantity": quantity, "price": price},
+            new_value={"instrument": instrument.symbol, "side": side, "quantity": quantity, "price": price, "cash_change": round(cash_change, 2)},
         )
 
     async def open_leg(self, instrument: Instrument, side: str, quantity: float, price: float) -> None:
         """side: "sell" (credits cash -- selling to open, e.g. a spread's
         short leg) or "buy" (debits cash -- buying to open, e.g. a
         spread's long hedge leg). Mirrors engine.py::_try_enter's
-        short-entry cash convention, applied per leg."""
-        await self._move_cash(side, quantity, price, "PAPER_NATIVE_LEG_OPENED", instrument)
+        short-entry cash convention, applied per leg.
 
-    async def close_leg(self, instrument: Instrument, side: str, quantity: float, price: float) -> None:
+        A future moves no cash when it opens: like a real futures account,
+        only its profit or loss is booked, when it closes (close_leg's
+        entry_price) -- its full contract value (~Rs 1.5 crore for 10 NIFTY
+        lots) would otherwise swing the pool's cash for as long as it's held."""
+        cash_change = 0.0 if instrument.instrument_type == "future" else None
+        await self._move_cash(side, quantity, price, "PAPER_NATIVE_LEG_OPENED", instrument, cash_change)
+
+    async def close_leg(self, instrument: Instrument, side: str, quantity: float, price: float, entry_price: float | None = None) -> None:
         """side is the CLOSING action -- "buy" to cover a short leg,
         "sell" to close a long leg. Mirrors engine.py::_exit_position's
-        cash convention, applied per leg."""
-        await self._move_cash(side, quantity, price, "PAPER_NATIVE_LEG_CLOSED", instrument)
+        cash convention, applied per leg. A future books its profit or
+        loss against `entry_price` (see open_leg), which it then needs."""
+        cash_change = None
+        if instrument.instrument_type == "future":
+            if entry_price is None:
+                raise ValueError(f"closing the future {instrument.symbol} needs its entry_price: only its profit or loss is booked")
+            cash_change = (price - entry_price) * quantity if side == "sell" else (entry_price - price) * quantity
+        await self._move_cash(side, quantity, price, "PAPER_NATIVE_LEG_CLOSED", instrument, cash_change)
 
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,

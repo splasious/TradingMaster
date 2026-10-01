@@ -80,14 +80,26 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
     # costs you) -- matches each strategy's own close_position() P&L sign
     # convention exactly, verified against nifty_pcr_multi_regime's
     # per-leg (entry - exit) for sell / (exit - entry) for buy formula.
-    trade_value = sum((leg["entry_price"] if side == "sell" else -leg["entry_price"]) * leg["quantity"] for side, leg in raw_legs)
+    # A future isn't a credit or a debit -- it books only its profit or loss
+    # (native_runner.open_leg) -- so it counts in Unrealized P&L only, not in
+    # the values: its ~Rs 1.5 crore contract value would bury the premium.
+    is_future = [instrument.instrument_type == "future" for instrument in leg_instruments]
+    trade_value = sum(
+        (leg["entry_price"] if side == "sell" else -leg["entry_price"]) * leg["quantity"]
+        for (side, leg), future in zip(raw_legs, is_future) if not future
+    )
     live_value = None
     unrealized_pnl = None
     if all(p is not None for p in prices):
         live_value = sum(
-            (price if side == "sell" else -price) * leg["quantity"] for (side, leg), price in zip(raw_legs, prices)
+            (price if side == "sell" else -price) * leg["quantity"]
+            for (side, leg), price, future in zip(raw_legs, prices, is_future) if not future
         )
-        unrealized_pnl = trade_value - live_value
+        futures_pnl = sum(
+            ((leg["entry_price"] - price) if side == "sell" else (price - leg["entry_price"])) * leg["quantity"]
+            for (side, leg), price, future in zip(raw_legs, prices, is_future) if future
+        )
+        unrealized_pnl = trade_value - live_value + futures_pnl
 
     underlying_id = leg_instruments[0].underlying_instrument_id if leg_instruments else None
     underlying = await db.get(Instrument, underlying_id) if underlying_id else None

@@ -1342,6 +1342,19 @@ FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE '
 GROUP BY i.expiry ORDER BY i.expiry;
 
 \echo
+\echo '== PF1. Nifty PCR Futures Hedge: deployments on its code, the open position (bias, leg kinds and expiries), last check, and closed trades by exit reason'
+SELECT s.name AS strategy, sv.version_number, d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
+       d.state::jsonb -> 'position' ->> 'bias' AS bias, d.state::jsonb -> 'position' ->> 'pcr_at_entry' AS pcr_at_entry,
+       d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'expiry' AS future_expiry, d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'side' AS future_side,
+       d.state::jsonb -> 'position' -> 'legs' -> 'option' ->> 'option_type' AS option_type, d.state::jsonb -> 'position' -> 'legs' -> 'option' ->> 'expiry' AS option_expiry,
+       (SELECT string_agg(t.exit_reason || ' x' || t.n, ', ') FROM (SELECT exit_reason, count(*) AS n FROM paper_native_trades WHERE deployment_id = d.id GROUP BY 1) t) AS trades,
+       (SELECT round(sum(pnl)::numeric, 0) FROM paper_native_trades WHERE deployment_id = d.id) AS realised_pnl
+FROM strategy_versions sv JOIN strategies s ON s.id = sv.strategy_id JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
+WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
+ORDER BY d.created_at;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
