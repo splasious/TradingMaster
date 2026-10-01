@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import and_, exists, func, select, text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.time import as_aware_utc
@@ -88,17 +88,23 @@ class Pair:
 
 
 async def _pairs(db: AsyncSession, now: datetime, sources: tuple[str, ...]) -> list[Pair]:
+    """Every saved (symbol, timeframe), except NFO kinds the top-up doesn't
+    download any more (stock options) -- they'd only ever show as behind."""
     rows = (
         await db.execute(
             select(BfCoverage, BfSymbol.symbol, BfSymbol.source, BfSymbol.expiry)
             .join(BfSymbol, BfSymbol.id == BfCoverage.symbol_id)
-            .where(BfSymbol.source.in_(sources))
+            .where(BfSymbol.source.in_(sources), or_(BfSymbol.source != "zerodha_nfo", keeps_candles()))
         )
     ).all()
+    today = now.astimezone(IST).date()
     out = []
     for cov, symbol, source, expiry in rows:
         last_day = ist_date(cov.last_ts)
-        expired = expiry is not None and expiry <= last_day
+        # Expired once its expiry day is past -- even when its last candle
+        # came earlier (a far strike that stopped trading): nothing more
+        # will come, so it isn't "behind".
+        expired = expiry is not None and (expiry <= last_day or expiry < today)
         kite = source in KITE_SOURCES
         behind = 0 if (expired or not kite) else sessions_behind(cov.last_ts, cov.timeframe, now, cov.checked_through)
         full = NSE_FULL_DAY_BARS.get(cov.timeframe)
@@ -113,13 +119,14 @@ def _cell(pairs: list[Pair], timeframe: str, updating: bool) -> dict:
     if not pairs:
         return {"timeframe": timeframe, "status": "none", "symbols": 0}
     active = [p for p in pairs if not p.expired]
-    # Only expired contracts: their history is closed, nothing is missing.
+    # Only expired contracts: their history is closed, nothing is missing --
+    # but nothing current is being saved at this timeframe either ("expired").
     basis = active or pairs
     behind = [p for p in active if p.behind > 0]
     worst = max((p.behind for p in active), default=0)
     return {
         "timeframe": timeframe,
-        "status": status_for(worst),
+        "status": status_for(worst) if active else "expired",
         "updating": updating,
         "saved_up_to": max(p.saved_up_to for p in basis),
         "oldest_saved_up_to": min(p.saved_up_to for p in basis),
@@ -285,7 +292,7 @@ async def _attention(db: AsyncSession, now: datetime, segments: list[dict], logi
         if seg["source"] not in KITE_SOURCES:
             continue
         for cell in seg["cells"]:
-            if cell["status"] in ("ok", "none"):
+            if cell["status"] in ("ok", "none", "expired"):
                 continue
             n = cell["behind"]
             unit = UNIT[seg["source"]] if n != 1 else UNIT[seg["source"]][:-1]

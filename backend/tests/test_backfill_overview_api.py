@@ -93,7 +93,8 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     assert (nse["15m"]["status"], nse["15m"]["behind"], nse["15m"]["sessions_behind"]) == ("bad", 1, 2)
     assert "1m" not in nse  # 1-minute is no longer kept
     nfo15 = {c["timeframe"]: c for c in body["segments"][1]["cells"]}["15m"]
-    assert (nfo15["status"], nfo15["symbols"], nfo15["expired"]) == ("ok", 0, 1)
+    # Only an expired contract at 15m: nothing missing, but nothing current either.
+    assert (nfo15["status"], nfo15["symbols"], nfo15["expired"]) == ("expired", 0, 1)
     assert [seg["source"] for seg in body["segments"]] == ["zerodha", "zerodha_nfo"]  # Delta Exchange is hidden
 
     # The daily bars are current, 15m is not: headline = the daily's close, flagged.
@@ -110,6 +111,30 @@ async def test_overview_reports_saved_up_to_and_what_needs_attention(client, see
     empty = next(a for a in body["attention"] if a["title"] == "1 NFO contract has no data yet")
     assert empty["detail"] == "1 still active -- retried in each NFO top-up."
     assert body["queue"]["state"] == "idle" and body["schedule"]["topup_time"] == "16:15"
+
+
+async def test_a_contract_past_expiry_isnt_behind_and_stock_options_arent_counted(client, seeded_admin, db_session):
+    seeded = await _seed(db_session)
+    session, two_back = seeded["session"], seeded["two_back"]
+    # Stopped trading before its expiry day (a far strike): last candle two
+    # sessions before an expiry that has since passed.
+    stale = BfSymbol(source="zerodha_nfo", symbol="NIFTYFAR", display_name="far strike", expiry=previous_trading_day(session),
+                     option_type="CE", underlying_symbol="NIFTY")
+    live = BfSymbol(source="zerodha_nfo", symbol="NIFTYNEAR", display_name="near", expiry=session + timedelta(days=5),
+                    option_type="PE", underlying_symbol="NIFTY")
+    stock_option = BfSymbol(source="zerodha_nfo", symbol="ACMEOPT", display_name="stock option", expiry=session + timedelta(days=20),
+                            option_type="CE", underlying_symbol="ACME")
+    db_session.add_all([stale, live, stock_option])
+    await db_session.flush()
+    for symbol, last in ((stale, _at(two_back, 15, 15)), (live, _at(session, 15, 15)), (stock_option, _at(two_back, 15, 15))):
+        db_session.add(BfCoverage(symbol_id=symbol.id, timeframe="15m", first_ts=last - timedelta(days=30), last_ts=last, bar_count=100))
+    await db_session.commit()
+
+    body = (await client.get("/api/v1/backfill-platform/overview", headers=await _headers(client, seeded_admin))).json()
+    nfo15 = {c["timeframe"]: c for c in body["segments"][1]["cells"]}["15m"]
+    # live counts; the far strike and the old option are expired; the stock option isn't downloaded, so not counted
+    assert (nfo15["status"], nfo15["symbols"], nfo15["current"], nfo15["expired"], nfo15["behind"]) == ("ok", 1, 1, 2, 0)
+    assert not any("NFO" in a["title"] and "behind" in a["title"] for a in body["attention"])
 
 
 async def test_freshness_is_the_compact_nse_status(client, seeded_admin, db_session):

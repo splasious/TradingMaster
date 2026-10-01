@@ -11,6 +11,14 @@ rows) rather than a hardcoded NIFTY/BANKNIFTY list -- today that's exactly
 those two, per the earlier "keep only Nifty and bank nifty" instruction,
 without hardcoding the names here.
 
+Futures roll too (agreed 1 Oct 2026, after the September stock futures
+expired with nothing tracked for October): every underlying with a future
+tracked for backfill keeps its nearest FUTURES_TO_MAINTAIN monthly futures --
+the current and next month -- at the timeframes its futures have been saved
+at, in the same Data Backfill watchlists. So at each monthly expiry the next
+month's future is already there; a new one is backfilled from as far back as
+Kite has it (FUTURES_HISTORY_DAYS).
+
 Purely additive: this only ensures a target set of expiries exist and
 no-ops once they do. Contracts that have expired are retired separately,
 four trading days on (retire_expired.py): stock contracts are deleted, and
@@ -34,13 +42,20 @@ and doesn't apply here.
 import asyncio
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models.backfill_platform import JOB_PRIORITY_SCHEDULED, BfBackfillJob
+from app.models.backfill_platform import (
+    JOB_PRIORITY_SCHEDULED,
+    BfBackfillJob,
+    BfBackfillStatus,
+    BfCoverage,
+    BfSymbol,
+    BfWatchlistItem,
+)
 from app.models.instrument import Instrument
 from app.services.backfill_platform.catalog_sync import UNDERLYING_NAME_ALIASES
 from app.services.backfill_platform.symbols import get_or_create_symbol
@@ -64,6 +79,14 @@ BACKFILL_TIMEFRAME = "15m"
 # than that (one cached instrument-dump read when nothing's missing), but
 # no need to.
 CHECK_INTERVAL_SECONDS = 6 * 3600
+
+# Futures kept per underlying: the current month and the next.
+FUTURES_TO_MAINTAIN = 2
+# A monthly future lists about three months before it expires; asking from
+# further back just returns what Kite has.
+FUTURES_HISTORY_DAYS = 100
+# A tracked future whose timeframes can't be told (none saved yet).
+FUTURES_DEFAULT_TIMEFRAMES = (BACKFILL_TIMEFRAME,)
 
 _KITE_NAME_BY_UNDERLYING_SYMBOL = {v: k for k, v in UNDERLYING_NAME_ALIASES.items()}
 
@@ -193,6 +216,100 @@ async def _ensure_underlying_expiries(
     return queued
 
 
+def _row_expiry(row: dict) -> date | None:
+    raw = row.get("expiry")
+    if not raw:
+        return None
+    return raw if isinstance(raw, date) else date.fromisoformat(str(raw)[:10])
+
+
+def _target_futures(nfo_rows: list[dict], kite_name: str, today: date, count: int) -> list[dict]:
+    """The nearest `count` still-trading futures of one underlying, from
+    Kite's NFO dump, nearest first."""
+    futures = [
+        row for row in nfo_rows
+        if row.get("name") == kite_name and (row.get("instrument_type") or "").upper() == "FUT"
+        and (_row_expiry(row) or date.min) >= today
+    ]
+    return sorted(futures, key=_row_expiry)[:count]
+
+
+async def _future_families(db: AsyncSession) -> dict[str, dict]:
+    """Per underlying (Kite's name) with a future tracked for backfill: its
+    futures' symbols, the timeframes they've been saved at, and the
+    watchlists they're in."""
+    futures = (
+        await db.execute(
+            select(BfSymbol).where(
+                BfSymbol.source == "zerodha_nfo", BfSymbol.option_type.is_(None), BfSymbol.underlying_symbol.is_not(None),
+            )
+        )
+    ).scalars().all()
+    families: dict[str, dict] = {}
+    by_id: dict[uuid.UUID, str] = {}
+    for future in futures:
+        family = families.setdefault(future.underlying_symbol, {"symbols": {}, "timeframes": set(), "watchlists": set()})
+        family["symbols"][future.symbol] = future
+        by_id[future.id] = future.underlying_symbol
+    if not by_id:
+        return families
+    for symbol_id, timeframe in (
+        await db.execute(select(BfCoverage.symbol_id, BfCoverage.timeframe).where(BfCoverage.symbol_id.in_(by_id)))
+    ).all():
+        families[by_id[symbol_id]]["timeframes"].add(timeframe)
+    for symbol_id, watchlist_id in (
+        await db.execute(select(BfWatchlistItem.symbol_id, BfWatchlistItem.watchlist_id).where(BfWatchlistItem.symbol_id.in_(by_id)))
+    ).all():
+        families[by_id[symbol_id]]["watchlists"].add(watchlist_id)
+    return families
+
+
+async def _ensure_futures(db: AsyncSession, broker: ZerodhaKiteBroker, account_user_id: uuid.UUID) -> int:
+    """Adds and backfills each tracked underlying's current and next month
+    futures where missing (FUTURES_TO_MAINTAIN). Returns how many
+    (future, timeframe) downloads were queued."""
+    families = await _future_families(db)
+    if not families:
+        return 0
+    nfo_rows = await broker.get_instruments("NFO")
+    today_ist = datetime.now(timezone.utc).astimezone(IST).date()
+    start = today_ist - timedelta(days=FUTURES_HISTORY_DAYS)
+    queued = 0
+    for kite_name, family in families.items():
+        timeframes = sorted(family["timeframes"]) or list(FUTURES_DEFAULT_TIMEFRAMES)
+        for row in _target_futures(nfo_rows, kite_name, today_ist, FUTURES_TO_MAINTAIN):
+            tradingsymbol = row["tradingsymbol"]
+            lot_size_raw = row.get("lot_size")
+            future = family["symbols"].get(tradingsymbol) or await get_or_create_symbol(
+                db, "zerodha_nfo", tradingsymbol, tradingsymbol, expiry=_row_expiry(row), strike=None, option_type=None,
+                lot_size=int(float(lot_size_raw)) if lot_size_raw else None, underlying_symbol=kite_name,
+            )
+            in_lists = set((await db.execute(
+                select(BfWatchlistItem.watchlist_id).where(BfWatchlistItem.symbol_id == future.id)
+            )).scalars())
+            for watchlist_id in family["watchlists"] - in_lists:
+                db.add(BfWatchlistItem(watchlist_id=watchlist_id, symbol_id=future.id))
+            saved = set((await db.execute(select(BfCoverage.timeframe).where(BfCoverage.symbol_id == future.id))).scalars())
+            waiting = set((await db.execute(
+                select(BfBackfillJob.timeframe).where(
+                    BfBackfillJob.symbol_id == future.id,
+                    BfBackfillJob.status.in_((BfBackfillStatus.PENDING.value, BfBackfillStatus.RUNNING.value)),
+                )
+            )).scalars())
+            for timeframe in timeframes:
+                if timeframe in saved or timeframe in waiting:
+                    continue
+                db.add(BfBackfillJob(
+                    symbol_id=future.id, source="zerodha_nfo", timeframe=timeframe, start_date=start,
+                    requested_by=account_user_id, priority=JOB_PRIORITY_SCHEDULED,
+                ))
+                queued += 1
+    await db.commit()
+    if queued:
+        backfill_worker.wake()
+    return queued
+
+
 class NfoExpiryRotationScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -247,6 +364,10 @@ class NfoExpiryRotationScheduler:
                     total_added += await _ensure_underlying_expiries(db, broker, underlying, account.user_id)
                 except KiteAPIError:
                     logger.exception("NFO expiry rotation failed for %s", underlying.symbol)
+            try:
+                total_added += await _ensure_futures(db, broker, account.user_id)
+            except KiteAPIError:
+                logger.exception("NFO futures rotation failed")
             return total_added
 
 

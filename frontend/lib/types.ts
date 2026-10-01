@@ -1127,8 +1127,9 @@ export interface HistoryDepthOut {
 // ---- Data Backfill overview (backend: services/backfill_platform/overview.py)
 
 /** ok = the last closed NSE session is saved; warn = 1 session behind;
- * bad = 2+ behind; none = nothing tracked for that timeframe. */
-export type BfFreshStatus = "ok" | "warn" | "bad" | "none";
+ * bad = 2+ behind; none = nothing tracked for that timeframe; expired =
+ * only expired contracts at that timeframe -- nothing current is saved. */
+export type BfFreshStatus = "ok" | "warn" | "bad" | "none" | "expired";
 export type BfTimeframe = "1m" | "5m" | "15m" | "30m" | "60m" | "1d";
 
 export interface BfCoverageCell {

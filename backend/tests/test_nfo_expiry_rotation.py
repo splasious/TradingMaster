@@ -226,3 +226,101 @@ async def test_check_once_backfills_every_tracked_underlying(db_session: AsyncSe
     added = await scheduler.check_once()
     assert added == 2  # ATM only (window=0) x {CE, PE}
     assert scheduler.last_error is None
+
+
+# --- Futures: the current and next month for every underlying with a
+# future tracked (FUTURES_TO_MAINTAIN), at its timeframes, in its watchlists.
+
+def _future_row(name: str, expiry: date, lot: int = 500) -> dict:
+    return {"name": name, "expiry": expiry.isoformat(), "strike": "0", "instrument_type": "FUT",
+            "tradingsymbol": f"{name}{expiry:%y%b}FUT".upper(), "instrument_token": "1", "lot_size": str(lot)}
+
+
+async def _seed_expired_stock_future(db_session: AsyncSession, timeframes=("5m", "1d")):
+    from datetime import datetime, timezone
+
+    from app.models.backfill_platform import BfCoverage, BfSymbol, BfWatchlist, BfWatchlistItem
+    from app.models.user import User
+
+    user = User(email=f"fut_{uuid.uuid4().hex[:6]}@tradingmaster.internal", hashed_password="x", full_name="F")
+    db_session.add(user)
+    await db_session.flush()
+    watchlist = BfWatchlist(owner_id=user.id, name="Stock futures", tags=[])
+    expired = BfSymbol(source="zerodha_nfo", symbol="ACME26SEPFUT", display_name="ACME26SEPFUT", expiry=date.today() - timedelta(days=2),
+                       option_type=None, lot_size=500, underlying_symbol="ACME")
+    db_session.add_all([watchlist, expired])
+    await db_session.flush()
+    db_session.add(BfWatchlistItem(watchlist_id=watchlist.id, symbol_id=expired.id))
+    at = datetime.now(timezone.utc) - timedelta(days=2)
+    for tf in timeframes:
+        db_session.add(BfCoverage(symbol_id=expired.id, timeframe=tf, first_ts=at - timedelta(days=60), last_ts=at, bar_count=100))
+    await db_session.commit()
+    return watchlist
+
+
+async def test_futures_roll_to_the_current_and_next_month_at_their_timeframes(db_session: AsyncSession, monkeypatch):
+    from sqlalchemy import select
+
+    from app.models.backfill_platform import JOB_PRIORITY_SCHEDULED, BfBackfillJob, BfSymbol, BfWatchlistItem
+
+    watchlist = await _seed_expired_stock_future(db_session)
+    today = rotation.datetime.now(rotation.timezone.utc).astimezone(rotation.IST).date()
+    near, nxt, far = today + timedelta(days=20), today + timedelta(days=55), today + timedelta(days=85)
+    rows = [_future_row("ACME", far), _future_row("ACME", near), _future_row("ACME", nxt), _future_row("OTHER", near),
+            *_option_rows("ACME", near.isoformat(), [100], 50)]
+
+    async def fake_get_instruments(self, segment="NSE"):
+        assert segment == "NFO"
+        return rows
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+    broker = ZerodhaKiteBroker()
+    queued = await rotation._ensure_futures(db_session, broker, account_user_id=uuid.uuid4())
+
+    assert queued == 4  # 2 futures x the 2 timeframes the expired one had
+    added = (await db_session.execute(select(BfSymbol).where(BfSymbol.expiry >= today))).scalars().all()
+    assert sorted(s.expiry for s in added) == [near, nxt]  # not the third month, not OTHER's
+    assert all(s.option_type is None and s.underlying_symbol == "ACME" and s.lot_size == 500 for s in added)
+    jobs = (await db_session.execute(select(BfBackfillJob))).scalars().all()
+    assert sorted(j.timeframe for j in jobs) == ["1d", "1d", "5m", "5m"]
+    assert {(j.priority, j.start_date) for j in jobs} == {(JOB_PRIORITY_SCHEDULED, today - timedelta(days=rotation.FUTURES_HISTORY_DAYS))}
+    listed = (await db_session.execute(select(BfWatchlistItem.symbol_id).where(BfWatchlistItem.watchlist_id == watchlist.id))).scalars().all()
+    assert {s.id for s in added} <= set(listed)  # in the same watchlist
+
+    # Run again: nothing new while the jobs wait.
+    assert await rotation._ensure_futures(db_session, broker, account_user_id=uuid.uuid4()) == 0
+
+
+async def test_a_future_already_saved_isnt_downloaded_again(db_session: AsyncSession, monkeypatch):
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from app.models.backfill_platform import BfBackfillJob, BfCoverage, BfSymbol
+
+    await _seed_expired_stock_future(db_session, timeframes=("15m",))
+    today = rotation.datetime.now(rotation.timezone.utc).astimezone(rotation.IST).date()
+    near, nxt = today + timedelta(days=20), today + timedelta(days=55)
+    current = BfSymbol(source="zerodha_nfo", symbol=_future_row("ACME", near)["tradingsymbol"], display_name="x", expiry=near,
+                       option_type=None, lot_size=500, underlying_symbol="ACME")
+    db_session.add(current)
+    await db_session.flush()
+    now = datetime.now(timezone.utc)
+    db_session.add(BfCoverage(symbol_id=current.id, timeframe="15m", first_ts=now - timedelta(days=30), last_ts=now, bar_count=500))
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [_future_row("ACME", near), _future_row("ACME", nxt)]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+    assert await rotation._ensure_futures(db_session, ZerodhaKiteBroker(), account_user_id=uuid.uuid4()) == 1  # only next month
+    [job] = (await db_session.execute(select(BfBackfillJob))).scalars().all()
+    assert (await db_session.get(BfSymbol, job.symbol_id)).expiry == nxt and job.timeframe == "15m"
+
+
+async def test_no_tracked_futures_means_nothing_to_roll(db_session: AsyncSession, monkeypatch):
+    async def fail(self, segment="NSE"):
+        raise AssertionError("no instrument dump needed")
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fail)
+    assert await rotation._ensure_futures(db_session, ZerodhaKiteBroker(), account_user_id=uuid.uuid4()) == 0

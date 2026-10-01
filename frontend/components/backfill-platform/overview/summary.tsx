@@ -140,7 +140,7 @@ function CoverageCell({ cell, unit }: { cell: BfCoverageCell; unit: string }) {
     return <span className="text-xs text-text-muted">Not tracked</span>;
   }
   const kind = cellKind(cell);
-  const label = kind === "updating" ? "Updating" : behindLabel(kind, cell.sessions_behind, true);
+  const label = kind === "updating" ? "Updating" : kind === "expired" ? "No current contracts" : behindLabel(kind, cell.sessions_behind, true);
   const lines: string[] = [];
   if (cell.symbols) {
     lines.push(cell.behind ? `${cell.current?.toLocaleString("en-IN")} of ${cell.symbols.toLocaleString("en-IN")} ${unit} current` : `${cell.symbols.toLocaleString("en-IN")} ${unit}`);
