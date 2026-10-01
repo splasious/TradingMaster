@@ -169,8 +169,10 @@ async def test_no_nifty_price_waits_and_tries_again_within_the_window(db_session
     assert ctx.now + timedelta(minutes=1) - at(9, 30) <= rot.DECIDE_WITHIN  # the next tick still falls inside the window
 
 
-def test_it_ranks_the_50_stocks_of_the_macd_rsi_list():
+def test_it_ranks_the_57_stocks_of_the_macd_rsi_list():
     from app.services.strategy.native_strategies.macd_rsi_15min import WATCHLIST
 
-    assert len(rot.STOCK_UNIVERSE) == 50 == len(set(rot.STOCK_UNIVERSE))
+    assert len(rot.STOCK_UNIVERSE) == 57 == len(set(rot.STOCK_UNIVERSE))
     assert rot.STOCK_UNIVERSE == WATCHLIST
+    added_1_oct = ["CUPID", "HFCL", "KIRLOSENG", "MTARTECH", "STLTECH", "TDPOWERSYS", "WELCORP"]
+    assert rot.STOCK_UNIVERSE[-7:] == added_1_oct

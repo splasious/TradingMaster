@@ -1,7 +1,8 @@
 """Migrations of 30 Sep evening: a6b7c8d9e0f1 marks for one more copy the NFO
 contracts whose live-feed candles still differ from Kite's final ones, and
 4abb8d69a900 moves MACD - RSI - 15 MIN's running deployment onto the fresh
-up-cross version, keeping its holdings."""
+up-cross version, keeping its holdings; on 1 Oct, cc8323c6d54e moves it and
+RS Rotation 15 MIN onto their 57-stock lists."""
 
 import hashlib
 import importlib.util
@@ -104,6 +105,7 @@ async def test_the_running_macd_deployment_moves_to_the_fresh_cross_version(db_e
 
     migration = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
     migration.OLD_MD5 = hashlib.md5(old_code.encode()).hexdigest()
+    migration.NEW_MD5 = _md5(BUILTIN)  # the built-in has moved on since (cc8323c6d54e)
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
     db_session.expire_all()
@@ -122,9 +124,50 @@ async def test_the_running_macd_deployment_moves_to_the_fresh_cross_version(db_e
     ]
 
 
-def test_the_built_in_is_the_approved_fresh_cross_code():
-    migration = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
-    assert hashlib.md5(BUILTIN.read_bytes().replace(b"\r", b"")).hexdigest() == migration.NEW_MD5
+def _md5(path: pathlib.Path) -> str:
+    return hashlib.md5(path.read_bytes().replace(b"\r", b"")).hexdigest()
+
+
+def test_the_built_ins_are_the_approved_57_stock_code():
+    fresh_cross = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
+    seven = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
+    assert seven.CHANGES["macd_rsi_15min.py"][0] == fresh_cross.NEW_MD5  # it moves on from the fresh-cross version
+    for filename, (_, to_md5) in seven.CHANGES.items():
+        assert _md5(BUILTIN.parent / filename) == to_md5, filename
+
+
+async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, db_session):
+    macd_code, rs_code = "# MACD, 50 stocks\n", "# RS 15, 50 stocks\n"
+    macd = await _deployment(db_session, "seven_a@tradingmaster.internal", macd_code)
+    rs = await _deployment(db_session, "seven_b@tradingmaster.internal", rs_code)
+    edited = await _deployment(db_session, "seven_c@tradingmaster.internal", "# edited by hand since\n")
+    stopped = await _deployment(db_session, "seven_d@tradingmaster.internal", macd_code, status=DeploymentStatus.STOPPED.value)
+    before = {d.id: d.strategy_version_id for d in (macd, rs, edited, stopped)}
+    ids = [d.id for d in (macd, rs, edited, stopped)]
+    await db_session.commit()
+
+    migration = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
+    migration.CHANGES = {
+        "macd_rsi_15min.py": (hashlib.md5(macd_code.encode()).hexdigest(), migration.CHANGES["macd_rsi_15min.py"][1]),
+        "nifty_rs_rotation_15min.py": (hashlib.md5(rs_code.encode()).hexdigest(), migration.CHANGES["nifty_rs_rotation_15min.py"][1]),
+    }
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    for deployment_id, filename in ((ids[0], "macd_rsi_15min.py"), (ids[1], "nifty_rs_rotation_15min.py")):
+        moved = await db_session.get(PaperNativeDeployment, deployment_id)
+        version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+        assert version.version_number == 12 and version.python_code == (BUILTIN.parent / filename).read_text(encoding="utf-8")
+        assert '"WELCORP"' in version.python_code and version.parameters == {"x": 1}
+        assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0
+    for deployment_id in ids[2:]:
+        assert (await db_session.get(PaperNativeDeployment, deployment_id)).strategy_version_id == before[deployment_id]
+
+    audit = (await db_session.execute(select(AuditLog))).scalars().all()
+    assert sorted((a.object_id, a.previous_value["version_number"], a.new_value["version_number"]) for a in audit) == sorted(
+        [(str(ids[0]), 11, 12), (str(ids[1]), 11, 12)]
+    )
 
 
 # ------------------------------------------------- AM OP straddle at 3 PM --

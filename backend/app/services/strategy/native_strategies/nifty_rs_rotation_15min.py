@@ -3,7 +3,7 @@ RS Rotation 15 MIN -- Relative-Strength Rotation on 15-minute candles (native, u
 ============================================================================================
 
 The weekly Nifty RS Rotation (nifty_rs_rotation.py) run on 15-minute
-candles, over its own 50 stocks (STOCK_UNIVERSE below -- the same list as
+candles, over its own 57 stocks (STOCK_UNIVERSE below -- the same list as
 MACD - RSI - 15 MIN, not the weekly one's 500). At every completed
 15-minute candle it ranks them by strength relative to NIFTY 50, with the
 same AFL formula:
@@ -66,6 +66,7 @@ STOCK_UNIVERSE = [
     "GLENMARK", "GVT&D", "HDFCAMC", "HINDALCO", "HINDCOPPER", "IDEA", "IIFL", "INDIANB", "KARURVYSYA", "LAURUSLABS",
     "LTF", "MANAPPURAM", "MCX", "MFSL", "MUTHOOTFIN", "NATIONALUM", "NAVINFLUOR", "NYKAA", "PAYTM", "POLYCAB",
     "POWERINDIA", "RADICO", "RBLBANK", "SAIL", "SBIN", "SHRIRAMFIN", "SOLARINDS", "TVSMOTOR", "UNIONBANK", "VEDL",
+    "CUPID", "HFCL", "KIRLOSENG", "MTARTECH", "STLTECH", "TDPOWERSYS", "WELCORP",  # added 1 Oct
 ]
 BENCHMARK_SYMBOL = "NIFTY 50"
 
