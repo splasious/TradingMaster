@@ -99,6 +99,7 @@ awaited natively.
 """
 
 import asyncio
+import os
 from datetime import datetime
 from typing import Any
 
@@ -114,6 +115,12 @@ _ORDER_TYPE_MAP = {"market": "MKT", "limit": "L"}
 # the "NSE"/"NFO" aliases on orders).
 _SEGMENTS = {"NSE": "nse_cm", "NFO": "nse_fo", "nse_cm": "nse_cm", "nse_fo": "nse_fo"}
 _PRODUCTS = ("CNC", "MIS", "NRML")
+
+
+# The SDK writes its own log file (./logs/neo-api-client.log) unless told
+# not to; its warnings still reach the app's console log. Read once, when
+# the SDK is first imported -- which is always after this module is.
+os.environ.setdefault("NEO_LOG_FILE_ENABLED", "false")
 
 
 class KotakNeoAPIError(Exception):
