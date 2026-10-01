@@ -1282,6 +1282,48 @@ FROM (SELECT DISTINCT ON (expiry, option_type) * FROM itm WHERE prem > 0 ORDER B
 ORDER BY 1 DESC, 2, 3;
 
 \echo
+\echo '== EX1. Expired NFO contracts still held, by kind (backfill symbols; today = IST): symbols, with a coverage row, 15m/5m/1d bars recorded in coverage, last expiry, how many expired before the last 7/30/90 days'
+SELECT CASE WHEN s.option_type IS NULL THEN 'future' WHEN s.underlying_symbol IN ('NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50') THEN 'index option' ELSE 'stock option' END AS kind, (s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date) AS expired,
+       count(DISTINCT s.id) AS symbols, count(DISTINCT c.symbol_id) AS with_coverage,
+       COALESCE(sum(c.bar_count) FILTER (WHERE c.timeframe = '15m'), 0) AS bars_15m, COALESCE(sum(c.bar_count) FILTER (WHERE c.timeframe = '5m'), 0) AS bars_5m,
+       COALESCE(sum(c.bar_count) FILTER (WHERE c.timeframe = '1d'), 0) AS bars_1d,
+       to_char(min(s.expiry), 'DD Mon YYYY') AS first_expiry, to_char(max(s.expiry), 'DD Mon YYYY') AS last_expiry,
+       count(DISTINCT s.id) FILTER (WHERE s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date - 7) AS expired_over_7d,
+       count(DISTINCT s.id) FILTER (WHERE s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date - 30) AS expired_over_30d,
+       count(DISTINCT s.id) FILTER (WHERE s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date - 90) AS expired_over_90d
+FROM bf_symbols s LEFT JOIN bf_coverage c ON c.symbol_id = s.id
+WHERE s.source = 'zerodha_nfo' AND s.expiry IS NOT NULL
+GROUP BY 1, 2 ORDER BY 2 DESC, 1;
+
+\echo
+\echo '== EX2. The same expired contracts in the chart catalog (instruments): count by kind and whether still flagged active, plus what points at them (counts only)'
+SELECT CASE WHEN i.instrument_type = 'future' THEN 'future' WHEN u.symbol IN ('NIFTY 50','NIFTY BANK','NIFTY FIN SERVICE','NIFTY MID SELECT','NIFTY NEXT 50') THEN 'index option' ELSE 'stock option' END AS kind,
+       i.is_active, count(*) AS instruments,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM fo_oi_snapshots f WHERE f.instrument_id = i.id)) AS with_oi_snapshots,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM paper_deployments d WHERE d.instrument_id = i.id)) AS paper_deployments,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM live_deployments d WHERE d.instrument_id = i.id)) AS live_deployments,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM backtest_jobs b WHERE b.instrument_id = i.id)) AS backtests,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM paper_native_deployments d WHERE d.state::text LIKE '%' || i.id::text || '%')) AS in_native_state
+FROM instruments i LEFT JOIN instruments u ON u.id = i.underlying_instrument_id
+WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date
+GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '== EX3. Expired NFO contracts referenced from paper trade history (legs saved with the trade) and recorded jobs: counts'
+SELECT (SELECT count(DISTINCT i.id) FROM instruments i JOIN paper_native_trades t ON t.legs::text LIKE '%' || i.id::text || '%'
+         WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date) AS expired_contracts_in_trade_history,
+       (SELECT count(*) FROM bf_backfill_jobs j JOIN bf_symbols s ON s.id = j.symbol_id
+         WHERE s.source = 'zerodha_nfo' AND s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date AND j.status IN ('pending', 'running')) AS open_jobs_for_expired,
+       (SELECT count(*) FROM bf_watchlist_items w JOIN bf_symbols s ON s.id = w.symbol_id
+         WHERE s.source = 'zerodha_nfo' AND s.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date) AS expired_in_watchlists;
+
+\echo
+\echo '== EX4. Table sizes of what holds the contracts and their candles'
+SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS total_size, n_live_tup AS rows_estimate
+FROM pg_stat_user_tables WHERE relname IN ('bf_ohlcv_bars', 'ohlcv_candles', 'bf_symbols', 'bf_coverage', 'instruments', 'fo_oi_snapshots', 'bf_backfill_jobs', 'pcr_strike_oi')
+ORDER BY pg_total_relation_size(relid) DESC;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
