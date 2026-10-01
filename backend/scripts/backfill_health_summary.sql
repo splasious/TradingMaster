@@ -1193,6 +1193,47 @@ FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol L
 GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
 
 \echo
+\echo '== NS8. Is the missing 15:15 candle the F&O closing session? The 57 listed stocks by: has F&O contracts, has the 30 Sep 15:15 15m candle -- with how many have each 30 Sep 5m candle from 15:05 on'
+WITH lst(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL'),
+  ('CUPID'), ('HFCL'), ('KIRLOSENG'), ('MTARTECH'), ('STLTECH'), ('TDPOWERSYS'), ('WELCORP')),
+st AS (
+  SELECT l.symbol, i.id,
+         EXISTS (SELECT 1 FROM instruments f WHERE f.exchange = 'NFO' AND f.underlying_instrument_id = i.id)
+           OR EXISTS (SELECT 1 FROM bf_symbols b WHERE b.source = 'zerodha_nfo' AND b.underlying_symbol = l.symbol) AS fno,
+         EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '15m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30') AS has_1515,
+         EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '15m' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-09-30') AS has_30sep
+  FROM lst l JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = l.symbol
+)
+SELECT fno, has_1515, count(*) AS stocks,
+  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = st.id AND c.timeframe = '5m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:05+05:30')) AS m5_1505,
+  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = st.id AND c.timeframe = '5m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:10+05:30')) AS m5_1510,
+  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = st.id AND c.timeframe = '5m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30')) AS m5_1515,
+  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = st.id AND c.timeframe = '5m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:20+05:30')) AS m5_1520,
+  count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = st.id AND c.timeframe = '5m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:25+05:30')) AS m5_1525
+FROM st WHERE has_30sep GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '-- NS8b. Since when: per session over the stored 15m history, how many of the 50 have a 15:15 candle (first and last 8 sessions, plus any session where the count changes)'
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL')),
+per AS (
+  SELECT (c.ts AT TIME ZONE 'Asia/Kolkata')::date AS d,
+         count(DISTINCT c.instrument_id) FILTER (WHERE (c.ts AT TIME ZONE 'Asia/Kolkata')::time = time '15:15') AS with_1515,
+         count(DISTINCT c.instrument_id) AS with_any
+  FROM fifty f JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol JOIN ohlcv_candles c ON c.instrument_id = i.id AND c.timeframe = '15m'
+  GROUP BY 1
+), lagged AS (SELECT d, with_1515, with_any, lag(with_1515) OVER (ORDER BY d) AS prev, row_number() OVER (ORDER BY d) AS rn, count(*) OVER () AS n FROM per)
+SELECT to_char(d, 'DD Mon YYYY') AS session, with_1515, with_any FROM lagged
+WHERE rn <= 3 OR rn > n - 3 OR with_1515 IS DISTINCT FROM prev ORDER BY d;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
