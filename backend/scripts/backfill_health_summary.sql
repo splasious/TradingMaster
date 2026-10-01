@@ -1355,6 +1355,55 @@ WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a shor
 ORDER BY d.created_at;
 
 \echo
+\echo '== OW1. Who owns what (users numbered by sign-up order, no emails): strategies, capital pools, native deployments in their pools (active), live deployments, broker accounts'
+WITH u AS (
+  SELECT u.id, 'User ' || row_number() OVER (ORDER BY u.created_at) AS label, u.is_active,
+         (SELECT string_agg(r.name, '+' ORDER BY r.name) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles,
+         to_char(u.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') AS created, u.email LIKE '%@tradingmaster.internal' AS internal_account
+  FROM users u
+)
+SELECT u.label, u.roles, u.is_active, u.created, u.internal_account,
+       (SELECT count(*) FROM strategies s WHERE s.owner_id = u.id) AS strategies,
+       (SELECT count(*) FROM paper_portfolios p WHERE p.user_id = u.id) AS pools,
+       (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id WHERE p.user_id = u.id) AS native_deployments,
+       (SELECT count(*) FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id WHERE p.user_id = u.id AND d.status = 'active') AS native_active,
+       (SELECT count(*) FROM paper_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id WHERE p.user_id = u.id) AS simple_paper_deployments,
+       (SELECT count(*) FROM live_deployments l WHERE l.owner_id = u.id) AS live_deployments,
+       (SELECT count(*) FROM broker_accounts b WHERE b.user_id = u.id) AS broker_accounts
+FROM u ORDER BY u.label;
+
+\echo
+\echo '== OW2. Every strategy: owner (numbered as OW1), versions, backtests, and its deployments -- whose pool, status'
+WITH u AS (
+  SELECT u.id, 'User ' || row_number() OVER (ORDER BY u.created_at) AS label, u.is_active,
+         (SELECT string_agg(r.name, '+' ORDER BY r.name) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles,
+         to_char(u.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') AS created, u.email LIKE '%@tradingmaster.internal' AS internal_account
+  FROM users u
+)
+SELECT s.name AS strategy, s.code_type, owner.label AS owner,
+       (SELECT count(*) FROM strategy_versions v WHERE v.strategy_id = s.id) AS versions,
+       (SELECT count(*) FROM backtest_jobs b WHERE b.strategy_id = s.id) + (SELECT count(*) FROM native_backtest_jobs b WHERE b.strategy_id = s.id) AS backtests,
+       (SELECT string_agg(pu.label || ':' || d.status || ' (' || p.name || ')', ', ' ORDER BY d.created_at)
+          FROM paper_native_deployments d JOIN paper_portfolios p ON p.id = d.portfolio_id JOIN u pu ON pu.id = p.user_id WHERE d.strategy_id = s.id) AS native_deployments,
+       (SELECT count(*) FROM paper_deployments d WHERE d.strategy_id = s.id) AS simple_paper,
+       (SELECT count(*) FROM live_deployments l WHERE l.strategy_id = s.id) AS live
+FROM strategies s JOIN u owner ON owner.id = s.owner_id
+ORDER BY owner.label, s.name;
+
+\echo
+\echo '-- OW3. Capital pools: owner, and how many strategies of other owners run in them'
+WITH u AS (
+  SELECT u.id, 'User ' || row_number() OVER (ORDER BY u.created_at) AS label, u.is_active,
+         (SELECT string_agg(r.name, '+' ORDER BY r.name) FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = u.id) AS roles,
+         to_char(u.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon YYYY') AS created, u.email LIKE '%@tradingmaster.internal' AS internal_account
+  FROM users u
+)
+SELECT pu.label AS pool_owner, p.name AS pool, round(p.cash::numeric, 0) AS cash, round(p.initial_capital::numeric, 0) AS initial_capital,
+       (SELECT count(*) FROM paper_native_deployments d WHERE d.portfolio_id = p.id) AS native_deployments,
+       (SELECT count(*) FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id WHERE d.portfolio_id = p.id AND s.owner_id <> p.user_id) AS other_owners_strategies
+FROM paper_portfolios p JOIN u pu ON pu.id = p.user_id ORDER BY pu.label, p.name;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
