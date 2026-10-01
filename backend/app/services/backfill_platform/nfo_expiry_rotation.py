@@ -11,10 +11,11 @@ rows) rather than a hardcoded NIFTY/BANKNIFTY list -- today that's exactly
 those two, per the earlier "keep only Nifty and bank nifty" instruction,
 without hardcoding the names here.
 
-No pruning of expired contracts: this is purely additive, ensuring a
-target set of expiries exist and no-op once they do. Historical OI/PCR
-data for a lapsed contract stays useful for backtesting, same as this
-app keeps full equity history rather than deleting old candles.
+Purely additive: this only ensures a target set of expiries exist and
+no-ops once they do. Contracts that have expired are retired separately,
+four trading days on (retire_expired.py): stock contracts are deleted, and
+index contracts keep their candles -- the history backtests of past weeklies
+run on -- but leave lists and watchlists.
 
 Expiry dates and strike lists both come straight from Kite's own live NFO
 instrument dump (`ZerodhaKiteBroker.get_instruments("NFO")`, cached 30 min
