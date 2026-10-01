@@ -1165,6 +1165,34 @@ WHERE sv.python_code LIKE '%RS Rotation 15 MIN -- Relative-Strength Rotation on 
 ORDER BY sv.created_at, d.created_at;
 
 \echo
+\echo '== NS7. Why most have no 15:15 candle: 15m jobs that covered 30 Sep for the 50, split by whether the stock has that candle now -- when they ran (IST), dates, status, bars'
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL')),
+sym AS (
+  SELECT s.id, EXISTS (SELECT 1 FROM bf_ohlcv_bars b WHERE b.symbol_id = s.id AND b.timeframe = '15m' AND b.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30') AS has_1515
+  FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol
+)
+SELECT sym.has_1515, to_char(date_trunc('hour', j.started_at AT TIME ZONE 'Asia/Kolkata') + floor(extract(minute FROM j.started_at AT TIME ZONE 'Asia/Kolkata') / 15) * interval '15 min', 'DD Mon HH24:MI') AS started_ist_15min,
+       to_char(j.start_date, 'DD Mon') AS from_day, to_char(j.end_date, 'DD Mon') AS to_day, j.status, (j.run_id IS NOT NULL) AS topup,
+       count(*) AS jobs, sum(j.downloaded_count) AS downloaded, sum(j.inserted_count) AS inserted
+FROM sym JOIN bf_backfill_jobs j ON j.symbol_id = sym.id AND j.timeframe = '15m'
+WHERE (j.end_date IS NULL OR j.end_date >= DATE '2026-09-30') AND (j.start_date IS NULL OR j.start_date <= DATE '2026-09-30') AND j.created_at > TIMESTAMPTZ '2026-09-30 00:00+05:30'
+GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY 1, 2;
+
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL'))
+SELECT EXISTS (SELECT 1 FROM bf_ohlcv_bars b WHERE b.symbol_id = s.id AND b.timeframe = '15m' AND b.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30') AS has_1515,
+       to_char(c.last_ts AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS coverage_last_bar_ist, to_char(c.checked_through, 'DD Mon') AS checked_through, count(*) AS stocks
+FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol LEFT JOIN bf_coverage c ON c.symbol_id = s.id AND c.timeframe = '15m'
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
