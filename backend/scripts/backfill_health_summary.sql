@@ -1158,7 +1158,15 @@ SELECT sv.version_number, to_char(sv.created_at AT TIME ZONE 'Asia/Kolkata', 'DD
        md5(replace(sv.python_code, E'\r', '')) = '5a9c766dbf2905e41410671e435753d5' AS is_57_builtin,
        md5(replace(sv.python_code, E'\r', '')) = '99da3a7283fd0afd59add3360cae2cdd' AS is_50_builtin,
        d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
+       md5(replace(sv.python_code, E'\r', '')) = '988246769bebae7d1d8c3cdfbcf91be8' AS is_carry_builtin,
        to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
+       substring(d.last_signal_reason FROM '^[0-9:]+ close|^holding|^no live|^skipped') AS reason_kind,
+       substring(d.last_signal_reason FROM '(ranked [0-9]+/[0-9]+|warming up: [0-9]+/[0-9]+)') AS ranked,
+       (regexp_match(d.last_signal_reason, 'bought: ([^|]*)'))[1] = 'none ' AS bought_none,
+       array_length(regexp_split_to_array((regexp_match(d.last_signal_reason, 'bought: ([^|]*)'))[1], ','), 1) AS bought_n,
+       substring(d.last_signal_reason FROM 'holding [0-9]+/[0-9]+') AS holding,
+       jsonb_array_length(COALESCE(d.state::jsonb -> '_series' -> 'bars', '[]'::jsonb)) AS series_bars,
+       (SELECT count(*) FROM paper_native_trades t WHERE t.deployment_id = d.id) AS closed_trades,
        (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS holding_now
 FROM strategy_versions sv LEFT JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
 WHERE sv.python_code LIKE '%RS Rotation 15 MIN -- Relative-Strength Rotation on 15-minute candles%'
