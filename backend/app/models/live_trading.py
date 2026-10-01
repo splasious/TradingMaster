@@ -81,9 +81,12 @@ class LiveOrder(Base):
         Uuid, ForeignKey("live_native_deployments.id", ondelete="CASCADE"), nullable=True
     )
     purpose: Mapped[str | None] = mapped_column(String(20))
-    # The broker's own fill: how much of it executed, at what average price.
+    # The broker's own fill: how much of it executed, at what average price
+    # -- and, for a protected order (native_gateway.py), the limit it was
+    # sent with.
     filled_quantity: Mapped[float | None] = mapped_column(Float)
     average_price: Mapped[float | None] = mapped_column(Float)
+    limit_price: Mapped[float | None] = mapped_column(Float)
 
 
 class LivePosition(Base):

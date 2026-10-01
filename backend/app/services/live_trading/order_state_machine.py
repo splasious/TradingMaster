@@ -85,11 +85,40 @@ HDFC_STATE_MAP = {
     "rejected": LiveOrderStatus.REJECTED, "REJECTED": LiveOrderStatus.REJECTED,
 }
 
+# Dhan's `orderStatus` (DhanHQ v2 order book / GET /orders/{id}).
+DHAN_STATE_MAP = {
+    "TRANSIT": LiveOrderStatus.SUBMITTED,
+    "PENDING": LiveOrderStatus.OPEN,
+    "PART_TRADED": LiveOrderStatus.PARTIALLY_FILLED,
+    "TRADED": LiveOrderStatus.FILLED,
+    "REJECTED": LiveOrderStatus.REJECTED,
+    "CANCELLED": LiveOrderStatus.CANCELLED,
+    "EXPIRED": LiveOrderStatus.EXPIRED,
+}
+
+# Angel One SmartAPI's order book `status` (lowercase, Kite-like wording).
+ANGEL_ONE_STATE_MAP = {
+    "put order req received": LiveOrderStatus.SUBMITTED,
+    "validation pending": LiveOrderStatus.SUBMITTED,
+    "open pending": LiveOrderStatus.ACKNOWLEDGED,
+    "open": LiveOrderStatus.OPEN,
+    "trigger pending": LiveOrderStatus.OPEN,
+    "modify pending": LiveOrderStatus.OPEN,
+    "modify validation pending": LiveOrderStatus.OPEN,
+    "modified": LiveOrderStatus.OPEN,
+    "cancel pending": LiveOrderStatus.OPEN,
+    "complete": LiveOrderStatus.FILLED,
+    "cancelled": LiveOrderStatus.CANCELLED,
+    "rejected": LiveOrderStatus.REJECTED,
+}
+
 STATE_MAPS: dict[str, dict[str, LiveOrderStatus]] = {
     "delta_exchange": DELTA_STATE_MAP,
     "zerodha_kite": KITE_STATE_MAP,
     "kotak_neo": KOTAK_NEO_STATE_MAP,
     "hdfc_securities": HDFC_STATE_MAP,
+    "dhan": DHAN_STATE_MAP,
+    "angel_one": ANGEL_ONE_STATE_MAP,
 }
 
 TERMINAL_STATUSES = {LiveOrderStatus.FILLED, LiveOrderStatus.CANCELLED, LiveOrderStatus.REJECTED, LiveOrderStatus.EXPIRED}

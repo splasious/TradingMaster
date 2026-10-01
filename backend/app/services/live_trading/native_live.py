@@ -71,6 +71,7 @@ from app.models.strategy import StrategyVersion
 from app.services.alerts.service import create_alert
 from app.services.backfill_platform.coverage import IST, next_trading_day
 from app.services.live_trading import kill_switch
+from app.services.live_trading.broker_contracts import ContractListError, ContractNotFound
 from app.services.live_trading.native_gateway import Fill, product_for
 from app.services.live_trading.order_state_machine import LiveOrderStatus
 from app.services.market_data.live_price import live_price
@@ -265,11 +266,14 @@ async def _send(db: AsyncSession, deployment: LiveNativeDeployment, gateway, int
     order = LiveOrder(
         native_deployment_id=deployment.id, instrument_id=intent.instrument.id, broker_account_id=deployment.broker_account_id,
         owner_id=deployment.owner_id, client_order_id=client_order_id, side=intent.side, quantity=intent.quantity,
-        order_type="market_order", status=LiveOrderStatus.SUBMITTED.value, product=product, purpose=purpose, created_at=now,
+        order_type="protected_limit", status=LiveOrderStatus.SUBMITTED.value, product=product, purpose=purpose, created_at=now,
     )
     db.add(order)
     await db.flush()
-    fill = await gateway.market_order(intent.instrument, intent.side, intent.quantity, product, client_order_id)
+    # The limit is set off the live price now, not the price the strategy saw.
+    price = await _mark(db, intent.instrument, now) or intent.ref_price
+    fill = await gateway.order(intent.instrument, intent.side, intent.quantity, product, client_order_id, price)
+    order.limit_price = fill.limit_price
     order.broker_order_id = fill.broker_order_id
     order.status = fill.status.value
     order.filled_quantity = fill.filled_quantity
@@ -607,12 +611,17 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
     expected: dict[tuple[str, str], float] = defaultdict(float)
     holders: dict[tuple[str, str], list[LiveNativeDeployment]] = defaultdict(list)
     names: dict[tuple[str, str], str] = {}
+    unmatched: list[tuple[str, LiveNativeDeployment]] = []
     for deployment in deployments:
         for position in (await load_positions(db, deployment)).values():
             instrument = await db.get(Instrument, position.instrument_id)
             if instrument is None:
                 continue
-            key = gateway.key_for(instrument)
+            try:
+                key = await gateway.key(instrument)
+            except (ContractNotFound, ContractListError) as exc:
+                unmatched.append((f"{instrument.symbol}: can't be checked at the broker ({exc})", deployment))
+                continue
             expected[key] += position.quantity
             holders[key].append(deployment)
             names[key] = instrument.symbol
@@ -626,6 +635,10 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
         await db.commit()
         return [reason]
     differences = []
+    for text, deployment in unmatched:
+        differences.append(text)
+        if deployment.status == LIVE_NATIVE_ACTIVE:
+            await pause(db, deployment, f"{text}. Check it there, then resume.", now)
     for key, quantity in expected.items():
         broker_quantity = actual.get(key, 0.0)
         if abs(broker_quantity - quantity) > _QTY_EPS:

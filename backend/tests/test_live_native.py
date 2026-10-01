@@ -5,7 +5,7 @@ batch opened and puts the strategy back; the limits, the kill switch and
 reconciliation pause or stop it. No real broker is involved anywhere."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -26,7 +26,7 @@ from app.models.live_trading import LiveOrder
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.services.broker.zerodha_broker import IST
-from app.services.live_trading import kill_switch, native_gateway, native_live
+from app.services.live_trading import broker_contracts, kill_switch, native_gateway, native_live
 from app.services.live_trading.native_gateway import BrokerGateway, Fill
 from app.services.live_trading.native_scheduler import LiveNativeScheduler
 from app.services.live_trading.order_state_machine import LiveOrderStatus
@@ -72,6 +72,13 @@ async def evaluate(ctx):
 '''
 
 
+@pytest.fixture(autouse=True)
+def _fresh_contract_lists():
+    broker_contracts.forget_lists()
+    yield
+    broker_contracts.forget_lists()
+
+
 class FakeGateway:
     """A broker that fills at set prices unless told to refuse; it holds
     what it filled, so reconciliation can compare."""
@@ -82,17 +89,22 @@ class FakeGateway:
         self.refuse: dict[tuple[str, str], str] = {}
         self.partial: dict[tuple[str, str], float] = {}
         self.held: dict[tuple[str, str], float] = {}
+        self.sent_prices: list[float] = []
 
-    def key_for(self, instrument):
+    def _key(self, instrument):
         return ("NFO" if instrument.instrument_type in ("option", "future") else "NSE", instrument.external_ref)
 
-    async def market_order(self, instrument, side, quantity, product, client_order_id):
+    async def key(self, instrument):
+        return self._key(instrument)
+
+    async def order(self, instrument, side, quantity, product, client_order_id, price):
         self.orders.append((instrument.symbol, side, quantity, product))
+        self.sent_prices.append(price)
         reason = self.refuse.get((instrument.symbol, side))
         if reason:
             return Fill(LiveOrderStatus.REJECTED, 0.0, None, f"R{len(self.orders)}", reason)
         filled = self.partial.get((instrument.symbol, side), quantity)
-        key = self.key_for(instrument)
+        key = self._key(instrument)
         self.held[key] = self.held.get(key, 0.0) + (filled if side == "buy" else -filled)
         status = LiveOrderStatus.FILLED if filled >= quantity else LiveOrderStatus.CANCELLED
         return Fill(status, filled, self.prices[instrument.symbol], f"B{len(self.orders)}", None if filled >= quantity else "partly filled")
@@ -352,7 +364,8 @@ async def test_the_scheduler_runs_only_while_the_market_is_open_and_lifts_due_pa
 
 
 class _KiteLike:
-    """A broker adapter speaking Kite's order vocabulary."""
+    """A broker adapter speaking Kite's order vocabulary, with a two-row
+    instrument dump."""
 
     def __init__(self, statuses):
         self.placed, self.cancelled, self.statuses = [], [], list(statuses)
@@ -373,30 +386,55 @@ class _KiteLike:
     async def get_holdings(self):
         return [{"tradingsymbol": "SBIN", "quantity": 90, "t1_quantity": 10}]
 
+    async def get_instruments(self, segment):
+        if segment == "NSE":
+            return [{"tradingsymbol": "SBIN", "name": "STATE BANK OF INDIA", "expiry": "", "strike": "0", "lot_size": "1",
+                     "instrument_type": "EQ", "exchange": "NSE", "exchange_token": "3045"}]
+        return [{"tradingsymbol": "NIFTY2610622700CE", "name": "NIFTY", "expiry": "2026-10-06", "strike": "22700.0", "lot_size": "65",
+                 "instrument_type": "CE", "exchange": "NFO", "exchange_token": "40001"}]
 
-async def test_the_gateway_speaks_kite_and_waits_for_the_fill(db_session, monkeypatch):
+
+async def _kite_option(db):
+    option = Instrument(exchange="NFO", symbol="NIFTY2610622700CE", name="NIFTY", instrument_type="option", data_source="test",
+                        external_ref="NIFTY2610622700CE", strike=22700.0, option_type="CE", lot_size=65, expiry=date(2026, 10, 6))
+    db.add(option)
+    await db.flush()
+    return option
+
+
+async def test_the_gateway_sends_a_protected_limit_in_kites_words_and_waits_for_the_fill(db_session, monkeypatch):
     monkeypatch.setattr(native_gateway, "POLL_SECONDS", 0)
-    _, inst = await _setup(db_session)
+    option = await _kite_option(db_session)
     broker = _KiteLike([{"status": "OPEN", "raw": {}}, {"status": "COMPLETE", "raw": {"filled_quantity": 130, "average_price": 101.5}}])
-    fill = await BrokerGateway("zerodha_kite", broker).market_order(inst["short"], "sell", 130.0, "NRML", "tmn-x")
-    assert broker.placed == [{"tradingsymbol": "NIFTYT22700CE", "exchange": "NFO", "product": "NRML", "quantity": 130.0, "side": "sell",
-                              "order_type": "market", "client_order_id": "tmn-x"}]
-    assert (fill.status, fill.filled_quantity, fill.average_price) == (LiveOrderStatus.FILLED, 130.0, 101.5)
+    fill = await BrokerGateway("zerodha_kite", broker).order(option, "sell", 130.0, "NRML", "tmn-x", 102.0)
+    assert broker.placed == [{"tradingsymbol": "NIFTY2610622700CE", "exchange": "NFO", "token": "40001", "product": "NRML",
+                              "quantity": 130.0, "side": "sell", "order_type": "limit", "limit_price": 100.95, "client_order_id": "tmn-x"}]
+    assert (fill.status, fill.filled_quantity, fill.average_price, fill.limit_price) == (LiveOrderStatus.FILLED, 130.0, 101.5, 100.95)
 
-    rejected = await BrokerGateway("zerodha_kite", _KiteLike([{"status": "REJECTED", "raw": {"status_message": "RMS: margin"}}])).market_order(
-        inst["short"], "sell", 130.0, "NRML", "tmn-y")
+    rejected = await BrokerGateway("zerodha_kite", _KiteLike([{"status": "REJECTED", "raw": {"status_message": "RMS: margin"}}])).order(
+        option, "sell", 130.0, "NRML", "tmn-y", 102.0)
     assert rejected.status == LiveOrderStatus.REJECTED and rejected.reason == "RMS: margin"
 
     gateway = BrokerGateway("zerodha_kite", broker)
     assert await gateway.net_positions() == {("NFO", "NIFTYT22700CE"): -130.0, ("NSE", "SBIN"): 100.0}
 
 
+async def test_a_contract_the_broker_doesnt_list_is_never_sent(db_session):
+    option = await _kite_option(db_session)
+    option.lot_size = 75  # the broker says 65
+    broker = _KiteLike([{"status": "COMPLETE", "raw": {}}])
+    fill = await BrokerGateway("zerodha_kite", broker).order(option, "buy", 75.0, "NRML", "tmn-l", 100.0)
+    assert broker.placed == [] and fill.status == LiveOrderStatus.REJECTED and "lot size 65 at the broker" in fill.reason
+    fill = await BrokerGateway("hdfc_securities", broker).order(option, "buy", 75.0, "NRML", "tmn-h", 100.0)
+    assert broker.placed == [] and "can't trade through hdfc_securities" in fill.reason
+
+
 async def test_an_order_still_open_after_the_timeout_is_cancelled(db_session, monkeypatch):
     monkeypatch.setattr(native_gateway, "POLL_SECONDS", 0)
     monkeypatch.setattr(native_gateway, "FILL_TIMEOUT_SECONDS", 0)
-    _, inst = await _setup(db_session)
+    option = await _kite_option(db_session)
     broker = _KiteLike([{"status": "OPEN", "raw": {"filled_quantity": 65}}])
-    fill = await BrokerGateway("zerodha_kite", broker).market_order(inst["short"], "sell", 130.0, "NRML", "tmn-z")
+    fill = await BrokerGateway("zerodha_kite", broker).order(option, "sell", 130.0, "NRML", "tmn-z", 102.0)
     assert broker.cancelled == ["K1"] and fill.status == LiveOrderStatus.CANCELLED and fill.filled_quantity == 65.0
 
 

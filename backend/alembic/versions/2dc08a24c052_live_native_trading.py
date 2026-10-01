@@ -1,7 +1,7 @@
 """Native strategies trading live: deployments, their real holdings, trades,
 the account-wide loss limit, and fills on live orders
 
-Additive only -- four new tables and four nullable live_orders columns
+Additive only -- four new tables and five nullable live_orders columns
 (models/live_native.py, models/live_trading.py). Nothing existing changes.
 
 Revision ID: 2dc08a24c052
@@ -82,6 +82,7 @@ def upgrade() -> None:
         batch.add_column(sa.Column("purpose", sa.String(20), nullable=True))
         batch.add_column(sa.Column("filled_quantity", sa.Float(), nullable=True))
         batch.add_column(sa.Column("average_price", sa.Float(), nullable=True))
+        batch.add_column(sa.Column("limit_price", sa.Float(), nullable=True))
         batch.create_foreign_key(
             "fk_live_orders_native_deployment", "live_native_deployments", ["native_deployment_id"], ["id"], ondelete="CASCADE",
         )
@@ -92,6 +93,7 @@ def downgrade() -> None:
     op.drop_index("ix_live_orders_native_deployment", table_name="live_orders")
     with op.batch_alter_table("live_orders") as batch:
         batch.drop_constraint("fk_live_orders_native_deployment", type_="foreignkey")
+        batch.drop_column("limit_price")
         batch.drop_column("average_price")
         batch.drop_column("filled_quantity")
         batch.drop_column("purpose")
