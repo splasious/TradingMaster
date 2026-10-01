@@ -102,6 +102,14 @@ def note_native_candle_demand(instrument_id: uuid.UUID, timeframe: str, now: dat
     _native_demand[(instrument_id, timeframe)] = now or datetime.now(timezone.utc)
 
 
+def forget_native_demand(instrument_ids) -> None:
+    """Drops retired instruments from the pairs native strategies asked for
+    (retire_expired.py), rather than waiting out NATIVE_DEMAND_TTL."""
+    ids = set(instrument_ids)
+    for pair in [pair for pair in _native_demand if pair[0] in ids]:
+        del _native_demand[pair]
+
+
 def _native_pairs(now: datetime) -> set[tuple[uuid.UUID, str]]:
     for pair, seen_at in list(_native_demand.items()):
         if now - seen_at > NATIVE_DEMAND_TTL:
@@ -198,6 +206,12 @@ class ActiveTimeframeSyncScheduler:
     @property
     def running(self) -> bool:
         return self._task is not None
+
+    def forget(self, instrument_ids) -> None:
+        """Drops the newest-fetched bookkeeping of retired instruments."""
+        ids = set(instrument_ids)
+        for key in [key for key in self._newest_fetched if key[0] in ids]:
+            del self._newest_fetched[key]
 
     async def _run(self) -> None:
         while True:

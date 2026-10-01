@@ -40,6 +40,9 @@ def sessions(db_engine, monkeypatch):
     # The 08:45 login check asks Kite whether the saved session still works:
     # it does, unless a test says otherwise.
     monkeypatch.setattr(kite_session_monitor.ZerodhaKiteBroker, "authenticate", _session_ok)
+    # Retiring expired contracts (tests/test_retire_expired_contracts.py) runs in
+    # the background at each session's top-up: not part of what these test.
+    monkeypatch.setattr(topup.BackfillTopupScheduler, "_start_retire", lambda self, session: None)
     return factory
 
 

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
+from app.services.backfill_platform.coverage import IST
 
 _SOURCE_TO_EXCHANGE = {"delta": "DELTA", "zerodha": "NSE", "zerodha_nfo": "NFO"}
 _SOURCE_TO_DATA_SOURCE = {"delta": "delta_exchange", "zerodha": "zerodha_kite", "zerodha_nfo": "zerodha_kite"}
@@ -121,11 +122,14 @@ async def sync_symbol_to_catalog(
         await db.flush()
         instrument_created = True
     else:
-        if not instrument.is_active:
+        if not instrument.is_active and not (
+            bf_symbol.expiry is not None and bf_symbol.expiry < datetime.now(timezone.utc).astimezone(IST).date()
+        ):
             # This bridge only ever runs on a symbol the user explicitly
             # chose to sync from their own watchlist -- re-activate it if
             # it was previously deactivated (e.g. it predates a catalog
-            # cleanup).
+            # cleanup). Not an expired contract: retire_expired.py hid it
+            # on purpose, and it is no longer traded.
             instrument.is_active = True
         if instrument.data_source != data_source:
             # A seeded/pre-existing instrument with no live source backing

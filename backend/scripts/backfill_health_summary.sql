@@ -1324,6 +1324,24 @@ FROM pg_stat_user_tables WHERE relname IN ('bf_ohlcv_bars', 'ohlcv_candles', 'bf
 ORDER BY pg_total_relation_size(relid) DESC;
 
 \echo
+\echo '== RT1. Expired NFO contracts retired at the nightly backfill (audit log): when, the expiry cutoff and what went'
+SELECT to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS at_ist, a.new_value::jsonb ->> 'session' AS session, a.new_value::jsonb ->> 'cutoff' AS expiry_cutoff,
+       a.new_value::jsonb ->> 'stock_symbols_deleted' AS stock_symbols, a.new_value::jsonb ->> 'backfill_bars_deleted' AS bf_bars,
+       a.new_value::jsonb ->> 'stock_instruments_deleted' AS stock_instruments, a.new_value::jsonb ->> 'chart_candles_deleted' AS chart_candles,
+       a.new_value::jsonb ->> 'oi_snapshots_deleted' AS oi_snapshots, a.new_value::jsonb ->> 'index_instruments_hidden' AS index_hidden,
+       a.new_value::jsonb ->> 'watchlist_items_removed' AS watchlist_items, a.new_value::jsonb ->> 'kept_in_use' AS kept_in_use
+FROM audit_logs a WHERE a.action = 'NFO_EXPIRED_RETIRED' ORDER BY a.created_at DESC LIMIT 6;
+
+\echo
+\echo '== RT2. Expired NFO contracts still held, by expiry date: stock contracts, index contracts still active, index contracts hidden (the 29 Sep batch is retired on 6 Oct)'
+SELECT to_char(i.expiry, 'DD Mon YYYY') AS expiry,
+       count(*) FILTER (WHERE i.symbol !~ '^(BANKNIFTY|FINNIFTY|MIDCPNIFTY|NIFTYNXT50|NIFTY)[0-9]') AS stock_contracts,
+       count(*) FILTER (WHERE i.symbol ~ '^(BANKNIFTY|FINNIFTY|MIDCPNIFTY|NIFTYNXT50|NIFTY)[0-9]' AND i.is_active) AS index_active,
+       count(*) FILTER (WHERE i.symbol ~ '^(BANKNIFTY|FINNIFTY|MIDCPNIFTY|NIFTYNXT50|NIFTY)[0-9]' AND NOT i.is_active) AS index_hidden
+FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE 'Asia/Kolkata')::date
+GROUP BY i.expiry ORDER BY i.expiry;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price

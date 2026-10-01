@@ -82,6 +82,18 @@ class TickEngine:
     def unsubscribe(self, instrument_id: uuid.UUID) -> None:
         self._subscriber_counts[instrument_id] = max(0, self._subscriber_counts.get(instrument_id, 0) - 1)
 
+    def forget(self, instrument_ids) -> None:
+        """Drops everything held for instruments that no longer exist or
+        trade (an expired contract, see backfill_platform/retire_expired.py)
+        -- these dicts otherwise keep an entry per instrument ever priced
+        until the process restarts."""
+        for instrument_id in instrument_ids:
+            for table in (
+                self._last_price, self._real_price, self._real_price_source, self._real_price_at, self._real_oi,
+                self._subscriber_counts,
+            ):
+                table.pop(instrument_id, None)
+
     def get_current_price(self, instrument_id: uuid.UUID) -> float | None:
         """Non-WebSocket callers (e.g. the paper trading engine) read the
         latest known price directly rather than consuming a queue -- real

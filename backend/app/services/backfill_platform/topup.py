@@ -264,6 +264,8 @@ class BackfillTopupScheduler:
         self.last_check_at: datetime | None = None
         self.last_error: str | None = None
         self._session_checked_on: date | None = None
+        self._retired_for: date | None = None
+        self._retire_task: asyncio.Task | None = None
 
     def start(self) -> None:
         if self._task is None:
@@ -273,6 +275,9 @@ class BackfillTopupScheduler:
         if self._task is not None:
             self._task.cancel()
             self._task = None
+        if self._retire_task is not None:
+            self._retire_task.cancel()
+            self._retire_task = None
 
     @property
     def running(self) -> bool:
@@ -308,6 +313,7 @@ class BackfillTopupScheduler:
             session = last_completed_session(now)
             if now < datetime.combine(session, _topup_time(settings.topup_time), tzinfo=IST):
                 return
+            self._start_retire(session)
             # A run still waiting for a login from an earlier session is
             # superseded: the new one fetches everything after each watermark.
             await db.execute(
@@ -338,6 +344,27 @@ class BackfillTopupScheduler:
                 await queue_topup_jobs(db, run, settings.topup_timeframes, account.user_id, now, JOB_PRIORITY_SCHEDULED)
             await db.commit()
         backfill_worker.wake()
+
+    def _start_retire(self, session: date) -> None:
+        """At the session's backfill, retire the NFO contracts four trading
+        days past expiry (retire_expired.py): once per session, in the
+        background -- batches with pauses, never holding up the next tick.
+        It needs no Zerodha login, so a run still waiting for one doesn't
+        hold it back; a failure is logged and tried again next session."""
+        if self._retired_for == session or (self._retire_task is not None and not self._retire_task.done()):
+            return
+        self._retired_for = session
+        self._retire_task = asyncio.create_task(self._retire(session))
+
+    async def _retire(self, session: date) -> None:
+        from app.services.backfill_platform.retire_expired import retire_expired_contracts
+
+        try:
+            await retire_expired_contracts(session, AsyncSessionLocal)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Retiring expired NFO contracts failed")
 
     async def _remind_login(self, db: AsyncSession, now: datetime) -> None:
         """From 08:45 IST on a trading day, an alert -- in the app and on
