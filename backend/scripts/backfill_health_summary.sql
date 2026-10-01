@@ -1116,6 +1116,55 @@ SELECT (SELECT count(*) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' A
        (SELECT to_char(max(s.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol) AS newest_copy_ist;
 
 \echo
+\echo '== NS4. The day''s last candles, last 6 sessions, the 50 listed stocks: how many have the 15:15 15m and 15:25 5m candle -- chart table and backfill copy'
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL')),
+days AS (SELECT DISTINCT (c.ts AT TIME ZONE 'Asia/Kolkata')::date AS d FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+         WHERE i.symbol = 'NIFTY 50' AND c.timeframe = '15m' AND c.ts > now() - interval '12 days' ORDER BY 1 DESC LIMIT 6)
+SELECT to_char(d.d, 'DD Mon') AS session,
+  (SELECT count(*) FROM fifty f JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol JOIN ohlcv_candles c ON c.instrument_id = i.id
+     AND c.timeframe = '15m' AND c.ts = (d.d + time '15:15') AT TIME ZONE 'Asia/Kolkata') AS chart_1515_15m,
+  (SELECT count(*) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol JOIN bf_ohlcv_bars b ON b.symbol_id = s.id
+     AND b.timeframe = '15m' AND b.ts = (d.d + time '15:15') AT TIME ZONE 'Asia/Kolkata') AS bf_1515_15m,
+  (SELECT count(*) FROM fifty f JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol JOIN ohlcv_candles c ON c.instrument_id = i.id
+     AND c.timeframe = '5m' AND c.ts = (d.d + time '15:25') AT TIME ZONE 'Asia/Kolkata') AS chart_1525_5m,
+  (SELECT count(*) FROM fifty f JOIN bf_symbols s ON s.source = 'zerodha' AND s.symbol = f.symbol JOIN bf_ohlcv_bars b ON b.symbol_id = s.id
+     AND b.timeframe = '5m' AND b.ts = (d.d + time '15:25') AT TIME ZONE 'Asia/Kolkata') AS bf_1525_5m,
+  (SELECT count(*) FROM fifty f JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol JOIN ohlcv_candles c ON c.instrument_id = i.id
+     AND c.timeframe = '15m' AND c.ts = (d.d + time '15:00') AT TIME ZONE 'Asia/Kolkata') AS chart_1500_15m
+FROM days d ORDER BY d.d DESC;
+
+\echo
+\echo '== NS5. MACD - RSI - 15 MIN versions 12 on: is each the 30 Sep version (v12) plus the 7 stocks and nothing else? (comments, whitespace, commas and the 7 names ignored)'
+WITH v AS (
+  SELECT sv.version_number, sv.python_code AS code, length(sv.python_code) AS chars,
+         md5(replace(sv.python_code, E'\r', '')) = '561759bbee3e25378f16c524c7f2f07b' AS is_57_builtin,
+         (SELECT count(*) FROM unnest(ARRAY['CUPID','HFCL','KIRLOSENG','MTARTECH','STLTECH','TDPOWERSYS','WELCORP']) n WHERE sv.python_code LIKE '%"' || n || '"%') AS of_7_listed,
+         regexp_replace(regexp_replace(regexp_replace(replace(sv.python_code, E'\r', ''), '#[^\n]*', '', 'g'),
+           '"(CUPID|HFCL|KIRLOSENG|MTARTECH|STLTECH|TDPOWERSYS|WELCORP)"', '', 'g'), '[\s,]', '', 'g') AS core,
+         (SELECT count(*) FROM paper_native_deployments d WHERE d.strategy_version_id = sv.id) AS deployments
+  FROM strategies s JOIN strategy_versions sv ON sv.strategy_id = s.id
+  WHERE s.name ILIKE 'MACD%RSI%15%MIN%' AND sv.version_number >= 12
+)
+SELECT version_number, chars, is_57_builtin, of_7_listed, core = (SELECT core FROM v WHERE version_number = 12) AS same_as_v12_otherwise, deployments
+FROM v ORDER BY version_number;
+
+\echo
+\echo '== NS6. RS Rotation 15 MIN: strategies whose code is the 15-minute RS rotation, their versions and deployments'
+SELECT sv.version_number, to_char(sv.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS saved_ist,
+       md5(replace(sv.python_code, E'\r', '')) = '5a9c766dbf2905e41410671e435753d5' AS is_57_builtin,
+       md5(replace(sv.python_code, E'\r', '')) = '99da3a7283fd0afd59add3360cae2cdd' AS is_50_builtin,
+       d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS holding_now
+FROM strategy_versions sv LEFT JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
+WHERE sv.python_code LIKE '%RS Rotation 15 MIN -- Relative-Strength Rotation on 15-minute candles%'
+ORDER BY sv.created_at, d.created_at;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
