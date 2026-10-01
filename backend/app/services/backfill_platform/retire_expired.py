@@ -15,8 +15,9 @@ Once a contract has been expired for RETIRE_AFTER_TRADING_DAYS trading days
     what backtests of past weeklies run on -- but leave every watchlist and
     are flagged inactive, so lists and search no longer show them;
   - their prices leave the live feed's memory.
-A contract something still refers to -- a deployment, backtest or order, or
-a native strategy's saved state -- is left exactly as it is. Trade history
+A contract something still refers to -- a deployment, backtest or order, a
+live strategy's holding, or a native strategy's saved state (paper or live)
+-- is left exactly as it is. Trade history
 keeps each leg's own symbol, strike and expiry, so it reads the same.
 
 Runs in the background, a few contracts per statement with pauses between
@@ -40,6 +41,7 @@ from app.models.backfill_platform import BfBackfillJob, BfCoverage, BfOhlcvBar, 
 from app.models.backtest import BacktestJob, OptimizationJob, PortfolioBacktestTrade
 from app.models.fo_scan import FoOiSnapshot
 from app.models.instrument import Instrument
+from app.models.live_native import LiveNativeDeployment, LiveNativePosition
 from app.models.live_trading import LiveDeployment, LiveOrder
 from app.models.market_data import BackfillJob, OhlcvCandle
 from app.models.paper_trading import PaperDeployment, PaperNativeDeployment
@@ -98,11 +100,12 @@ async def _in_use(db) -> set[str]:
     ids: set[str] = set()
     for column in (
         PaperDeployment.instrument_id, LiveDeployment.instrument_id, LiveOrder.instrument_id, BacktestJob.instrument_id,
-        OptimizationJob.instrument_id, PortfolioBacktestTrade.instrument_id,
+        OptimizationJob.instrument_id, PortfolioBacktestTrade.instrument_id, LiveNativePosition.instrument_id,
     ):
         ids.update(str(v) for v in (await db.execute(select(column).where(column.is_not(None)).distinct())).scalars())
-    for state in (await db.execute(select(PaperNativeDeployment.state))).scalars():
-        ids.update(_UUID.findall(json.dumps(state or {})))
+    for model in (PaperNativeDeployment, LiveNativeDeployment):
+        for state in (await db.execute(select(model.state))).scalars():
+            ids.update(_UUID.findall(json.dumps(state or {})))
     return ids
 
 

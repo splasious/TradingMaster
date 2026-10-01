@@ -183,3 +183,33 @@ async def test_syncing_to_the_catalog_does_not_bring_back_an_expired_contract(db
         await sync_symbol_to_catalog(db_session, sym)
         instrument = (await db_session.execute(select(Instrument).where(Instrument.symbol == name))).scalar_one()
         assert instrument.is_active is expect_active, name
+
+
+async def test_a_contract_a_live_strategy_holds_is_kept(db_engine, db_session: AsyncSession, monkeypatch):
+    from app.models.broker import Broker, BrokerAccount
+    from app.models.live_native import LiveNativeDeployment, LiveNativePosition
+
+    factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    monkeypatch.setattr(retire, "PAUSE_SECONDS", 0)
+    world = await _world(db_session)
+    stock_option = await db_session.get(Instrument, world["stock_option"]["inst"])
+    strategy = (await db_session.execute(select(Strategy))).scalars().first()
+    version = (await db_session.execute(select(StrategyVersion))).scalars().first()
+    broker = Broker(code="zerodha_kite_retire_test", name="Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    account = BrokerAccount(user_id=strategy.owner_id, broker_id=broker.id, account_label="Kite", environment="live")
+    db_session.add(account)
+    await db_session.flush()
+    deployment = LiveNativeDeployment(owner_id=strategy.owner_id, strategy_id=strategy.id, strategy_version_id=version.id,
+                                      broker_account_id=account.id, status="active", capital=100000.0)
+    db_session.add(deployment)
+    await db_session.flush()
+    db_session.add(LiveNativePosition(deployment_id=deployment.id, instrument_id=stock_option.id, quantity=-65.0, avg_price=10.0,
+                                      strategy_quantity=650.0, opened_at=T0))
+    await db_session.commit()
+
+    result = await retire.retire_expired_contracts(RETIRED_ON, factory)
+    assert await _count(db_session, Instrument, id=world["stock_option"]["inst"]) == 1  # held live: kept
+    assert await _count(db_session, Instrument, id=world["stock_future"]["inst"]) == 0  # not held: gone
+    assert result.kept_in_use == 2  # with the paper strategy's "in use" one
