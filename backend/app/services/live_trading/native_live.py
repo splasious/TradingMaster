@@ -40,9 +40,12 @@ together past their limit (default DEFAULT_ACCOUNT_LOSS_PCT of their live
 capital) -- every one is squared off and paused, and the kill switch goes on.
 
 Every minute (reconcile_account): what the broker holds against what the
-strategies on that account hold (paused ones included); any difference
-pauses every running strategy holding that instrument, and alerts you with
-both sides. The account-wide stop happens once a day: after it, with
+strategies on that account hold (paused ones included) plus what you
+already held of it yourself when a strategy first traded it there
+(record_baselines, LiveAccountBaseline); any difference pauses every
+running strategy holding that instrument, and alerts you with both sides.
+A strategy only runs on a broker account that passed the broker test
+(broker_test.py). The account-wide stop happens once a day: after it, with
 nothing of the user's running, it isn't checked again.
 """
 
@@ -58,9 +61,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.alert import AlertSeverity, AlertType
 from app.models.instrument import Instrument
+from app.models.broker import BrokerAccount
 from app.models.live_native import (
     LIVE_NATIVE_ACTIVE,
     LIVE_NATIVE_PAUSED,
+    LiveAccountBaseline,
     LiveNativeDeployment,
     LiveNativePosition,
     LiveNativeTrade,
@@ -509,6 +514,12 @@ async def _run(db: AsyncSession, deployment: LiveNativeDeployment, gateway, now:
         await pause(db, deployment, message, now, resume_at=None if failures else _next_session_open(now))
         return LiveOutcome(action="paused", signal="LOSS_LIMIT", reason=message)
 
+    account = await db.get(BrokerAccount, deployment.broker_account_id)
+    if account is None or account.live_verified_at is None:
+        message = "This broker account hasn't passed the broker test (Settings > Brokers) -- paused until it has"
+        await pause(db, deployment, message, now)
+        return LiveOutcome(action="paused", signal="NOT_TESTED", reason=message)
+
     version = await db.get(StrategyVersion, deployment.strategy_version_id)
     if version is None or not version.python_code:
         return LiveOutcome(action="error", reason="strategy version or code missing")
@@ -547,12 +558,71 @@ async def _run(db: AsyncSession, deployment: LiveNativeDeployment, gateway, now:
         await _alert(db, deployment, AlertSeverity.WARNING, AlertType.ORDER_REJECTED, "Live orders not sent", message)
         return LiveOutcome(action="skipped", signal="CAPITAL_CAP", reason=message)
 
+    try:
+        await record_baselines(db, deployment, gateway, ctx.intents, now)
+    except LiveOrderError as exc:
+        await pause(db, deployment, str(exc), now)
+        return LiveOutcome(action="paused", signal="BASELINE", reason=str(exc))
     outcome = await execute_batch(db, deployment, gateway, ctx, snapshot, now)
     if outcome.action == "traded":
         outcome.action, outcome.signal = ctx._last_action, ctx._last_signal
         outcome.reason = ctx._last_reason
     outcome.wake_at = ctx._wake_at
     return outcome
+
+
+# ------------------------------------------------------- your holdings --
+
+def _key_text(key: tuple[str, str]) -> str:
+    return "|".join(key)
+
+
+async def _account_holders(db: AsyncSession, broker_account_id: uuid.UUID) -> list[LiveNativeDeployment]:
+    return list((await db.execute(
+        select(LiveNativeDeployment).where(
+            LiveNativeDeployment.broker_account_id == broker_account_id,
+            LiveNativeDeployment.status.in_((LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED)),
+        )
+    )).scalars().all())
+
+
+async def record_baselines(db: AsyncSession, deployment: LiveNativeDeployment, gateway, intents: list[Intent], now: datetime) -> None:
+    """Before a live strategy's first trade in a contract on this account --
+    none of the account's strategies holds it -- notes what the account
+    already holds of it: that part is yours, and reconciliation expects it
+    on top of the strategies'. Can't read the account: LiveOrderError
+    (nothing is sent)."""
+    opens = [i for i in intents if i.kind == "open"]
+    if not opens:
+        return
+    held: set = set()
+    for holder in await _account_holders(db, deployment.broker_account_id):
+        held.update((await load_positions(db, holder)).keys())
+    first = {i.instrument.id: i.instrument for i in opens if i.instrument.id not in held}
+    if not first:
+        return
+    keys = {}
+    for iid, instrument in first.items():
+        try:
+            keys[iid] = await gateway.key(instrument)
+        except (ContractNotFound, ContractListError):
+            continue  # its order won't be sent either (native_gateway)
+    if not keys:
+        return
+    try:
+        actual = await gateway.net_positions()
+    except Exception as exc:
+        raise LiveOrderError(f"Couldn't read what the account already holds before its first trade in "
+                             f"{', '.join(first[i].symbol for i in keys)} ({exc}) -- paused, nothing sent") from exc
+    for iid, key in keys.items():
+        row = (await db.execute(select(LiveAccountBaseline).where(
+            LiveAccountBaseline.broker_account_id == deployment.broker_account_id, LiveAccountBaseline.contract_key == _key_text(key),
+        ))).scalar_one_or_none()
+        if row is None:
+            row = LiveAccountBaseline(broker_account_id=deployment.broker_account_id, contract_key=_key_text(key))
+            db.add(row)
+        row.symbol, row.quantity, row.recorded_at = first[iid].symbol[:50], float(actual.get(key, 0.0)), now
+    await db.flush()
 
 
 # ---------------------------------------------------------- account-wide --
@@ -634,6 +704,9 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
                 await pause(db, deployment, reason[:500], now)
         await db.commit()
         return [reason]
+    yours = {row.contract_key: row.quantity for row in (await db.execute(
+        select(LiveAccountBaseline).where(LiveAccountBaseline.broker_account_id == broker_account_id)
+    )).scalars()}
     differences = []
     for text, deployment in unmatched:
         differences.append(text)
@@ -641,8 +714,10 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
             await pause(db, deployment, f"{text}. Check it there, then resume.", now)
     for key, quantity in expected.items():
         broker_quantity = actual.get(key, 0.0)
-        if abs(broker_quantity - quantity) > _QTY_EPS:
-            text = f"{names[key]}: the broker holds {broker_quantity:g}, the live strategies {quantity:g}"
+        own = yours.get(_key_text(key), 0.0)
+        if abs(broker_quantity - quantity - own) > _QTY_EPS:
+            text = f"{names[key]}: the broker holds {broker_quantity:g}, the live strategies {quantity:g}" + (
+                f" and you {own:g} of your own -- if you traded it yourself, that's the difference" if own else "")
             differences.append(text)
             for deployment in holders[key]:
                 if deployment.status == LIVE_NATIVE_ACTIVE:
@@ -653,5 +728,6 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
 
 __all__ = [
     "LiveNativeContext", "LiveOrderError", "LiveOutcome", "LivePool", "account_limit", "check_account_limits", "day_pnl",
-    "execute_batch", "load_positions", "loss_limit", "pause", "pool_cash", "reconcile_account", "run_live_native", "square_off",
+    "execute_batch", "load_positions", "loss_limit", "pause", "pool_cash", "reconcile_account", "record_baselines", "run_live_native",
+    "square_off",
 ]

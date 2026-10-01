@@ -21,7 +21,13 @@ from app.schemas.broker import (
 from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.broker.hdfc_securities_broker import HDFCSecuritiesBroker
-from app.services.broker.registry import get_broker_adapter, is_real_adapter, requires_interactive_auth, supports_trading
+from app.services.broker.registry import (
+    get_broker_adapter,
+    is_real_adapter,
+    requires_interactive_auth,
+    supports_live_strategies,
+    supports_trading,
+)
 from app.services.broker.zerodha_broker import IST, ZerodhaKiteBroker
 from app.services.notifications.telegram import send_telegram
 from app.services.visibility import broker_visible, hidden_broker_codes
@@ -33,6 +39,7 @@ def _broker_out(broker: Broker) -> BrokerOut:
     return BrokerOut(
         id=str(broker.id), code=broker.code, name=broker.name, is_enabled=broker.is_enabled,
         is_real_adapter=is_real_adapter(broker.code), supports_trading=supports_trading(broker.code),
+        supports_live_strategies=supports_live_strategies(broker.code),
     )
 
 
@@ -45,6 +52,7 @@ def _account_out(account: BrokerAccount) -> BrokerAccountOut:
         is_active=account.is_active,
         connection_status=account.connection.status if account.connection else ConnectionStatus.DISCONNECTED.value,
         connection_last_error=account.connection.last_error if account.connection else None,
+        live_verified_at=account.live_verified_at,
     )
 
 
@@ -175,6 +183,9 @@ async def update_broker_account(
             db.add(account.credential)
         else:
             account.credential.encrypted_payload = encrypt_payload(json.dumps(payload.credentials))
+        # New credentials may be another account at the broker: the broker
+        # test has to be passed again before live strategies use it.
+        account.live_verified_at = None
 
         # A changed credential invalidates whatever the old connection state
         # meant (e.g. a Kite access_token tied to the OLD api_key/secret

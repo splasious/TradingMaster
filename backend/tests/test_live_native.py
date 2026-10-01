@@ -17,6 +17,7 @@ from app.models.live_native import (
     LIVE_NATIVE_ACTIVE,
     LIVE_NATIVE_PAUSED,
     PRODUCT_INTRADAY,
+    LiveAccountBaseline,
     LiveNativeDeployment,
     LiveNativePosition,
     LiveNativeTrade,
@@ -121,7 +122,7 @@ async def _setup(db, code: str = SPREAD, **overrides) -> tuple[LiveNativeDeploym
         broker = Broker(code="zerodha_kite", name="Zerodha Kite", is_enabled=True)
         db.add(broker)
     await db.flush()
-    account = BrokerAccount(user_id=user.id, broker_id=broker.id, account_label="Kite", environment="live")
+    account = BrokerAccount(user_id=user.id, broker_id=broker.id, account_label="Kite", environment="live", live_verified_at=NOW)
     strategy = Strategy(name="Live test", owner_id=user.id, code_type="native")
     db.add_all([account, strategy])
     await db.flush()
@@ -507,3 +508,60 @@ async def test_reconciliation_counts_what_a_paused_strategy_holds(db_session):
 
     assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW) == []
     assert deployment.status == LIVE_NATIVE_ACTIVE and paused.pause_reason == "paused by you"
+
+
+async def test_an_account_that_hasnt_passed_the_broker_test_runs_nothing(db_session):
+    deployment, _ = await _setup(db_session)
+    account = await db_session.get(BrokerAccount, deployment.broker_account_id)
+    account.live_verified_at = None
+    await db_session.commit()
+    gateway = FakeGateway()
+    out = await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    assert out.signal == "NOT_TESTED" and deployment.status == LIVE_NATIVE_PAUSED and gateway.orders == []
+    assert "broker test" in deployment.pause_reason
+
+
+async def test_your_own_holdings_are_counted_apart_from_the_strategys(db_session):
+    deployment, inst = await _setup(db_session, code=STOCK, state={"want": "buy", "qty": 10})
+    gateway = FakeGateway()
+    gateway.held[("NSE", "SBIN")] = 100.0  # yours, from before
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    assert gateway.held[("NSE", "SBIN")] == 110.0
+    [baseline] = (await db_session.execute(select(LiveAccountBaseline))).scalars().all()
+    assert (baseline.contract_key, baseline.symbol, baseline.quantity) == ("NSE|SBIN", "SBIN", 100.0)
+    assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW) == []
+    assert deployment.status == LIVE_NATIVE_ACTIVE
+
+    gateway.held[("NSE", "SBIN")] = 60.0  # you sold 50 of yours in the broker's app
+    [difference] = await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW)
+    assert difference == ("SBIN: the broker holds 60, the live strategies 10 and you 100 of your own -- "
+                          "if you traded it yourself, that's the difference")
+    assert deployment.status == LIVE_NATIVE_PAUSED
+
+
+async def test_your_holdings_are_noted_only_before_the_first_strategy_trade(db_session):
+    deployment, inst = await _setup(db_session, code=STOCK, state={"want": "buy", "qty": 10})
+    gateway = FakeGateway()
+    gateway.held[("NSE", "SBIN")] = 100.0
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    second = LiveNativeDeployment(owner_id=deployment.owner_id, strategy_id=deployment.strategy_id,
+                                  strategy_version_id=deployment.strategy_version_id, broker_account_id=deployment.broker_account_id,
+                                  status=LIVE_NATIVE_ACTIVE, capital=500000.0, state={"want": "buy", "qty": 5})
+    db_session.add(second)
+    await db_session.commit()
+    await native_live.run_live_native(db_session, second, gateway, NOW + timedelta(minutes=1))
+    [baseline] = (await db_session.execute(select(LiveAccountBaseline))).scalars().all()
+    assert baseline.quantity == 100.0  # not re-read as 110 while the first strategy holds it
+    assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW) == []
+
+
+async def test_an_account_it_cant_read_before_a_first_trade_sends_nothing(db_session):
+    deployment, _ = await _setup(db_session, code=STOCK, state={"want": "buy", "qty": 10})
+    gateway = FakeGateway()
+
+    async def down():
+        raise RuntimeError("broker down")
+
+    gateway.net_positions = down
+    out = await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    assert out.signal == "BASELINE" and gateway.orders == [] and deployment.status == LIVE_NATIVE_PAUSED

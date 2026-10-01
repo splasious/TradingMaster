@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -11,6 +12,8 @@ class BrokerOut(BaseModel):
     is_real_adapter: bool
     # False for connect-and-verify-only brokers (registry._CONNECT_ONLY_BROKERS).
     supports_trading: bool = True
+    # Live native strategies can trade through it (registry._LIVE_STRATEGY_BROKERS).
+    supports_live_strategies: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -23,6 +26,8 @@ class BrokerAccountOut(BaseModel):
     is_active: bool
     connection_status: str
     connection_last_error: str | None = None
+    # When it passed the broker test (live_trading/broker_test.py); None: untested.
+    live_verified_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 

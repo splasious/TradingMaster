@@ -22,6 +22,8 @@ export interface BrokerOut {
   is_real_adapter: boolean;
   /** False for brokers connected for login and funds only (no trading yet). */
   supports_trading: boolean;
+  /** Live native strategies can trade through it (Zerodha, Dhan, Angel One). */
+  supports_live_strategies: boolean;
 }
 
 export type ConnectionStatus = "connected" | "connecting" | "reconnecting" | "disconnected" | "delayed" | "error";
@@ -34,6 +36,36 @@ export interface BrokerAccountOut {
   is_active: boolean;
   connection_status: ConnectionStatus;
   connection_last_error: string | null;
+  /** When it passed the broker test; null: untested -- live strategies won't run on it. */
+  live_verified_at: string | null;
+}
+
+export interface BrokerTestStep {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface BrokerTestContract {
+  ours: string;
+  ok: boolean;
+  broker_symbol?: string;
+  broker_id?: string | null;
+  lot_size?: number | null;
+  error?: string;
+}
+
+export interface BrokerTestOut {
+  passed: boolean;
+  steps: BrokerTestStep[];
+  contracts: BrokerTestContract[];
+  still_held: string | null;
+  live_verified_at: string | null;
+}
+
+export interface ServerIpOut {
+  ipv4: string | null;
+  ipv6: string | null;
 }
 
 export interface SystemHealth {

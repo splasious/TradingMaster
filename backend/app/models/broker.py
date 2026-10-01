@@ -45,6 +45,11 @@ class BrokerAccount(Base):
     environment: Mapped[str] = mapped_column(String(20), default=Environment.PAPER.value, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # When this account passed the broker test (live_trading/broker_test.py):
+    # a one-share order bought and sold, its fill, price and position read
+    # back right. Live strategies only run on a tested account; new
+    # credentials clear it.
+    live_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     broker: Mapped["Broker"] = relationship(back_populates="accounts")
     credential: Mapped["BrokerCredential | None"] = relationship(

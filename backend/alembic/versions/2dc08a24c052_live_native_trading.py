@@ -1,8 +1,10 @@
 """Native strategies trading live: deployments, their real holdings, trades,
-the account-wide loss limit, and fills on live orders
+the account-wide loss limit, fills on live orders, your own holdings per
+broker account, and when an account passed the broker test
 
-Additive only -- four new tables and five nullable live_orders columns
-(models/live_native.py, models/live_trading.py). Nothing existing changes.
+Additive only -- five new tables, five nullable live_orders columns and one
+nullable broker_accounts column (models/live_native.py, live_trading.py,
+broker.py). Nothing existing changes.
 
 Revision ID: 2dc08a24c052
 Revises: 7dab5ef6e158
@@ -77,6 +79,18 @@ def upgrade() -> None:
         sa.Column("account_daily_loss_limit", sa.Float(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
+    op.create_table(
+        "live_account_baselines",
+        sa.Column("id", sa.Uuid(), primary_key=True),
+        sa.Column("broker_account_id", sa.Uuid(), sa.ForeignKey("broker_accounts.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("contract_key", sa.String(100), nullable=False),
+        sa.Column("symbol", sa.String(50), nullable=False),
+        sa.Column("quantity", sa.Float(), nullable=False),
+        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False),
+        sa.UniqueConstraint("broker_account_id", "contract_key", name="uq_live_account_baseline"),
+    )
+    with op.batch_alter_table("broker_accounts") as batch:
+        batch.add_column(sa.Column("live_verified_at", sa.DateTime(timezone=True), nullable=True))
     with op.batch_alter_table("live_orders") as batch:
         batch.add_column(sa.Column("native_deployment_id", sa.Uuid(), nullable=True))
         batch.add_column(sa.Column("purpose", sa.String(20), nullable=True))
@@ -98,6 +112,9 @@ def downgrade() -> None:
         batch.drop_column("filled_quantity")
         batch.drop_column("purpose")
         batch.drop_column("native_deployment_id")
+    with op.batch_alter_table("broker_accounts") as batch:
+        batch.drop_column("live_verified_at")
+    op.drop_table("live_account_baselines")
     op.drop_table("live_risk_settings")
     op.drop_index("ix_live_native_trades_deployment_closed", table_name="live_native_trades")
     op.drop_table("live_native_trades")

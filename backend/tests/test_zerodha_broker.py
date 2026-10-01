@@ -258,6 +258,19 @@ async def test_cancel_order_defaults_to_regular_variety(monkeypatch):
     assert result["status"] == "CANCEL PENDING"
 
 
+async def test_get_holdings_reads_the_portfolio(monkeypatch):
+    async def fake_request(self, method, url, headers=None, params=None, data=None):
+        assert (method, url) == ("GET", "https://api.kite.trade/portfolio/holdings")
+        return _mock_response(200, {"status": "success", "data": [
+            {"tradingsymbol": "SBIN", "exchange": "NSE", "quantity": 90, "t1_quantity": 10},
+        ]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = "k", "t"
+    assert await broker.get_holdings() == [{"tradingsymbol": "SBIN", "exchange": "NSE", "quantity": 90, "t1_quantity": 10}]
+
+
 async def test_request_without_credentials_raises():
     broker = ZerodhaKiteBroker()
     with pytest.raises(KiteAPIError, match="Not authenticated"):

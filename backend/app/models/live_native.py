@@ -100,3 +100,22 @@ class LiveRiskSettings(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     account_daily_loss_limit: Mapped[float | None] = mapped_column(Float)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class LiveAccountBaseline(Base):
+    """What a broker account already held of a contract -- yours, not a
+    strategy's -- when a live strategy first traded it there (agreed 1 Oct
+    2026). Reconciliation expects this plus what the strategies hold; it is
+    recorded afresh whenever no strategy on the account holds the contract,
+    so it only counts while one does. `contract_key` is the broker's own
+    (native_gateway.BrokerGateway.key), joined as "segment|id"."""
+
+    __tablename__ = "live_account_baselines"
+    __table_args__ = (UniqueConstraint("broker_account_id", "contract_key", name="uq_live_account_baseline"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    broker_account_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("broker_accounts.id", ondelete="CASCADE"), nullable=False)
+    contract_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

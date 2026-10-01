@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     brokers,
     indicators,
     instruments,
+    live_native,
     live_trading,
     market_data,
     market_data_ws,
@@ -46,6 +47,7 @@ api_router.include_router(portfolio_optimization.router, prefix="/portfolio-opti
 api_router.include_router(paper_trading.router, prefix="/paper-trading", tags=["paper-trading"])
 api_router.include_router(paper_native_trading.router, prefix="/paper-trading", tags=["paper-trading"])
 api_router.include_router(live_trading.router, prefix="/live-trading", tags=["live-trading"])
+api_router.include_router(live_native.router, prefix="/live-native", tags=["live-native"])
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(backup.router, prefix="/backup", tags=["backup"])

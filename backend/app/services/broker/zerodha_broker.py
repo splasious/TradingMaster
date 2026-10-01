@@ -296,6 +296,13 @@ class ZerodhaKiteBroker(BrokerInterface):
         positions = await self._request("GET", "/portfolio/positions")
         return positions.get("net", []) if positions else []
 
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        """Delivery holdings (GET /portfolio/holdings): `quantity` in the
+        demat account, `t1_quantity` bought but not yet delivered. A stock
+        bought CNC is in the day's positions until the day ends, then here."""
+        holdings = await self._request("GET", "/portfolio/holdings")
+        return holdings or []
+
     async def get_orders(self) -> list[dict[str, Any]]:
         orders = await self._request("GET", "/orders")
         return orders or []

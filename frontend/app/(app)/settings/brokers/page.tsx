@@ -1,7 +1,7 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, LogIn } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, CheckCircle2, LogIn, XCircle } from "lucide-react";
 import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +16,8 @@ import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBrokerAccounts, useBrokers } from "@/lib/hooks";
-import type { BrokerAccountOut, HDFCLoginUrlOut, KiteLoginUrlOut } from "@/lib/types";
+import { istDate } from "@/lib/time";
+import type { BrokerAccountOut, BrokerTestOut, HDFCLoginUrlOut, KiteLoginUrlOut, ServerIpOut } from "@/lib/types";
 
 const KITE_PENDING_ACCOUNT_KEY = "tm_kite_pending_account_id";
 const HDFC_PENDING_ACCOUNT_KEY = "tm_hdfc_pending_account_id";
@@ -222,8 +223,8 @@ function ConnectBrokerModal({ open, onClose, accounts }: { open: boolean; onClos
 
         <p className="text-xs text-text-muted">
           All brokers use real adapters -- real API credentials are required. Kotak Neo, Angel One and Dhan
-          authenticate immediately. Angel One and Dhan are connected for login and funds only for now --
-          orders can&apos;t be placed through them yet. Zerodha Kite and HDFC Securities need one more step after this: an interactive
+          authenticate immediately. Angel One and Dhan place orders for live strategies only (after the broker
+          test) -- manual orders can&apos;t go through them yet. Zerodha Kite and HDFC Securities need one more step after this: an interactive
           browser login (neither supports key/secret-only auth) -- you&apos;ll get a &quot;Login with...&quot; button
           for the account once it&apos;s created. Kotak Neo needs TOTP registration completed on their own site first
           (one-time, scan a QR code into an authenticator app) -- the TOTP secret above is that same registration
@@ -433,6 +434,181 @@ function EditBrokerAccountModal({ account, onClose }: { account: BrokerAccountOu
   );
 }
 
+function ServerIpCard() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["live-native-server-ip"],
+    queryFn: () => apiFetch<ServerIpOut>("/api/v1/live-native/server-ip"),
+    staleTime: 10 * 60 * 1000,
+  });
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Static IP for live orders</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2 text-sm">
+        <p className="text-text-muted">
+          Brokers accept API orders only from a static IP you have registered with them (SEBI&apos;s rules, since 1 April
+          2026). Register this server&apos;s IP with each broker you&apos;ll trade live through: Zerodha (Kite Connect
+          developer console), Dhan (DhanHQ API page), Angel One (SmartAPI app), Kotak Neo (Trade API settings).
+        </p>
+        {isLoading ? (
+          <p className="text-text-muted">Checking...</p>
+        ) : isError || (!data?.ipv4 && !data?.ipv6) ? (
+          <p className="text-warning">Couldn&apos;t find this server&apos;s public IP right now -- try again in a minute.</p>
+        ) : (
+          <div className="flex flex-wrap gap-x-6 gap-y-1 font-mono text-text-primary">
+            {data?.ipv4 && <span>IPv4 {data.ipv4}</span>}
+            {data?.ipv6 && <span className="break-all">IPv6 {data.ipv6}</span>}
+          </div>
+        )}
+        {data?.ipv6 && (
+          <p className="text-xs text-text-muted">
+            This server also has IPv6. A broker reached over IPv6 sees that address, not the IPv4 one -- register both where
+            the broker allows two.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BrokerTestModal({ account, onClose }: { account: BrokerAccountOut | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [symbol, setSymbol] = useState("");
+  const [understood, setUnderstood] = useState(false);
+  const [report, setReport] = useState<BrokerTestOut | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openedFor, setOpenedFor] = useState<string | null>(null);
+  if (account && account.id !== openedFor) {
+    setOpenedFor(account.id);
+    setSymbol("");
+    setUnderstood(false);
+    setReport(null);
+    setError(null);
+  }
+
+  const testMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<BrokerTestOut>("/api/v1/live-native/broker-test", {
+        method: "POST",
+        body: JSON.stringify({ broker_account_id: account!.id, symbol: symbol.trim() }),
+      }),
+    onSuccess: (data) => {
+      setReport(data);
+      queryClient.invalidateQueries({ queryKey: ["broker-accounts"] });
+    },
+    onError: (err) => setError(err instanceof ApiError ? err.message : "The test couldn't run"),
+  });
+
+  if (!account) return null;
+
+  return (
+    <Modal open={!!account} onClose={onClose} title={`Test ${account.account_label} for live strategies`}>
+      <div className="space-y-4 text-sm">
+        <p className="text-text-secondary">
+          This places two real orders in this account: it buys 1 share of the stock you choose, intraday, and sells it
+          again -- checking the contract names, the fill, the price and the position at every step. It costs the
+          share&apos;s spread and two orders&apos; brokerage. Run it while the market is open, before 15:00. Live strategies
+          only run on an account that passed.
+        </p>
+
+        {!report && (
+          <form
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setError(null);
+              testMutation.mutate();
+            }}
+          >
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium text-text-secondary">Stock (NSE, under ₹1,000)</label>
+              <Input required value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="e.g. IDEA" />
+            </div>
+            <label className="flex items-start gap-2 text-xs text-text-secondary">
+              <input type="checkbox" className="mt-0.5" checked={understood} onChange={(e) => setUnderstood(e.target.checked)} />
+              I understand this buys and sells 1 share with real money in {account.broker.name}.
+            </label>
+            {error && <div className="rounded-md bg-negative-soft px-3 py-2 text-negative">{error}</div>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!understood || !symbol.trim() || testMutation.isPending}>
+                {testMutation.isPending ? "Testing... (up to a minute)" : "Buy and sell 1 share"}
+              </Button>
+            </div>
+          </form>
+        )}
+
+        {report && (
+          <div className="space-y-3">
+            {report.still_held && (
+              <div className="flex items-start gap-2 rounded-md border border-negative/30 bg-negative-soft px-3 py-2 text-negative">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <p>{report.still_held}</p>
+              </div>
+            )}
+            <p className={report.passed ? "font-medium text-positive" : "font-medium text-negative"}>
+              {report.passed ? "Passed -- live strategies can use this account." : "Not passed -- live strategies can't use this account yet."}
+            </p>
+            <ul className="space-y-1.5">
+              {report.steps.map((s, i) => (
+                <li key={i} className="flex items-start gap-2">
+                  {s.ok ? (
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-positive" aria-label="passed" />
+                  ) : (
+                    <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-negative" aria-label="failed" />
+                  )}
+                  <span>
+                    <span className="font-medium text-text-primary">{s.name}</span>{" "}
+                    <span className="text-text-secondary">{s.detail}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {report.contracts.length > 0 && (
+              <div className="overflow-x-auto">
+                <Table>
+                  <Thead>
+                    <tr>
+                      <Th>Here</Th>
+                      <Th>At the broker</Th>
+                    </tr>
+                  </Thead>
+                  <Tbody>
+                    {report.contracts.map((c) => (
+                      <tr key={c.ours}>
+                        <Td className="font-mono text-xs">{c.ours}</Td>
+                        <Td className="text-xs">
+                          {c.ok ? (
+                            <span className="font-mono">
+                              {c.broker_symbol}
+                              {c.broker_id ? ` (${c.broker_id})` : ""}
+                              {c.lot_size ? `, lot ${c.lot_size}` : ""}
+                            </span>
+                          ) : (
+                            <span className="text-negative">{c.error}</span>
+                          )}
+                        </Td>
+                      </tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              </div>
+            )}
+            <div className="flex justify-end">
+              <Button type="button" variant="secondary" onClick={onClose}>
+                Close
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function InteractiveSessionExpiredBanner({ accounts }: { accounts: BrokerAccountOut[] }) {
   const expired = accounts.filter((a) => INTERACTIVE_AUTH_BROKERS.has(a.broker.code) && a.connection_status === "error");
   if (!expired.length) return null;
@@ -457,6 +633,7 @@ export default function BrokersSettingsPage() {
   const queryClient = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<BrokerAccountOut | null>(null);
+  const [testingAccount, setTestingAccount] = useState<BrokerAccountOut | null>(null);
   const canManage = hasRole("administrator", "trader");
 
   const disconnectMutation = useMutation({
@@ -482,13 +659,15 @@ export default function BrokersSettingsPage() {
           <h1 className="text-xl font-semibold text-text-primary">Broker Connections</h1>
           <p className="text-sm text-text-muted">
             Zerodha Kite, HDFC Securities, Kotak Neo, Angel One and Dhan all use real adapters -- session-token
-            auth via interactive login for Kite and HDFC, TOTP for Kotak Neo, Angel One and Dhan. Angel One and Dhan are connected for login and funds only for now.
+            auth via interactive login for Kite and HDFC, TOTP for Kotak Neo, Angel One and Dhan. Live strategies trade through
+            Zerodha, Dhan and Angel One, on an account that passed the broker test.
           </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}
       </div>
 
       {accounts && <InteractiveSessionExpiredBanner accounts={accounts} />}
+      <ServerIpCard />
       {deleteError && <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">{deleteError}</div>}
 
       <Card>
@@ -519,9 +698,14 @@ export default function BrokersSettingsPage() {
                     <Td>
                       <div className="flex flex-wrap items-center gap-1.5">
                         {account.broker.name}
-                        {account.broker.supports_trading === false && (
+                        {account.broker.supports_trading === false && !account.broker.supports_live_strategies && (
                           <Badge tone="neutral" title="Connected for login and funds only -- trading through it isn't enabled yet">
                             Login &amp; funds only
+                          </Badge>
+                        )}
+                        {account.broker.supports_trading === false && account.broker.supports_live_strategies && (
+                          <Badge tone="neutral" title="Orders go through it for live strategies only -- not manual orders yet">
+                            Live strategies only
                           </Badge>
                         )}
                       </div>
@@ -533,12 +717,30 @@ export default function BrokersSettingsPage() {
                       {account.connection_status === "error" && account.connection_last_error && (
                         <p className="mt-1 max-w-xs text-xs text-text-muted">{account.connection_last_error}</p>
                       )}
+                      {account.environment === "live" && account.broker.supports_live_strategies && (
+                        <div className="mt-1">
+                          {account.live_verified_at ? (
+                            <Badge tone="positive" title="Passed the broker test -- live strategies can use it">
+                              Tested {istDate(account.live_verified_at)}
+                            </Badge>
+                          ) : (
+                            <Badge tone="neutral" title="Live strategies run only on an account that passed the broker test">
+                              Not tested for live
+                            </Badge>
+                          )}
+                        </div>
+                      )}
                     </Td>
                     {canManage && (
                       <Td className="text-right">
                         <div className="flex justify-end gap-1">
                           {INTERACTIVE_AUTH_BROKERS.has(account.broker.code) && account.connection_status !== "connected" && (
                             <InteractiveLoginButton accountId={account.id} brokerCode={account.broker.code} />
+                          )}
+                          {account.environment === "live" && account.broker.supports_live_strategies && (
+                            <Button variant="ghost" size="sm" onClick={() => setTestingAccount(account)}>
+                              Test
+                            </Button>
                           )}
                           <Button variant="ghost" size="sm" onClick={() => setEditingAccount(account)}>
                             Edit
@@ -576,6 +778,7 @@ export default function BrokersSettingsPage() {
 
       <ConnectBrokerModal open={modalOpen} onClose={() => setModalOpen(false)} accounts={accounts ?? []} />
       <EditBrokerAccountModal account={editingAccount} onClose={() => setEditingAccount(null)} />
+      <BrokerTestModal account={testingAccount} onClose={() => setTestingAccount(null)} />
     </div>
   );
 }
