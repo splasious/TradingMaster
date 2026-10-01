@@ -145,6 +145,29 @@ async def test_a_holding_between_rank_11_and_20_is_kept(db_session, monkeypatch)
     assert [s for _, s in scores].index("S15") + 1 == 14
 
 
+async def test_a_missing_1515_candle_takes_the_close_before_it(db_session, monkeypatch):
+    # Most of the listed stocks have no 15:15 candle; they're still ranked at
+    # 09:30, on their 15:00 close. A stock with nothing stored at all isn't.
+    from sqlalchemy import delete
+
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    last_slot = rot.bars_before(at(9, 15), 1)[0].astimezone(timezone.utc)
+    no_1515 = [instruments[f"S{i:02d}"].id for i in range(20)]
+    await db_session.execute(delete(OhlcvCandle).where(OhlcvCandle.instrument_id.in_(no_1515), OhlcvCandle.ts == last_slot))
+    await db_session.execute(delete(OhlcvCandle).where(OhlcvCandle.instrument_id == instruments["S24"].id))
+    await db_session.commit()
+    _live(instruments, {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0})
+
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 30, 3))
+    await rot.evaluate(ctx)
+
+    closes = ctx.state["_series"]["closes"]
+    assert closes["S00"][-2] == 100.0 and closes["S00"][:-1] == [100.0] * 9  # 15:15 slot: the 15:00 close
+    assert closes["S24"][:-1] == [None] * 9
+    assert "ranked 24/25" in ctx._last_reason
+    assert sorted(ctx.state["holdings"]) == [f"S{i}" for i in range(14, 24)]
+
+
 async def test_the_rolling_closes_stay_off_the_card(db_session, monkeypatch):
     from app.api.v1.endpoints.paper_native_trading import _public_state
 

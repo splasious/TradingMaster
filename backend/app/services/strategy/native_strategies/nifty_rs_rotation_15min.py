@@ -27,7 +27,11 @@ Trading, as decided on 30-Sep-2026:
     private -- not shown on its card), seeded from the stored 15-minute
     candles of the slots before -- the previous session's, downloaded
     each evening, so every morning starts from Kite's final candles. A
-    stock is ranked only with all RS_WINDOW bars; one missing a bar waits.
+    slot with no candle for a stock takes its close before it (nothing
+    traded in it): since 3 Aug 2026 F&O stocks -- most of this list --
+    have no candles after 15:15, so never a 15:15 candle; theirs is the
+    15:00 candle's close. A stock is ranked only with all RS_WINDOW bars;
+    one with no price at all for a bar waits.
     Started during a session, it ranks once it has RS_WINDOW bars of its
     own, since that day's earlier candles aren't stored until the evening.
   - Buys: while fewer than TOP_N are held, the highest-ranked stocks of
@@ -85,6 +89,7 @@ POSITION_SIZE_PCT = 10.0
 RS_WINDOW = 10
 RS_SUM_DIVISOR = 13.0
 RS_MULTIPLIER = 12.0
+CARRY_BACK = 25  # candles searched back for a close to carry into an empty seed slot -- a session's worth
 
 
 def _is_trading_day(d: date) -> bool:
@@ -161,23 +166,36 @@ def rs_value(stock: list, bench: list) -> float | None:
 
 
 async def _seeded_series(ctx, bar: datetime, instruments: dict) -> dict:
-    """The RS_WINDOW-1 slots before `bar` from the stored 15-minute candles
-    -- None where a stock has none. `instruments`: {symbol: Instrument}."""
+    """The RS_WINDOW-1 slots before `bar` from the stored 15-minute candles.
+    A slot a stock has no candle for takes its close before it -- nothing
+    traded in it, so the price stood where it was; the session's 15:15
+    candle, which F&O stocks don't have (see the module docstring). None
+    only where no close is stored from CARRY_BACK candles before the first
+    slot on. `instruments`: {symbol: Instrument}."""
     slots = bars_before(bar, RS_WINDOW - 1)
+    earliest = bars_before(slots[0], CARRY_BACK)[0]
     ids = {inst.id: symbol for symbol, inst in instruments.items()}
     rows = (
         await ctx.db.execute(
             select(OhlcvCandle.instrument_id, OhlcvCandle.ts, OhlcvCandle.close).where(
                 OhlcvCandle.instrument_id.in_(list(ids)), OhlcvCandle.timeframe == TIMEFRAME,
-                OhlcvCandle.ts >= slots[0].astimezone(timezone.utc), OhlcvCandle.ts <= slots[-1].astimezone(timezone.utc),
-            )
+                OhlcvCandle.ts >= earliest.astimezone(timezone.utc), OhlcvCandle.ts <= slots[-1].astimezone(timezone.utc),
+            ).order_by(OhlcvCandle.ts)
         )
     ).all()
-    stored = {(ids[instrument_id], as_aware_utc(ts)): close for instrument_id, ts, close in rows}
-    return {
-        "bars": [s.isoformat() for s in slots],
-        "closes": {symbol: [stored.get((symbol, s)) for s in slots] for symbol in instruments},
-    }
+    stored: dict[str, list[tuple[datetime, float]]] = {symbol: [] for symbol in instruments}
+    for instrument_id, ts, close in rows:
+        stored[ids[instrument_id]].append((as_aware_utc(ts), close))
+    closes = {}
+    for symbol, candles in stored.items():
+        series, last, i = [], None, 0
+        for slot in slots:
+            while i < len(candles) and candles[i][0] <= slot:
+                last = candles[i][1]
+                i += 1
+            series.append(last)
+        closes[symbol] = series
+    return {"bars": [s.isoformat() for s in slots], "closes": closes}
 
 
 async def evaluate(ctx) -> None:

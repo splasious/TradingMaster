@@ -2,7 +2,8 @@
 contracts whose live-feed candles still differ from Kite's final ones, and
 4abb8d69a900 moves MACD - RSI - 15 MIN's running deployment onto the fresh
 up-cross version, keeping its holdings; on 1 Oct, cc8323c6d54e moves it and
-RS Rotation 15 MIN onto their 57-stock lists."""
+RS Rotation 15 MIN onto their 57-stock lists, and 7dab5ef6e158 RS Rotation
+15 MIN onto the version that carries a close into an empty slot."""
 
 import hashlib
 import importlib.util
@@ -128,12 +129,14 @@ def _md5(path: pathlib.Path) -> str:
     return hashlib.md5(path.read_bytes().replace(b"\r", b"")).hexdigest()
 
 
-def test_the_built_ins_are_the_approved_57_stock_code():
+def test_the_built_ins_are_the_approved_code():
     fresh_cross = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
     seven = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
-    assert seven.CHANGES["macd_rsi_15min.py"][0] == fresh_cross.NEW_MD5  # it moves on from the fresh-cross version
-    for filename, (_, to_md5) in seven.CHANGES.items():
-        assert _md5(BUILTIN.parent / filename) == to_md5, filename
+    carry = _load("7dab5ef6e158_rs_15min_carry_close_into_empty_slot")
+    assert seven.CHANGES["macd_rsi_15min.py"][0] == fresh_cross.NEW_MD5  # each moves on from the version before
+    assert seven.CHANGES["nifty_rs_rotation_15min.py"][1] in carry.CHANGES["nifty_rs_rotation_15min.py"][0]
+    assert _md5(BUILTIN) == seven.CHANGES["macd_rsi_15min.py"][1]
+    assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == carry.CHANGES["nifty_rs_rotation_15min.py"][1]
 
 
 async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, db_session):
@@ -149,7 +152,8 @@ async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, d
     migration = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
     migration.CHANGES = {
         "macd_rsi_15min.py": (hashlib.md5(macd_code.encode()).hexdigest(), migration.CHANGES["macd_rsi_15min.py"][1]),
-        "nifty_rs_rotation_15min.py": (hashlib.md5(rs_code.encode()).hexdigest(), migration.CHANGES["nifty_rs_rotation_15min.py"][1]),
+        # the RS built-in has moved on since (7dab5ef6e158)
+        "nifty_rs_rotation_15min.py": (hashlib.md5(rs_code.encode()).hexdigest(), _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py")),
     }
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -168,6 +172,31 @@ async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, d
     assert sorted((a.object_id, a.previous_value["version_number"], a.new_value["version_number"]) for a in audit) == sorted(
         [(str(ids[0]), 11, 12), (str(ids[1]), 11, 12)]
     )
+
+
+
+async def test_a_running_rs_15min_deployment_moves_to_the_carry_forward_version(db_engine, db_session):
+    fifty, fifty_seven = "# RS 15, 50 stocks\n", "# RS 15, 57 stocks\n"
+    on_50 = await _deployment(db_session, "carry_a@tradingmaster.internal", fifty)
+    on_57 = await _deployment(db_session, "carry_b@tradingmaster.internal", fifty_seven)
+    edited = await _deployment(db_session, "carry_c@tradingmaster.internal", "# edited by hand since\n")
+    ids, before = [on_50.id, on_57.id, edited.id], edited.strategy_version_id
+    await db_session.commit()
+
+    migration = _load("7dab5ef6e158_rs_15min_carry_close_into_empty_slot")
+    to_md5 = migration.CHANGES["nifty_rs_rotation_15min.py"][1]
+    migration.CHANGES = {"nifty_rs_rotation_15min.py": ({hashlib.md5(c.encode()).hexdigest() for c in (fifty, fifty_seven)}, to_md5)}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    rs_code = (BUILTIN.parent / "nifty_rs_rotation_15min.py").read_text(encoding="utf-8")
+    for deployment_id in ids[:2]:
+        moved = await db_session.get(PaperNativeDeployment, deployment_id)
+        version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+        assert version.version_number == 12 and version.python_code == rs_code and "CARRY_BACK" in rs_code
+        assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0
+    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before
 
 
 # ------------------------------------------------- AM OP straddle at 3 PM --
