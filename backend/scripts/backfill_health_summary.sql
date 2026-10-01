@@ -1242,6 +1242,46 @@ SELECT to_char(d, 'DD Mon YYYY') AS session, with_1515, with_any FROM lagged
 WHERE rn <= 3 OR rn > n - 3 OR with_1515 IS DISTINCT FROM prev ORDER BY d;
 
 \echo
+\echo '== NF1. NIFTY futures in the chart catalog: expiry, lot size, linked to NIFTY 50, stored 5m/15m candles, last candle'
+SELECT i.expiry, i.lot_size, i.is_active, (i.underlying_instrument_id IS NOT NULL) AS linked_to_underlying,
+       (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '5m') AS c5m,
+       (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '15m') AS c15m,
+       (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = i.id) AS last_candle_ist
+FROM instruments i
+WHERE i.exchange = 'NFO' AND i.instrument_type = 'future' AND (i.symbol ~ '^NIFTY[0-9]' AND i.symbol LIKE '%FUT') AND i.symbol NOT LIKE 'NIFTYNXT%'
+ORDER BY i.expiry;
+
+\echo
+\echo '== NF2. NIFTY option expiries listed (from 30 Sep): strikes, calls/puts, with a 15:15 15m candle on 30 Sep'
+SELECT o.expiry, count(*) AS contracts, count(*) FILTER (WHERE o.option_type = 'CE') AS calls, count(*) FILTER (WHERE o.option_type = 'PE') AS puts,
+       min(o.strike) AS min_strike, max(o.strike) AS max_strike, min(o.lot_size) AS lot_min, max(o.lot_size) AS lot_max,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ohlcv_candles c WHERE c.instrument_id = o.id AND c.timeframe = '15m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30')) AS with_1515_candle
+FROM instruments o JOIN instruments u ON u.id = o.underlying_instrument_id AND u.symbol = 'NIFTY 50'
+WHERE o.exchange = 'NFO' AND o.instrument_type = 'option' AND o.expiry >= DATE '2026-09-30'
+GROUP BY o.expiry ORDER BY o.expiry LIMIT 8;
+
+\echo
+\echo '== NF3. Where an in-the-money NIFTY option costs about 150 (30 Sep 15:15 close): per expiry and side, the nearest ITM strike and the ITM strike whose premium is closest to 150 -- points in the money, premium, time value'
+WITH spot AS (
+  SELECT c.close AS s FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+  WHERE i.symbol = 'NIFTY 50' AND c.timeframe = '15m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30'
+), opt AS (
+  SELECT o.expiry, o.option_type, o.strike, c.close AS prem
+  FROM instruments o JOIN instruments u ON u.id = o.underlying_instrument_id AND u.symbol = 'NIFTY 50'
+  JOIN ohlcv_candles c ON c.instrument_id = o.id AND c.timeframe = '15m' AND c.ts = TIMESTAMPTZ '2026-09-30 15:15+05:30'
+  WHERE o.exchange = 'NFO' AND o.instrument_type = 'option' AND o.expiry >= DATE '2026-09-30'
+), itm AS (
+  SELECT opt.expiry, opt.option_type, opt.strike, opt.prem, abs(opt.strike - spot.s) AS pts FROM opt, spot
+  WHERE (opt.option_type = 'PE' AND opt.strike > spot.s) OR (opt.option_type = 'CE' AND opt.strike < spot.s)
+)
+SELECT 'nearest ITM' AS pick, expiry, option_type, round(pts::numeric) AS itm_points, round(prem::numeric, 1) AS premium, round((prem - pts)::numeric, 1) AS time_value
+FROM (SELECT DISTINCT ON (expiry, option_type) * FROM itm ORDER BY expiry, option_type, pts) a
+UNION ALL
+SELECT 'closest to 150', expiry, option_type, round(pts::numeric), round(prem::numeric, 1), round((prem - pts)::numeric, 1)
+FROM (SELECT DISTINCT ON (expiry, option_type) * FROM itm WHERE prem > 0 ORDER BY expiry, option_type, abs(prem - 150)) b
+ORDER BY 1 DESC, 2, 3;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
