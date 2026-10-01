@@ -1355,6 +1355,58 @@ WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a shor
 ORDER BY d.created_at;
 
 \echo
+\echo '== NB1. NFO coverage by timeframe and kind, as the Data Backfill page counts it (counts only): expired by its last bar (expiry on or before that bar''s day), past expiry but its last bar earlier (the page counts these as live and behind), still trading; last-bar days'
+WITH c AS (
+  SELECT cov.timeframe, s.expiry, (cov.last_ts AT TIME ZONE 'Asia/Kolkata')::date AS last_day,
+         CASE WHEN s.option_type IN ('CE', 'PE') AND coalesce(s.underlying_symbol, '') IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50') THEN 'index option'
+              WHEN s.option_type IN ('CE', 'PE') THEN 'stock option'
+              WHEN coalesce(s.underlying_symbol, '') IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50') THEN 'index future'
+              ELSE 'stock future' END AS kind
+  FROM bf_coverage cov JOIN bf_symbols s ON s.id = cov.symbol_id
+  WHERE s.source = 'zerodha_nfo'
+), t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today)
+SELECT c.timeframe, c.kind,
+       count(*) FILTER (WHERE c.expiry IS NOT NULL AND c.expiry <= c.last_day) AS expired_by_last_bar,
+       count(*) FILTER (WHERE c.expiry > c.last_day AND c.expiry < t.today) AS past_expiry_last_bar_earlier,
+       count(*) FILTER (WHERE c.expiry IS NULL OR (c.expiry >= t.today AND c.expiry > c.last_day)) AS still_trading,
+       to_char(min(c.last_day) FILTER (WHERE c.expiry > c.last_day AND c.expiry < t.today), 'DD Mon') AS oldest_last_bar_past_expiry,
+       to_char(min(c.expiry) FILTER (WHERE c.expiry > c.last_day AND c.expiry < t.today), 'DD Mon') AS first_expiry_past,
+       to_char(max(c.expiry) FILTER (WHERE c.expiry > c.last_day AND c.expiry < t.today), 'DD Mon') AS last_expiry_past,
+       to_char(min(c.last_day) FILTER (WHERE c.expiry IS NULL OR (c.expiry >= t.today AND c.expiry > c.last_day)), 'DD Mon') AS oldest_last_bar_trading,
+       to_char(max(c.last_day) FILTER (WHERE c.expiry IS NULL OR (c.expiry >= t.today AND c.expiry > c.last_day)), 'DD Mon') AS newest_last_bar_trading
+FROM c, t GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '== NB2. NFO futures by expiry (counts only): futures and underlyings tracked for backfill, coverage per timeframe, in the chart catalog, in Data Backfill watchlists'
+SELECT to_char(s.expiry, 'DD Mon YYYY') AS expiry,
+       CASE WHEN coalesce(s.underlying_symbol, '') IN ('NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50') THEN 'index' ELSE 'stock' END AS kind,
+       count(*) AS futures, count(DISTINCT s.underlying_symbol) AS underlyings,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_coverage c WHERE c.symbol_id = s.id AND c.timeframe = '5m')) AS with_5m,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_coverage c WHERE c.symbol_id = s.id AND c.timeframe = '15m')) AS with_15m,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_coverage c WHERE c.symbol_id = s.id AND c.timeframe = '30m')) AS with_30m,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_coverage c WHERE c.symbol_id = s.id AND c.timeframe = '60m')) AS with_60m,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_coverage c WHERE c.symbol_id = s.id AND c.timeframe = '1d')) AS with_1d,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM instruments i WHERE i.exchange = 'NFO' AND i.symbol = s.symbol)) AS in_catalog,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_watchlist_items w WHERE w.symbol_id = s.id)) AS in_watchlists
+FROM bf_symbols s
+WHERE s.source = 'zerodha_nfo' AND (s.option_type IS NULL OR s.option_type NOT IN ('CE', 'PE'))
+GROUP BY 1, 2, s.expiry ORDER BY s.expiry, 2;
+
+\echo
+\echo '-- NB2b. Underlyings that had a 29 Sep future: how many also have a 27 Oct / 24 Nov future tracked (counts only)'
+WITH sep AS (
+  SELECT DISTINCT underlying_symbol FROM bf_symbols
+  WHERE source = 'zerodha_nfo' AND (option_type IS NULL OR option_type NOT IN ('CE', 'PE')) AND expiry = DATE '2026-09-29'
+)
+SELECT count(*) AS underlyings_with_sep_future,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bf_symbols s WHERE s.source = 'zerodha_nfo' AND s.underlying_symbol = sep.underlying_symbol
+                                        AND (s.option_type IS NULL OR s.option_type NOT IN ('CE', 'PE')) AND s.expiry > DATE '2026-09-29')) AS with_a_later_future,
+       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM instruments i JOIN instruments u ON u.id = i.underlying_instrument_id
+                                        WHERE i.exchange = 'NFO' AND i.instrument_type = 'future' AND i.expiry > DATE '2026-09-29'
+                                          AND u.symbol = sep.underlying_symbol)) AS later_future_in_catalog
+FROM sep;
+
+\echo
 \echo '== OW1. Who owns what (users numbered by sign-up order, no emails): strategies, capital pools, native deployments in their pools (active), live deployments, broker accounts'
 WITH u AS (
   SELECT u.id, 'User ' || row_number() OVER (ORDER BY u.created_at) AS label, u.is_active,
