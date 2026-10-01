@@ -66,7 +66,7 @@ def _patch_hdfc(monkeypatch, *, token_status: int = 200, token_payload: dict | N
 
 def _patch_kotak_neo_sdk(monkeypatch):
     class _FakeNeoAPI:
-        def __init__(self, environment=None, access_token=None, neo_fin_key=None, consumer_key=None):
+        def __init__(self, environment=None, access_token=None, neo_fin_key=None, consumer_key=None, **kwargs):
             pass
 
         def totp_login(self, mobile_number=None, ucc=None, totp=None):

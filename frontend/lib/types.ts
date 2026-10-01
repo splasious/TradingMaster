@@ -22,7 +22,7 @@ export interface BrokerOut {
   is_real_adapter: boolean;
   /** False for brokers connected for login and funds only (no trading yet). */
   supports_trading: boolean;
-  /** Live native strategies can trade through it (Zerodha, Dhan, Angel One). */
+  /** Live native strategies can trade through it (Zerodha, Dhan, Angel One, Kotak Neo). */
   supports_live_strategies: boolean;
 }
 

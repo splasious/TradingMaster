@@ -22,15 +22,14 @@ psutil>=7.0
 openpyxl>=3.1
 kiteconnect>=5.0
 pyotp>=2.9
-# neo_api_client (Kotak Neo's broker SDK) is installed separately in the
-# Dockerfile with --no-deps: its setup.py hard-pins asyncio==3.4.3, a
-# stale Python 2/3.3-era backport package that fails to install on
-# Python 3.12 (which has asyncio built in natively) -- these are its
-# other real runtime dependencies, installed here unpinned instead of at
-# its stale exact versions.
-bidict
-pyjsparser
-PyJWT
+# Kotak Neo's broker SDK (kotakneoapi, package neo_api_client) is
+# installed separately in the Dockerfile with --no-deps -- it pins
+# pandas<3 -- and these are its runtime dependencies not listed elsewhere
+# here, at the versions it asks for.
+PyJWT>=2.10.1,<3
+structlog>=24.1.0,<27
+tenacity>=8.2.3,<10
+python-decouple>=3.8,<4
 python-dotenv
 websocket-client
 websockets

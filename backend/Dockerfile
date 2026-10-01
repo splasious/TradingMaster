@@ -2,17 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# git is required by pip to install neo_api_client (Kotak Neo's broker
-# SDK, requirements.txt) from its GitHub repo -- it has no PyPI release,
-# and python:3.12-slim doesn't include git by default.
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# --no-deps: neo_api_client's own setup.py hard-pins asyncio==3.4.3 (fails
-# to install on Python 3.12) among other stale exact versions -- its real
-# dependencies are already satisfied by requirements.txt above instead.
-RUN pip install --no-cache-dir --no-deps "neo_api_client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2"
+# Kotak Neo's official SDK (package neo_api_client), from PyPI.
+# --no-deps: it pins pandas<3 and numpy<3, and this app runs pandas 3 --
+# its other runtime dependencies (httpx, pydantic, PyJWT, websockets,
+# websocket-client, pyotp, structlog, tenacity, python-decouple) are in
+# requirements.txt above.
+RUN pip install --no-cache-dir --no-deps "kotakneoapi==3.0.7"
 
 COPY . .
 

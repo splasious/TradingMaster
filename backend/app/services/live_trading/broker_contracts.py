@@ -34,7 +34,11 @@ Read from each broker's own published material, not invented:
   Angel One the OpenAPI scrip master its SmartAPI docs point to: token,
             symbol, name, expiry (DDMONYYYY), strike (x100), lotsize,
             instrumenttype, exch_seg
-The Dhan and Angel One column sets are checked on every load; the broker
+  Kotak Neo the per-segment CSVs its SDK's scrip_master() points to
+            (kotakneoapi 3.0.7): pSymbol (token), pTrdSymbol, pSymbolName,
+            pOptionType (CE/PE/XX), pExpiryDate (1980-based on F&O),
+            "dStrikePrice;" (x100), lLotSize
+The Dhan, Angel One and Kotak column sets are checked on every load; the broker
 test (Settings > Brokers) shows what a sample of contracts matched to.
 """
 
@@ -46,7 +50,7 @@ import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -288,6 +292,48 @@ def angel_rows(data: list[dict]) -> list[ContractRow]:
     return rows
 
 
+_KOTAK_COLUMNS = ("pSymbol", "pTrdSymbol", "pSymbolName", "pOptionType", "pExpiryDate", "dStrikePrice", "lLotSize")
+# Kotak's F&O expiries are seconds from 1 Jan 1980 (the SDK's search_scrip
+# adds this to read them as Unix time).
+_KOTAK_EPOCH_SHIFT = 315511200
+
+
+def kotak_rows(text: str, segment: str) -> list[ContractRow]:
+    """One of Kotak Neo's per-segment contract lists (nse_cm or nse_fo)."""
+    reader = csv.DictReader(io.StringIO(text))
+    # "dStrikePrice;" carries a stray semicolon in Kotak's header.
+    fields = {(c or "").strip().rstrip(";"): c for c in reader.fieldnames or []}
+    _require_columns(fields, _KOTAK_COLUMNS, "Kotak Neo's")
+    rows = []
+    for raw in reader:
+        get = lambda name: (raw.get(fields[name]) or "").strip()  # noqa: E731
+        token, symbol, name = get("pSymbol"), get("pTrdSymbol"), get("pSymbolName")
+        if not token or not symbol:
+            continue
+        if segment == "nse_cm":
+            if "-" not in symbol:
+                continue
+            series = symbol.rsplit("-", 1)[1].upper()
+            if series not in _STOCK_SERIES:
+                continue
+            rows.append(ContractRow(KIND_STOCK, symbol.rsplit("-", 1)[0], None, None, None, series,
+                                    BrokerContract((segment, token), symbol, segment, token)))
+            continue
+        option_type = get("pOptionType").upper()
+        kind = KIND_OPTION if option_type in ("CE", "PE") else KIND_FUTURE if option_type == "XX" else None
+        expiry_raw = _float(get("pExpiryDate"))
+        if kind is None or not expiry_raw:
+            continue
+        expiry = datetime.fromtimestamp(int(expiry_raw) + _KOTAK_EPOCH_SHIFT, tz=timezone.utc).date()
+        strike = _float(get("dStrikePrice"))
+        rows.append(ContractRow(
+            kind, name, expiry, (strike / 100.0 if strike is not None else None) if kind == KIND_OPTION else None,  # listed x100
+            option_type if kind == KIND_OPTION else None, None,
+            BrokerContract((segment, token), symbol, segment, token, _int(get("lLotSize"))),
+        ))
+    return rows
+
+
 # --------------------------------------------------------------- fetching --
 
 async def _download(url: str) -> bytes:
@@ -312,6 +358,15 @@ async def _fetch_rows(broker_code: str, broker: Any) -> list[ContractRow]:
         except ValueError as exc:
             raise ContractListError("Angel One's contract list isn't valid JSON") from exc
         return angel_rows(data)
+    if broker_code == "kotak_neo":
+        try:
+            urls = await broker.contract_list_urls()
+        except Exception as exc:
+            raise ContractListError(f"Kotak Neo's contract list address: {exc}") from exc
+        rows: list[ContractRow] = []
+        for segment, url in urls.items():
+            rows += kotak_rows((await _download(url)).decode("utf-8", errors="replace"), segment)
+        return rows
     raise ContractListError(f"no contract list for broker '{broker_code}'")
 
 

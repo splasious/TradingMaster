@@ -44,14 +44,14 @@ class FakeKotakNeoClient:
     def quotes(self, instrument_tokens=None, quote_type=None):
         return {"data": [{"last_traded_price": self.ltp}]}
 
-    def limits(self, segment=None, exchange=None, product=None):
+    def limits(self):  # SDK v3: no arguments
         return {"data": {"Net": str(self.available_margin)}}
 
     def place_order(self, **kwargs):
         self.placed_orders.append(kwargs)
         return {"data": {"nOrdNo": "KN998877"}}
 
-    def order_report(self):
+    def order_report(self, order_id=None):  # SDK v3: one order by number, or the book
         return {"data": [{"nOrdNo": "KN998877", "ordSt": self.order_status}]}
 
     def positions(self):
@@ -62,7 +62,7 @@ class FakeKotakNeoClient:
 def fake_kotak_sdk(monkeypatch):
     client_holder: dict[str, FakeKotakNeoClient] = {}
 
-    def _neo_api_factory(environment=None, access_token=None, neo_fin_key=None, consumer_key=None):
+    def _neo_api_factory(environment=None, access_token=None, neo_fin_key=None, consumer_key=None, **kwargs):
         client = client_holder.setdefault("client", FakeKotakNeoClient())
         return client
 
@@ -146,7 +146,7 @@ async def test_entry_places_real_kotak_neo_order(db_session: AsyncSession, fake_
     order = client.placed_orders[0]
     assert order["transaction_type"] == "B"
     assert order["trading_symbol"] == "INFY"
-    assert order["exchange_segment"] == "NSE"
+    assert order["exchange_segment"] == "nse_cm"  # Kotak SDK v3 accepts only its canonical segments
     assert order["product"] == "CNC"
     assert order["order_type"] == "MKT"
     assert order["quantity"] == "2"

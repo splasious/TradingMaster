@@ -39,9 +39,9 @@ _REGISTRY: dict[str, type[BrokerInterface]] = {
 # own contract (live_trading/broker_contracts.py).
 _CONNECT_ONLY_BROKERS = {"angel_one", "dhan"}
 
-# Brokers live native strategies can trade through. Kotak Neo and HDFC
-# Securities aren't wired for them yet.
-_LIVE_STRATEGY_BROKERS = {"zerodha_kite", "dhan", "angel_one"}
+# Brokers live native strategies can trade through. HDFC Securities isn't
+# wired for them (its API docs couldn't be verified).
+_LIVE_STRATEGY_BROKERS = {"zerodha_kite", "dhan", "angel_one", "kotak_neo"}
 
 # Brokers whose auth can't complete in a single authenticate() call --
 # they need an interactive browser login first (see the relevant

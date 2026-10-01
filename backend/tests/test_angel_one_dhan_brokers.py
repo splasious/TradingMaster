@@ -126,7 +126,7 @@ async def test_only_live_strategies_trade_through_them():
     with pytest.raises(ValueError, match="Dhan is connected for login and funds only"):
         require_trading_support("dhan", "Dhan")
     assert supports_live_strategies("dhan") and supports_live_strategies("angel_one") and supports_live_strategies("zerodha_kite")
-    assert not supports_live_strategies("kotak_neo") and not supports_live_strategies("hdfc_securities")
+    assert supports_live_strategies("kotak_neo") and not supports_live_strategies("hdfc_securities")
     with pytest.raises(NotImplementedError):
         await DhanBroker().get_trades()
 

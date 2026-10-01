@@ -21,11 +21,11 @@ price step). Prices go on a grid every NSE tick size divides (price_step):
 1 up to Rs 20,000, 5 above.
 
 The contract each order names is the broker's own (broker_contracts.py):
-Zerodha's symbols are this app's; Dhan and Angel One are matched by what
-the contract is. Each adapter's place_order() takes the same order dict --
+Zerodha's symbols are this app's; Dhan, Angel One and Kotak Neo are
+matched by what the contract is. Each adapter's place_order() takes the same order dict --
 tradingsymbol / exchange / token / product (Kite's MIS-NRML-CNC) /
 order_type / limit_price -- and translates it to its broker's vocabulary.
-Kotak Neo and HDFC Securities aren't wired for live strategies yet
+HDFC Securities isn't wired for live strategies
 (registry.supports_live_strategies).
 
 Product by the strategy's style (agreed 1 Oct): intraday -> MIS; overnight
@@ -54,7 +54,7 @@ FNO_TYPES = ("option", "future")
 
 # How often an order's status is asked for while it works: Angel One reads
 # it from the whole order book, so less often.
-_POLL_SECONDS = {"angel_one": 1.0}
+_POLL_SECONDS = {"angel_one": 1.0, "kotak_neo": 1.0}
 
 # The fill fields of each broker's order report, first match wins: Kite,
 # Kotak Neo, Dhan, Angel One.
@@ -141,6 +141,17 @@ _POSITION_KEYS = {
 }
 
 
+def _kotak_positions(rows: list[dict]) -> dict:
+    """Kotak reports a position as filled buys/sells today (fl...) and
+    carried forward (cf...); the net is buys less sells."""
+    out: dict = {}
+    for row in rows:
+        key = (str(row.get("exSeg") or ""), str(row.get("tok") or ""))
+        net = sum(float(row.get(f) or 0) for f in ("flBuyQty", "cfBuyQty")) - sum(float(row.get(f) or 0) for f in ("flSellQty", "cfSellQty"))
+        out[key] = out.get(key, 0.0) + net
+    return out
+
+
 def _holdings(broker_code: str, rows: list[dict]) -> dict:
     if broker_code == "zerodha_kite":
         return _kite_holdings(rows)
@@ -151,6 +162,9 @@ def _holdings(broker_code: str, rows: list[dict]) -> dict:
         elif broker_code == "angel_one":
             key = (str(row.get("exchange") or "NSE"), str(row.get("symboltoken") or ""))
             quantity = float(row.get("quantity") or 0) + float(row.get("t1quantity") or 0)
+        elif broker_code == "kotak_neo":  # not modelled by Kotak's SDK: read defensively
+            token = row.get("instrumentToken") or row.get("exchangeIdentifier") or ""
+            key, quantity = (str(row.get("exchangeSegment") or "nse_cm"), str(token)), float(row.get("quantity") or 0)
         else:
             continue
         out[key] = out.get(key, 0.0) + quantity
@@ -233,7 +247,11 @@ class BrokerGateway:
         holdings overnight)."""
         fields, quantity_fields = _POSITION_KEYS.get(self.broker_code, (("exchange", "tradingsymbol"), ("quantity",)))
         held: dict[tuple[str, str], float] = {}
-        for row in await self.broker.get_positions() or []:
+        rows = await self.broker.get_positions() or []
+        if self.broker_code == "kotak_neo":
+            held.update(_kotak_positions(rows))
+            rows = []
+        for row in rows:
             key = tuple(str(row.get(f) or "") for f in fields)
             held[key] = held.get(key, 0.0) + float(_number(row, quantity_fields) or 0)
         get_holdings = getattr(self.broker, "get_holdings", None)

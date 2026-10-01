@@ -65,6 +65,10 @@ KITE_STATE_MAP = {
 # order-verification logic (neo_api_client/api/order_api.py), which checks
 # for exactly these lowercase values before allowing a cancel.
 KOTAK_NEO_STATE_MAP = {
+    "put order req received": LiveOrderStatus.SUBMITTED,  # the rest: SDK v3's orderfeed OrderStatus
+    "validation pending": LiveOrderStatus.SUBMITTED,
+    "open pending": LiveOrderStatus.ACKNOWLEDGED,
+    "modified": LiveOrderStatus.OPEN,
     "rejected": LiveOrderStatus.REJECTED,
     "cancelled": LiveOrderStatus.CANCELLED,
     "open": LiveOrderStatus.OPEN,

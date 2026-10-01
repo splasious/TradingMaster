@@ -138,16 +138,16 @@ async def test_the_endpoint_refuses_what_it_cant_test(client: AsyncClient, seede
     headers = await _headers(client, seeded_admin)
     admin = (await db_session.execute(select(User).where(User.email == seeded_admin["email"]))).scalar_one()
     brokers = {}
-    for code, name in (("zerodha_kite", "Zerodha Kite"), ("kotak_neo", "Kotak Neo")):
+    for code, name in (("zerodha_kite", "Zerodha Kite"), ("hdfc_securities", "HDFC Securities")):
         brokers[code] = (await db_session.execute(select(Broker).where(Broker.code == code))).scalar_one_or_none()
         if brokers[code] is None:
             brokers[code] = Broker(code=code, name=name, is_enabled=True)
             db_session.add(brokers[code])
     await db_session.flush()
     paper = BrokerAccount(user_id=admin.id, broker_id=brokers["zerodha_kite"].id, account_label="P", environment="paper")
-    kotak = BrokerAccount(user_id=admin.id, broker_id=brokers["kotak_neo"].id, account_label="K", environment="live")
+    hdfc = BrokerAccount(user_id=admin.id, broker_id=brokers["hdfc_securities"].id, account_label="H", environment="live")
     kite = BrokerAccount(user_id=admin.id, broker_id=brokers["zerodha_kite"].id, account_label="L", environment="live")
-    db_session.add_all([paper, kotak, kite])
+    db_session.add_all([paper, hdfc, kite])
     await db_session.commit()
 
     async def post(account, symbol="IDEA"):
@@ -155,7 +155,7 @@ async def test_the_endpoint_refuses_what_it_cant_test(client: AsyncClient, seede
                                  headers=headers)
 
     assert "Only a live broker account" in (await post(paper)).json()["detail"]
-    assert "can't trade through Kotak Neo yet" in (await post(kotak)).json()["detail"]
+    assert "can't trade through HDFC Securities yet" in (await post(hdfc)).json()["detail"]
     monkeypatch.setattr(live_native_api, "can_test_now", lambda now: "NSE is closed -- run the test while the market is open")
     assert (await post(kite)).json()["detail"].startswith("NSE is closed")
     monkeypatch.setattr(live_native_api, "can_test_now", lambda now: None)

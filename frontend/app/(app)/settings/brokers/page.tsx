@@ -660,7 +660,7 @@ export default function BrokersSettingsPage() {
           <p className="text-sm text-text-muted">
             Zerodha Kite, HDFC Securities, Kotak Neo, Angel One and Dhan all use real adapters -- session-token
             auth via interactive login for Kite and HDFC, TOTP for Kotak Neo, Angel One and Dhan. Live strategies trade through
-            Zerodha, Dhan and Angel One, on an account that passed the broker test.
+            Zerodha, Dhan, Angel One and Kotak Neo, on an account that passed the broker test.
           </p>
         </div>
         {canManage && <Button onClick={() => setModalOpen(true)}>Connect Broker</Button>}

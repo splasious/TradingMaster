@@ -187,3 +187,49 @@ async def test_positions_and_holdings_are_keyed_as_each_broker_names_contracts()
     # the same keys the contract lists give them
     assert ContractIndex(dhan_rows(DHAN_CSV)).match(_option()).key == ("NSE_FNO", "40001")
     assert ContractIndex(angel_rows(ANGEL)).match(_stock()).key == ("NSE", "3045")
+
+
+def _kotak_expiry(day: date) -> str:
+    # Kotak lists F&O expiries as seconds from 1 Jan 1980: Unix time less 315511200.
+    from datetime import datetime as _dt, timezone as _tz
+
+    return str(int(_dt(day.year, day.month, day.day, 9, 0, tzinfo=_tz.utc).timestamp()) - 315511200)
+
+
+KOTAK_CM = (
+    "pSymbol,pGroup,pExchSeg,pInstType,pSymbolName,pTrdSymbol,pOptionType,pExpiryDate,lLotSize,dTickSize , dStrikePrice; \n"
+    "3045,EQ,nse_cm,,SBIN,SBIN-EQ,,,1,5,-1\n"
+    "999,BE,nse_cm,,XYZ,XYZ-BE,,,1,5,-1\n"
+    "26000,,nse_cm,,NIFTY,Nifty 50,,,1,0,-1\n"
+)
+KOTAK_FO = (
+    "pSymbol,pGroup,pExchSeg,pInstType,pSymbolName,pTrdSymbol,pOptionType,pExpiryDate,lLotSize,dTickSize , dStrikePrice; \n"
+    f"40001,,nse_fo,OPTIDX,NIFTY,NIFTY2610622700CE,CE,{_kotak_expiry(EXPIRY)},65,5,2270000\n"
+    f"40002,,nse_fo,OPTIDX,NIFTY,NIFTY2610622700PE,PE,{_kotak_expiry(EXPIRY)},65,5,2270000\n"
+    f"40010,,nse_fo,FUTIDX,NIFTY,NIFTY26OCTFUT,XX,{_kotak_expiry(date(2026, 10, 27))},65,10,-1\n"
+)
+
+
+def test_kotak_contracts_from_its_two_segment_lists():
+    from app.services.live_trading.broker_contracts import kotak_rows
+
+    index = ContractIndex(kotak_rows(KOTAK_CM, "nse_cm") + kotak_rows(KOTAK_FO, "nse_fo"))
+    stock = index.match(_stock())
+    assert (stock.key, stock.symbol, stock.exchange, stock.token) == (("nse_cm", "3045"), "SBIN-EQ", "nse_cm", "3045")
+    assert index.match(_stock("XYZ")).symbol == "XYZ-BE"
+    option = index.match(_option())
+    assert (option.key, option.symbol, option.lot_size) == (("nse_fo", "40001"), "NIFTY2610622700CE", 65)  # strike /100, 1980 dates
+    assert index.match(_option(symbol="NIFTY2610622700PE", option_type="PE")).token == "40002"
+    assert index.match(_future()).token == "40010"
+    with pytest.raises(ContractListError, match="Kotak Neo's contract list has changed format -- missing lLotSize"):
+        kotak_rows(KOTAK_FO.replace("lLotSize", "lot"), "nse_fo")
+
+
+async def test_kotak_positions_net_todays_and_carried_quantities():
+    from app.services.live_trading.native_gateway import BrokerGateway
+
+    kotak = BrokerGateway("kotak_neo", _Holder(
+        [{"exSeg": "nse_fo", "tok": "40001", "flBuyQty": "0", "flSellQty": "65", "cfBuyQty": "130", "cfSellQty": "0"}],
+        [{"exchangeSegment": "nse_cm", "instrumentToken": 3045, "quantity": 12}],
+    ))
+    assert await kotak.net_positions() == {("nse_fo", "40001"): 65.0, ("nse_cm", "3045"): 12.0}

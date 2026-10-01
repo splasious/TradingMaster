@@ -2,6 +2,36 @@
 money once connected through Settings > Brokers, mirroring zerodha_broker.py
 and delta_broker.py.
 
+SDK version 3 (Oct 2026): this wraps Kotak's current official SDK,
+`kotakneoapi` 3.0.7 on PyPI (package `neo_api_client`, Kotak-Neo's own
+"kotak-neo-python"), which replaced the v2 GitHub release this adapter was
+first written against. What changed for this adapter, read from the v3
+source and checked by running it against a fake HTTP transport (the exact
+requests it sends -- tests/test_kotak_neo_broker.py):
+  - place_order only accepts the canonical segments "nse_cm" / "nse_fo"
+    (the "NSE"/"NFO" aliases are rejected), so _SEGMENTS maps ours;
+    the order goes out as jData {es, pc, pr, pt, qt, rt, tp, ts, tt, ig, mp:
+    "0", am: "NO"}; quantity is in units, not lots (Kotak's own guidance)
+  - limits() takes no arguments (it always asks for ALL/ALL/ALL)
+  - order_report(order_id) fetches one order (GET /quick/user/orders/<no>)
+  - holdings() is GET /portfolio/v1/holdings; positions() GET
+    /quick/user/positions
+  - scrip_master(segment) returns that segment's contract-list CSV URL;
+    the columns used (live_trading/broker_contracts.py) are the ones the
+    SDK's own search_scrip reads: pSymbolName, pOptionType, pExpiryDate
+    (+315511200 s on F&O), "dStrikePrice;" (x100) -- plus pSymbol (the
+    token), pTrdSymbol and lLotSize
+  - HTTP/2 is off (http2=False): it would need the h2 package, and gains
+    nothing for a handful of calls
+Response fields (nOrdNo, ordSt, fldQty, avgPrc, rejRsn on orders; tok,
+exSeg, flBuyQty/flSellQty/cfBuyQty/cfSellQty on positions) are the SDK's
+own order-feed models' names; holdings' fields aren't modelled by the SDK
+and are read defensively. The broker test runs a one-share order through
+all of it before any live strategy can use the account.
+
+What follows is the original v2-era description; where it differs, the
+v3 notes above win.
+
 Unlike Zerodha (raw HTTP, no official SDK) and Delta (raw HTTP, self-signed
 HMAC), Kotak Neo publishes an official Python SDK
 (https://github.com/Kotak-Neo/Kotak-neo-api-v2, org "Kotak-Neo" -- the
@@ -80,9 +110,10 @@ from app.services.broker.base import BrokerInterface
 # here the same way.
 _ORDER_TYPE_MAP = {"market": "MKT", "limit": "L"}
 
-# Kotak Neo's exchange_segment short codes accept "NSE"/"NFO" directly
-# (settings.py's alias dict maps them to "nse_cm"/"nse_fo" internally) --
-# no translation needed for the values this codebase already uses.
+# This app's exchange codes -> Kotak's canonical segments (SDK v3 rejects
+# the "NSE"/"NFO" aliases on orders).
+_SEGMENTS = {"NSE": "nse_cm", "NFO": "nse_fo", "nse_cm": "nse_cm", "nse_fo": "nse_fo"}
+_PRODUCTS = ("CNC", "MIS", "NRML")
 
 
 class KotakNeoAPIError(Exception):
@@ -147,7 +178,7 @@ class KotakNeoBroker(BrokerInterface):
             import pyotp
             from neo_api_client import NeoAPI
 
-            client = NeoAPI(environment="prod", access_token=None, neo_fin_key=None, consumer_key=consumer_key)
+            client = NeoAPI(environment="prod", access_token=None, neo_fin_key=None, consumer_key=consumer_key, http2=False)
             totp_code = pyotp.TOTP(totp_secret).now()
             login_resp = client.totp_login(mobile_number=mobile_number, ucc=ucc, totp=totp_code)
             error = _is_error_response(login_resp)
@@ -174,7 +205,7 @@ class KotakNeoBroker(BrokerInterface):
         # matching how this method is used elsewhere in this codebase
         # (a lightweight "is this session actually alive" probe).
         client = self._require_client()
-        result = await asyncio.to_thread(lambda: client.limits(segment="ALL", exchange="ALL", product="ALL"))
+        result = await asyncio.to_thread(client.limits)
         error = _is_error_response(result)
         if error:
             raise KotakNeoAPIError(f"Kotak Neo profile/limits check failed: {error}")
@@ -185,7 +216,7 @@ class KotakNeoBroker(BrokerInterface):
 
     async def get_balance(self) -> dict[str, Any]:
         client = self._require_client()
-        result = await asyncio.to_thread(lambda: client.limits(segment="ALL", exchange="ALL", product="ALL"))
+        result = await asyncio.to_thread(client.limits)
         error = _is_error_response(result)
         if error:
             raise KotakNeoAPIError(f"Kotak Neo get_balance failed: {error}")
@@ -212,6 +243,27 @@ class KotakNeoBroker(BrokerInterface):
             raise KotakNeoAPIError(f"Kotak Neo get_positions failed: {error}")
         data = result.get("data", []) if isinstance(result, dict) else result
         return data if isinstance(data, list) else []
+
+    async def get_holdings(self) -> list[dict[str, Any]]:
+        client = self._require_client()
+        result = await asyncio.to_thread(client.holdings)
+        error = _is_error_response(result)
+        if error:
+            raise KotakNeoAPIError(f"Kotak Neo get_holdings failed: {error}")
+        data = result.get("data", []) if isinstance(result, dict) else result
+        return data if isinstance(data, list) else []
+
+    async def contract_list_urls(self) -> dict[str, str]:
+        """Kotak's contract-list CSV URL for each segment live strategies
+        trade (scrip_master needs only the consumer key)."""
+        client = self._require_client()
+        urls = {}
+        for segment in ("nse_cm", "nse_fo"):
+            result = await asyncio.to_thread(lambda seg=segment: client.scrip_master(exchange_segment=seg))
+            if not isinstance(result, str) or not result.startswith("http"):
+                raise KotakNeoAPIError(f"Kotak Neo gave no {segment} contract list: {_is_error_response(result) or result}")
+            urls[segment] = result
+        return urls
 
     async def get_orders(self) -> list[dict[str, Any]]:
         client = self._require_client()
@@ -292,12 +344,17 @@ class KotakNeoBroker(BrokerInterface):
         side = order["side"].upper()
         transaction_type = "B" if side == "BUY" else "S"
         order_type = _ORDER_TYPE_MAP.get(order.get("order_type", "market"), "MKT")
-        price = str(order.get("limit_price") or "0")
+        limit = order.get("limit_price")
+        price = f"{float(limit):.2f}" if limit else "0"
+        segment = _SEGMENTS.get(order.get("exchange", "NSE"))
+        product = order.get("product", "CNC")
+        if segment is None or product not in _PRODUCTS:
+            raise KotakNeoAPIError(f"Unsupported exchange/product for Kotak Neo: {order.get('exchange')}/{product}")
 
         def _place() -> Any:
             return client.place_order(
-                exchange_segment=order.get("exchange", "NSE"),
-                product=order.get("product", "CNC"),
+                exchange_segment=segment,
+                product=product,
                 price=price,
                 order_type=order_type,
                 quantity=str(int(order["quantity"])),
@@ -351,13 +408,22 @@ class KotakNeoBroker(BrokerInterface):
         return {"broker_order_id": str(order_id), "status": "CANCEL PENDING", "raw": result}
 
     async def get_order_status(self, order_id: str) -> dict[str, Any]:
+        """The one order (order_report(order_id)); the whole order book if
+        that answer doesn't carry it."""
         client = self._require_client()
-        result = await asyncio.to_thread(client.order_report)
-        error = _is_error_response(result)
-        if error:
-            raise KotakNeoAPIError(f"Kotak Neo get_order_status failed: {error}")
-        rows = result.get("data", []) if isinstance(result, dict) else result
-        rows = rows if isinstance(rows, list) else []
-        match = next((r for r in rows if str(r.get("nOrdNo")) == str(order_id)), None)
+
+        def _rows(result: Any) -> list[dict]:
+            error = _is_error_response(result)
+            if error:
+                raise KotakNeoAPIError(f"Kotak Neo get_order_status failed: {error}")
+            rows = result.get("data", []) if isinstance(result, dict) else result
+            return [rows] if isinstance(rows, dict) else (rows if isinstance(rows, list) else [])
+
+        def _find(rows: list[dict]) -> dict | None:
+            return next((r for r in rows if str(r.get("nOrdNo")) == str(order_id)), None)
+
+        match = _find(_rows(await asyncio.to_thread(lambda: client.order_report(order_id=order_id))))
+        if match is None:
+            match = _find(_rows(await asyncio.to_thread(client.order_report)))
         status = match.get("ordSt", "unknown") if match else "unknown"
         return {"order_id": order_id, "status": status, "raw": match or {}}
