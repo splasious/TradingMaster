@@ -1052,6 +1052,43 @@ WHERE s.source = 'zerodha' AND s.symbol = 'HEG' AND b.timeframe = '1d'
 ORDER BY b.ts DESC LIMIT 5;
 
 \echo
+\echo '== NS1. The 7 stocks added to MACD - RSI - 15 MIN and RS Rotation 15 MIN on 1 Oct (numbered, no names): chart instrument, backfill symbol, stored 15m/5m candles, 15m candles on 30 Sep, the 9 RS seed slots of 30 Sep (13:15-15:15), last 15m candle'
+WITH names(n, symbol) AS (VALUES (1, 'CUPID'), (2, 'HFCL'), (3, 'KIRLOSENG'), (4, 'MTARTECH'), (5, 'STLTECH'), (6, 'TDPOWERSYS'), (7, 'WELCORP'))
+SELECT n.n,
+       (SELECT count(*) FROM instruments i WHERE i.exchange = 'NSE' AND i.symbol = n.symbol) AS nse_instruments,
+       (SELECT count(*) FROM bf_symbols s WHERE s.source = 'zerodha' AND s.symbol = n.symbol) AS bf_symbols,
+       (SELECT count(*) FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id WHERE s.source = 'zerodha' AND s.symbol = n.symbol AND b.timeframe = '15m') AS bf_15m,
+       (SELECT count(*) FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id WHERE s.source = 'zerodha' AND s.symbol = n.symbol AND b.timeframe = '5m') AS bf_5m,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'NSE' AND i.symbol = n.symbol AND c.timeframe = '15m') AS chart_15m,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'NSE' AND i.symbol = n.symbol AND c.timeframe = '5m') AS chart_5m,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'NSE' AND i.symbol = n.symbol AND c.timeframe = '15m'
+          AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-09-30') AS chart_15m_30sep,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.exchange = 'NSE' AND i.symbol = n.symbol AND c.timeframe = '15m'
+          AND c.ts BETWEEN TIMESTAMPTZ '2026-09-30 13:15+05:30' AND TIMESTAMPTZ '2026-09-30 15:15+05:30') AS rs_seed_slots,
+       (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+          WHERE i.exchange = 'NSE' AND i.symbol = n.symbol AND c.timeframe = '15m') AS last_15m
+FROM names n ORDER BY n.n;
+
+\echo
+\echo '== NS2. The 50 stocks already on both lists, as counts: how many have >= 151 stored 15m candles (MACD warm-up) and all 9 RS seed slots of 30 Sep; NIFTY 50 seed slots'
+WITH fifty(symbol) AS (VALUES ('ABCAPITAL'), ('ACUTAAS'), ('ADANIENSOL'), ('ADANIPOWER'), ('AMBER'), ('ANANDRATHI'), ('APARINDS'), ('ASHOKLEY'), ('ATHERENERG'), ('AUBANK'),
+  ('BANKINDIA'), ('BHARATFORG'), ('BHEL'), ('BSE'), ('CANBK'), ('CUMMINSIND'), ('DELHIVERY'), ('EICHERMOT'), ('FEDERALBNK'), ('FORTIS'),
+  ('GLENMARK'), ('GVT&D'), ('HDFCAMC'), ('HINDALCO'), ('HINDCOPPER'), ('IDEA'), ('IIFL'), ('INDIANB'), ('KARURVYSYA'), ('LAURUSLABS'),
+  ('LTF'), ('MANAPPURAM'), ('MCX'), ('MFSL'), ('MUTHOOTFIN'), ('NATIONALUM'), ('NAVINFLUOR'), ('NYKAA'), ('PAYTM'), ('POLYCAB'),
+  ('POWERINDIA'), ('RADICO'), ('RBLBANK'), ('SAIL'), ('SBIN'), ('SHRIRAMFIN'), ('SOLARINDS'), ('TVSMOTOR'), ('UNIONBANK'), ('VEDL')),
+per AS (
+  SELECT f.symbol,
+         (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '15m') AS c15,
+         (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id AND c.timeframe = '15m'
+            AND c.ts BETWEEN TIMESTAMPTZ '2026-09-30 13:15+05:30' AND TIMESTAMPTZ '2026-09-30 15:15+05:30') AS seed
+  FROM fifty f LEFT JOIN instruments i ON i.exchange = 'NSE' AND i.symbol = f.symbol
+)
+SELECT count(*) AS stocks, count(*) FILTER (WHERE c15 >= 151) AS with_151_15m, count(*) FILTER (WHERE seed = 9) AS with_9_seed_slots,
+       (SELECT count(*) FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id WHERE i.symbol = 'NIFTY 50' AND c.timeframe = '15m'
+          AND c.ts BETWEEN TIMESTAMPTZ '2026-09-30 13:15+05:30' AND TIMESTAMPTZ '2026-09-30 15:15+05:30') AS nifty_seed_slots
+FROM per;
+
+\echo
 \echo '== Q4. Prices advanced strategies recorded -- entries/exits of trades closed today (IST) and entries of every open holding/leg -- vs the real 5m open at that minute and the last stored close before it (no stock names or prices)'
 WITH closed AS (
   SELECT d.strategy_id, 'trade entry' AS kind, t.opened_at AS at, CASE WHEN l.value->>'instrument_id' ~ '^[0-9a-fA-F-]{36}$' THEN (l.value->>'instrument_id')::uuid END AS instrument_id, CASE WHEN l.value->>'entry_price' ~ '^-?\d+(\.\d+)?$' THEN (l.value->>'entry_price')::numeric END AS price
