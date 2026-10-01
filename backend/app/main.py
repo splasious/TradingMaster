@@ -16,6 +16,7 @@ from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_session_monitor import kite_session_monitor_scheduler
 from app.services.broker.kite_ticker_service import kite_ticker_service
 from app.services.fo_scan.oi_store_scheduler import fo_oi_store_scheduler
+from app.services.live_trading.native_scheduler import live_native_scheduler
 from app.services.live_trading.scheduler import live_trading_scheduler
 from app.services.market_data.active_timeframe_sync_scheduler import active_timeframe_sync_scheduler
 from app.services.market_data.kite_rest_price_feed import kite_rest_price_feed
@@ -41,6 +42,7 @@ async def lifespan(app: FastAPI):
     kite_rest_price_feed.start()
     paper_trading_scheduler.start()
     live_trading_scheduler.start()
+    live_native_scheduler.start()
     bf_live_sync_scheduler.start()
     backfill_worker.start()
     timeframe_purge.start()
@@ -66,6 +68,7 @@ async def lifespan(app: FastAPI):
     timeframe_purge.stop()
     backfill_worker.stop()
     bf_live_sync_scheduler.stop()
+    live_native_scheduler.stop()
     live_trading_scheduler.stop()
     paper_trading_scheduler.stop()
     kite_rest_price_feed.stop()

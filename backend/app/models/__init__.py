@@ -28,6 +28,7 @@ from app.models.backtest import (
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, BrokerCredential
 from app.models.fo_scan import FoOiSnapshot, FoOiTotal, FoScanResult
 from app.models.instrument import Instrument
+from app.models.live_native import LiveNativeDeployment, LiveNativePosition, LiveNativeTrade, LiveRiskSettings
 from app.models.live_trading import KillSwitch, LiveDeployment, LiveOrder, LivePosition, LiveTrade
 from app.models.market_data import BackfillJob, OhlcvCandle
 from app.models.paper_trading import (
@@ -69,6 +70,10 @@ __all__ = [
     "BrokerCredential",
     "Instrument",
     "KillSwitch",
+    "LiveNativeDeployment",
+    "LiveNativePosition",
+    "LiveNativeTrade",
+    "LiveRiskSettings",
     "LiveDeployment",
     "LiveOrder",
     "LivePosition",

@@ -73,6 +73,17 @@ class LiveOrder(Base):
     product: Mapped[str | None] = mapped_column(String(10))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A native strategy's live order (models/live_native.py) -- with
+    # instrument_id/broker_account_id/owner_id set as for a manual one --
+    # and what it was for: "open", "close", "rollback" (closing a leg that
+    # filled when another of the same batch failed) or "square_off".
+    native_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("live_native_deployments.id", ondelete="CASCADE"), nullable=True
+    )
+    purpose: Mapped[str | None] = mapped_column(String(20))
+    # The broker's own fill: how much of it executed, at what average price.
+    filled_quantity: Mapped[float | None] = mapped_column(Float)
+    average_price: Mapped[float | None] = mapped_column(Float)
 
 
 class LivePosition(Base):
