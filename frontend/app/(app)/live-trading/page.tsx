@@ -2,6 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Play, Square, XCircle, Zap } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 import { LiveTradingBanner } from "@/components/layout/live-trading-banner";
@@ -409,7 +410,11 @@ export default function LiveTradingPage() {
       <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
           <h1 className="text-xl font-semibold text-text-primary">Live Trading</h1>
-          <p className="text-sm text-text-muted">Real orders through a connected broker, gated by the safety checklist and risk engine.</p>
+          <p className="text-sm text-text-muted">
+            Real orders through a connected broker, gated by the safety checklist and risk engine -- for Visual and Python Code
+            strategies. Advanced strategies go live from their card&apos;s Live switch on the{" "}
+            <Link href="/trading" className="text-active hover:underline">Trading page</Link>.
+          </p>
         </div>
         <Button variant="destructive" onClick={() => setModalOpen(true)}>
           <Play className="h-3.5 w-3.5" /> Go Live

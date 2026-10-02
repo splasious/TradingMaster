@@ -309,12 +309,13 @@ async def test_the_card_shows_its_next_check(world):
 
 
 async def test_legs_kept_at_the_top_of_the_state_show_as_its_position(world, db_session):
-    state = {"regime": "BEARISH", "pcr_at_entry": 0.71, "legs": {
+    state = {"regime": "BEARISH", "pcr_at_entry": 0.71, "last_pcr": 0.6984, "last_pcr_at": "10:15", "legs": {
         "future": {"instrument_id": str(world.option.id), "side": "sell", "quantity": 650, "entry_price": 120.0,
                    "opened_at": "2026-10-05T10:15:06+05:30"},
     }}
     position = await _build_position_out(db_session, state)
-    assert position.bias == "BEARISH" and len(position.legs) == 1 and position.metrics == {"pcr_at_entry": 0.71}
+    assert position.bias == "BEARISH" and len(position.legs) == 1 and position.legs[0].instrument_type == "option"
+    assert position.metrics == {"total_oi_pcr_at_entry": "0.710", "total_oi_pcr_last_close": "0.698 @ 10:15"}
     assert await _build_position_out(db_session, {"regime": "FLAT", "legs": {}}) is None
 
 

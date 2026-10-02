@@ -69,7 +69,7 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
 }
 
 /** Aggregates Total Equity / Day P&L / Unrealized P&L the same way
- * app/(app)/paper-trading/page.tsx's PortfolioCard does (realized P&L
+ * app/(app)/trading/page.tsx's PortfolioCard does (realized P&L
  * today from trade history + every open position's unrealized P&L, both
  * regular and Advanced Python/native) -- deliberately not the portfolio
  * API's own equity/unrealized_pnl fields, per that component's own

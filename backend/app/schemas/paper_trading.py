@@ -122,6 +122,9 @@ class NativeLegOut(BaseModel):
     quantity: float
     entry_price: float
     current_price: float | None
+    # "future" books only its P&L (native_runner.open_leg) -- the card's
+    # equity counts its P&L, not its full contract value.
+    instrument_type: str | None = None
 
 
 class NativeHoldingOut(NativeLegOut):

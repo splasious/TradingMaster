@@ -10,6 +10,10 @@ const nextConfig: NextConfig = {
   // output shape and fail with a stray ENOENT if "standalone" is forced on
   // every build.
   ...(process.env.DESKTOP_BUILD === "1" ? { output: "standalone" as const } : {}),
+  // Paper Trading became Trading (2 Oct 2026): old links and bookmarks still land there.
+  async redirects() {
+    return [{ source: "/paper-trading", destination: "/trading", permanent: false }];
+  },
 };
 
 export default nextConfig;

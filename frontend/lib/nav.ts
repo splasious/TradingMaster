@@ -56,7 +56,7 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
   {
     label: "Trading",
     items: [
-      { label: "Paper Trading", href: "/paper-trading", icon: Activity },
+      { label: "Trading", href: "/trading", icon: Activity },
       { label: "Live Trading", href: "/live-trading", icon: Radio },
       { label: "Portfolio", href: "/portfolio", icon: Briefcase },
       { label: "Orders", href: "/orders", icon: ListOrdered },
@@ -80,7 +80,7 @@ export const NAV_SECTIONS: { label: string; items: NavItem[] }[] = [
  * off on purpose -- real money stays one step further away. */
 export const BOTTOM_TABS: { label: string; href: string }[] = [
   { label: "Home", href: "/dashboard" },
-  { label: "Paper", href: "/paper-trading" },
+  { label: "Trading", href: "/trading" },
   { label: "Charts", href: "/charts" },
   { label: "Data", href: "/market-data" },
 ];

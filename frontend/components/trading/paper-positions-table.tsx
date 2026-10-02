@@ -20,7 +20,7 @@ interface Row {
 /** Every open paper position across both regular (single-instrument) and
  * Advanced Python (native, possibly multi-leg) deployments, in one table
  * -- paper trading is this app's primary/default mode (see
- * app/(app)/paper-trading's own "Today's Gain" card), so this is what a
+ * app/(app)/trading's own "Today's Gain" card), so this is what a
  * Kite-style Dashboard's positions panel should show, unlike the
  * existing Positions page which is live-trading-only. A native
  * deployment's multi-leg spread renders as one row (its own

@@ -2,9 +2,11 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Download, LogOut, Pencil, Play, Plus, Square, Trash2, Zap } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
+import { GoLiveModal, LiveBar, LiveOffModal, LiveRunSection, LiveSwitch, brokerText, rupees } from "@/components/trading/live-run";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
 import { StrategyInstrumentPicker } from "@/components/trading/strategy-instrument-picker";
 import { Badge } from "@/components/ui/badge";
@@ -16,11 +18,15 @@ import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
 import {
   useAllNativeTrades,
   useAllPaperTrades,
+  useBrokerAccounts,
   useEffectivePcr,
   useInstruments,
+  useLiveNativeTrades,
+  useLiveRuns,
   useNativeDeployments,
   useNativeTrades,
   usePaperDeployments,
@@ -33,6 +39,8 @@ import { marketLabel } from "@/lib/market";
 import { istDateTime, istShortDateTime, istShortTime } from "@/lib/time";
 import type {
   InstrumentOut,
+  LiveNativeTradeOut,
+  LiveRunOut,
   NativeDeploymentOut,
   NativeEvaluationOut,
   NativeHoldingOut,
@@ -43,6 +51,7 @@ import type {
   PaperDeploymentOut,
   PaperEvaluationOut,
   PaperPortfolioOut,
+  PaperTradeOut,
   StrategyOut,
 } from "@/lib/types";
 
@@ -119,12 +128,14 @@ function CreatePoolModal({ onClose, onCreated }: { onClose: () => void; onCreate
 
 function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
   const queryClient = useQueryClient();
-  const { data: allStrategies } = useStrategies();
-  // Native (Advanced Python) strategies pick their own instrument(s) live --
-  // they don't belong in this single-instrument flow at all. They deploy
-  // from the Advanced Strategy Deployments section's own modal below.
-  const strategies = allStrategies?.filter((s) => s.code_type !== "native");
+  const { data: strategies } = useStrategies();
+  // One box for every strategy (2 Oct): an Advanced Python (native) one
+  // picks its own instruments live, so it needs only a capital pool; the
+  // others deploy against the instrument(s) chosen here.
+  const advanced = strategies?.filter((s) => s.code_type === "native") ?? [];
+  const classic = strategies?.filter((s) => s.code_type !== "native") ?? [];
   const [strategy, setStrategy] = useState<StrategyOut | null>(null);
+  const isNative = strategy?.code_type === "native";
   const [instrumentQuery, setInstrumentQuery] = useState("");
   const [instrument, setInstrument] = useState<InstrumentOut | null>(null);
   const { data: rawInstrumentResults } = useInstruments(instrumentQuery);
@@ -147,6 +158,13 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
 
   const startMutation = useMutation({
     mutationFn: async () => {
+      if (isNative) {
+        await apiFetch<NativeDeploymentOut>("/api/v1/paper-trading/native-deployments", {
+          method: "POST",
+          body: JSON.stringify({ strategy_id: strategy!.id, portfolio_id: portfolioId }),
+        });
+        return;
+      }
       const targetIds = usesStrategyInstruments ? [...selectedIds] : instrument ? [instrument.id] : [];
       const results = await Promise.allSettled(
         targetIds.map((instrument_id) =>
@@ -169,13 +187,14 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["paper-deployments"] });
+      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
       queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
       reset();
       onClose();
     },
   });
 
-  const canStart = (usesStrategyInstruments ? selectedIds.size > 0 : !!instrument) && !!portfolioId;
+  const canStart = !!strategy && !!portfolioId && (isNative || (usesStrategyInstruments ? selectedIds.size > 0 : !!instrument));
 
   return (
     <>
@@ -185,9 +204,12 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
           reset();
           onClose();
         }}
-        title="Start Paper Trading"
+        title="Start a strategy"
       >
         <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            It starts on paper. Once it&apos;s running, its card&apos;s Live switch takes it live on your broker.
+          </p>
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-text-secondary">Strategy</label>
             <Select
@@ -195,17 +217,37 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
               onChange={(e) => {
                 setStrategy(strategies?.find((s) => s.id === e.target.value) ?? null);
                 setInstrument(null);
+                setSelectedIds(new Set());
               }}
             >
               <option value="" disabled>
                 Select a strategy
               </option>
-              {strategies?.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.code_type})
-                </option>
-              ))}
+              {advanced.length > 0 && (
+                <optgroup label="Advanced Python">
+                  {advanced.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {classic.length > 0 && (
+                <optgroup label="Visual and Python Code">
+                  {classic.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.code_type})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </Select>
+            {isNative && (
+              <p className="text-xs text-text-muted">An Advanced Python strategy picks its own instruments live -- just choose its capital pool.</p>
+            )}
+            {strategies && !strategies.length && (
+              <p className="text-xs text-text-muted">No strategies yet -- create one in the Strategy Builder first.</p>
+            )}
           </div>
 
           <div className="space-y-1.5">
@@ -227,7 +269,7 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
             </Select>
           </div>
 
-          {strategy && usesStrategyInstruments && (
+          {strategy && !isNative && usesStrategyInstruments && (
             <StrategyInstrumentPicker
               key={strategy.id}
               strategyVersionInstrumentIds={strategyInstrumentIds}
@@ -236,7 +278,7 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
             />
           )}
 
-          {strategy && !usesStrategyInstruments && (
+          {strategy && !isNative && !usesStrategyInstruments && (
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-text-secondary">Instrument</label>
               <p className="text-xs text-text-muted">This strategy wasn&apos;t built with any instruments attached -- pick one to deploy it against.</p>
@@ -280,9 +322,9 @@ function StartDeploymentModal({ open, onClose, portfolios }: { open: boolean; on
             <Button onClick={() => startMutation.mutate()} disabled={!canStart || startMutation.isPending}>
               {startMutation.isPending
                 ? "Starting..."
-                : usesStrategyInstruments && selectedIds.size > 1
+                : !isNative && usesStrategyInstruments && selectedIds.size > 1
                   ? `Start (${selectedIds.size} instruments)`
-                  : "Start"}
+                  : "Start on paper"}
             </Button>
           </div>
         </div>
@@ -931,174 +973,83 @@ function PortfolioCard({
   );
 }
 
-function ClosedTradesPanel() {
-  const { data: trades, isLoading } = useAllPaperTrades();
-
-  return (
-    <CollapsibleSection title="Closed Trades" count={trades?.length ?? 0}>
-      {isLoading ? (
-        <LoadingState />
-      ) : (
-        <Table>
-          <Thead>
-            <tr>
-              <Th>Strategy</Th>
-              <Th>Instrument</Th>
-              <Th>Entered</Th>
-              <Th>Exited</Th>
-              <Th className="text-right">Qty</Th>
-              <Th className="text-right">Trade Value</Th>
-              <Th className="text-right">P&amp;L</Th>
-              <Th className="text-right">P&amp;L %</Th>
-              <Th>Exit Reason</Th>
-            </tr>
-          </Thead>
-          <Tbody>
-            {trades?.map((t) => (
-              <tr key={t.id}>
-                <Td className="font-medium">{t.strategy_name ?? "--"}</Td>
-                <Td>{t.instrument_symbol ?? "--"}</Td>
-                <Td className="font-financial text-xs">
-                  {istDateTime(t.entry_ts)}
-                  <span className="ml-1.5 text-text-muted">@ {t.entry_price.toFixed(2)}</span>
-                </Td>
-                <Td className="font-financial text-xs">
-                  {istDateTime(t.exit_ts)}
-                  <span className="ml-1.5 text-text-muted">@ {t.exit_price.toFixed(2)}</span>
-                </Td>
-                <Td className="text-right font-financial">{t.quantity}</Td>
-                <Td className="text-right font-financial">
-                  {(t.quantity * t.entry_price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                </Td>
-                <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                  {t.pnl >= 0 ? "+" : ""}
-                  {t.pnl.toFixed(2)}
-                </Td>
-                <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
-                  {t.pnl_pct >= 0 ? "+" : ""}
-                  {t.pnl_pct.toFixed(2)}%
-                </Td>
-                <Td className="text-text-muted">{exitReasonLabel(t.exit_reason)}</Td>
-              </tr>
-            ))}
-          </Tbody>
-        </Table>
-      )}
-    </CollapsibleSection>
-  );
+/** "2026-10-02" for a timestamp's IST day -- what the date filters compare. */
+function istDay(iso: string): string {
+  const p = istParts(iso);
+  return `${p.year}-${p.month.padStart(2, "0")}-${p.day.padStart(2, "0")}`;
 }
 
-function NativeClosedTradesPanel() {
-  const { data: trades, isLoading } = useAllNativeTrades();
+/** Every closed trade on the page in one list -- Advanced and Visual/Python
+ * Code, paper and live -- filtered by paper/live, strategy and dates. */
+function TradeHistoryPanel() {
+  const { data: native, isLoading } = useAllNativeTrades();
+  const { data: classic } = useAllPaperTrades();
+  const { data: live } = useLiveNativeTrades();
+  const [mode, setMode] = useState<"all" | "paper" | "live">("all");
+  const [strategy, setStrategy] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
-  return (
-    <CollapsibleSection title="Advanced Strategy Closed Trades" count={trades?.length ?? 0}>
-      {isLoading ? (
-        <LoadingState />
-      ) : (
-        <div className="p-4">
-          <NativeTradeRecord trades={trades ?? []} showStrategy filename="advanced-strategy-closed-trades" />
-        </div>
-      )}
-    </CollapsibleSection>
-  );
-}
-
-function StartNativeDeploymentModal({ open, onClose, portfolios }: { open: boolean; onClose: () => void; portfolios: PaperPortfolioOut[] }) {
-  const queryClient = useQueryClient();
-  const { data: strategies } = useStrategies();
-  const nativeStrategies = strategies?.filter((s) => s.code_type === "native") ?? [];
-  const [strategyId, setStrategyId] = useState("");
-  const [portfolioId, setPortfolioId] = useState("");
-
-  function reset() {
-    setStrategyId("");
-    setPortfolioId("");
-  }
-
-  const startMutation = useMutation({
-    mutationFn: () =>
-      apiFetch<NativeDeploymentOut>("/api/v1/paper-trading/native-deployments", {
-        method: "POST",
-        body: JSON.stringify({ strategy_id: strategyId, portfolio_id: portfolioId }),
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["native-deployments"] });
-      queryClient.invalidateQueries({ queryKey: ["paper-portfolios"] });
-      reset();
-      onClose();
-    },
+  const all: HistoryTrade[] = [
+    ...liveHistory(live ?? []),
+    ...(native ?? []).map((t) => ({ ...t, mode: "paper" as const })),
+    ...(classic ?? []).map(classicHistory),
+  ].sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
+  const strategies = [...new Set(all.map((t) => t.strategy_name).filter((n): n is string => !!n))].sort();
+  const shown = all.filter((t) => {
+    const day = istDay(t.closed_at);
+    return (
+      (mode === "all" || (t.mode ?? "paper") === mode) &&
+      (!strategy || t.strategy_name === strategy) &&
+      (!from || day >= from) &&
+      (!to || day <= to)
+    );
   });
 
   return (
-    <Modal
-      open={open}
-      onClose={() => {
-        reset();
-        onClose();
-      }}
-      title="Start Advanced Strategy Deployment"
-    >
-      <div className="space-y-4">
-        <p className="text-sm text-text-secondary">
-          Advanced Python strategies pick their own instrument(s) live -- no instrument or sizing to choose here, just
-          which strategy and which capital pool to run it against.
-        </p>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Strategy</label>
-          <Select value={strategyId} onChange={(e) => setStrategyId(e.target.value)}>
-            <option value="" disabled>
-              Select an Advanced Python strategy
-            </option>
-            {nativeStrategies.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </Select>
-          {!nativeStrategies.length && (
-            <p className="text-xs text-text-muted">
-              No Advanced Python strategies yet -- create one in the Strategy Builder&apos;s &quot;Advanced
-              Python&quot; tab first.
-            </p>
-          )}
-        </div>
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium text-text-secondary">Capital Pool</label>
-          <Select value={portfolioId} onChange={(e) => setPortfolioId(e.target.value)}>
-            <option value="" disabled>
-              Select a capital pool
-            </option>
-            {portfolios.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.currency} {p.cash.toFixed(0)} available)
-              </option>
-            ))}
-          </Select>
-        </div>
-
-        {startMutation.error && (
-          <div className="rounded-md bg-negative-soft px-3 py-2 text-sm text-negative">
-            {startMutation.error instanceof ApiError ? startMutation.error.message : "Failed to start"}
+    <CollapsibleSection title="Trade history" count={all.length}>
+      {isLoading ? (
+        <LoadingState />
+      ) : (
+        <div className="space-y-3 p-4">
+          <div className="flex flex-wrap items-end gap-3 text-xs">
+            <label className="space-y-1">
+              <span className="block font-medium text-text-secondary">Paper / Live</span>
+              <Select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} className="w-32">
+                <option value="all">All</option>
+                <option value="paper">Paper</option>
+                <option value="live">Live</option>
+              </Select>
+            </label>
+            <label className="space-y-1">
+              <span className="block font-medium text-text-secondary">Strategy</span>
+              <Select value={strategy} onChange={(e) => setStrategy(e.target.value)} className="w-56 max-w-full">
+                <option value="">All strategies</option>
+                {strategies.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </Select>
+            </label>
+            <label className="space-y-1">
+              <span className="block font-medium text-text-secondary">From</span>
+              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="w-40" />
+            </label>
+            <label className="space-y-1">
+              <span className="block font-medium text-text-secondary">To</span>
+              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="w-40" />
+            </label>
+            {(mode !== "all" || strategy || from || to) && (
+              <Button variant="ghost" size="sm" onClick={() => { setMode("all"); setStrategy(""); setFrom(""); setTo(""); }}>
+                Clear
+              </Button>
+            )}
           </div>
-        )}
-
-        <div className="flex justify-end gap-2">
-          <Button
-            variant="secondary"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-          >
-            Cancel
-          </Button>
-          <Button onClick={() => startMutation.mutate()} disabled={!strategyId || !portfolioId || startMutation.isPending}>
-            {startMutation.isPending ? "Starting..." : "Start"}
-          </Button>
+          <NativeTradeRecord trades={shown} showStrategy showMode filename="trade-history" />
         </div>
-      </div>
-    </Modal>
+      )}
+    </CollapsibleSection>
   );
 }
 
@@ -1180,6 +1131,8 @@ function formatPrice(value: number): string {
  * a liability of the same -- opening either already moved its entry value
  * through cash, so equity = cash + the sum of these. */
 function legMarketValue(leg: NativeLegOut): number {
+  // A future moved no cash when opened, only its P&L counts (native_runner).
+  if (leg.instrument_type === "future") return legPnl(leg) ?? 0;
   const value = (leg.current_price ?? leg.entry_price) * leg.quantity;
   return leg.side === "short" ? -value : value;
 }
@@ -1413,7 +1366,7 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
   const pnl = position.unrealized_pnl;
   const pnlPct = pnl != null && position.trade_value ? (pnl / Math.abs(position.trade_value)) * 100 : null;
   const regime = position.bias ?? "in a trade";
-  const regimeTone = regime === "bullish" ? "positive" : regime === "bearish" ? "negative" : "neutral";
+  const regimeTone = regime.toLowerCase() === "bullish" ? "positive" : regime.toLowerCase() === "bearish" ? "negative" : "neutral";
   const openedText =
     istDate(position.opened_at) === istDate(new Date().toISOString())
       ? istShortTime(position.opened_at)
@@ -1540,14 +1493,15 @@ function csvCell(value: string | number | null | undefined): string {
 
 /** The same record as the table, one row per trade, legs spelled out in the
  * last column -- opens cleanly in Excel (BOM for UTF-8). */
-function downloadTradeRecordCsv(trades: NativeTradeOut[], filename: string) {
+function downloadTradeRecordCsv(trades: HistoryTrade[], filename: string, withMode = false) {
   const fixed = (v: number | null) => (v == null ? "" : v.toFixed(2));
   const header = [
-    "Date", "Strategy", "Symbol", "Side", "Entry Time (IST)", "Exit Time (IST)", "Entry Price", "Exit Price",
+    "Date", ...(withMode ? ["Paper / Live"] : []), "Strategy", "Symbol", "Side", "Entry Time (IST)", "Exit Time (IST)", "Entry Price", "Exit Price",
     "Qty", "Lots", "Gross P&L", "Charges (est.)", "Net P&L", "Return %", "Exit Reason", "Legs",
   ];
   const rows = trades.map((t) => [
-    istDate(t.opened_at), t.strategy_name, t.underlying_symbol, t.structure, istTime(t.opened_at), exitText(t),
+    istDate(t.opened_at), ...(withMode ? [t.mode === "live" ? `Live ${t.broker ?? ""}` : "Paper"] : []),
+    t.strategy_name, t.underlying_symbol, t.structure, istTime(t.opened_at), exitText(t),
     fixed(t.entry_price), fixed(t.exit_price), t.quantity, lotsText(t.lots), t.pnl.toFixed(2), fixed(t.charges),
     t.net_pnl.toFixed(2), t.pnl_pct.toFixed(2), exitReasonLabel(t.exit_reason),
     t.legs
@@ -1609,11 +1563,38 @@ function TradeLegsTable({ trade }: { trade: NativeTradeOut }) {
   );
 }
 
-function TradeRecordRow({ trade: t, showStrategy }: { trade: NativeTradeOut; showStrategy: boolean }) {
+/** A closed trade in the Trading page's history: paper, or live on a broker. */
+type HistoryTrade = NativeTradeOut & { mode?: "paper" | "live"; broker?: string };
+
+function ModeBadge({ trade }: { trade: HistoryTrade }) {
+  return trade.mode === "live" ? (
+    <Badge tone="negative" className="px-2 py-0.5 text-[10px] font-semibold">LIVE · {trade.broker}</Badge>
+  ) : (
+    <Badge tone="warning" className="px-2 py-0.5 text-[10px] font-semibold">PAPER</Badge>
+  );
+}
+
+function liveHistory(trades: LiveNativeTradeOut[]): HistoryTrade[] {
+  return trades.map((t) => ({ ...t, mode: "live" as const, broker: brokerText(t) }));
+}
+
+/** A Visual / Python Code paper trade in the same shape as an Advanced one. */
+function classicHistory(t: PaperTradeOut): HistoryTrade {
+  return {
+    id: t.id, deployment_id: t.deployment_id, strategy_name: t.strategy_name, currency: "INR", opened_at: t.entry_ts, closed_at: t.exit_ts,
+    legs: [{ instrument_id: "", instrument_symbol: t.instrument_symbol, strike: null, option_type: null, side: "long", quantity: t.quantity,
+             entry_price: t.entry_price, exit_price: t.exit_price, pnl: t.pnl }],
+    underlying_symbol: t.instrument_symbol, structure: null, side: null, entry_price: t.entry_price, exit_price: t.exit_price,
+    quantity: t.quantity, lots: null, pnl: t.pnl, charges: null, net_pnl: t.pnl, pnl_pct: t.pnl_pct, exit_reason: t.exit_reason,
+    mode: "paper",
+  };
+}
+
+function TradeRecordRow({ trade: t, showStrategy, showMode }: { trade: HistoryTrade; showStrategy: boolean; showMode: boolean }) {
   const [open, setOpen] = useState(false);
   const currency = t.currency ?? "";
   const cell = "px-2.5 py-2 whitespace-nowrap";
-  const columns = showStrategy ? 15 : 14;
+  const columns = 14 + (showStrategy ? 1 : 0) + (showMode ? 1 : 0);
   return (
     <>
       <tr className="cursor-pointer hover:bg-surface-elevated" onClick={() => setOpen(!open)} title="Show legs">
@@ -1621,6 +1602,11 @@ function TradeRecordRow({ trade: t, showStrategy }: { trade: NativeTradeOut; sho
           {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </Td>
         <Td className={`${cell} font-financial`}>{istDate(t.opened_at)}</Td>
+        {showMode && (
+          <Td className={cell}>
+            <ModeBadge trade={t} />
+          </Td>
+        )}
         {showStrategy && <Td className={`${cell} font-medium`}>{t.strategy_name ?? "—"}</Td>}
         <Td className={`${cell} font-medium`}>{t.underlying_symbol ?? "—"}</Td>
         <Td className={cell}>{t.structure ?? "—"}</Td>
@@ -1662,7 +1648,9 @@ function RecordStat({ label, children }: { label: string; children: React.ReactN
 /** Closed trades as a trading record: one row per trade (date, symbol,
  * structure, entry/exit time and price, qty/lots, gross, charges, net,
  * return, exit reason), click a row for its legs; totals above, CSV export. */
-function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades: NativeTradeOut[]; showStrategy?: boolean; filename: string }) {
+function NativeTradeRecord({
+  trades, showStrategy = false, showMode = false, filename,
+}: { trades: HistoryTrade[]; showStrategy?: boolean; showMode?: boolean; filename: string }) {
   if (!trades.length) return <EmptyState title="No closed trades yet" />;
 
   const wins = trades.filter((t) => t.net_pnl > 0).length;
@@ -1696,7 +1684,7 @@ function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades:
             </>
           )}
         </div>
-        <Button variant="secondary" size="sm" onClick={() => downloadTradeRecordCsv(trades, filename)}>
+        <Button variant="secondary" size="sm" onClick={() => downloadTradeRecordCsv(trades, filename, showMode)}>
           <Download className="h-3.5 w-3.5" /> Download CSV
         </Button>
       </div>
@@ -1707,6 +1695,7 @@ function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades:
             <tr>
               <Th className="w-6 px-2.5" />
               <Th className={th}>Date</Th>
+              {showMode && <Th className={th}>Paper / Live</Th>}
               {showStrategy && <Th className={th}>Strategy</Th>}
               <Th className={th}>Symbol</Th>
               <Th className={th}>Side</Th>
@@ -1724,7 +1713,7 @@ function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades:
           </Thead>
           <Tbody>
             {trades.map((t) => (
-              <TradeRecordRow key={t.id} trade={t} showStrategy={showStrategy} />
+              <TradeRecordRow key={`${t.mode ?? "paper"}-${t.id}`} trade={t} showStrategy={showStrategy} showMode={showMode} />
             ))}
           </Tbody>
         </Table>
@@ -1733,7 +1722,7 @@ function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades:
       <p className="text-[11px] leading-relaxed text-text-muted">
         Times are IST. On a multi-leg trade, Entry/Exit Price is the net premium per unit (short premiums minus long);
         click a row for each leg. Charges are an estimate of brokerage, STT, exchange, SEBI, stamp duty and GST at NSE
-        rates -- paper fills pay none, so the pool&apos;s Realized P&amp;L stays gross.
+        rates -- paper fills pay none, so the pool&apos;s Realized P&amp;L stays gross. Live trades are at the broker&apos;s fills.
       </p>
     </div>
   );
@@ -1741,13 +1730,18 @@ function NativeTradeRecord({ trades, showStrategy = false, filename }: { trades:
 
 function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
   const { data: trades, isLoading } = useNativeTrades(deployment.id);
+  const { data: liveTrades } = useLiveNativeTrades();
+  const mine = liveHistory((liveTrades ?? []).filter((t) => t.paper_deployment_id === deployment.id));
+  const all: HistoryTrade[] = [...mine, ...(trades ?? []).map((t) => ({ ...t, mode: "paper" as const }))].sort(
+    (a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime(),
+  );
 
   return (
     <div className="border-t border-border pt-4">
       {isLoading ? (
         <LoadingState />
       ) : (
-        <NativeTradeRecord trades={trades ?? []} filename={`${deployment.strategy_name}-closed-trades`} />
+        <NativeTradeRecord trades={all} showMode={mine.length > 0} filename={`${deployment.strategy_name}-closed-trades`} />
       )}
     </div>
   );
@@ -1764,13 +1758,40 @@ function SummaryField({ label, children }: { label: string; children: React.Reac
   );
 }
 
+/** The card's one line: what it holds and since when (or that it's flat),
+ * and when it's checked next -- instead of a raw signal code. */
+function cardStatus(d: NativeDeploymentOut): { headline: string; rest: string[] } {
+  const rest: string[] = [];
+  let headline: string;
+  const position = d.position;
+  if (position) {
+    const regime = String(position.bias ?? "In a trade");
+    const opened = istDate(position.opened_at) === istDate(new Date().toISOString()) ? istShortTime(position.opened_at) : istShortDateTime(position.opened_at);
+    headline = `${regime === regime.toUpperCase() ? regime : regime.charAt(0).toUpperCase() + regime.slice(1)} since ${opened}`;
+    rest.push(position.legs.map((l) => `${l.side === "short" ? "Short" : "Long"} ${l.instrument_symbol}`).join(" + "));
+    const pcr = position.metrics?.total_oi_pcr_last_close;
+    if (typeof pcr === "string") rest.push(`TOTAL_OI_PCR ${pcr}`);
+  } else if (d.holdings?.length) {
+    headline = `Holding ${d.holdings.length} stock${d.holdings.length === 1 ? "" : "s"}`;
+  } else {
+    headline = d.status === "active" ? "Flat, waiting for its signal" : "Stopped";
+  }
+  if (d.status === "active" && d.next_check_at && new Date(d.next_check_at).getTime() > Date.now()) {
+    rest.push(`next check ${istTime(d.next_check_at)}`);
+  }
+  return { headline, rest };
+}
+
 function NativeDeploymentCard({
-  deployment, soloPortfolio, onMoveUp, onMoveDown,
+  deployment, soloPortfolio, onMoveUp, onMoveDown, liveRun, canGoLive,
 }: {
   deployment: NativeDeploymentOut; soloPortfolio?: PaperPortfolioOut; onMoveUp?: () => void; onMoveDown?: () => void;
+  liveRun?: LiveRunOut; canGoLive: boolean;
 }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
+  const [goingLive, setGoingLive] = useState(false);
+  const [turningOff, setTurningOff] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
   const position = deployment.position;
@@ -1870,10 +1891,12 @@ function NativeDeploymentCard({
     <span className="text-text-muted">--</span>
   );
 
+  const status = cardStatus(deployment);
+
   return (
-    <Card>
+    <Card className={liveRun ? "border-negative/50 shadow-[inset_3px_0_0_var(--negative)]" : undefined}>
       <CardHeader>
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {(onMoveUp || onMoveDown) && (
             <div className="-ml-1.5 flex" role="group" aria-label={`Position of ${deployment.strategy_name}`}>
               <MoveButton label="Move up" onClick={onMoveUp}>
@@ -1891,8 +1914,20 @@ function NativeDeploymentCard({
               v{runningVersion}
             </span>
           )}
+          {canGoLive ? (
+            <span title={!liveRun && deployment.status !== "active" ? "Restart the paper run to go live" : undefined}>
+              <LiveSwitch
+                live={!!liveRun}
+                disabled={!liveRun && deployment.status !== "active"}
+                onLive={() => setGoingLive(true)}
+                onPaper={() => setTurningOff(true)}
+              />
+            </span>
+          ) : (
+            !liveRun && <Badge tone="warning" className="px-2 py-0.5 text-[11px] font-semibold">PAPER</Badge>
+          )}
         </div>
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {deployment.status === "active" ? (
             <>
               <Button variant="ghost" size="sm" onClick={() => evaluateMutation.mutate()} disabled={evaluateMutation.isPending}>
@@ -1945,6 +1980,26 @@ function NativeDeploymentCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {status && (
+          <p className="-mt-2 text-sm text-text-secondary">
+            {status.headline && <strong className="font-semibold text-text-primary">{status.headline}</strong>}
+            {status.rest.map((part) => (
+              <span key={part}> · {part}</span>
+            ))}
+          </p>
+        )}
+        {goingLive && (
+          <GoLiveModal paperDeploymentId={deployment.id} strategyName={deployment.strategy_name} onClose={() => setGoingLive(false)} />
+        )}
+        {turningOff && liveRun && (
+          <LiveOffModal run={liveRun} strategyName={deployment.strategy_name} onClose={() => setTurningOff(false)} />
+        )}
+        {liveRun && <LiveRunSection run={liveRun} strategyName={deployment.strategy_name} canManage />}
+        {liveRun && (
+          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-warning">
+            <span className="rounded bg-warning-soft px-1.5 py-0.5">Paper</span> running beside it at its own size
+          </div>
+        )}
         <Modal open={confirmStop} onClose={() => setConfirmStop(false)} title={`Stop ${deployment.strategy_name}?`}>
           <div className="space-y-4 text-sm">
             <p className="text-text-secondary">
@@ -2144,13 +2199,17 @@ function MoveButton({ label, onClick, children }: { label: string; onClick?: () 
 }
 
 function NativeDeploymentsPanel({
-  onStart,
   portfolios,
   regularDeployments,
+  liveByPaper,
+  canGoLive,
+  visible,
 }: {
-  onStart: () => void;
   portfolios: PaperPortfolioOut[];
   regularDeployments: PaperDeploymentOut[];
+  liveByPaper: Map<string, LiveRunOut>;
+  canGoLive: boolean;
+  visible: (d: NativeDeploymentOut) => boolean;
 }) {
   const queryClient = useQueryClient();
   const { data: deployments, isLoading } = useNativeDeployments();
@@ -2184,14 +2243,9 @@ function NativeDeploymentsPanel({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-sm font-semibold text-text-primary">Advanced Strategy Deployments</h2>
-          <PcrTicker />
-        </div>
-        <Button variant="secondary" size="sm" onClick={onStart}>
-          <Play className="h-3.5 w-3.5" /> Start Advanced Deployment
-        </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold text-text-primary">Strategies</h2>
+        <PcrTicker />
       </div>
       {isLoading ? (
         <Card>
@@ -2203,39 +2257,175 @@ function NativeDeploymentsPanel({
         <Card>
           <CardContent>
             <EmptyState
-              title="No Advanced Python deployments yet"
-              description="For strategies that pick their own instruments live -- multi-leg options, PCR-driven spreads, and the like."
+              title="No Advanced Python strategies running yet"
+              description="Start a strategy above -- it runs on paper first, then its card's Live switch takes it live on your broker."
             />
           </CardContent>
         </Card>
+      ) : !deployments.some(visible) ? (
+        <Card>
+          <CardContent>
+            <EmptyState title="Nothing matches this filter" />
+          </CardContent>
+        </Card>
       ) : (
-        deployments.map((d, i) => (
-          <NativeDeploymentCard
-            key={d.id}
-            deployment={d}
-            soloPortfolio={soloIds.has(d.portfolio_id) ? portfolioById.get(d.portfolio_id) : undefined}
-            onMoveUp={deployments.length > 1 && i > 0 ? () => move(i, -1) : undefined}
-            onMoveDown={deployments.length > 1 && i < deployments.length - 1 ? () => move(i, 1) : undefined}
-          />
-        ))
+        deployments.map((d, i) =>
+          visible(d) ? (
+            <NativeDeploymentCard
+              key={d.id}
+              deployment={d}
+              soloPortfolio={soloIds.has(d.portfolio_id) ? portfolioById.get(d.portfolio_id) : undefined}
+              onMoveUp={deployments.length > 1 && i > 0 ? () => move(i, -1) : undefined}
+              onMoveDown={deployments.length > 1 && i < deployments.length - 1 ? () => move(i, 1) : undefined}
+              liveRun={liveByPaper.get(d.id)}
+              canGoLive={canGoLive}
+            />
+          ) : null,
+        )
       )}
     </div>
   );
 }
 
-export default function PaperTradingPage() {
+/** The soonest a running strategy asked to be checked, if any is still ahead. */
+function earliestNextCheck(deployments: NativeDeploymentOut[]): string | null {
+  const ahead = deployments
+    .map((d) => (d.status === "active" && d.next_check_at ? new Date(d.next_check_at).getTime() : null))
+    .filter((t): t is number => t != null && t > Date.now());
+  return ahead.length ? new Date(Math.min(...ahead)).toISOString() : null;
+}
+
+/** The day so far, kept apart: paper and live P&L today, each broker's login
+ * state, and the earliest next check. */
+function TodayStrip({
+  nativeDeployments, regularDeployments, liveRuns,
+}: { nativeDeployments: NativeDeploymentOut[]; regularDeployments: PaperDeploymentOut[]; liveRuns: LiveRunOut[] }) {
+  const { data: nativeTrades } = useAllNativeTrades();
+  const { data: classicTrades } = useAllPaperTrades();
+  const { data: accounts } = useBrokerAccounts();
+  const today = istDay(new Date().toISOString());
+  const realised =
+    (nativeTrades ?? []).filter((t) => istDay(t.closed_at) === today).reduce((sum, t) => sum + t.pnl, 0) +
+    (classicTrades ?? []).filter((t) => istDay(t.exit_ts) === today).reduce((sum, t) => sum + t.pnl, 0);
+  const open =
+    nativeDeployments.reduce((sum, d) => sum + (d.position?.unrealized_pnl ?? (d.holdings ?? []).reduce((h, l) => h + (legPnl(l) ?? 0), 0)), 0) +
+    regularDeployments.reduce((sum, d) => sum + (d.open_position?.unrealized_pnl ?? 0), 0);
+  const paperToday = realised + open;
+  const paperRunning = nativeDeployments.filter((d) => d.status === "active").length + regularDeployments.filter((d) => d.status === "active").length;
+  const liveToday = liveRuns.reduce((sum, r) => sum + r.day_pnl, 0);
+  const liveAccounts = (accounts ?? []).filter((a) => a.environment === "live" && a.broker.supports_live_strategies && a.is_active);
+  const next = earliestNextCheck(nativeDeployments);
+  const tile = "min-w-0 space-y-0.5 rounded-lg border border-border bg-surface px-4 py-3";
+
+  return (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className={tile}>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Paper today</div>
+        <div className={`font-financial text-lg font-semibold ${toneFor(paperToday)}`}>{rupees(paperToday, true)}</div>
+        <div className="text-xs text-text-muted">{paperRunning} running</div>
+      </div>
+      <div className={tile}>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Live today</div>
+        <div className={`font-financial text-lg font-semibold ${liveRuns.length ? toneFor(liveToday) : "text-text-muted"}`}>
+          {liveRuns.length ? rupees(liveToday, true) : "—"}
+        </div>
+        <div className="text-xs text-text-muted">{liveRuns.length ? `${liveRuns.length} live · kept apart from paper` : "Nothing live"}</div>
+      </div>
+      <div className={tile}>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Brokers</div>
+        {liveAccounts.length ? (
+          <ul className="space-y-0.5 text-xs">
+            {liveAccounts.map((a) => (
+              <li key={a.id} className="flex items-center gap-1.5 truncate">
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${a.connection_status === "connected" ? "bg-positive" : "bg-warning"}`} aria-hidden />
+                <span className="truncate">
+                  {a.broker.name} ({a.account_label}) · {a.connection_status === "connected" ? "logged in" : "login needed"}
+                  {!a.live_verified_at && " · not tested"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-text-muted">
+            No live broker yet -- <Link href="/settings/brokers" className="text-active hover:underline">Settings &gt; Brokers</Link>
+          </p>
+        )}
+      </div>
+      <div className={tile}>
+        <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">Next check</div>
+        <div className="font-financial text-lg font-semibold">{next ? istTime(next) : "—"}</div>
+        <div className="text-xs text-text-muted">{next ? "earliest strategy check" : "every ~10 s while NSE is open"}</div>
+      </div>
+    </div>
+  );
+}
+
+type CardFilter = { kind: "all" } | { kind: "paper" } | { kind: "live" } | { kind: "broker"; name: string };
+
+function FilterChips({ filter, onChange, brokers }: { filter: CardFilter; onChange: (f: CardFilter) => void; brokers: string[] }) {
+  const options: { label: string; value: CardFilter }[] = [
+    { label: "All", value: { kind: "all" } },
+    { label: "Paper", value: { kind: "paper" } },
+    { label: "Live", value: { kind: "live" } },
+    ...brokers.map((name) => ({ label: name, value: { kind: "broker", name } as CardFilter })),
+  ];
+  const same = (a: CardFilter, b: CardFilter) => a.kind === b.kind && (a.kind !== "broker" || (b.kind === "broker" && a.name === b.name));
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Show">
+      {options.map((o) => (
+        <button
+          key={o.label}
+          type="button"
+          aria-pressed={same(filter, o.value)}
+          onClick={() => onChange(o.value)}
+          className={`rounded-full border px-3 py-1 text-xs font-medium ${
+            same(filter, o.value) ? "border-text-primary bg-text-primary text-background" : "border-border-strong bg-surface text-text-secondary hover:text-text-primary"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export default function TradingPage() {
   const { data: deployments, isLoading } = usePaperDeployments();
   const { data: portfolios } = usePaperPortfolios();
   const { data: nativeDeployments } = useNativeDeployments();
+  const { data: liveRuns } = useLiveRuns();
+  const { hasRole } = useAuth();
+  const canGoLive = hasRole("administrator", "trader");
   const standalonePortfolios = (portfolios ?? []).filter(
     (p) => !soloNativePortfolioIds(deployments ?? [], nativeDeployments ?? []).has(p.id),
   );
   const [modalOpen, setModalOpen] = useState(false);
-  const [nativeModalOpen, setNativeModalOpen] = useState(false);
   const [creatingPool, setCreatingPool] = useState(false);
   const [toDelete, setToDelete] = useState<PaperDeploymentOut | null>(null);
   const [editingPortfolio, setEditingPortfolio] = useState<PaperPortfolioOut | null>(null);
   const [deletingPortfolio, setDeletingPortfolio] = useState<PaperPortfolioOut | null>(null);
+  const [filter, setFilter] = useState<CardFilter>({ kind: "all" });
+
+  const runs = liveRuns ?? [];
+  const cardIds = new Set((nativeDeployments ?? []).map((d) => d.id));
+  const liveByPaper = new Map(runs.filter((r) => r.paper_deployment_id).map((r) => [r.paper_deployment_id!, r]));
+  // A live run whose paper card is gone still shows -- real money is never hidden.
+  const unlinked = runs.filter((r) => !r.paper_deployment_id || !cardIds.has(r.paper_deployment_id));
+  const brokerNames = [...new Set(runs.map((r) => r.broker_name))];
+  const visible = (d: NativeDeploymentOut) => {
+    const live = liveByPaper.get(d.id);
+    switch (filter.kind) {
+      case "paper":
+        return !live;
+      case "live":
+        return !!live;
+      case "broker":
+        return live?.broker_name === filter.name;
+      default:
+        return true;
+    }
+  };
+  const showClassic = (deployments?.length ?? 0) > 0 && (filter.kind === "all" || filter.kind === "paper");
 
   const inTrade = deployments?.filter((d) => d.status === "active" && d.open_position) ?? [];
   const watching = deployments?.filter((d) => d.status === "active" && !d.open_position) ?? [];
@@ -2243,26 +2433,30 @@ export default function PaperTradingPage() {
 
   return (
     <div className="space-y-6">
-      <PaperTradingBanner />
+      {runs.length ? <LiveBar runs={runs} /> : <PaperTradingBanner />}
 
       <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-text-primary">Paper Trading</h1>
+          <h1 className="text-xl font-semibold text-text-primary">Trading</h1>
           <p className="text-sm text-text-muted">
-            Live Market Data &rarr; Strategy &rarr; Signal &rarr; Risk Engine &rarr; Paper Execution &rarr; Portfolio. Re-evaluated automatically every ~10s, or trigger manually.
+            Your strategies on paper, and live through your broker. Each one starts on paper; its card&apos;s Live switch takes it live.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={() => setCreatingPool(true)}>
-            <Plus className="h-3.5 w-3.5" /> New Capital Pool
+            <Plus className="h-3.5 w-3.5" /> New capital pool
           </Button>
           <Button onClick={() => setModalOpen(true)}>
-            <Play className="h-3.5 w-3.5" /> Start Deployment
+            <Play className="h-3.5 w-3.5" /> Start a strategy
           </Button>
         </div>
       </div>
 
-      {standalonePortfolios.length > 0 && (
+      <TodayStrip nativeDeployments={nativeDeployments ?? []} regularDeployments={deployments ?? []} liveRuns={runs} />
+
+      <FilterChips filter={filter} onChange={setFilter} brokers={brokerNames} />
+
+      {standalonePortfolios.length > 0 && filter.kind === "all" && (
         <div className="space-y-3">
           {standalonePortfolios.map((p) => (
             <PortfolioCard
@@ -2276,42 +2470,63 @@ export default function PaperTradingPage() {
         </div>
       )}
 
-      <NativeDeploymentsPanel onStart={() => setNativeModalOpen(true)} portfolios={portfolios ?? []} regularDeployments={deployments ?? []} />
+      <NativeDeploymentsPanel
+        portfolios={portfolios ?? []}
+        regularDeployments={deployments ?? []}
+        liveByPaper={liveByPaper}
+        canGoLive={canGoLive}
+        visible={visible}
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Running (in a trade)</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {isLoading ? (
-            <LoadingState />
-          ) : !deployments?.length ? (
-            <EmptyState title="No paper trading deployments yet" description="Start a deployment to begin simulated execution." />
-          ) : !inTrade.length ? (
-            <EmptyState
-              title="Nothing currently in a trade"
-              description="Active deployments are still evaluating in the background -- see Watching below."
-            />
-          ) : (
-            <GroupedDeploymentsTable deployments={inTrade} onDelete={setToDelete} defaultOpen />
-          )}
-        </CardContent>
-      </Card>
+      {unlinked.length > 0 && filter.kind !== "paper" && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-text-primary">Live without a paper card</h2>
+          {unlinked
+            .filter((r) => filter.kind !== "broker" || r.broker_name === filter.name)
+            .map((r) => (
+              <Card key={r.id}>
+                <CardContent>
+                  <LiveRunSection run={r} strategyName={brokerText(r)} canManage={canGoLive} />
+                </CardContent>
+              </Card>
+            ))}
+        </div>
+      )}
 
-      <CollapsibleSection title="Watching (active, not currently in a trade)" count={watching.length}>
-        <GroupedDeploymentsTable deployments={watching} onDelete={setToDelete} />
-      </CollapsibleSection>
+      {showClassic && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-text-primary">Visual and Python Code strategies</h2>
+          <Card>
+            <CardHeader>
+              <CardTitle>Running (in a trade)</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              {isLoading ? (
+                <LoadingState />
+              ) : !inTrade.length ? (
+                <EmptyState
+                  title="Nothing currently in a trade"
+                  description="Active deployments are still evaluating in the background -- see Watching below."
+                />
+              ) : (
+                <GroupedDeploymentsTable deployments={inTrade} onDelete={setToDelete} defaultOpen />
+              )}
+            </CardContent>
+          </Card>
 
-      <CollapsibleSection title="Stopped" count={stopped.length}>
-        <GroupedDeploymentsTable deployments={stopped} onDelete={setToDelete} />
-      </CollapsibleSection>
+          <CollapsibleSection title="Watching (active, not currently in a trade)" count={watching.length}>
+            <GroupedDeploymentsTable deployments={watching} onDelete={setToDelete} />
+          </CollapsibleSection>
 
-      <NativeClosedTradesPanel />
+          <CollapsibleSection title="Stopped" count={stopped.length}>
+            <GroupedDeploymentsTable deployments={stopped} onDelete={setToDelete} />
+          </CollapsibleSection>
+        </div>
+      )}
 
-      <ClosedTradesPanel />
+      <TradeHistoryPanel />
 
       <StartDeploymentModal open={modalOpen} onClose={() => setModalOpen(false)} portfolios={portfolios ?? []} />
-      <StartNativeDeploymentModal open={nativeModalOpen} onClose={() => setNativeModalOpen(false)} portfolios={portfolios ?? []} />
       {creatingPool && <CreatePoolModal onClose={() => setCreatingPool(false)} onCreated={() => setCreatingPool(false)} />}
       {toDelete && <DeleteDeploymentModal deployment={toDelete} onClose={() => setToDelete(null)} />}
       {editingPortfolio && <EditCapitalModal portfolio={editingPortfolio} onClose={() => setEditingPortfolio(null)} />}

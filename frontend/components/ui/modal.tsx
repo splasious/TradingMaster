@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import { X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -15,6 +15,7 @@ interface ModalProps {
 
 export function Modal({ open, onClose, title, children, className }: ModalProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
 
   useEffect(() => {
     const dialog = ref.current;
@@ -26,6 +27,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
   return (
     <dialog
       ref={ref}
+      aria-labelledby={titleId}
       onClose={onClose}
       onCancel={onClose}
       className={cn(
@@ -34,7 +36,7 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
       )}
     >
       <div className="flex items-center justify-between border-b border-border px-5 py-4">
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <h2 id={titleId} className="text-sm font-semibold">{title}</h2>
         <button
           onClick={onClose}
           className="rounded-md p-1 text-text-muted hover:bg-surface-elevated hover:text-text-primary"

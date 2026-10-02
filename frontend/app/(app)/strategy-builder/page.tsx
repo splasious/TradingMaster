@@ -344,8 +344,8 @@ function StrategyForm({ editId, existing }: { editId: string | null; existing: S
                   strategies that can&apos;t be expressed as one <code>generate_signal()</code> call against one
                   pre-selected instrument (no fixed instrument, multi-leg positions, PCR/option-chain data). Must
                   define <code>async def evaluate(ctx)</code>. Deploys separately from Python Code Mode strategies
-                  (no instrument or % sizing to pick -- the code decides both), from the Paper Trading page&apos;s
-                  Advanced Strategy Deployments section.
+                  (no instrument or % sizing to pick -- the code decides both), from the Trading page&apos;s
+                  Start a strategy button.
                 </p>
                 <BuiltinLoader onLoad={setNativeCode} />
                 <textarea
@@ -486,7 +486,7 @@ function BuiltinLoader({ onLoad }: { onLoad: (code: string) => void }) {
       </div>
       <p className="text-xs text-text-muted">
         {loaded
-          ? `Loaded ${loaded}. Save to store it as a new version, then start a new deployment on the Paper Trading page -- a running deployment keeps its version.`
+          ? `Loaded ${loaded}. Save to store it as a new version, then start it on the Trading page -- a running deployment keeps its version.`
           : "Replaces the editor's code with the version that ships with the app."}
       </p>
       {load.isError && <p className="text-xs text-negative">Couldn&apos;t load it: {(load.error as Error).message}</p>}

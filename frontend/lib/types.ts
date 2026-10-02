@@ -293,6 +293,8 @@ export interface NativeLegOut {
   quantity: number;
   entry_price: number;
   current_price: number | null;
+  /** "future" books only its P&L -- equity counts that, not its contract value. */
+  instrument_type?: string | null;
 }
 
 /** One entry of a multi-holding strategy's state["holdings"]: the leg,
@@ -348,8 +350,64 @@ export interface NativeDeploymentOut {
   /** Its code closes its own positions when asked -- Exit, and "Exit
    * positions, then stop", only work when true. */
   can_exit: boolean;
+  /** When the strategy asked to be checked next, if it did (otherwise every ~10s while NSE is open). */
+  next_check_at?: string | null;
   created_at: string;
   stopped_at: string | null;
+}
+
+/** One position a live run holds at the broker, at its real fill price. */
+export interface LiveLegOut {
+  instrument_symbol: string;
+  instrument_type: string;
+  strike: number | null;
+  option_type: string | null;
+  expiry: string | null;
+  side: "long" | "short";
+  quantity: number;
+  lots: number | null;
+  avg_price: number;
+  current_price: number | null;
+  pnl: number | null;
+  product: string | null;
+  opened_at: string | null;
+}
+
+/** What fixes a paused live run -- the card's fix-it button. */
+export type LiveFix = "login" | "test" | "loss_limit" | "kill_switch" | "resume" | "check_broker";
+
+/** A live run switched on from a paper card (the Trading page's Paper / Live switch). */
+export interface LiveRunOut {
+  id: string;
+  paper_deployment_id: string | null;
+  strategy_id: string;
+  status: "active" | "paused" | "stopped";
+  broker_account_id: string;
+  broker_code: string;
+  broker_name: string;
+  account_label: string;
+  connection_status: string;
+  lots_per_leg: number;
+  capital: number;
+  /** As set; null means the default, 3% of capital -- `loss_limit` is the one in force. */
+  daily_loss_limit: number | null;
+  loss_limit: number;
+  product_style: "overnight" | "intraday";
+  max_orders_per_day: number;
+  day_pnl: number;
+  unrealised_pnl: number;
+  realised_today: number;
+  orders_today: number;
+  positions: LiveLegOut[];
+  pause_reason: string | null;
+  paused_at: string | null;
+  resume_at: string | null;
+  fix: LiveFix | null;
+  last_evaluated_at: string | null;
+  last_signal: string | null;
+  last_signal_reason: string | null;
+  state: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface NativeTradeLeg {
@@ -394,6 +452,13 @@ export interface NativeTradeOut {
   net_pnl: number;
   pnl_pct: number;
   exit_reason: string;
+}
+
+/** A closed live trade of a live run, at the broker's fills. */
+export interface LiveNativeTradeOut extends NativeTradeOut {
+  paper_deployment_id: string | null;
+  broker_name: string;
+  account_label: string;
 }
 
 export interface NativeEvaluationOut {

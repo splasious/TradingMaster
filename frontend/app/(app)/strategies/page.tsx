@@ -354,7 +354,7 @@ export default function StrategiesPage() {
           />
           <StrategyGrid
             title="Advanced Python Strategies"
-            description="Trusted, unsandboxed code -- no fixed instrument, real DB access, multi-leg positions. Deploys from Paper Trading's Advanced Strategy Deployments section; backtest it from the Backtesting page's Advanced (Native) tab."
+            description="Trusted, unsandboxed code -- no fixed instrument, real DB access, multi-leg positions. Starts from the Trading page (paper, then Live on a card); backtest it from the Backtesting page's Advanced (Native) tab."
             strategies={nativeStrategies}
             hasRole={hasRole}
             user={user}

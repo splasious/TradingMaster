@@ -34,6 +34,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.time import as_aware_utc
 from app.models.alert import AlertSeverity
 from app.models.broker import Broker, BrokerAccount, BrokerConnection, Environment
 from app.models.instrument import Instrument
@@ -302,7 +303,7 @@ async def run_view(db: AsyncSession, run: LiveNativeDeployment, now: datetime, k
             "instrument_symbol": instrument.symbol, "instrument_type": instrument.instrument_type, "strike": instrument.strike,
             "option_type": instrument.option_type, "expiry": instrument.expiry, "side": "long" if position.quantity > 0 else "short",
             "quantity": abs(position.quantity), "lots": lots, "avg_price": position.avg_price, "current_price": price, "pnl": pnl,
-            "product": position.product, "opened_at": position.opened_at,
+            "product": position.product, "opened_at": _aware(position.opened_at),
         })
     today = await day_pnl(db, run, now)
     state = run.state or {}
@@ -316,8 +317,12 @@ async def run_view(db: AsyncSession, run: LiveNativeDeployment, now: datetime, k
         "loss_limit": loss_limit(run), "product_style": run.product_style, "max_orders_per_day": run.max_orders_per_day,
         "day_pnl": today, "unrealised_pnl": unrealised, "realised_today": today - unrealised,
         "orders_today": await _orders_today(db, run, now), "positions": legs,
-        "pause_reason": run.pause_reason, "paused_at": run.paused_at, "resume_at": run.resume_at,
+        "pause_reason": run.pause_reason, "paused_at": _aware(run.paused_at), "resume_at": _aware(run.resume_at),
         "fix": pause_fix(run, kill_switch_on),
-        "last_evaluated_at": run.last_evaluated_at, "last_signal": run.last_signal, "last_signal_reason": run.last_signal_reason,
-        "state": {k: v for k, v in state.items() if not k.startswith("_")}, "created_at": run.created_at,
+        "last_evaluated_at": _aware(run.last_evaluated_at), "last_signal": run.last_signal, "last_signal_reason": run.last_signal_reason,
+        "state": {k: v for k, v in state.items() if not k.startswith("_")}, "created_at": _aware(run.created_at),
     }
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    return as_aware_utc(value) if value is not None else None

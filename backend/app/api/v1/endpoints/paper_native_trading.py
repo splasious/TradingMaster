@@ -56,8 +56,14 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
         opened = min((leg["opened_at"] for leg in state["legs"].values() if leg.get("opened_at")), default=None)
         if opened is None:
             return None
-        position = {"legs": state["legs"], "regime": state.get("regime"), "opened_at": opened,
-                    **{k: state[k] for k in ("pcr_at_entry", "last_pcr", "last_pcr_at") if state.get(k) is not None}}
+        # Its PCR is its own TOTAL_OI_PCR, not the 4-expiry one the card's
+        # "PCR (entry -> now)" compares with, so it's shown as text under
+        # names of its own.
+        position = {"legs": state["legs"], "regime": state.get("regime"), "opened_at": opened}
+        if isinstance(state.get("pcr_at_entry"), (int, float)):
+            position["total_oi_pcr_at_entry"] = f"{state['pcr_at_entry']:.3f}"
+        if isinstance(state.get("last_pcr"), (int, float)):
+            position["total_oi_pcr_last_close"] = f"{state['last_pcr']:.3f}" + (f" @ {state['last_pcr_at']}" if state.get("last_pcr_at") else "")
     if not isinstance(position, dict):
         return None
 
@@ -82,7 +88,7 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
             NativeLegOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="short" if side == "sell" else "long", quantity=leg["quantity"], entry_price=leg["entry_price"],
-                current_price=current_price,
+                current_price=current_price, instrument_type=instrument.instrument_type,
             )
         )
 

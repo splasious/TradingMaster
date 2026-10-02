@@ -37,6 +37,8 @@ import type {
   NativeBacktestTradeOut,
   NativeDeploymentOut,
   NativeTradeOut,
+  LiveNativeTradeOut,
+  LiveRunOut,
   OptimizationJobOut,
   OptimizationResultOut,
   PaperDeploymentOut,
@@ -456,6 +458,24 @@ export function useAllNativeTrades() {
   return useQuery({
     queryKey: ["native-trades", "all"],
     queryFn: () => apiFetch<NativeTradeOut[]>("/api/v1/paper-trading/native-trades"),
+    refetchInterval: 10000,
+  });
+}
+
+/** The user's live runs that are on (running or paused), with their
+ * positions at live prices -- the Trading page's Live switch. */
+export function useLiveRuns() {
+  return useQuery({
+    queryKey: ["live-runs"],
+    queryFn: () => apiFetch<LiveRunOut[]>("/api/v1/live-native/runs"),
+    refetchInterval: 5000,
+  });
+}
+
+export function useLiveNativeTrades() {
+  return useQuery({
+    queryKey: ["live-native-trades"],
+    queryFn: () => apiFetch<LiveNativeTradeOut[]>("/api/v1/live-native/trades"),
     refetchInterval: 10000,
   });
 }
