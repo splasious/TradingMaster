@@ -1407,6 +1407,48 @@ SELECT count(*) AS underlyings_with_sep_future,
 FROM sep;
 
 \echo
+\echo '== PS1. NIFTY PCR Strategy: TOTAL_OI_PCR (nearest weekly expiry, ATM +/- 20 strikes of 50, both OIs present) at each 15-minute close 09:45-15:15, last 3 sessions, beside the 4-expiry PCR; the state a FLAT strategy would enter'
+WITH snaps AS (
+  SELECT s.id, s.ts, s.session_date, s.spot, s.pcr AS pcr_4exp, (s.expiries ->> 0)::date AS nearest,
+         floor(s.spot / 50 + 0.5) * 50 AS atm
+  FROM pcr_snapshots s
+  WHERE s.underlying = 'NIFTY' AND s.session_date IN (
+          SELECT DISTINCT session_date FROM pcr_snapshots WHERE underlying = 'NIFTY' ORDER BY session_date DESC LIMIT 3)
+    AND (s.ts AT TIME ZONE 'Asia/Kolkata')::time BETWEEN '09:45' AND '15:15' AND s.spot IS NOT NULL
+), pairs AS (
+  SELECT n.id, o.strike,
+         max(o.oi) FILTER (WHERE o.option_type = 'CE') AS ce, max(o.oi) FILTER (WHERE o.option_type = 'PE') AS pe
+  FROM snaps n JOIN pcr_strike_oi o ON o.snapshot_id = n.id AND o.expiry = n.nearest
+  WHERE o.strike BETWEEN n.atm - 1000 AND n.atm + 1000
+  GROUP BY n.id, o.strike
+), pcr AS (
+  SELECT id, count(*) AS listed, count(*) FILTER (WHERE ce IS NOT NULL AND pe IS NOT NULL) AS used,
+         sum(pe) FILTER (WHERE ce IS NOT NULL AND pe IS NOT NULL) / nullif(sum(ce) FILTER (WHERE ce IS NOT NULL AND pe IS NOT NULL), 0) AS total_oi_pcr
+  FROM pairs GROUP BY id
+)
+SELECT to_char(n.session_date, 'DD Mon') AS session, to_char(n.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS close,
+       to_char(n.nearest, 'DD Mon') AS nearest_expiry, p.used || '/' || p.listed AS strikes,
+       round(p.total_oi_pcr::numeric, 3) AS total_oi_pcr, round(n.pcr_4exp::numeric, 3) AS pcr_4_expiries,
+       CASE WHEN p.total_oi_pcr IS NULL OR p.used < 0.9 * p.listed THEN 'skip (coverage)'
+            WHEN p.total_oi_pcr > 1.25 THEN 'BULLISH' WHEN p.total_oi_pcr < 0.75 THEN 'BEARISH'
+            WHEN p.total_oi_pcr BETWEEN 0.80 AND 1.20 THEN 'NEUTRAL' ELSE 'flat (band)' END AS flat_would_enter
+FROM snaps n LEFT JOIN pcr p ON p.id = n.id
+ORDER BY n.ts;
+
+\echo
+\echo '-- PS2. NIFTY PCR Strategy deployments (counts only): per user number, status, regime, last signal and when, closed trades by exit reason'
+SELECT u.label AS owner, d.status, d.state::jsonb ->> 'regime' AS regime, d.last_signal,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist,
+       (SELECT string_agg(r.exit_reason || ' x' || r.n, ', ') FROM (
+          SELECT t.exit_reason, count(*) AS n FROM paper_native_trades t WHERE t.deployment_id = d.id GROUP BY 1) r) AS closed_trades
+FROM paper_native_deployments d
+JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+JOIN paper_portfolios pp ON pp.id = d.portfolio_id
+JOIN (SELECT id, 'User ' || row_number() OVER (ORDER BY created_at) AS label FROM users) u ON u.id = pp.user_id
+WHERE sv.python_code LIKE '%TOTAL_OI_PCR state machine%'
+ORDER BY u.label, d.created_at;
+
+\echo
 \echo '== OW1. Who owns what (users numbered by sign-up order, no emails): strategies, capital pools, native deployments in their pools (active), live deployments, broker accounts'
 WITH u AS (
   SELECT u.id, 'User ' || row_number() OVER (ORDER BY u.created_at) AS label, u.is_active,
