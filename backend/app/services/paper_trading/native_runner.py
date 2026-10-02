@@ -94,6 +94,15 @@ class NativeContext:
         self._last_action: str = "hold"
         self._wake_at: datetime | None = None
 
+    @property
+    def started_at(self) -> datetime | None:
+        """When this run was started (the paper deployment, or the live run
+        switched on from its card); None in a backtest. A strategy acting on
+        completed bars can use it to wait for the first one after it
+        started, rather than act on one it never saw."""
+        created = getattr(self.deployment, "created_at", None)
+        return as_aware_utc(created) if created is not None else None
+
     def wake_at(self, when: datetime) -> None:
         """Asks to be run again at `when` (to the second), on top of the
         scheduler's regular 10-second cycle -- for a strategy whose rules

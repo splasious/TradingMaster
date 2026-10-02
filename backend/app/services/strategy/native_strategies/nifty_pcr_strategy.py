@@ -16,7 +16,9 @@ BrokerAdapter loop.
                 call OI, is not acted on (the file's stale-data block).
   Signals       each completed 15-minute close from 09:45 to 15:15 IST,
                 once, when its record has arrived (normally seconds after
-                the close). PCR entries and exits happen only here.
+                the close). PCR entries and exits happen only here. A run
+                acts only on closes after it started (v2): switched on at
+                10:52, its first signal is 11:00.
   FLAT          PCR > 1.25 -> BULLISH; PCR < 0.75 -> BEARISH;
                 0.80 <= PCR <= 1.20 -> NEUTRAL (unless locked for the day);
                 otherwise stay flat (transition band).
@@ -77,7 +79,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.hours import nse_market_open
 from app.services.options.pcr_snapshots import latest_mark
 
-VERSION = 1
+VERSION = 2
 
 UNDERLYING_SYMBOL = "NIFTY 50"  # the index in the chart catalog
 PCR_UNDERLYING = "NIFTY"  # the PCR records' name for it
@@ -518,8 +520,14 @@ async def evaluate(ctx) -> None:
         if _expired(state["legs"]["future"], today):
             notes.append(await _roll_future(ctx, state, underlying, spot, today))
 
-    # The completed 15-minute signal.
+    # The completed 15-minute signal -- only a close after this run started:
+    # a run switched on at 10:52 (paper, or live from its card) waits for
+    # 11:00 rather than act at once on the 10:45 close it never saw.
     mark = signal_mark(ctx.now)
+    started = getattr(ctx, "started_at", None)
+    if mark is not None and started is not None and mark <= started:
+        notes.append(f"started {started.astimezone(IST):%H:%M}: first signal at the next close")
+        mark = None
     signal = None
     if mark is not None and state.get("last_signal_mark") != mark.isoformat():
         pcr, detail, found = await _signal_pcr(ctx, mark, spot)

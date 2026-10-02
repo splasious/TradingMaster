@@ -23,6 +23,7 @@ from app.services.paper_trading.native_runner import NativeContext
 SPOT = 23450.0
 CASH = 1_000_000.0
 QTY = 650.0  # 10 lots x 65
+STARTED = datetime(2026, 10, 1, 18, 0, tzinfo=timezone.utc)  # the deployment's start, before every test's session
 # Time value per weekly expiry: premium = intrinsic + this.
 TIME_VALUE = {date(2026, 10, 6): 60.0, date(2026, 10, 13): 150.0, date(2026, 10, 27): 100.0, date(2026, 11, 3): 150.0}
 
@@ -54,7 +55,7 @@ class Market:
         db.add_all([version, self.portfolio])
         await db.flush()
         self.deployment = PaperNativeDeployment(portfolio_id=self.portfolio.id, strategy_id=strategy.id, strategy_version_id=version.id,
-                                                status=DeploymentStatus.ACTIVE.value, state=None)
+                                                status=DeploymentStatus.ACTIVE.value, state=None, created_at=STARTED)
         self.nifty = Instrument(exchange="NSE", symbol="NIFTY 50", name="NIFTY 50", instrument_type="index", data_source="zerodha_kite",
                                 external_ref="NIFTY 50")
         db.add_all([self.deployment, self.nifty])
@@ -165,6 +166,16 @@ async def test_nothing_before_the_0945_close_and_nothing_until_its_record_arrive
     assert ctx.state["regime"] == "FLAT" and ctx._last_signal is None
     ctx = await market.check(at(5, 9, 45, 2))  # 09:45 record not stored yet
     assert ctx.state["regime"] == "FLAT" and "waiting for the 09:45 PCR record" in ctx._last_reason
+
+
+async def test_a_run_started_mid_session_waits_for_the_next_close(market):
+    market.deployment.created_at = at(5, 10, 52)  # switched on at 10:52 -- the 10:45 close came before it
+    await market.record(at(5, 10, 45), 0.70)
+    ctx = await market.check(at(5, 10, 52, 30))
+    assert ctx.state["regime"] == "FLAT" and ctx._last_signal is None and "first signal at the next close" in ctx._last_reason
+    await market.record(at(5, 11, 0), 0.70)
+    ctx = await market.check(at(5, 11, 0, 6))
+    assert ctx.state["regime"] == "BEARISH" and ctx._last_signal == "ENTER_BEAR"
 
 
 async def test_bullish_entry_exit_and_the_next_close_decides_again(market):
@@ -329,4 +340,4 @@ def test_it_is_offered_as_a_built_in():
     from app.api.v1.endpoints.strategies import _native_builtin
 
     builtin = _native_builtin("nifty_pcr_strategy")
-    assert builtin["title"].startswith("NIFTY PCR Strategy") and builtin["version"] == 1
+    assert builtin["title"].startswith("NIFTY PCR Strategy") and builtin["version"] == 2

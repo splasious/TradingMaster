@@ -24,7 +24,9 @@ from app.schemas.paper_trading import (
 )
 from app.services.audit import write_audit_log
 from app.services.market_data.tick_engine import tick_engine
+from app.services.live_trading.live_runs import linked_run
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
+from app.services.paper_trading.scheduler import paper_trading_scheduler
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
@@ -48,6 +50,14 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
     showed "flat" with a real position open underneath it, since this
     function used to recognize only the first shape."""
     position = (state or {}).get("position") if state else None
+    if not isinstance(position, dict) and isinstance((state or {}).get("legs"), dict) and state["legs"]:
+        # The third shape: legs and regime at the top of the state (NIFTY PCR
+        # Strategy -- {"regime": ..., "legs": {"future": {...}, "option": {...}}}).
+        opened = min((leg["opened_at"] for leg in state["legs"].values() if leg.get("opened_at")), default=None)
+        if opened is None:
+            return None
+        position = {"legs": state["legs"], "regime": state.get("regime"), "opened_at": opened,
+                    **{k: state[k] for k in ("pcr_at_entry", "last_pcr", "last_pcr_at") if state.get(k) is not None}}
     if not isinstance(position, dict):
         return None
 
@@ -229,6 +239,7 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=_public_state(d.state),
                 position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
                 latest_version_number=latest_versions.get(d.strategy_id), can_exit=can_exit.get(d.strategy_version_id, False),
+                next_check_at=paper_trading_scheduler.next_wakeup(d.id) if d.status == DeploymentStatus.ACTIVE.value else None,
                 created_at=d.created_at, stopped_at=d.stopped_at,
             )
         )
@@ -405,6 +416,11 @@ async def use_latest_strategy_version(deployment_id: str, db: AsyncSession = Dep
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already running the latest version.")
     previous = await db.get(StrategyVersion, deployment.strategy_version_id)
     deployment.strategy_version_id = latest.id
+    # The card has one version: its live run, if on, moves with it (same
+    # state-compatibility rule as paper -- the new code carries on from it).
+    live = await linked_run(db, deployment.id)
+    if live is not None:
+        live.strategy_version_id = latest.id
     await write_audit_log(
         db, user_id=user.id, action="PAPER_NATIVE_VERSION_UPDATED", object_type="paper_native_deployment", object_id=str(deployment.id),
         previous_value={"version_number": previous.version_number if previous else None}, new_value={"version_number": latest.version_number},
@@ -419,6 +435,8 @@ async def delete_native_deployment(deployment_id: str, db: AsyncSession = Depend
     deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
     if deployment.status == DeploymentStatus.ACTIVE.value:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stop this deployment before deleting it.")
+    if await linked_run(db, deployment.id) is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="It's live -- turn Live off before deleting it.")
 
     await db.execute(delete(PaperNativeTrade).where(PaperNativeTrade.deployment_id == deployment.id))
     await write_audit_log(

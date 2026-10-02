@@ -76,6 +76,9 @@ class PaperTradingScheduler:
         else:
             self._wakeups[deployment_id] = as_aware_utc(wake_at)
 
+    def next_wakeup(self, deployment_id: uuid.UUID) -> datetime | None:
+        return self._wakeups.get(deployment_id)
+
     async def _run_wakeups(self) -> None:
         while True:
             await asyncio.sleep(WAKE_CHECK_SECONDS)

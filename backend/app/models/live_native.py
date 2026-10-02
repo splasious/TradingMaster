@@ -33,6 +33,11 @@ class LiveNativeDeployment(Base):
     strategy_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False)
     strategy_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("strategy_versions.id", ondelete="CASCADE"), nullable=False)
     broker_account_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("broker_accounts.id", ondelete="CASCADE"), nullable=False)
+    # The paper run whose card it was switched on from (the Trading page's
+    # Paper / Live switch, agreed 2 Oct): paper keeps running beside it.
+    paper_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("paper_native_deployments.id", ondelete="SET NULL"), index=True,
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=LIVE_NATIVE_ACTIVE)  # active | paused | stopped
     state: Mapped[dict | None] = mapped_column(JSON)  # the strategy's own, as on paper
 
