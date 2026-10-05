@@ -1827,3 +1827,43 @@ SELECT relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS s
 FROM pg_stat_user_tables
 WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_candles', 'instruments', 'pcr_snapshots', 'pcr_strike_oi')
 ORDER BY pg_total_relation_size(relid) DESC;
+
+\echo
+\echo '== AM7. AM OP TRD 15 MIN today (IST): legs opened/closed (time, contract, side -- no prices), closed trades (times, exit reason), the open position (regime, NIFTY at entry, since) and its last check; NIFTY 50 candles and the NIFTY level saved at each 15-minute PCR mark, 09:15-11:30. Its roll fires on the live NIFTY price at any 10-second check, not at a candle close'
+WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
+SELECT to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS at_ist, replace(a.action, 'PAPER_NATIVE_LEG_', '') AS leg,
+       a.new_value::jsonb ->> 'instrument' AS contract, a.new_value::jsonb ->> 'side' AS side
+FROM audit_logs a JOIN paper_native_deployments d ON a.object_id = d.id::text JOIN strategies s ON s.id = d.strategy_id, today
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND a.object_type = 'paper_native_deployment' AND a.action LIKE 'PAPER_NATIVE_LEG_%'
+  AND a.created_at >= today.start
+ORDER BY a.created_at;
+
+WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
+SELECT to_char(t.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist, to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS closed_ist,
+       t.exit_reason, json_array_length(t.legs::json) AS legs
+FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id, today
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND t.closed_at >= today.start
+ORDER BY t.closed_at;
+
+SELECT d.status, d.state::jsonb -> 'position' ->> 'regime' AS regime,
+       round((d.state::jsonb -> 'position' ->> 'entry_spot')::numeric, 2) AS nifty_at_entry,
+       to_char((d.state::jsonb -> 'position' ->> 'opened_at')::timestamptz AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS since_ist,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_check_ist, d.last_signal,
+       CASE WHEN d.last_signal = 'ERROR' THEN split_part(d.last_signal_reason, ':', 1) ELSE d.last_signal_reason END AS last_reason
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' ORDER BY d.created_at;
+
+WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
+SELECT c.timeframe, to_char(c.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS candle_start_ist,
+       round(c.open::numeric, 2) AS open, round(c.high::numeric, 2) AS high, round(c.low::numeric, 2) AS low, round(c.close::numeric, 2) AS close
+FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id, today
+WHERE i.symbol = 'NIFTY 50' AND c.timeframe IN ('5m', '15m')
+  AND c.ts >= today.start + interval '9 hours 15 minutes' AND c.ts < today.start + interval '11 hours 30 minutes'
+ORDER BY c.timeframe, c.ts;
+
+WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
+SELECT to_char(p.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS pcr_mark_ist, to_char(p.captured_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS saved_ist,
+       round(p.spot::numeric, 2) AS nifty, round(p.pcr::numeric, 3) AS pcr_4_expiry
+FROM pcr_snapshots p, today
+WHERE p.underlying = 'NIFTY' AND p.ts >= today.start + interval '9 hours 15 minutes' AND p.ts < today.start + interval '11 hours 30 minutes'
+ORDER BY p.ts;
