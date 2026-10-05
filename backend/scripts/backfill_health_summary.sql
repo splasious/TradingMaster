@@ -1829,7 +1829,7 @@ WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_cand
 ORDER BY pg_total_relation_size(relid) DESC;
 
 \echo
-\echo '== AM7. AM OP TRD 15 MIN today (IST): legs opened/closed (time, contract, side -- no prices), closed trades (times, exit reason), the open position (regime, NIFTY at entry, since) and its last check; NIFTY 50 candles and the NIFTY level saved at each 15-minute PCR mark, 09:15-11:30. Its roll fires on the live NIFTY price at any 10-second check, not at a candle close'
+\echo '== AM7. AM OP TRD 15 MIN today (IST): legs opened/closed (time, contract, side -- no prices), closed trades (times, exit reason), the open position (regime, NIFTY at entry, since) and its last check; NIFTY 50 candles and the NIFTY level saved at each 15-minute PCR mark, 09:15-11:30. Since version 7 (5 Oct) it rolls only when a completed 15-minute close is 100+ points from entry'
 WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
 SELECT to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS at_ist, replace(a.action, 'PAPER_NATIVE_LEG_', '') AS leg,
        a.new_value::jsonb ->> 'instrument' AS contract, a.new_value::jsonb ->> 'side' AS side
@@ -1874,7 +1874,7 @@ SELECT v.version_number AS runs_version, (SELECT max(version_number) FROM strate
        to_char(v.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS version_saved_ist,
        array_length(string_to_array(replace(v.python_code, E'\r', ''), E'\n'), 1) AS saved_lines,
        (regexp_match(v.python_code, 'ROLL_TRIGGER = ([0-9.]+)'))[1] AS roll_trigger,
-       position('moved >= ROLL_TRIGGER' in v.python_code) > 0 AS rolls_on_live_move,
+       position('CLOSE_GRACE' in v.python_code) > 0 AS rolls_on_15min_close,
        md5(replace(v.python_code, E'\r', '')) AS saved_md5
 FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
 WHERE trim(s.name) = 'AM OP TRD 15 MIN' ORDER BY d.created_at;
