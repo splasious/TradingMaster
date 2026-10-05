@@ -25,9 +25,16 @@ purely from the current (15m-timeframe) PCR reading:
 boundary can't flip the position every tick, and PCR sitting IN a buffer
 zone with no open position just stays flat (no edge either way).
 
-Rolling: closes and reopens the SAME regime at the new ATM once spot has
-moved ROLL_TRIGGER (100) points from the spot recorded when the position
-was last opened/rolled -- a uniform 100 points for all three position
+Rolling: closes and reopens the SAME regime at the new ATM when a
+COMPLETED 15-minute candle closes ROLL_TRIGGER (100) or more points from
+the spot recorded when the position was last opened/rolled (agreed 5 Oct:
+never mid-candle -- on 5 Oct the old live-price check rolled at 10:26:09,
+while the 10:30 close was only ~70 points away). Each close from 10:00 to
+14:45 is checked once, at the first check after it: the strategy asks to be
+run CLOSE_WAKE (2 s) after every close, and NIFTY's price then is the
+candle's close; a first check later than CLOSE_GRACE (90 s) after a close
+isn't at it, so that close is skipped, never rolled on. A position is checked from the first close after it opened
+(opened 10:26: first at 10:30). A uniform 100 points for all three position
 types (the original spec split this 100 for the iron condor / 200 for the
 directional spreads; unified to 100 across the board on request). This is
 gated on raw spot distance from that recorded entry_spot, NOT on comparing
@@ -68,8 +75,10 @@ the expiry date itself.
 Display-only fields: each opened position also records its own exit
 rules -- pcr_exit_below / pcr_exit_above (pcr_exit_band(), the same
 thresholds the PCR exit check itself uses), roll_trigger and exit_time --
-so the Paper Trading card can show how close PCR, spot and the clock are
-to closing or rolling it. Nothing in evaluate() reads them back.
+so the Trading page card can show how close PCR, spot and the clock are
+to closing or rolling it, and last_close_at / nifty_last_close, the latest
+15-minute close it was checked at. Nothing in evaluate() reads them back
+(roll_checked_close, which does, is the close last checked).
 
 Runs through services/paper_trading/native_runner.py -- same ctx-based
 contract as nifty_pcr_credit_spread.py (see that file for the underlying
@@ -79,7 +88,7 @@ ctx.close_leg, ctx.record_trade, ctx.note).
 """
 
 import uuid
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 
 from sqlalchemy import select
 
@@ -96,6 +105,10 @@ UNDERLYING_SYMBOL = "NIFTY 50"
 PCR_TIMEFRAME = "15m"
 
 ROLL_TRIGGER = 100  # uniform roll distance for all three position types
+CANDLE_MINUTES = 15  # rolls are decided on completed 15-minute candle closes (agreed 5 Oct)
+FIRST_ROLL_CLOSE = dtime(10, 0)  # the first close after the 09:45 entry
+CLOSE_WAKE = timedelta(seconds=2)  # run this long after each close
+CLOSE_GRACE = timedelta(seconds=90)  # a first check later than this isn't at the close: that close is skipped
 
 SIDEWAYS_LOW = 0.80
 SIDEWAYS_HIGH = 1.20
@@ -142,6 +155,25 @@ def pcr_exit_band(regime: str) -> tuple[float | None, float | None]:
     raise ValueError(f"no exit band for regime '{regime}'")
 
 
+def completed_close(now_ist: datetime) -> datetime | None:
+    """The latest 15-minute candle close at or before now (IST) that a roll
+    is decided on -- 10:00 to 14:45 (15:00 is the hard exit); None outside."""
+    minutes = now_ist.hour * 60 + now_ist.minute
+    close_minutes = minutes - minutes % CANDLE_MINUTES
+    close = now_ist.replace(hour=close_minutes // 60, minute=close_minutes % 60, second=0, microsecond=0)
+    return close if FIRST_ROLL_CLOSE <= close.time() < EXIT_TIME else None
+
+
+def next_close(now_ist: datetime) -> datetime | None:
+    """The next 15-minute close after now (IST) up to 15:00, or None."""
+    minutes = now_ist.hour * 60 + now_ist.minute + 1
+    up = -(-minutes // CANDLE_MINUTES) * CANDLE_MINUTES
+    if up >= 24 * 60:
+        return None
+    close = now_ist.replace(hour=up // 60, minute=up % 60, second=0, microsecond=0)
+    return close if close.time() <= EXIT_TIME else None
+
+
 def in_entry_window(t: dtime) -> bool:
     return ENTRY_TIME <= t < EXIT_TIME
 
@@ -185,6 +217,11 @@ async def evaluate(ctx) -> None:
 
     force_exit = ctx.state.pop("force_exit", False)
     position = ctx.state.get("position")
+
+    # Be run right after every 15-minute close: rolls are decided there.
+    upcoming = next_close(now_ist)
+    if upcoming is not None:
+        ctx.wake_at(upcoming + CLOSE_WAKE)
 
     spot = await ctx.get_price(underlying.id)
     if spot is None:
@@ -249,12 +286,32 @@ async def evaluate(ctx) -> None:
 
         entry_spot = position.get("entry_spot")
         moved = abs(spot - entry_spot) if entry_spot is not None else 0.0
-        if entry_spot is not None and moved >= ROLL_TRIGGER:
-            await close_position("rollover")
-            is_rollover = True
-            position = None  # fall through to reopen the SAME regime at the new ATM below, same tick
-        else:
-            ctx.note("hold", reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved)")
+        close_at = completed_close(now_ist)
+        if "roll_checked_close" not in position:  # opened by an earlier version: checked from the next close on
+            position["roll_checked_close"] = close_at.isoformat() if close_at else None
+        due = (
+            close_at is not None and entry_spot is not None and position["roll_checked_close"] != close_at.isoformat()
+            and close_at > datetime.fromisoformat(position["opened_at"])
+        )
+        missed = None
+        if due and now_ist - close_at > CLOSE_GRACE:
+            # Not run at this close (the app was down?): NIFTY now isn't its close, so no roll on it.
+            position["roll_checked_close"] = close_at.isoformat()
+            missed = close_at.strftime("%H:%M")
+        elif due:
+            # The first check after this close: NIFTY now is the candle's close.
+            position["roll_checked_close"] = close_at.isoformat()
+            position["last_close_at"] = close_at.strftime("%H:%M")
+            position["nifty_last_close"] = spot
+            if moved >= ROLL_TRIGGER:
+                await close_position("rollover")
+                is_rollover = True
+                position = None  # fall through to reopen the SAME regime at the new ATM below, same tick
+        if not is_rollover:
+            last = f"; last close {position['last_close_at']} {position['nifty_last_close']}" if position.get("last_close_at") else ""
+            skipped = f"; the {missed} close was missed (checked late) -- not rolled on" if missed else ""
+            ctx.note("hold", reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved; "
+                                    f"rolls on a 15-min close {ROLL_TRIGGER}pt away{last}{skipped})")
             return
 
     if not in_entry_window(now_ist.time()):
@@ -306,6 +363,7 @@ async def evaluate(ctx) -> None:
         await ctx.open_leg(leg["instrument"], leg["side"], quantity, leg["price"])
 
     exit_below, exit_above = pcr_exit_band(regime)
+    close_now = completed_close(now_ist)
     ctx.state["position"] = {
         "regime": regime,
         "pcr_at_entry": pcr,
@@ -316,6 +374,8 @@ async def evaluate(ctx) -> None:
         "pcr_exit_above": exit_above,
         "roll_trigger": ROLL_TRIGGER,
         "exit_time": EXIT_TIME.strftime("%H:%M"),
+        # Read back: the close already behind it -- the first roll check is the next one.
+        "roll_checked_close": close_now.isoformat() if close_now else None,
         "legs": {
             name: {
                 "instrument_id": str(leg["instrument"].id), "strike": leg["strike"], "option_type": leg["option_type"],

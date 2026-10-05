@@ -285,3 +285,52 @@ async def test_the_stopped_am_op_straddle_closes_at_its_3pm_price(db_engine, db_
     for other in ids[2:]:
         assert (await db_session.get(PaperNativeDeployment, other)).state["position"] is not None
         assert (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == other))).first() is None
+
+
+# ------------------------------------------- AM OP: roll on 15-minute closes --
+
+AM_OP = pathlib.Path(__file__).parent.parent / "app/services/strategy/native_strategies/nifty_pcr_multi_regime.py"
+
+
+async def test_the_running_am_op_deployment_moves_to_the_15min_close_roll_version(db_engine, db_session):
+    from app.models.broker import Broker, BrokerAccount
+    from app.models.live_native import LiveNativeDeployment
+
+    old_code = "# AM OP version 6: rolls on the live price\n"
+    running = await _deployment(db_session, "amop_a@tradingmaster.internal", old_code)
+    edited = await _deployment(db_session, "amop_b@tradingmaster.internal", "# edited by hand since\n")
+    other = await _deployment(db_session, "amop_c@tradingmaster.internal", old_code)
+    for deployment, name in ((running, "AM OP TRD 15 MIN"), (edited, "AM OP TRD 15 MIN"), (other, "MACD - RSI - 15 MIN")):
+        (await db_session.get(Strategy, deployment.strategy_id)).name = name
+    running.state = {"position": {"regime": "sideways", "entry_spot": 22480.4, "legs": {}}}
+    broker = Broker(code="zerodha_kite", name="Zerodha Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    owner = (await db_session.get(PaperPortfolio, running.portfolio_id)).user_id
+    account = BrokerAccount(user_id=owner, broker_id=broker.id, account_label="Kite", environment="live")
+    db_session.add(account)
+    await db_session.flush()
+    live = LiveNativeDeployment(owner_id=owner, strategy_id=running.strategy_id, strategy_version_id=running.strategy_version_id,
+                                broker_account_id=account.id, paper_deployment_id=running.id, status="active", capital=300000)
+    db_session.add(live)
+    await db_session.flush()
+    before = {d.id: d.strategy_version_id for d in (running, edited, other)}
+    running_id, edited_id, other_id, live_id = running.id, edited.id, other.id, live.id
+    await db_session.commit()
+
+    migration = _load("5c8e1f2a9b3d_am_op_roll_on_15min_close")
+    assert migration.NEW_MD5 == _md5(AM_OP)  # the built-in is the approved code
+    migration.OLD_MD5 = hashlib.md5(old_code.encode()).hexdigest()
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, running_id)
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == AM_OP.read_text(encoding="utf-8")
+    assert moved.state["position"]["entry_spot"] == 22480.4  # its position carries on
+    assert (await db_session.get(LiveNativeDeployment, live_id)).strategy_version_id == version.id
+    assert (await db_session.get(PaperNativeDeployment, edited_id)).strategy_version_id == before[edited_id]
+    assert (await db_session.get(PaperNativeDeployment, other_id)).strategy_version_id == before[other_id]
+    audit = (await db_session.execute(select(AuditLog))).scalars().all()
+    assert [(a.object_id, a.previous_value, a.new_value["version_number"]) for a in audit] == [(str(running_id), {"version_number": 11}, 12)]
