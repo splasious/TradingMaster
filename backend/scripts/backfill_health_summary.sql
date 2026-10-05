@@ -2047,3 +2047,32 @@ SELECT v.version_number,
          WHERE rtrim(l, E' \t') <> '' ORDER BY n), E'\n')) AS norm_md5
 FROM strategies s JOIN LATERAL (SELECT * FROM strategy_versions v WHERE v.strategy_id = s.id ORDER BY v.version_number DESC LIMIT 1) v ON true
 WHERE trim(s.name) = 'RS Rotation Weekly';
+
+\echo
+\echo '== RW6. RS Rotation Weekly''s newest backtest: its trades by kind and the days it traded (counts and dates only -- no P&L; see the Backtests page)'
+WITH job AS (
+  SELECT b.* FROM native_backtest_jobs b JOIN strategies s ON s.id = b.strategy_id
+  WHERE trim(s.name) = 'RS Rotation Weekly' ORDER BY b.created_at DESC LIMIT 1
+)
+SELECT v.version_number AS ran_version, job.start_date, job.end_date, job.status,
+       round(extract(epoch FROM (coalesce(job.completed_at, now()) - job.started_at)) / 60.0, 1) AS run_minutes,
+       count(t.id) AS trades,
+       count(t.id) FILTER (WHERE t.exit_reason = 'dropped_out_of_top_n') AS sold_out_of_top10,
+       count(t.id) FILTER (WHERE t.exit_reason = 'trimmed_to_equal_weight') AS trims,
+       count(t.id) FILTER (WHERE t.exit_reason = 'backtest_end') AS closed_at_end,
+       count(t.id) FILTER (WHERE t.exit_reason NOT IN ('dropped_out_of_top_n', 'trimmed_to_equal_weight', 'backtest_end')) AS other,
+       to_char(min(t.opened_at) AT TIME ZONE 'Asia/Kolkata', 'Dy DD Mon HH24:MI') AS first_buy_ist
+FROM job JOIN strategy_versions v ON v.id = job.strategy_version_id LEFT JOIN native_backtest_trades t ON t.job_id = job.id
+GROUP BY v.version_number, job.start_date, job.end_date, job.status, job.completed_at, job.started_at;
+
+-- RW6b. When it readjusted: trades closed per weekday and time (IST) -- Fridays 15:00, a Thursday before a Friday holiday
+WITH job AS (
+  SELECT b.id FROM native_backtest_jobs b JOIN strategies s ON s.id = b.strategy_id
+  WHERE trim(s.name) = 'RS Rotation Weekly' ORDER BY b.created_at DESC LIMIT 1
+)
+SELECT to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'Dy HH24:MI') AS closed_at_ist, count(*) AS trades,
+       count(DISTINCT (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date) AS days,
+       string_agg(DISTINCT to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon'), ', ')
+         FILTER (WHERE extract(isodow FROM t.closed_at AT TIME ZONE 'Asia/Kolkata') <> 5) AS non_friday_days
+FROM native_backtest_trades t JOIN job ON job.id = t.job_id
+GROUP BY 1 ORDER BY 2 DESC;
