@@ -21,6 +21,7 @@ import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useBrokerAccounts, useKillSwitch } from "@/lib/hooks";
 import { istShortDateTime, istShortTime } from "@/lib/time";
+import { CloseFootnote, CloseMark, priceHeading } from "@/components/trading/close-price";
 import type { BrokerAccountOut, LiveRunOut } from "@/lib/types";
 
 const MAX_LOTS_PER_LEG = 25; // live_runs.MAX_LOTS_PER_LEG -- under NIFTY's 1,800 freeze quantity
@@ -462,7 +463,7 @@ export function LiveRunSection({ run, strategyName, canManage }: { run: LiveRunO
                 <Th className="px-3">Contract</Th>
                 <Th className="px-3 text-right">Qty (lots)</Th>
                 <Th className="px-3 text-right">Avg fill</Th>
-                <Th className="px-3 text-right">LTP</Th>
+                <Th className="px-3 text-right">{priceHeading(run.positions)}</Th>
                 <Th className="px-3 text-right">P&amp;L ₹</Th>
                 <Th className="px-3">Since</Th>
               </tr>
@@ -478,13 +479,17 @@ export function LiveRunSection({ run, strategyName, canManage }: { run: LiveRunO
                     {p.quantity.toLocaleString("en-IN")}{p.lots != null ? ` (${Number.isInteger(p.lots) ? p.lots : p.lots.toFixed(2)})` : ""}
                   </Td>
                   <Td className="px-3 py-2 text-right font-financial">{p.avg_price.toFixed(2)}</Td>
-                  <Td className="px-3 py-2 text-right font-financial">{p.current_price != null ? p.current_price.toFixed(2) : "—"}</Td>
+                  <Td className="whitespace-nowrap px-3 py-2 text-right font-financial">
+                    {p.current_price != null ? p.current_price.toFixed(2) : "—"}
+                    <CloseMark close={p.close} legs={run.positions} />
+                  </Td>
                   <Td className={`px-3 py-2 text-right font-financial ${tone(p.pnl)}`}>{p.pnl != null ? rupees(p.pnl, true) : "—"}</Td>
                   <Td className="whitespace-nowrap px-3 py-2 text-text-secondary">{p.opened_at ? istShortTime(p.opened_at) : "—"}</Td>
                 </tr>
               ))}
             </Tbody>
           </Table>
+          <CloseFootnote legs={run.positions} />
         </div>
       ) : (
         <p className="text-xs text-text-muted">Holds nothing live yet -- it acts on the strategy&apos;s next signal.</p>

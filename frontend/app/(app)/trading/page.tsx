@@ -37,6 +37,7 @@ import {
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
 import { istDateTime, istShortDateTime, istShortTime } from "@/lib/time";
+import { CloseFootnote, CloseMark, priceHeading, sessionDay, valueHeading } from "@/components/trading/close-price";
 import type {
   InstrumentOut,
   LiveNativeTradeOut,
@@ -1223,70 +1224,74 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
   const cell = "px-3 py-2 whitespace-nowrap";
 
   return (
-    <Table className="text-xs">
-      <Thead>
-        <tr>
-          <Th className="px-3">Stock</Th>
-          <Th className="px-3">Status</Th>
-          <Th className="px-3 text-right">Qty</Th>
-          <Th className="px-3 text-right">Avg Entry</Th>
-          <Th className="px-3 text-right">LTP</Th>
-          <Th className="px-3 text-right">Invested</Th>
-          <Th className="px-3 text-right">Live Value</Th>
-          <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
-          <Th className="px-3 text-right">P&amp;L %</Th>
-          {columns.map((c) => (
-            <Th key={c} className={`px-3 ${numericColumns.has(c) ? "text-right" : ""}`}>
-              {metricLabel(c)}
-            </Th>
-          ))}
-          <Th className="px-3">Entry Time</Th>
-        </tr>
-      </Thead>
-      <Tbody>
-        {rows.map((h) => {
-          const invested = legTradeValue(h);
-          const live = legLiveValue(h);
-          const pnl = legPnl(h);
-          const pnlPct = pnl != null && invested ? (pnl / invested) * 100 : null;
-          const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
-          const status = typeof h.metrics?.status === "string" ? h.metrics.status : "HOLD";
-          return (
-            <tr key={h.instrument_symbol}>
-              <Td className={`${cell} font-medium`}>{h.instrument_symbol}</Td>
-              <Td className={cell}>
-                <Badge tone="active" className="px-2 py-0.5 text-[10px] uppercase">
-                  {status}
-                </Badge>
-              </Td>
-              <Td className={`${cell} text-right font-financial`}>{h.quantity.toLocaleString()}</Td>
-              <Td className={`${cell} text-right font-financial`}>{formatPrice(h.entry_price)}</Td>
-              <Td className={`${cell} text-right font-financial`}>
-                {h.current_price != null ? formatPrice(h.current_price) : <span className="text-text-muted">—</span>}
-              </Td>
-              <Td className={`${cell} text-right font-financial`}>{formatMoney(invested, currency)}</Td>
-              <Td className={`${cell} text-right font-financial`}>
-                {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
-              </Td>
-              <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
-              <Td className={`${cell} text-right font-financial ${pnlTone}`}>
-                {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
-              </Td>
-              {columns.map((c) => (
-                <Td key={c} className={`${cell} ${numericColumns.has(c) ? "text-right font-financial" : ""}`}>
-                  <MetricValue name={c} value={h.metrics?.[c]} />
+    <>
+      <Table className="text-xs">
+        <Thead>
+          <tr>
+            <Th className="px-3">Stock</Th>
+            <Th className="px-3">Status</Th>
+            <Th className="px-3 text-right">Qty</Th>
+            <Th className="px-3 text-right">Avg Entry</Th>
+            <Th className="px-3 text-right">{priceHeading(holdings)}</Th>
+            <Th className="px-3 text-right">Invested</Th>
+            <Th className="px-3 text-right">{valueHeading(holdings)}</Th>
+            <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
+            <Th className="px-3 text-right">P&amp;L %</Th>
+            {columns.map((c) => (
+              <Th key={c} className={`px-3 ${numericColumns.has(c) ? "text-right" : ""}`}>
+                {metricLabel(c)}
+              </Th>
+            ))}
+            <Th className="px-3">Entry Time</Th>
+          </tr>
+        </Thead>
+        <Tbody>
+          {rows.map((h) => {
+            const invested = legTradeValue(h);
+            const live = legLiveValue(h);
+            const pnl = legPnl(h);
+            const pnlPct = pnl != null && invested ? (pnl / invested) * 100 : null;
+            const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
+            const status = typeof h.metrics?.status === "string" ? h.metrics.status : "HOLD";
+            return (
+              <tr key={h.instrument_symbol}>
+                <Td className={`${cell} font-medium`}>{h.instrument_symbol}</Td>
+                <Td className={cell}>
+                  <Badge tone="active" className="px-2 py-0.5 text-[10px] uppercase">
+                    {status}
+                  </Badge>
                 </Td>
-              ))}
-              <Td className={`${cell} text-text-secondary`} title={h.opened_at ?? undefined}>
-                {h.opened_at
-                  ? istShortDateTime(h.opened_at)
-                  : "—"}
-              </Td>
-            </tr>
-          );
-        })}
-      </Tbody>
-    </Table>
+                <Td className={`${cell} text-right font-financial`}>{h.quantity.toLocaleString()}</Td>
+                <Td className={`${cell} text-right font-financial`}>{formatPrice(h.entry_price)}</Td>
+                <Td className={`${cell} text-right font-financial`}>
+                  {h.current_price != null ? formatPrice(h.current_price) : <span className="text-text-muted">—</span>}
+                  <CloseMark close={h.close} legs={holdings} />
+                </Td>
+                <Td className={`${cell} text-right font-financial`}>{formatMoney(invested, currency)}</Td>
+                <Td className={`${cell} text-right font-financial`}>
+                  {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
+                </Td>
+                <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
+                <Td className={`${cell} text-right font-financial ${pnlTone}`}>
+                  {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
+                </Td>
+                {columns.map((c) => (
+                  <Td key={c} className={`${cell} ${numericColumns.has(c) ? "text-right font-financial" : ""}`}>
+                    <MetricValue name={c} value={h.metrics?.[c]} />
+                  </Td>
+                ))}
+                <Td className={`${cell} text-text-secondary`} title={h.opened_at ?? undefined}>
+                  {h.opened_at
+                    ? istShortDateTime(h.opened_at)
+                    : "—"}
+                </Td>
+              </tr>
+            );
+          })}
+        </Tbody>
+      </Table>
+      <CloseFootnote legs={holdings} />
+    </>
   );
 }
 
@@ -1294,57 +1299,61 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
 function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency: string }) {
   const cell = "px-3 py-2 whitespace-nowrap";
   return (
-    <Table className="text-xs">
-      <Thead>
-        <tr>
-          <Th className="px-3">Side</Th>
-          <Th className="px-3">Contract</Th>
-          <Th className="px-3 text-right">Strike</Th>
-          <Th className="px-3 text-right">Qty</Th>
-          <Th className="px-3 text-right">Entry</Th>
-          <Th className="px-3 text-right">LTP</Th>
-          <Th className="px-3 text-right">Trade Value</Th>
-          <Th className="px-3 text-right">Live Value</Th>
-          <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
-          <Th className="px-3 text-right">P&amp;L %</Th>
-        </tr>
-      </Thead>
-      <Tbody>
-        {legs.map((l) => {
-          const tradeValue = legTradeValue(l);
-          const live = legLiveValue(l);
-          const pnl = legPnl(l);
-          const pnlPct = pnl != null && tradeValue ? (pnl / tradeValue) * 100 : null;
-          const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
-          return (
-            <tr key={l.instrument_symbol}>
-              <Td className={cell}>
-                <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-[10px] uppercase">
-                  {l.side}
-                </Badge>
-              </Td>
-              <Td className={`${cell} font-medium`}>{l.instrument_symbol}</Td>
-              <Td className={`${cell} text-right font-financial`}>
-                {l.strike != null ? `${l.strike.toLocaleString()} ${l.option_type ?? ""}` : "—"}
-              </Td>
-              <Td className={`${cell} text-right font-financial`}>{l.quantity.toLocaleString()}</Td>
-              <Td className={`${cell} text-right font-financial`}>{formatPrice(l.entry_price)}</Td>
-              <Td className={`${cell} text-right font-financial`}>
-                {l.current_price != null ? formatPrice(l.current_price) : <span className="text-text-muted">—</span>}
-              </Td>
-              <Td className={`${cell} text-right font-financial`}>{formatMoney(tradeValue, currency)}</Td>
-              <Td className={`${cell} text-right font-financial`}>
-                {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
-              </Td>
-              <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
-              <Td className={`${cell} text-right font-financial ${pnlTone}`}>
-                {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
-              </Td>
-            </tr>
-          );
-        })}
-      </Tbody>
-    </Table>
+    <>
+      <Table className="text-xs">
+        <Thead>
+          <tr>
+            <Th className="px-3">Side</Th>
+            <Th className="px-3">Contract</Th>
+            <Th className="px-3 text-right">Strike</Th>
+            <Th className="px-3 text-right">Qty</Th>
+            <Th className="px-3 text-right">Entry</Th>
+            <Th className="px-3 text-right">{priceHeading(legs)}</Th>
+            <Th className="px-3 text-right">Trade Value</Th>
+            <Th className="px-3 text-right">{valueHeading(legs)}</Th>
+            <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
+            <Th className="px-3 text-right">P&amp;L %</Th>
+          </tr>
+        </Thead>
+        <Tbody>
+          {legs.map((l) => {
+            const tradeValue = legTradeValue(l);
+            const live = legLiveValue(l);
+            const pnl = legPnl(l);
+            const pnlPct = pnl != null && tradeValue ? (pnl / tradeValue) * 100 : null;
+            const pnlTone = pnl == null ? "text-text-muted" : pnl >= 0 ? "text-positive" : "text-negative";
+            return (
+              <tr key={l.instrument_symbol}>
+                <Td className={cell}>
+                  <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-[10px] uppercase">
+                    {l.side}
+                  </Badge>
+                </Td>
+                <Td className={`${cell} font-medium`}>{l.instrument_symbol}</Td>
+                <Td className={`${cell} text-right font-financial`}>
+                  {l.strike != null ? `${l.strike.toLocaleString()} ${l.option_type ?? ""}` : "—"}
+                </Td>
+                <Td className={`${cell} text-right font-financial`}>{l.quantity.toLocaleString()}</Td>
+                <Td className={`${cell} text-right font-financial`}>{formatPrice(l.entry_price)}</Td>
+                <Td className={`${cell} text-right font-financial`}>
+                  {l.current_price != null ? formatPrice(l.current_price) : <span className="text-text-muted">—</span>}
+                  <CloseMark close={l.close} legs={legs} />
+                </Td>
+                <Td className={`${cell} text-right font-financial`}>{formatMoney(tradeValue, currency)}</Td>
+                <Td className={`${cell} text-right font-financial`}>
+                  {live != null ? formatMoney(live, currency) : <span className="text-text-muted">—</span>}
+                </Td>
+                <Td className={`${cell} text-right font-financial ${pnlTone}`}>{pnl != null ? formatMoney(pnl, currency, true) : "—"}</Td>
+                <Td className={`${cell} text-right font-financial ${pnlTone}`}>
+                  {pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : "—"}
+                </Td>
+              </tr>
+            );
+          })}
+        </Tbody>
+      </Table>
+      <CloseFootnote legs={legs} />
+    </>
   );
 }
 
@@ -1428,7 +1437,7 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
             </SummaryField>
           )}
           {entrySpot != null && (
-            <SummaryField label={`${position.underlying_symbol ?? "Spot"} (entry → now)`}>
+            <SummaryField label={`${position.underlying_symbol ?? "Spot"} (entry → ${position.underlying_close ? `close ${sessionDay(position.underlying_close.session)}` : "now"})`}>
               {formatPrice(entrySpot)} → {position.underlying_price != null ? formatPrice(position.underlying_price) : "--"}
               {spotMoved != null && (
                 <div className={`text-xs ${nearRoll ? "text-warning" : "text-text-muted"}`}>
@@ -2095,7 +2104,7 @@ function NativeDeploymentCard({
                 {holdings.length} holding{holdings.length === 1 ? "" : "s"}
               </SummaryField>
               <SummaryField label="Invested">{formatMoney(holdingsInvested, deployment.currency)}</SummaryField>
-              <SummaryField label="Live Value">
+              <SummaryField label={valueHeading(holdings)}>
                 {holdingsLive != null ? formatMoney(holdingsLive, deployment.currency) : <span className="text-text-muted">--</span>}
               </SummaryField>
               <SummaryField label="Total P&amp;L">

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -114,6 +114,17 @@ class NativeDeploymentOrderIn(BaseModel):
     deployment_ids: list[str] = Field(max_length=500)
 
 
+class ClosePriceOut(BaseModel):
+    """Set on a leg while NSE is shut: its current_price is then this
+    session's closing price from the saved candles (market_data/
+    closing_price.py) -- `provisional` while that's still the 15:30 last
+    price, before the evening download brings the day's close."""
+
+    session: date
+    provisional: bool
+    as_of: datetime
+
+
 class NativeLegOut(BaseModel):
     instrument_symbol: str
     strike: float | None
@@ -125,6 +136,7 @@ class NativeLegOut(BaseModel):
     # "future" books only its P&L (native_runner.open_leg) -- the card's
     # equity counts its P&L, not its full contract value.
     instrument_type: str | None = None
+    close: ClosePriceOut | None = None
 
 
 class NativeHoldingOut(NativeLegOut):
@@ -163,6 +175,7 @@ class NativePositionOut(BaseModel):
     metrics: dict[str, float | int | str | bool | None] = Field(default_factory=dict)
     underlying_symbol: str | None = None
     underlying_price: float | None = None
+    underlying_close: ClosePriceOut | None = None
 
 
 class NativeDeploymentOut(BaseModel):

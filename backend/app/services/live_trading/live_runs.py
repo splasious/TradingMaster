@@ -57,12 +57,15 @@ from app.services.live_trading.native_live import (
     _key_text,
     _mark,
     _orders_today,
+    _realised,
+    _session_start_utc,
     day_pnl,
     load_positions,
     loss_limit,
     pause,
     square_off,
 )
+from app.services.market_data.closing_price import session_closes
 from app.services.market_data.hours import nse_market_open
 
 ACTIVE_STATES = (LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED)
@@ -290,12 +293,15 @@ async def run_view(db: AsyncSession, run: LiveNativeDeployment, now: datetime, k
     connection = (await db.execute(
         select(BrokerConnection).where(BrokerConnection.broker_account_id == run.broker_account_id)
     )).scalar_one_or_none()
+    held = [(position, await db.get(Instrument, position.instrument_id)) for position in (await load_positions(db, run)).values()]
+    held = [(position, instrument) for position, instrument in held if instrument is not None]
+    # While NSE is shut the card shows the session's close (display only --
+    # the engine's loss limit keeps its own live mark, see day_pnl).
+    closes = {} if nse_market_open(now) else await session_closes(db, [instrument.id for _, instrument in held], now)
     legs, unrealised = [], 0.0
-    for position in (await load_positions(db, run)).values():
-        instrument = await db.get(Instrument, position.instrument_id)
-        if instrument is None:
-            continue
-        price = await _mark(db, instrument, now)
+    for position, instrument in held:
+        close = closes.get(instrument.id)
+        price = close.price if close else await _mark(db, instrument, now)
         pnl = (price - position.avg_price) * position.quantity if price is not None else None
         unrealised += pnl or 0.0
         lots = abs(position.quantity) / instrument.lot_size if instrument.lot_size and instrument.instrument_type in ("option", "future") else None
@@ -304,8 +310,9 @@ async def run_view(db: AsyncSession, run: LiveNativeDeployment, now: datetime, k
             "option_type": instrument.option_type, "expiry": instrument.expiry, "side": "long" if position.quantity > 0 else "short",
             "quantity": abs(position.quantity), "lots": lots, "avg_price": position.avg_price, "current_price": price, "pnl": pnl,
             "product": position.product, "opened_at": _aware(position.opened_at),
+            "close": {"session": close.session, "provisional": close.provisional, "as_of": close.as_of} if close else None,
         })
-    today = await day_pnl(db, run, now)
+    today = await day_pnl(db, run, now) if not closes else await _realised(db, run.id, _session_start_utc(now)) + unrealised
     state = run.state or {}
     return {
         "id": str(run.id), "paper_deployment_id": str(run.paper_deployment_id) if run.paper_deployment_id else None,

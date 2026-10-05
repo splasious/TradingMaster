@@ -13,6 +13,7 @@ from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, Pa
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.schemas.paper_trading import (
+    ClosePriceOut,
     NativeDeploymentCreate,
     NativeDeploymentOrderIn,
     NativeDeploymentOut,
@@ -23,7 +24,7 @@ from app.schemas.paper_trading import (
     NativeTradeOut,
 )
 from app.services.audit import write_audit_log
-from app.services.market_data.tick_engine import tick_engine
+from app.services.market_data.closing_price import SessionClose, display_prices
 from app.services.live_trading.live_runs import linked_run
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
 from app.services.paper_trading.scheduler import paper_trading_scheduler
@@ -33,7 +34,11 @@ from app.services.strategy.state_machine import StrategyStatus, can_transition
 router = APIRouter()
 
 
-async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePositionOut | None:
+def _close_out(close: SessionClose | None) -> ClosePriceOut | None:
+    return ClosePriceOut(session=close.session, provisional=close.provisional, as_of=close.as_of) if close else None
+
+
+async def _build_position_out(db: AsyncSession, state: dict | None, now: datetime | None = None) -> NativePositionOut | None:
     """Display-only reconstruction of a deployment's open position from its
     raw state blob -- returns None for any state that isn't shaped like
     one of the two real conventions that exist today (flat, or a future
@@ -74,21 +79,27 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
     else:
         return None
 
-    legs_out: list[NativeLegOut] = []
-    prices: list[float | None] = []
     leg_instruments: list[Instrument] = []
     for side, leg in raw_legs:
         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
         if instrument is None:
             return None
         leg_instruments.append(instrument)
-        current_price = tick_engine.get_current_price(instrument.id)
+    underlying_id = leg_instruments[0].underlying_instrument_id if leg_instruments else None
+    underlying = await db.get(Instrument, underlying_id) if underlying_id else None
+    # Live while NSE is open; the session's close while it's shut.
+    shown = await display_prices(db, [i.id for i in leg_instruments] + ([underlying.id] if underlying else []), now)
+
+    legs_out: list[NativeLegOut] = []
+    prices: list[float | None] = []
+    for (side, leg), instrument in zip(raw_legs, leg_instruments):
+        current_price, close = shown[instrument.id]
         prices.append(current_price)
         legs_out.append(
             NativeLegOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="short" if side == "sell" else "long", quantity=leg["quantity"], entry_price=leg["entry_price"],
-                current_price=current_price, instrument_type=instrument.instrument_type,
+                current_price=current_price, instrument_type=instrument.instrument_type, close=_close_out(close),
             )
         )
 
@@ -117,14 +128,13 @@ async def _build_position_out(db: AsyncSession, state: dict | None) -> NativePos
         )
         unrealized_pnl = trade_value - live_value + futures_pnl
 
-    underlying_id = leg_instruments[0].underlying_instrument_id if leg_instruments else None
-    underlying = await db.get(Instrument, underlying_id) if underlying_id else None
+    underlying_price, underlying_close = shown[underlying.id] if underlying else (None, None)
     return NativePositionOut(
         bias=position.get("bias") or position.get("regime"), opened_at=datetime.fromisoformat(position["opened_at"]),
         legs=legs_out, trade_value=trade_value, live_value=live_value, unrealized_pnl=unrealized_pnl,
         metrics=_scalar_metrics(position, _POSITION_CORE_KEYS),
         underlying_symbol=underlying.symbol if underlying else None,
-        underlying_price=tick_engine.get_current_price(underlying.id) if underlying else None,
+        underlying_price=underlying_price, underlying_close=_close_out(underlying_close),
     )
 
 
@@ -150,7 +160,7 @@ def _parse_opened_at(value) -> datetime | None:
         return None
 
 
-async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[NativeHoldingOut] | None:
+async def _build_holdings_out(db: AsyncSession, state: dict | None, now: datetime | None = None) -> list[NativeHoldingOut] | None:
     """Display-only reconstruction of deployment.state["holdings"] -- a
     dict of independently-opened long equity positions (see
     NativeDeploymentOut.holdings' docstring for why this is separate from
@@ -163,17 +173,18 @@ async def _build_holdings_out(db: AsyncSession, state: dict | None) -> list[Nati
     if not isinstance(holdings, dict):
         return None
 
+    held = [(leg, await db.get(Instrument, uuid.UUID(leg["instrument_id"]))) for leg in holdings.values()]
+    held = [(leg, instrument) for leg, instrument in held if instrument is not None]
+    # Live while NSE is open; the session's close while it's shut.
+    shown = await display_prices(db, [instrument.id for _, instrument in held], now)
     legs_out: list[NativeHoldingOut] = []
-    for leg in holdings.values():
-        instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
-        if instrument is None:
-            continue
-        current_price = tick_engine.get_current_price(instrument.id)
+    for leg, instrument in held:
+        current_price, close = shown[instrument.id]
         legs_out.append(
             NativeHoldingOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="long", quantity=leg["quantity"], entry_price=leg["entry_price"], current_price=current_price,
-                opened_at=_parse_opened_at(leg.get("opened_at")),
+                close=_close_out(close), opened_at=_parse_opened_at(leg.get("opened_at")),
                 metrics=_scalar_metrics(leg, _HOLDING_CORE_KEYS),
             )
         )

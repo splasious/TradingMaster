@@ -285,6 +285,15 @@ export interface StrategyVersionCreate {
   risk_rules: Partial<RiskRules>;
 }
 
+/** Set on a leg while NSE is shut: its current_price is then the
+ * session's closing price -- `provisional` while still the 15:30 last
+ * price, before the evening download brings the day's close. */
+export interface ClosePriceOut {
+  session: string;
+  provisional: boolean;
+  as_of: string;
+}
+
 export interface NativeLegOut {
   instrument_symbol: string;
   strike: number | null;
@@ -295,6 +304,7 @@ export interface NativeLegOut {
   current_price: number | null;
   /** "future" books only its P&L -- equity counts that, not its contract value. */
   instrument_type?: string | null;
+  close?: ClosePriceOut | null;
 }
 
 /** One entry of a multi-holding strategy's state["holdings"]: the leg,
@@ -318,6 +328,7 @@ export interface NativePositionOut {
   metrics: Record<string, number | string | boolean | null>;
   underlying_symbol: string | null;
   underlying_price: number | null;
+  underlying_close?: ClosePriceOut | null;
 }
 
 export interface EffectivePcrOut {
@@ -371,6 +382,7 @@ export interface LiveLegOut {
   pnl: number | null;
   product: string | null;
   opened_at: string | null;
+  close?: ClosePriceOut | null;
 }
 
 /** What fixes a paused live run -- the card's fix-it button. */

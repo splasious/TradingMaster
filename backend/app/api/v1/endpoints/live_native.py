@@ -25,7 +25,7 @@ from app.models.live_native import LiveNativeDeployment, LiveNativeTrade
 from app.models.paper_trading import PaperNativeDeployment, PaperPortfolio
 from app.models.strategy import Strategy
 from app.models.user import User
-from app.schemas.paper_trading import NativeTradeOut
+from app.schemas.paper_trading import ClosePriceOut, NativeTradeOut
 from app.services.audit import write_audit_log
 from app.services.broker.registry import supports_live_strategies
 from app.services.live_trading import kill_switch
@@ -190,6 +190,7 @@ class LiveLegOut(BaseModel):
     pnl: float | None = None
     product: str | None = None
     opened_at: datetime | None = None
+    close: ClosePriceOut | None = None  # set while NSE is shut: current_price is the session's close
 
 
 class LiveRunOut(BaseModel):
