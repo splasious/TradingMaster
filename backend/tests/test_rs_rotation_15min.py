@@ -17,7 +17,7 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import NativeContext
-from app.services.strategy.native_strategies.nifty_rs_rotation import _latest_rs_value
+from app.services.strategy.native_strategies.nifty_rs_rotation import rs_value as weekly_rs_value
 
 SYMBOLS = [f"S{i:02d}" for i in range(25)]
 DAY = datetime(2026, 10, 1, tzinfo=IST)  # Thursday; 30 Sep before it is a session too
@@ -46,7 +46,7 @@ def test_the_bars_before_the_first_close_are_the_previous_sessions_last():
 def test_rs_value_is_the_weekly_strategys_formula():
     stock = [100.0, 101.0, 99.5, 102.0, 103.5, 101.0, 104.0, 105.5, 104.0, 107.0]
     bench = [20000.0, 20050.0, 19980.0, 20100.0, 20120.0, 20080.0, 20150.0, 20200.0, 20170.0, 20250.0]
-    assert rot.rs_value(stock, bench) == pytest.approx(_latest_rs_value(stock, bench))
+    assert rot.rs_value(stock, bench) == pytest.approx(weekly_rs_value(stock, bench))
     assert rot.rs_value(stock[:-1] + [None], bench) is None  # a missing bar: not ranked
 
 
