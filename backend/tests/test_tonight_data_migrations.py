@@ -369,3 +369,36 @@ async def test_am_op_goes_back_to_its_version_6_code_unchanged(db_engine, db_ses
 def test_the_am_op_built_in_rolls_on_the_live_move_again():
     code = AM_OP.read_text(encoding="utf-8")
     assert "moved >= ROLL_TRIGGER" in code and "CLOSE_GRACE" not in code
+
+
+async def test_rs_rotation_weekly_gets_the_fixed_code_as_its_next_version(db_engine, db_session):
+    old = "# the 30 Sep weekly code\ndef _rebalance_date_for_week(d):\n    return d\nTOP_N = 10\n"
+    saved = old.replace("\nTOP_N", "\n\nTOP_N").replace("\n", "  \r\n")  # a blank line more, trailing spaces, Windows line ends
+    user = User(email="rs_weekly@tradingmaster.internal", hashed_password="x", full_name="RS")
+    db_session.add(user)
+    await db_session.flush()
+    weekly, edited = Strategy(name="RS Rotation Weekly", owner_id=user.id, code_type="native"), Strategy(name="RS mine", owner_id=user.id, code_type="native")
+    db_session.add_all([weekly, edited])
+    await db_session.flush()
+    for strategy, code in ((weekly, saved), (edited, old.replace("TOP_N = 10", "TOP_N = 12"))):
+        db_session.add(StrategyVersion(strategy_id=strategy.id, version_number=3, timeframe="1wk", instrument_ids=[], parameters={},
+                                       python_code=code, position_sizing={}, risk_rules={}, created_by=user.id))
+    await db_session.commit()
+    weekly_id, edited_id = weekly.id, edited.id
+
+    migration = _load("8f2b4d6a1c35_rs_rotation_weekly_v4")
+    migration.OLD_NORM_MD5 = migration._norm_md5(old)  # the real one is checked against production in health check RW5
+    assert migration.NEW_MD5 == hashlib.md5(migration.BUILT_IN.read_text().encode()).hexdigest()  # the built-in is the agreed code
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing: v4 isn't the old code
+    db_session.expire_all()
+
+    async def latest(strategy_id):
+        return (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy_id)
+                                         .order_by(StrategyVersion.version_number.desc()))).scalars().first()
+
+    v4 = await latest(weekly_id)
+    assert (v4.version_number, v4.timeframe) == (4, "1wk") and "REBALANCE_TIME = time(15, 0)" in v4.python_code
+    assert (await latest(edited_id)).version_number == 3  # someone's own edit of it is left alone
+    [audit] = (await db_session.execute(select(AuditLog).where(AuditLog.object_id == str(weekly_id)))).scalars().all()
+    assert audit.new_value["version_number"] == 4

@@ -2039,3 +2039,11 @@ WITH code AS (
 SELECT 'only in saved' AS which, string_agg(line_no::text, ',' ORDER BY line_no) AS line_numbers, count(*) AS lines FROM saved WHERE h NOT IN (SELECT h FROM repo)
 UNION ALL
 SELECT 'only in repo', string_agg(line_no::text, ',' ORDER BY line_no), count(*) FROM repo WHERE h NOT IN (SELECT h FROM saved);
+
+-- RW5. Its latest version's fingerprint ignoring blank lines and trailing spaces (migration 8f2b4d6a1c35 saves v4 only when it is ff02ad89...)
+SELECT v.version_number,
+       md5(array_to_string(ARRAY(
+         SELECT rtrim(l, E' \t') FROM unnest(string_to_array(replace(v.python_code, E'\r', ''), E'\n')) WITH ORDINALITY u(l, n)
+         WHERE rtrim(l, E' \t') <> '' ORDER BY n), E'\n')) AS norm_md5
+FROM strategies s JOIN LATERAL (SELECT * FROM strategy_versions v WHERE v.strategy_id = s.id ORDER BY v.version_number DESC LIMIT 1) v ON true
+WHERE trim(s.name) = 'RS Rotation Weekly';
