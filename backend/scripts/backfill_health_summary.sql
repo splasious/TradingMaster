@@ -1914,27 +1914,39 @@ WHERE p.underlying = 'NIFTY' AND (p.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE
   AND (p.ts AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:45' AND TIME '15:00'
 ORDER BY p.ts;
 
-WITH opts AS (
-  SELECT i.id, i.strike::int AS strike, i.option_type FROM instruments i
-  WHERE i.exchange = 'NFO' AND i.instrument_type = 'option' AND i.expiry = DATE '2026-10-06' AND i.symbol LIKE 'NIFTY%'
-    AND i.strike BETWEEN 22200 AND 22800
-), marks AS (
-  SELECT c.instrument_id, c.ts + interval '5 minutes' AS close_at, c.close
-  FROM ohlcv_candles c JOIN opts ON opts.id = c.instrument_id
-  WHERE c.timeframe = '5m' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
-    AND extract(minute FROM (c.ts AT TIME ZONE 'Asia/Kolkata')) IN (10, 25, 40, 55)
-    AND (c.ts AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:40' AND TIME '14:55'
+-- AM9b. Which candles exist today for the NIFTY 6-Oct contracts 22200-22800 (main table and backfill copy), by timeframe
+SELECT 'chart' AS tbl, c.timeframe, count(*) AS candles, count(DISTINCT c.instrument_id) AS contracts,
+       to_char(min(c.ts) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS first_ist, to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS last_ist
+FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+WHERE i.exchange = 'NFO' AND i.symbol LIKE 'NIFTY26O06%' AND i.strike BETWEEN 22200 AND 22800
+  AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
+GROUP BY c.timeframe
+UNION ALL
+SELECT 'backfill', b.timeframe, count(*), count(DISTINCT b.symbol_id),
+       to_char(min(b.ts) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI'), to_char(max(b.ts) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI')
+FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+WHERE s.symbol LIKE 'NIFTY26O06%' AND (b.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
+GROUP BY b.timeframe ORDER BY 1, 2;
+
+-- AM9c. Option closes at each 15-minute close (09:45-15:00): the close of the 5m candle ending then, else the 15m one; chart table first, else the backfill copy
+WITH bars AS (
+  SELECT i.symbol, c.timeframe, c.ts, c.close FROM ohlcv_candles c JOIN instruments i ON i.id = c.instrument_id
+  WHERE i.exchange = 'NFO' AND i.symbol LIKE 'NIFTY26O06%' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05' AND c.timeframe IN ('5m', '15m')
+  UNION ALL
+  SELECT s.symbol, b.timeframe, b.ts, b.close FROM bf_ohlcv_bars b JOIN bf_symbols s ON s.id = b.symbol_id
+  WHERE s.symbol LIKE 'NIFTY26O06%' AND (b.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05' AND b.timeframe IN ('5m', '15m')
+), at_close AS (
+  SELECT symbol, ts + (CASE timeframe WHEN '5m' THEN interval '5 minutes' ELSE interval '15 minutes' END) AS close_at,
+         timeframe, close
+  FROM bars
+), pick AS (
+  SELECT DISTINCT ON (symbol, close_at) symbol, close_at, close FROM at_close
+  WHERE extract(minute FROM (close_at AT TIME ZONE 'Asia/Kolkata')) IN (0, 15, 30, 45)
+    AND (close_at AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:45' AND TIME '15:00'
+  ORDER BY symbol, close_at, timeframe
 )
-SELECT to_char(m.close_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS close_ist,
-       max(m.close) FILTER (WHERE o.strike = 22300 AND o.option_type = 'CE') AS ce_22300,
-       max(m.close) FILTER (WHERE o.strike = 22300 AND o.option_type = 'PE') AS pe_22300,
-       max(m.close) FILTER (WHERE o.strike = 22400 AND o.option_type = 'CE') AS ce_22400,
-       max(m.close) FILTER (WHERE o.strike = 22400 AND o.option_type = 'PE') AS pe_22400,
-       max(m.close) FILTER (WHERE o.strike = 22500 AND o.option_type = 'CE') AS ce_22500,
-       max(m.close) FILTER (WHERE o.strike = 22500 AND o.option_type = 'PE') AS pe_22500,
-       max(m.close) FILTER (WHERE o.strike = 22600 AND o.option_type = 'CE') AS ce_22600,
-       max(m.close) FILTER (WHERE o.strike = 22600 AND o.option_type = 'PE') AS pe_22600,
-       max(m.close) FILTER (WHERE o.strike = 22700 AND o.option_type = 'CE') AS ce_22700,
-       max(m.close) FILTER (WHERE o.strike = 22700 AND o.option_type = 'PE') AS pe_22700
-FROM marks m JOIN opts o ON o.id = m.instrument_id
-GROUP BY m.close_at ORDER BY m.close_at;
+SELECT to_char(close_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS close_ist,
+       max(close) FILTER (WHERE symbol = 'NIFTY26O0622400CE') AS ce_22400, max(close) FILTER (WHERE symbol = 'NIFTY26O0622400PE') AS pe_22400,
+       max(close) FILTER (WHERE symbol = 'NIFTY26O0622500CE') AS ce_22500, max(close) FILTER (WHERE symbol = 'NIFTY26O0622500PE') AS pe_22500,
+       max(close) FILTER (WHERE symbol = 'NIFTY26O0622600CE') AS ce_22600, max(close) FILTER (WHERE symbol = 'NIFTY26O0622600PE') AS pe_22600
+FROM pick GROUP BY close_at ORDER BY close_at;
