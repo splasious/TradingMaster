@@ -1893,3 +1893,48 @@ FROM saved WHERE h NOT IN (SELECT h FROM repo)
 UNION ALL
 SELECT 'only in repo', string_agg(line_no::text, ',' ORDER BY line_no), count(*)
 FROM repo WHERE h NOT IN (SELECT h FROM saved);
+
+\echo
+\echo '== AM9. 5 Oct, AM OP rollover compared (live 100-point move vs a 15-minute close 100 points away): its legs as filled (contract, side, times, per-unit prices -- no size, no P&L), NIFTY and PCR at each 15-minute close to 15:00, and NIFTY 6-Oct option closes at each 15-minute close (market prices)'
+SELECT to_char(t.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist, to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS closed_ist,
+       t.exit_reason, i.symbol AS contract, l.value ->> 'side' AS side,
+       round((l.value ->> 'entry_price')::numeric, 2) AS entry, round((l.value ->> 'exit_price')::numeric, 2) AS exit
+FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+CROSS JOIN LATERAL jsonb_array_elements(t.legs::jsonb) AS l(value)
+LEFT JOIN instruments i ON i.id::text = l.value ->> 'instrument_id'
+WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
+ORDER BY t.closed_at, i.symbol;
+
+SELECT to_char(p.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS close_ist, to_char(p.captured_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS saved_ist,
+       round(p.spot::numeric, 2) AS nifty_at_close, round(c.close::numeric, 2) AS nifty_5m_close, round(p.pcr::numeric, 3) AS pcr_4_expiry
+FROM pcr_snapshots p
+LEFT JOIN instruments n ON n.symbol = 'NIFTY 50'
+LEFT JOIN ohlcv_candles c ON c.instrument_id = n.id AND c.timeframe = '5m' AND c.ts = p.ts - interval '5 minutes'
+WHERE p.underlying = 'NIFTY' AND (p.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
+  AND (p.ts AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:45' AND TIME '15:00'
+ORDER BY p.ts;
+
+WITH opts AS (
+  SELECT i.id, i.strike::int AS strike, i.option_type FROM instruments i
+  WHERE i.exchange = 'NFO' AND i.instrument_type = 'option' AND i.expiry = DATE '2026-10-06' AND i.symbol LIKE 'NIFTY%'
+    AND i.strike BETWEEN 22200 AND 22800
+), marks AS (
+  SELECT c.instrument_id, c.ts + interval '5 minutes' AS close_at, c.close
+  FROM ohlcv_candles c JOIN opts ON opts.id = c.instrument_id
+  WHERE c.timeframe = '5m' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = DATE '2026-10-05'
+    AND extract(minute FROM (c.ts AT TIME ZONE 'Asia/Kolkata')) IN (10, 25, 40, 55)
+    AND (c.ts AT TIME ZONE 'Asia/Kolkata')::time BETWEEN TIME '09:40' AND TIME '14:55'
+)
+SELECT to_char(m.close_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS close_ist,
+       max(m.close) FILTER (WHERE o.strike = 22300 AND o.option_type = 'CE') AS ce_22300,
+       max(m.close) FILTER (WHERE o.strike = 22300 AND o.option_type = 'PE') AS pe_22300,
+       max(m.close) FILTER (WHERE o.strike = 22400 AND o.option_type = 'CE') AS ce_22400,
+       max(m.close) FILTER (WHERE o.strike = 22400 AND o.option_type = 'PE') AS pe_22400,
+       max(m.close) FILTER (WHERE o.strike = 22500 AND o.option_type = 'CE') AS ce_22500,
+       max(m.close) FILTER (WHERE o.strike = 22500 AND o.option_type = 'PE') AS pe_22500,
+       max(m.close) FILTER (WHERE o.strike = 22600 AND o.option_type = 'CE') AS ce_22600,
+       max(m.close) FILTER (WHERE o.strike = 22600 AND o.option_type = 'PE') AS pe_22600,
+       max(m.close) FILTER (WHERE o.strike = 22700 AND o.option_type = 'CE') AS ce_22700,
+       max(m.close) FILTER (WHERE o.strike = 22700 AND o.option_type = 'PE') AS pe_22700
+FROM marks m JOIN opts o ON o.id = m.instrument_id
+GROUP BY m.close_at ORDER BY m.close_at;
