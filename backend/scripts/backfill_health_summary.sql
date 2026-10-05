@@ -1874,7 +1874,8 @@ SELECT v.version_number AS runs_version, (SELECT max(version_number) FROM strate
        to_char(v.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS version_saved_ist,
        array_length(string_to_array(replace(v.python_code, E'\r', ''), E'\n'), 1) AS saved_lines,
        (regexp_match(v.python_code, 'ROLL_TRIGGER = ([0-9.]+)'))[1] AS roll_trigger,
-       position('moved >= ROLL_TRIGGER' in v.python_code) > 0 AS rolls_on_live_move
+       position('moved >= ROLL_TRIGGER' in v.python_code) > 0 AS rolls_on_live_move,
+       md5(replace(v.python_code, E'\r', '')) AS saved_md5
 FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
 WHERE trim(s.name) = 'AM OP TRD 15 MIN' ORDER BY d.created_at;
 
