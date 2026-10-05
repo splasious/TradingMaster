@@ -319,7 +319,7 @@ async def test_the_running_am_op_deployment_moves_to_the_15min_close_roll_versio
     await db_session.commit()
 
     migration = _load("5c8e1f2a9b3d_am_op_roll_on_15min_close")
-    assert migration.NEW_MD5 == _md5(AM_OP)  # the built-in is the approved code
+    migration.NEW_MD5 = _md5(AM_OP)  # the built-in went back to the live-move roll since (7e1a3c5b8d20)
     migration.OLD_MD5 = hashlib.md5(old_code.encode()).hexdigest()
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -334,3 +334,38 @@ async def test_the_running_am_op_deployment_moves_to_the_15min_close_roll_versio
     assert (await db_session.get(PaperNativeDeployment, other_id)).strategy_version_id == before[other_id]
     audit = (await db_session.execute(select(AuditLog))).scalars().all()
     assert [(a.object_id, a.previous_value, a.new_value["version_number"]) for a in audit] == [(str(running_id), {"version_number": 11}, 12)]
+
+
+async def test_am_op_goes_back_to_its_version_6_code_unchanged(db_engine, db_session):
+    v6, v7 = "# AM OP version 6: rolls on the live 100-point move\n", "# AM OP version 7: rolls on a 15-minute close\n"
+    running = await _deployment(db_session, "amop_v7a@tradingmaster.internal", v6)  # saved as version 11 here
+    (await db_session.get(Strategy, running.strategy_id)).name = "AM OP TRD 15 MIN"
+    v7_row = StrategyVersion(strategy_id=running.strategy_id, version_number=12, timeframe="15m", instrument_ids=[], parameters={"x": 1},
+                             python_code=v7, position_sizing={"type": "fixed_quantity", "value": 1}, risk_rules={})
+    db_session.add(v7_row)
+    await db_session.flush()
+    running.strategy_version_id = v7_row.id
+    running.state = {"position": None, "seeded": True}
+    no_v6 = await _deployment(db_session, "amop_v7b@tradingmaster.internal", v7)  # on version 7, but no version 6 to go back to
+    (await db_session.get(Strategy, no_v6.strategy_id)).name = "AM OP TRD 15 MIN"
+    running_id, no_v6_id, no_v6_version = running.id, no_v6.id, no_v6.strategy_version_id
+    await db_session.commit()
+
+    migration = _load("7e1a3c5b8d20_am_op_back_to_live_100pt_roll")
+    migration.V6_MD5 = hashlib.md5(v6.encode()).hexdigest()
+    migration.V7_MD5 = hashlib.md5(v7.encode()).hexdigest()
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, running_id)
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 13 and version.python_code == v6 and moved.state == {"position": None, "seeded": True}
+    assert (await db_session.get(PaperNativeDeployment, no_v6_id)).strategy_version_id == no_v6_version
+    audit = (await db_session.execute(select(AuditLog))).scalars().all()
+    assert [(a.object_id, a.previous_value, a.new_value["version_number"]) for a in audit] == [(str(running_id), {"version_number": 12}, 13)]
+
+
+def test_the_am_op_built_in_rolls_on_the_live_move_again():
+    code = AM_OP.read_text(encoding="utf-8")
+    assert "moved >= ROLL_TRIGGER" in code and "CLOSE_GRACE" not in code

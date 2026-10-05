@@ -1829,7 +1829,7 @@ WHERE relname IN ('bf_ohlcv_bars', 'bf_backfill_jobs', 'bf_symbols', 'ohlcv_cand
 ORDER BY pg_total_relation_size(relid) DESC;
 
 \echo
-\echo '== AM7. AM OP TRD 15 MIN today (IST): legs opened/closed (time, contract, side -- no prices), closed trades (times, exit reason), the open position (regime, NIFTY at entry, since) and its last check; NIFTY 50 candles and the NIFTY level saved at each 15-minute PCR mark, 09:15-11:30. Since version 7 (5 Oct) it rolls only when a completed 15-minute close is 100+ points from entry'
+\echo '== AM7. AM OP TRD 15 MIN today (IST): legs opened/closed (time, contract, side -- no prices), closed trades (times, exit reason), the open position (regime, NIFTY at entry, since) and its last check; NIFTY 50 candles and the NIFTY level saved at each 15-minute PCR mark, 09:15-11:30. Version 7 (5 Oct 15:39) rolled only on a completed 15-minute close 100+ points from entry; version 8 (5 Oct evening) is version 6 again: it rolls the moment live NIFTY is 100 points from entry'
 WITH today AS (SELECT ((now() AT TIME ZONE 'Asia/Kolkata')::date)::timestamp AT TIME ZONE 'Asia/Kolkata' AS start)
 SELECT to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS at_ist, replace(a.action, 'PAPER_NATIVE_LEG_', '') AS leg,
        a.new_value::jsonb ->> 'instrument' AS contract, a.new_value::jsonb ->> 'side' AS side
@@ -1869,7 +1869,7 @@ WHERE p.underlying = 'NIFTY' AND p.ts >= today.start + interval '9 hours 15 minu
 ORDER BY p.ts;
 
 \echo
-\echo '== AM8. AM OP TRD 15 MIN saved code vs the repo file nifty_pcr_multi_regime.py (332 lines): which version runs, and the line NUMBERS that differ (no code shown); its roll rule'
+\echo '== AM8. AM OP TRD 15 MIN saved code vs the repo file nifty_pcr_multi_regime.py (332 lines): which version runs, and the line NUMBERS that differ (no code shown); its roll rule (expected from 6 Oct: version 8, saved_md5 93a247f5..., rolls_on_15min_close f)'
 SELECT v.version_number AS runs_version, (SELECT max(version_number) FROM strategy_versions WHERE strategy_id = s.id) AS latest_version,
        to_char(v.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS version_saved_ist,
        array_length(string_to_array(replace(v.python_code, E'\r', ''), E'\n'), 1) AS saved_lines,
