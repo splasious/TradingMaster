@@ -496,3 +496,80 @@ async def test_the_15min_cash_strategies_get_the_pcr_filter_as_their_next_versio
     assert sorted((a.action, a.object_id, a.new_value["version_number"]) for a in audit) == sorted(
         ("STRATEGY_VERSION_CREATED", str(strategy_of[r.id]), 12) for r in (macd, rs, stopped)
     )
+
+
+# ---------------------------- 4 stocks' downloads again, as the Kite user --
+
+async def test_the_four_stocks_failed_downloads_are_queued_again_as_the_connected_kite_user(db_engine, db_session):
+    from datetime import date
+
+    from app.models.backfill_platform import BfBackfillJob
+    from app.models.broker import Broker, BrokerAccount, BrokerConnection
+
+    kite_user = User(email="kite_owner@tradingmaster.internal", hashed_password="x", full_name="Kite")
+    other_user = User(email="kite_other@tradingmaster.internal", hashed_password="x", full_name="Other")
+    db_session.add_all([kite_user, other_user])
+    await db_session.flush()
+    broker = Broker(code="zerodha_kite", name="Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    connected = BrokerAccount(user_id=kite_user.id, broker_id=broker.id, account_label="Kite", environment="live")
+    stale = BrokerAccount(user_id=other_user.id, broker_id=broker.id, account_label="Old Kite", environment="live")
+    db_session.add_all([connected, stale])
+    await db_session.flush()
+    db_session.add_all([BrokerConnection(broker_account_id=connected.id, status="connected"),
+                        BrokerConnection(broker_account_id=stale.id, status="disconnected")])
+    symbols = {s: BfSymbol(source="zerodha", symbol=s, display_name=s) for s in ("CUPID", "MTARTECH", "SBIN")}
+    db_session.add_all(symbols.values())
+    await db_session.flush()
+
+    def job(symbol: str, timeframe: str, status: str, requested_by=None) -> BfBackfillJob:
+        return BfBackfillJob(symbol_id=symbols[symbol].id, source="zerodha", timeframe=timeframe, start_date=date(2021, 1, 1),
+                             status=status, requested_by=requested_by, attempts=1, error_message="No Zerodha Kite account connected.")
+
+    jobs = [job("CUPID", "1d", "failed"), job("CUPID", "15m", "failed"), job("MTARTECH", "5m", "failed"),
+            job("SBIN", "1d", "failed"),  # not one of the four: left alone
+            job("CUPID", "5m", "failed", requested_by=other_user.id)]  # had a user: a different failure, left alone
+    db_session.add_all(jobs)
+    await db_session.flush()
+    ids, kite_id, other_id = [j.id for j in jobs], kite_user.id, other_user.id
+    await db_session.commit()
+
+    migration = _load("d6e8f0a2b4c5_requeue_the_four_stocks_downloads_as_the_kite_user")
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    after = [await db_session.get(BfBackfillJob, i) for i in ids]
+    for requeued in after[:3]:
+        assert requeued.status == "pending" and requeued.requested_by == kite_id
+        assert requeued.attempts == 0 and requeued.error_message is None and requeued.completed_at is None
+    assert after[3].status == "failed" and after[3].requested_by is None
+    assert after[4].status == "failed" and after[4].requested_by == other_id
+    audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "BF_BACKFILL_STARTED"))).scalars().all()
+    assert len(audit) == 1 and audit[0].new_value["symbols"] == ["CUPID", "MTARTECH"]
+
+
+async def test_with_no_kite_login_connected_the_latest_downloads_user_is_used(db_engine, db_session):
+    from datetime import date
+
+    from app.models.backfill_platform import BfBackfillJob
+
+    user = User(email="kite_last@tradingmaster.internal", hashed_password="x", full_name="Kite")
+    db_session.add(user)
+    await db_session.flush()
+    stock, done = BfSymbol(source="zerodha", symbol="STLTECH", display_name="STLTECH"), BfSymbol(source="zerodha", symbol="SBIN", display_name="SBIN")
+    db_session.add_all([stock, done])
+    await db_session.flush()
+    failed = BfBackfillJob(symbol_id=stock.id, source="zerodha", timeframe="1d", start_date=date(2021, 1, 1), status="failed", attempts=1)
+    db_session.add_all([failed, BfBackfillJob(symbol_id=done.id, source="zerodha", timeframe="1d", status="completed", requested_by=user.id,
+                                              completed_at=datetime(2026, 10, 5, 12, 30, tzinfo=timezone.utc))])
+    await db_session.flush()
+    failed_id, user_id = failed.id, user.id
+    await db_session.commit()
+
+    await _run(db_engine, _load("d6e8f0a2b4c5_requeue_the_four_stocks_downloads_as_the_kite_user"))
+    db_session.expire_all()
+
+    job = await db_session.get(BfBackfillJob, failed_id)
+    assert job.status == "pending" and job.requested_by == user_id
