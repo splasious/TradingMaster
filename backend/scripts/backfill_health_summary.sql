@@ -2076,3 +2076,45 @@ SELECT to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'Dy HH24:MI') AS closed_
          FILTER (WHERE extract(isodow FROM t.closed_at AT TIME ZONE 'Asia/Kolkata') <> 5) AS non_friday_days
 FROM native_backtest_trades t JOIN job ON job.id = t.job_id
 GROUP BY 1 ORDER BY 2 DESC;
+
+\echo
+\echo '== AU1. Sessions today (IST) by user (numbered) and device/browser kind: fresh logins vs refresh renewals, still active, distinct networks (counts only, no IPs)'
+WITH u AS (SELECT id, 'User ' || row_number() OVER (ORDER BY created_at) AS label FROM users),
+s AS (
+  SELECT s.*, u.label,
+         CASE WHEN s.user_agent ~* 'iphone' THEN 'iPhone' WHEN s.user_agent ~* 'ipad' THEN 'iPad' WHEN s.user_agent ~* 'android' THEN 'Android'
+              WHEN s.user_agent ~* 'windows' THEN 'Windows' WHEN s.user_agent ~* 'macintosh' THEN 'Mac' WHEN s.user_agent ~* 'linux' THEN 'Linux' ELSE 'other' END
+         || ' ' ||
+         CASE WHEN s.user_agent ~* 'telegram|fban|fbav|instagram|whatsapp|; wv\)' THEN 'in-app browser'
+              WHEN s.user_agent ~* 'edg/' THEN 'Edge' WHEN s.user_agent ~* 'opr/' THEN 'Opera' WHEN s.user_agent ~* 'crios|chrome/' THEN 'Chrome'
+              WHEN s.user_agent ~* 'fxios|firefox/' THEN 'Firefox' WHEN s.user_agent ~* 'safari/' THEN 'Safari' ELSE 'other' END AS device,
+         EXISTS (SELECT 1 FROM sessions p WHERE p.user_id = s.user_id AND p.revoked_at BETWEEN s.created_at - interval '2 seconds' AND s.created_at + interval '2 seconds'
+                 AND p.id <> s.id AND p.created_at < s.created_at) AS renewal
+  FROM sessions s JOIN u ON u.id = s.user_id
+  WHERE s.created_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
+)
+SELECT label AS user_no, device, count(*) AS sessions, count(*) FILTER (WHERE NOT renewal) AS fresh_logins, count(*) FILTER (WHERE renewal) AS renewals,
+       count(*) FILTER (WHERE revoked_at IS NULL AND expires_at > now()) AS active_now, count(DISTINCT ip_address) AS networks
+FROM s GROUP BY label, device ORDER BY label, device;
+
+-- AU2. Today's fresh logins in order (IST time, user number, device/browser kind) -- no IPs
+WITH u AS (SELECT id, 'User ' || row_number() OVER (ORDER BY created_at) AS label FROM users),
+s AS (
+  SELECT s.created_at, u.label,
+         CASE WHEN s.user_agent ~* 'iphone' THEN 'iPhone' WHEN s.user_agent ~* 'ipad' THEN 'iPad' WHEN s.user_agent ~* 'android' THEN 'Android'
+              WHEN s.user_agent ~* 'windows' THEN 'Windows' WHEN s.user_agent ~* 'macintosh' THEN 'Mac' WHEN s.user_agent ~* 'linux' THEN 'Linux' ELSE 'other' END
+         || ' ' ||
+         CASE WHEN s.user_agent ~* 'telegram|fban|fbav|instagram|whatsapp|; wv\)' THEN 'in-app browser'
+              WHEN s.user_agent ~* 'edg/' THEN 'Edge' WHEN s.user_agent ~* 'opr/' THEN 'Opera' WHEN s.user_agent ~* 'crios|chrome/' THEN 'Chrome'
+              WHEN s.user_agent ~* 'fxios|firefox/' THEN 'Firefox' WHEN s.user_agent ~* 'safari/' THEN 'Safari' ELSE 'other' END AS device,
+         EXISTS (SELECT 1 FROM sessions p WHERE p.user_id = s.user_id AND p.revoked_at BETWEEN s.created_at - interval '2 seconds' AND s.created_at + interval '2 seconds'
+                 AND p.id <> s.id AND p.created_at < s.created_at) AS renewal,
+         s.revoked_at, (SELECT count(*) FROM sessions c WHERE c.user_id = s.user_id AND c.created_at > s.created_at
+                        AND c.created_at <= coalesce(s.revoked_at, now()) + interval '2 seconds' AND c.created_at >= coalesce(s.revoked_at, now()) - interval '2 seconds') AS renewed_into
+  FROM sessions s JOIN u ON u.id = s.user_id
+  WHERE s.created_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
+)
+SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS created_ist, label AS user_no, device,
+       CASE WHEN renewal THEN 'renewal' ELSE 'LOGIN' END AS kind,
+       to_char(revoked_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS revoked_ist, renewed_into
+FROM s ORDER BY created_at;
