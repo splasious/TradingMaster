@@ -93,6 +93,16 @@ jobs:
               grep -oE '"(GET|POST|PUT|PATCH|DELETE) /api/v1/[^ ?"]*[^"]*" [0-9]{3}' /tmp/backend-today.log \
                 | sed -E 's/\?[^ ]*//; s#/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#/{id}#g; s# HTTP/[0-9.]+"#"#; s/"//g' \
                 | sort | uniq -c | sort -rn | head -40 || true
+              echo "-- Browser pre-flight (OPTIONS) answers (count, path, status):"
+              grep -oE '"OPTIONS /api/v1/[^ ?"]*[^"]*" [0-9]{3}' /tmp/backend-today.log \
+                | sed -E 's/\?[^ ]*//; s#/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#/{id}#g; s# HTTP/[0-9.]+"#"#; s/"//g' \
+                | sort | uniq -c | sort -rn | head -10 || true
+              echo "-- Site addresses the backend accepts calls from (CORS), the site's own domain shown as <site>:"
+              compose exec -T backend printenv CORS_ORIGINS 2>/dev/null | tr -d '[]" ' | tr ',' '\n' \
+                | sed -E 's#^(https?://)(.*\.)?[a-z0-9-]+\.[a-z]+(:[0-9]+)?/?$#\1\2<site>\3#' || true
+              echo "-- Site addresses the web server (Caddy) answers on, same masking:"
+              compose exec -T caddy sh -c 'cat /etc/caddy/Caddyfile' 2>/dev/null | grep -oE '^[^ #][^{]*' \
+                | tr ', ' '\n\n' | grep -E '\.' | sed -E 's#^(https?://)?(.*\.)?([a-z0-9-]+\.[a-z]+)$#\2<site>#' | sort -u || true
               echo "-- Session refresh and login calls, in order (IST time, call, status) -- times only:"
               compose logs --since "$since" --no-color --timestamps backend 2>/dev/null \
                 | grep -E '"POST /api/v1/auth/(refresh|login|logout)' \
