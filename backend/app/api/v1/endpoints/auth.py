@@ -27,6 +27,30 @@ settings = get_settings()
 
 REFRESH_COOKIE_NAME = "refresh_token"
 
+# How long a refresh token keeps working after it was renewed. Every renewal
+# replaces the token, so without this a second tab renewing at the same
+# moment, or a renewal whose answer never reached the browser (a reload
+# mid-request, a slow server), presented a token replaced seconds before and
+# signed the user out -- several times an hour on 6 Oct.
+RENEWAL_GRACE = timedelta(minutes=5)
+_RENEWED_WITHIN = timedelta(seconds=2)
+
+
+async def _just_renewed(db: AsyncSession, session: SessionModel, now: datetime) -> bool:
+    """`session` was revoked by a renewal (one that issued its replacement at
+    the same moment -- logout, a password reset or deactivation issue none)
+    no more than RENEWAL_GRACE ago."""
+    revoked = as_aware_utc(session.revoked_at)
+    if now - revoked > RENEWAL_GRACE:
+        return False
+    replacement = await db.scalar(
+        select(SessionModel.id).where(
+            SessionModel.user_id == session.user_id, SessionModel.id != session.id,
+            SessionModel.created_at >= revoked - _RENEWED_WITHIN, SessionModel.created_at <= revoked + _RENEWED_WITHIN,
+        ).limit(1)
+    )
+    return replacement is not None
+
 
 async def _issue_session(db: AsyncSession, response: Response, user: User, request: Request) -> None:
     raw_refresh_token = generate_refresh_token()
@@ -150,7 +174,9 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
     session = result.scalar_one_or_none()
 
     now = datetime.now(timezone.utc)
-    if session is None or session.revoked_at is not None or as_aware_utc(session.expires_at) < now:
+    if session is None or as_aware_utc(session.expires_at) < now:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token invalid or expired")
+    if session.revoked_at is not None and not await _just_renewed(db, session, now):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token invalid or expired")
 
     user_result = await db.execute(
@@ -160,8 +186,11 @@ async def refresh(request: Request, response: Response, db: AsyncSession = Depen
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive")
 
-    # Rotate: revoke the used refresh token and issue a new one.
-    session.revoked_at = now
+    # Rotate: revoke the used refresh token and issue a new one (a token
+    # still inside its grace window was revoked already: it gets a session
+    # of its own beside the one that replaced it).
+    if session.revoked_at is None:
+        session.revoked_at = now
     access_token = create_access_token(subject=str(user.id), roles=user.role_names)
     await _issue_session(db, response, user, request)
     await db.commit()

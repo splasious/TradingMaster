@@ -56,16 +56,64 @@ async def test_me_returns_current_user(client: AsyncClient, seeded_admin: dict):
     assert "administrator" in resp.json()["roles"]
 
 
-async def test_refresh_rotates_token_and_old_cookie_fails(client: AsyncClient, seeded_admin: dict):
+async def test_refresh_rotates_token_and_old_cookie_fails_after_the_grace_window(
+    client: AsyncClient, seeded_admin: dict, db_session: AsyncSession,
+):
+    """A renewal replaces the token, but the one it replaced keeps working
+    for RENEWAL_GRACE: a second tab renewing at the same moment, or a
+    renewal whose answer never reached the browser, presented it and signed
+    the user out (6 Oct). After the window it's refused."""
+    from datetime import timedelta
+
+    from sqlalchemy import select, update
+
+    from app.api.v1.endpoints.auth import RENEWAL_GRACE
+    from app.core.security import hash_refresh_token
+    from app.models.session import Session as SessionModel
+
     login_resp = await client.post("/api/v1/auth/login", json=seeded_admin)
     old_cookie = login_resp.cookies["refresh_token"]
 
     refresh_resp = await client.post("/api/v1/auth/refresh")
     assert refresh_resp.status_code == 200
+    new_cookie = refresh_resp.cookies["refresh_token"]
+    assert new_cookie != old_cookie
 
+    # Within the window: the replaced token still renews (a session of its own) and the new one keeps working.
     client.cookies.set("refresh_token", old_cookie)
     reuse_resp = await client.post("/api/v1/auth/refresh")
-    assert reuse_resp.status_code == 401
+    assert reuse_resp.status_code == 200 and reuse_resp.json()["access_token"]
+    assert reuse_resp.cookies["refresh_token"] not in (old_cookie, new_cookie)
+    client.cookies.set("refresh_token", new_cookie)
+    assert (await client.post("/api/v1/auth/refresh")).status_code == 200
+
+    # Past the window: refused.
+    old = (await db_session.execute(
+        select(SessionModel).where(SessionModel.refresh_token_hash == hash_refresh_token(old_cookie))
+    )).scalar_one()
+    await db_session.execute(
+        update(SessionModel).where(SessionModel.id == old.id).values(revoked_at=old.revoked_at - RENEWAL_GRACE - timedelta(seconds=1))
+    )
+    await db_session.commit()
+    client.cookies.set("refresh_token", old_cookie)
+    assert (await client.post("/api/v1/auth/refresh")).status_code == 401
+
+
+async def test_password_reset_signs_out_everywhere_at_once(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """Revoking with no replacement issued (a password reset, deactivation)
+    gets no grace."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import update
+
+    from app.models.session import Session as SessionModel
+
+    login_resp = await client.post("/api/v1/auth/login", json=seeded_admin)
+    cookie = login_resp.cookies["refresh_token"]
+    await db_session.execute(update(SessionModel).where(SessionModel.revoked_at.is_(None)).values(revoked_at=datetime.now(timezone.utc)))
+    await db_session.commit()
+    client.cookies.set("refresh_token", cookie)
+    assert (await client.post("/api/v1/auth/refresh")).status_code == 401
 
 
 async def test_logout_revokes_session(client: AsyncClient, seeded_admin: dict):

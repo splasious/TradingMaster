@@ -60,22 +60,45 @@ function formatErrorDetail(detail: unknown, fallback: string): string {
   return fallback;
 }
 
-async function refreshAccessToken(): Promise<string | null> {
-  if (!refreshInFlight) {
-    refreshInFlight = fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-    })
-      .then(async (res) => {
-        if (!res.ok) return null;
+/** A renewal that couldn't complete (network, server busy) -- not a sign-out. */
+export class SessionUnavailableError extends Error {}
+
+const RENEW_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+async function renewOnce(): Promise<string | null> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt <= RENEW_RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, RENEW_RETRY_DELAYS_MS[attempt - 1]));
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/refresh`, { method: "POST", credentials: "include" });
+      if (res.status === 401) return null; // no valid session: signed out
+      if (res.ok) {
         const data: TokenResponse = await res.json();
         setAccessToken(data.access_token);
         return data.access_token;
-      })
-      .catch(() => null)
-      .finally(() => {
-        refreshInFlight = null;
-      });
+      }
+      lastError = new Error(`renewal answered ${res.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new SessionUnavailableError(lastError instanceof Error ? lastError.message : "couldn't reach the server");
+}
+
+/** Swaps the httpOnly refresh cookie for a new access token. Resolves to
+ * null only when the server says there's no valid session; a renewal that
+ * couldn't complete is retried, then rejects with SessionUnavailableError
+ * -- never a sign-out. Every renewal replaces the cookie, which all tabs
+ * share, so tabs take turns (a Web Lock) rather than racing to present
+ * the same one (the 6 Oct sign-outs). */
+async function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    // request() resolves to what renewOnce resolves to (its typing nests the promise; then() flattens it).
+    const renewal = locks ? locks.request("tm-session-renewal", renewOnce).then((token) => token) : renewOnce();
+    refreshInFlight = renewal.finally(() => {
+      refreshInFlight = null;
+    });
   }
   return refreshInFlight;
 }
@@ -105,7 +128,14 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   let res = await doFetch();
 
   if (res.status === 401 && !skipAuthRetry) {
-    const newToken = await refreshAccessToken();
+    let newToken: string | null = null;
+    try {
+      newToken = await refreshAccessToken();
+    } catch {
+      // Couldn't renew just now (network, server busy): an error this time,
+      // not a sign-out -- the next poll tries again.
+      throw new ApiError(503, "Reconnecting to the server…");
+    }
     if (newToken) {
       res = await doFetch();
     }
