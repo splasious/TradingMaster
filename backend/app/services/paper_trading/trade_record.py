@@ -137,16 +137,15 @@ def _schedule_for(leg: dict, intraday: bool) -> _ChargeSchedule | None:
     return None
 
 
-def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime) -> float | None:
-    """Brokerage + STT + exchange + SEBI + stamp duty + GST for opening
-    and closing every leg (two executed orders per leg). None when any leg
-    isn't an NSE/BSE/NFO contract this schedule covers (e.g. a Delta
-    Exchange perpetual) or its details aren't known -- no charges beats a
-    wrong figure. Legs need resolve_leg_details()'s keys."""
+CHARGE_PARTS = ("brokerage", "stt", "exchange", "sebi", "stamp", "gst")
+
+
+def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime) -> dict[str, float] | None:
+    """estimate_charges() split into its parts (CHARGE_PARTS, plus "total")."""
     if not legs:
         return None
     intraday = as_aware_utc(opened_at).astimezone(IST).date() == as_aware_utc(closed_at).astimezone(IST).date()
-    total = 0.0
+    parts = dict.fromkeys(CHARGE_PARTS, 0.0)
     for leg in legs:
         schedule = _schedule_for(leg, intraday)
         if schedule is None:
@@ -162,13 +161,27 @@ def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime)
                 brokerage += schedule.brokerage_flat
             else:
                 brokerage += min(schedule.brokerage_flat, turnover * schedule.brokerage_pct / 100)
-        stt = (buy * schedule.stt_buy_pct + sell * schedule.stt_sell_pct) / 100
         exchange = (buy + sell) * schedule.exchange_pct / 100
         sebi = (buy + sell) * _SEBI_FEE_PCT / 100
-        stamp = buy * schedule.stamp_buy_pct / 100
-        gst = (brokerage + exchange + sebi) * _GST_PCT / 100
-        total += brokerage + stt + exchange + sebi + stamp + gst
-    return round(total, 2)
+        parts["brokerage"] += brokerage
+        parts["stt"] += (buy * schedule.stt_buy_pct + sell * schedule.stt_sell_pct) / 100
+        parts["exchange"] += exchange
+        parts["sebi"] += sebi
+        parts["stamp"] += buy * schedule.stamp_buy_pct / 100
+        parts["gst"] += (brokerage + exchange + sebi) * _GST_PCT / 100
+    out = {key: round(value, 2) for key, value in parts.items()}
+    out["total"] = round(sum(parts.values()), 2)
+    return out
+
+
+def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime) -> float | None:
+    """Brokerage + STT + exchange + SEBI + stamp duty + GST for opening
+    and closing every leg (two executed orders per leg). None when any leg
+    isn't an NSE/BSE/NFO contract this schedule covers (e.g. a Delta
+    Exchange perpetual) or its details aren't known -- no charges beats a
+    wrong figure. Legs need resolve_leg_details()'s keys."""
+    breakdown = charge_breakdown(legs, opened_at, closed_at)
+    return breakdown["total"] if breakdown else None
 
 
 def _leg_pnl(leg: dict) -> float:

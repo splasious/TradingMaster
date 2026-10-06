@@ -18,7 +18,7 @@ from app.schemas.native_backtest import (
 from app.services.audit import write_audit_log
 from app.services.backtest.native_runner import run_native_backtest_job
 from app.services.ownership import owned_job, require_strategy_owner
-from app.services.paper_trading.trade_record import resolve_leg_details
+from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
 router = APIRouter()
 
@@ -109,13 +109,18 @@ async def get_native_backtest_trades(
     )
     trades = list(result.scalars().all())
     resolved_legs = await resolve_leg_details(db, [t.legs or [] for t in trades])
-    return [
-        NativeBacktestTradeOut(
+    out = []
+    for t, legs in zip(trades, resolved_legs):
+        try:
+            charges = estimate_charges(legs, t.opened_at, t.closed_at)
+        except (KeyError, TypeError, ValueError):
+            charges = None
+        out.append(NativeBacktestTradeOut(
             id=str(t.id), opened_at=t.opened_at, closed_at=t.closed_at, legs=legs,
             pnl=t.pnl, pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
-        )
-        for t, legs in zip(trades, resolved_legs)
-    ]
+            charges=charges, net_pnl=round(t.pnl - charges, 2) if charges is not None else None,
+        ))
+    return out
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)

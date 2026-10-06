@@ -791,6 +791,9 @@ export interface NativeBacktestJobOut {
   completed_at: string | null;
 }
 
+/** An Advanced backtest's KPIs. The first six are in every result; the
+ * rest arrive with kpi_version 2 (6 Oct: equity day by day with open
+ * positions, after estimated charges -- see backend native_metrics.py). */
 export interface NativeBacktestMetrics {
   trade_count: number;
   net_pnl: number;
@@ -798,6 +801,41 @@ export interface NativeBacktestMetrics {
   best_trade: number;
   worst_trade: number;
   final_capital: number;
+  kpi_version?: number;
+  initial_capital?: number;
+  gross_pnl?: number;
+  total_return_pct?: number;
+  cagr_pct?: number | null;
+  max_drawdown_pct?: number;
+  max_drawdown_amount?: number;
+  drawdown_peak_date?: string | null;
+  drawdown_trough_date?: string | null;
+  max_drawdown_recovered?: boolean;
+  longest_drawdown_days?: number;
+  in_drawdown_at_end?: boolean;
+  annual_volatility_pct?: number | null;
+  sharpe_ratio?: number | null;
+  sortino_ratio?: number | null;
+  calmar_ratio?: number | null;
+  profit_factor?: number | null;
+  no_losing_trades?: boolean;
+  avg_win?: number | null;
+  avg_loss?: number | null;
+  payoff_ratio?: number | null;
+  expectancy?: number | null;
+  max_consecutive_wins?: number;
+  max_consecutive_losses?: number;
+  avg_holding_hours?: number | null;
+  charges_total?: number;
+  charges_breakdown?: Partial<Record<"brokerage" | "stt" | "exchange" | "sebi" | "stamp" | "gst", number>>;
+  charges_pct_of_gross?: number | null;
+  trades_without_charge_estimate?: number;
+  trading_days?: number;
+  exposure_pct?: number;
+  monthly_returns?: { year: number; month: number; return_pct: number | null }[];
+  yearly_returns?: { year: number; return_pct: number | null }[];
+  benchmark?: { symbol: string; return_pct: number | null; max_drawdown_pct: number | null; excess_return_pct: number | null } | null;
+  benchmark_curve?: [string, number][];
 }
 
 export interface NativeBacktestResultOut {
@@ -813,6 +851,9 @@ export interface NativeBacktestTradeOut {
   pnl: number;
   pnl_pct: number;
   exit_reason: string;
+  /** Estimated brokerage and levies; null when it can't be estimated. */
+  charges?: number | null;
+  net_pnl?: number | null;
 }
 
 export interface PortfolioBacktestJobOut {

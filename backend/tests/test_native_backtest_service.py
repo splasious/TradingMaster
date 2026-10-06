@@ -138,11 +138,15 @@ async def test_run_native_backtest_job_replays_and_saves_every_trade(db_session:
     result = (
         await db_session.execute(select(NativeBacktestResult).where(NativeBacktestResult.job_id == ctx["job"].id))
     ).scalar_one()
-    assert result.metrics["trade_count"] == 1
-    assert result.metrics["net_pnl"] == -200.0
-    assert result.metrics["win_rate_pct"] == 0.0
-    assert result.metrics["final_capital"] == 100000.0 - 200.0
-    assert len(result.equity_curve) == 2  # starting point + one trade close
+    metrics = result.metrics
+    assert metrics["kpi_version"] == 2 and metrics["trade_count"] == 1
+    assert metrics["gross_pnl"] == -200.0
+    assert metrics["charges_total"] > 0  # an NFO option round trip: brokerage, STT, ...
+    assert metrics["net_pnl"] == round(-200.0 - metrics["charges_total"], 2)
+    assert metrics["win_rate_pct"] == 0.0
+    assert metrics["final_capital"] == round(100000.0 + metrics["net_pnl"], 2)
+    # starting point + one value per replayed trading day, the last after the forced close
+    assert len(result.equity_curve) == 1 + metrics["trading_days"] and result.equity_curve[-1][1] == metrics["final_capital"]
 
     await db_session.refresh(ctx["strategy"])
     assert ctx["strategy"].status == StrategyStatus.BACKTESTED.value

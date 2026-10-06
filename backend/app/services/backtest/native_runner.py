@@ -26,11 +26,14 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
+from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.hours import nse_market_open
+from app.services.backtest.native_metrics import compute_native_metrics
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.native_runner import NativeContext
+from app.services.paper_trading.trade_record import charge_breakdown, resolve_leg_details
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 # 5m matches fo_opening_momentum.py's own CANDLE_TIMEFRAME and is finer than
@@ -49,9 +52,13 @@ class BacktestNativeContext(NativeContext):
 
     is_backtest = True
 
-    def __init__(self, db: AsyncSession, portfolio: PaperPortfolio, deployment: PaperNativeDeployment, state: dict, now: datetime):
+    def __init__(
+        self, db: AsyncSession, portfolio: PaperPortfolio, deployment: PaperNativeDeployment, state: dict, now: datetime,
+        book: "PositionBook | None" = None,
+    ):
         super().__init__(db=db, portfolio=portfolio, deployment=deployment, state=state, now=now)
         self.trades: list[dict] = []
+        self.book = book if book is not None else PositionBook()
 
     async def get_price(self, instrument_id: uuid.UUID) -> float | None:
         """No live tick engine in a backtest -- the latest stored candle
@@ -92,6 +99,7 @@ class BacktestNativeContext(NativeContext):
     ) -> None:
         """As the live one (a future books only its profit or loss, see
         NativeContext.open_leg), without an audit row per simulated fill."""
+        self.book.fill(instrument, side, quantity, price)
         if cash_change is None:
             notional = quantity * price
             cash_change = notional if side == "sell" else -notional
@@ -100,10 +108,70 @@ class BacktestNativeContext(NativeContext):
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,
     ) -> None:
+        closed_at = closed_at or self.now
+        [resolved] = await resolve_leg_details(self.db, [legs])
+        try:
+            breakdown = charge_breakdown(resolved, opened_at, closed_at)
+        except (KeyError, TypeError, ValueError):  # a leg without prices/quantity: no estimate rather than a failed run
+            breakdown = None
         self.trades.append({
-            "opened_at": opened_at, "closed_at": closed_at or self.now,
+            "opened_at": opened_at, "closed_at": closed_at,
             "legs": legs, "pnl": pnl, "pnl_pct": pnl_pct, "exit_reason": exit_reason,
+            "charges": breakdown["total"] if breakdown else None, "charges_breakdown": breakdown,
         })
+
+
+class PositionBook:
+    """What the replayed strategy holds, kept from its own fills (open_leg /
+    close_leg) so any Advanced strategy's open positions can be valued at
+    each day's close without knowing its state's shape. Quantity is signed
+    (bought +, sold -); a future also keeps its average entry, since it
+    books only its profit or loss (NativeContext.open_leg)."""
+
+    def __init__(self) -> None:
+        self.positions: dict[uuid.UUID, dict] = {}
+        self.filled_today = False
+
+    def fill(self, instrument: Instrument, side: str, quantity: float, price: float) -> None:
+        self.filled_today = True
+        signed = quantity if side == "buy" else -quantity
+        held = self.positions.get(instrument.id) or {"qty": 0.0, "avg": 0.0, "future": instrument.instrument_type == "future"}
+        qty = held["qty"] + signed
+        if abs(qty) < 1e-9:
+            self.positions.pop(instrument.id, None)
+            return
+        if held["qty"] == 0 or (held["qty"] > 0) != (qty > 0):
+            held["avg"] = price  # opened, or turned from long to short (or back)
+        elif abs(qty) > abs(held["qty"]):
+            held["avg"] = (held["avg"] * abs(held["qty"]) + price * quantity) / abs(qty)
+        held["qty"] = qty
+        self.positions[instrument.id] = held
+
+    async def value(self, ctx: "BacktestNativeContext") -> float:
+        """Open positions at ctx.now's prices: a long adds, a short owes,
+        a future counts its profit or loss only."""
+        total = 0.0
+        for instrument_id, held in self.positions.items():
+            price = await ctx.get_price(instrument_id)
+            if price is None:
+                price = held["avg"]
+            total += (price - held["avg"]) * held["qty"] if held["future"] else price * held["qty"]
+        return total
+
+
+async def _benchmark_days(db: AsyncSession, start: date, end: date) -> list[tuple[date, float, float]]:
+    """NIFTY 50's daily candles (day, open, close) from start to end."""
+    nifty = (await db.execute(select(Instrument).where(Instrument.symbol == "NIFTY 50", Instrument.exchange == "NSE"))).scalars().first()
+    if nifty is None:
+        return []
+    rows = await db.execute(
+        select(OhlcvCandle.ts, OhlcvCandle.open, OhlcvCandle.close).where(
+            OhlcvCandle.instrument_id == nifty.id, OhlcvCandle.timeframe == "1d",
+            OhlcvCandle.ts >= datetime.combine(start, time(0), tzinfo=IST).astimezone(timezone.utc),
+            OhlcvCandle.ts < datetime.combine(end + timedelta(days=1), time(0), tzinfo=IST).astimezone(timezone.utc),
+        ).order_by(OhlcvCandle.ts)
+    )
+    return [(as_aware_utc(ts).astimezone(IST).date(), float(open_), float(close)) for ts, open_, close in rows]
 
 
 def _trading_instants(start_date: date, end_date: date):
@@ -162,10 +230,24 @@ async def run_native_backtest_job(job_id: uuid.UUID) -> None:
 
             state: dict = {}
             trades: list[dict] = []
+            book = PositionBook()
+            daily: list[tuple[date, float, bool]] = []
             last_ts: datetime | None = None
+
+            async def close_day(ts: datetime) -> None:
+                """Equity at this day's close: cash, plus every open position
+                at its closing price, less the charges of trades closed so far."""
+                ctx = BacktestNativeContext(db=db, portfolio=portfolio, deployment=deployment, state={}, now=ts, book=book)
+                charges = sum(t["charges"] or 0.0 for t in trades)
+                equity = portfolio.cash + await book.value(ctx) - charges
+                daily.append((ts.astimezone(IST).date(), equity, bool(book.positions) or book.filled_today))
+                book.filled_today = False
+
             instants = _trading_instants(job.start_date, job.end_date)
             for ts in instants:
-                ctx = BacktestNativeContext(db=db, portfolio=portfolio, deployment=deployment, state=dict(state), now=ts)
+                if last_ts is not None and ts.astimezone(IST).date() != last_ts.astimezone(IST).date():
+                    await close_day(last_ts)
+                ctx = BacktestNativeContext(db=db, portfolio=portfolio, deployment=deployment, state=dict(state), now=ts, book=book)
                 try:
                     await evaluate_fn(ctx)
                 except Exception as exc:
@@ -180,32 +262,27 @@ async def run_native_backtest_job(job_id: uuid.UUID) -> None:
             # already uses live, so the report reflects a realistic close
             # instead of an abandoned position (state shapes per
             # paper_native_trading.py's _build_position_out/_build_holdings_out).
-            if last_ts is not None and (state.get("position") or state.get("holdings")):
+            if last_ts is not None and (state.get("position") or state.get("holdings") or book.positions):
                 state["force_exit"] = True
-                ctx = BacktestNativeContext(db=db, portfolio=portfolio, deployment=deployment, state=dict(state), now=last_ts)
+                ctx = BacktestNativeContext(db=db, portfolio=portfolio, deployment=deployment, state=dict(state), now=last_ts, book=book)
                 await evaluate_fn(ctx)
                 state = ctx.state
                 trades.extend(ctx.trades)
+            if last_ts is not None:
+                await close_day(last_ts)
 
             trades.sort(key=lambda t: t["closed_at"])
-            equity = job.initial_capital
+            metrics = compute_native_metrics(
+                initial_capital=job.initial_capital, daily=daily, trades=trades,
+                benchmark=await _benchmark_days(db, job.start_date, job.end_date),
+            )
             equity_curve: list[list] = [[
                 datetime.combine(job.start_date, MARKET_OPEN_IST, tzinfo=IST).astimezone(timezone.utc).isoformat(),
-                equity,
-            ]]
-            for t in trades:
-                equity += t["pnl"]
-                equity_curve.append([t["closed_at"].isoformat(), equity])
-
-            wins = [t for t in trades if t["pnl"] > 0]
-            metrics = {
-                "trade_count": len(trades),
-                "net_pnl": round(sum(t["pnl"] for t in trades), 2),
-                "win_rate_pct": round(len(wins) / len(trades) * 100, 2) if trades else 0.0,
-                "best_trade": round(max((t["pnl"] for t in trades), default=0.0), 2),
-                "worst_trade": round(min((t["pnl"] for t in trades), default=0.0), 2),
-                "final_capital": round(equity, 2),
-            }
+                job.initial_capital,
+            ]] + [
+                [datetime.combine(day, MARKET_CLOSE_IST, tzinfo=IST).astimezone(timezone.utc).isoformat(), round(equity, 2)]
+                for day, equity, _ in daily
+            ]
 
             db.add(NativeBacktestResult(job_id=job.id, metrics=metrics, equity_curve=equity_curve))
             for t in trades:

@@ -42,3 +42,5 @@ class NativeBacktestTradeOut(BaseModel):
     pnl: float
     pnl_pct: float
     exit_reason: str
+    charges: float | None = None  # estimated brokerage and levies (None: not estimable)
+    net_pnl: float | None = None  # pnl less charges

@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Loader2, Trash2, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { NativeBacktestResults } from "@/components/backtesting/native-results";
 import { OscillatorChart } from "@/components/charts/oscillator-chart";
 import { InstrumentMultiSelect } from "@/components/market-data/instrument-multiselect";
 import { WatchlistLoader } from "@/components/market-data/watchlist-loader";
@@ -37,7 +38,6 @@ import {
   type BacktestTradeOut,
   type InstrumentOut,
   type NativeBacktestJobOut,
-  type NativeBacktestMetrics,
   type NativeBacktestTradeOut,
   type PortfolioBacktestJobOut,
   type PortfolioBacktestTradeOut,
@@ -493,23 +493,6 @@ function PortfolioHistoryPanel({ strategyId, focusedJobId, onSelect }: { strateg
   );
 }
 
-function NativeKpiGrid({ metrics }: { metrics: NativeBacktestMetrics }) {
-  return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-      <KpiTile
-        label="Net P&L"
-        value={metrics.net_pnl.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })}
-        tone={metrics.net_pnl >= 0 ? "positive" : "negative"}
-      />
-      <KpiTile label="Win Rate" value={`${metrics.win_rate_pct}%`} />
-      <KpiTile label="Total Trades" value={`${metrics.trade_count}`} />
-      <KpiTile label="Best Trade" value={metrics.best_trade.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })} tone="positive" />
-      <KpiTile label="Worst Trade" value={metrics.worst_trade.toLocaleString(undefined, { maximumFractionDigits: 0, signDisplay: "always" })} tone="negative" />
-      <KpiTile label="Final Capital" value={metrics.final_capital.toLocaleString(undefined, { maximumFractionDigits: 0 })} />
-    </div>
-  );
-}
-
 function NativeBacktestTradesTable({ trades }: { trades: NativeBacktestTradeOut[] }) {
   return (
     <Table>
@@ -518,6 +501,8 @@ function NativeBacktestTradesTable({ trades }: { trades: NativeBacktestTradeOut[
           <Th>Opened</Th>
           <Th>Closed</Th>
           <Th className="text-right">P&amp;L</Th>
+          <Th className="text-right">Charges</Th>
+          <Th className="text-right">Net P&amp;L</Th>
           <Th className="text-right">P&amp;L %</Th>
           <Th>Exit Reason</Th>
           <Th>Legs</Th>
@@ -531,6 +516,10 @@ function NativeBacktestTradesTable({ trades }: { trades: NativeBacktestTradeOut[
             <Td className={`text-right font-financial ${t.pnl >= 0 ? "text-positive" : "text-negative"}`}>
               {t.pnl >= 0 ? "+" : ""}
               {t.pnl.toFixed(2)}
+            </Td>
+            <Td className="text-right font-financial text-text-secondary">{t.charges != null ? t.charges.toFixed(2) : "—"}</Td>
+            <Td className={`text-right font-financial ${t.net_pnl == null ? "text-text-muted" : t.net_pnl >= 0 ? "text-positive" : "text-negative"}`}>
+              {t.net_pnl == null ? "—" : `${t.net_pnl >= 0 ? "+" : ""}${t.net_pnl.toFixed(2)}`}
             </Td>
             <Td className={`text-right font-financial ${t.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
               {t.pnl_pct >= 0 ? "+" : ""}
@@ -1128,16 +1117,11 @@ export default function BacktestingPage() {
 
             {nativeResult && (
               <div className="space-y-6">
-                <NativeKpiGrid metrics={nativeResult.metrics} />
-
-                <div>
-                  <h3 className="mb-2 text-sm font-semibold text-text-primary">Equity Curve</h3>
-                  <OscillatorChart
-                    lines={[{ id: "equity", color: "#15803d", points: nativeResult.equity_curve.map(([ts, equity]) => ({ ts, value: equity })) }]}
-                    bands={[nativeInitialCapital]}
-                    height={220}
-                  />
-                </div>
+                <NativeBacktestResults
+                  metrics={nativeResult.metrics}
+                  equityCurve={nativeResult.equity_curve}
+                  initialCapital={nativeResult.metrics.initial_capital ?? nativeInitialCapital}
+                />
 
                 {nativeTrades && nativeTrades.length > 0 && (
                   <div>

@@ -10,9 +10,10 @@ interface OscillatorChartProps {
   bands?: number[]; // horizontal reference lines, e.g. [30, 70] for RSI
   height?: number;
   onChartReady?: (chart: IChartApi | null) => void;
+  priceFormatter?: (price: number) => string; // right-axis labels, e.g. rupees or %; read once when the chart is made
 }
 
-export function OscillatorChart({ lines, bands = [], height = 140, onChartReady }: OscillatorChartProps) {
+export function OscillatorChart({ lines, bands = [], height = 140, onChartReady, priceFormatter }: OscillatorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
@@ -34,6 +35,7 @@ export function OscillatorChart({ lines, bands = [], height = 140, onChartReady 
       layout: { background: { type: ColorType.Solid, color: "transparent" }, textColor: isDark ? "#a4acba" : "#545b68" },
       grid: { vertLines: { color: isDark ? "#1c2028" : "#eef0f3" }, horzLines: { color: isDark ? "#1c2028" : "#eef0f3" } },
       timeScale: { timeVisible: true, secondsVisible: false },
+      ...(priceFormatter ? { localization: { priceFormatter } } : {}),
     });
     chartRef.current = chart;
     onChartReady?.(chart);
