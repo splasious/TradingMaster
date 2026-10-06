@@ -2118,3 +2118,30 @@ SELECT to_char(created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS created_
        CASE WHEN renewal THEN 'renewal' ELSE 'LOGIN' END AS kind,
        to_char(revoked_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS revoked_ist, renewed_into
 FROM s ORDER BY created_at;
+
+\echo
+\echo '== UA1. NSE stocks still marked "unassigned" (no live source) that an active strategy names -- numbered, no names: on the backfill list?, bars there, chart candles, last copied, which strategy'
+WITH active_code AS (
+  SELECT DISTINCT s.name AS strategy, v.python_code
+  FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+  WHERE d.status IN ('active', 'paused')
+), ua AS (
+  SELECT i.id, i.symbol, i.instrument_type, i.is_active,
+         (SELECT string_agg(DISTINCT a.strategy, ', ') FROM active_code a
+           WHERE a.python_code LIKE '%"' || i.symbol || '"%' OR a.python_code LIKE '%''' || i.symbol || '''%') AS used_by
+  FROM instruments i WHERE i.exchange = 'NSE' AND i.data_source = 'unassigned'
+)
+SELECT 'Stock ' || row_number() OVER (ORDER BY ua.symbol) AS stock, ua.instrument_type, ua.is_active, ua.used_by,
+       bf.id IS NOT NULL AS on_backfill_list, to_char(bf.last_synced_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_copied_ist,
+       (SELECT count(*) FROM bf_ohlcv_bars b WHERE b.symbol_id = bf.id AND b.timeframe = '15m') AS bf_15m,
+       (SELECT count(*) FROM bf_ohlcv_bars b WHERE b.symbol_id = bf.id AND b.timeframe = '1d') AS bf_1d,
+       (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = ua.id AND c.timeframe = '15m') AS chart_15m,
+       (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = ua.id AND c.timeframe = '15m') AS chart_15m_last,
+       (SELECT count(*) FROM bf_symbols x WHERE x.source = 'zerodha' AND x.symbol LIKE ua.symbol || '-%') AS bf_suffix_variants
+FROM ua LEFT JOIN bf_symbols bf ON bf.source = 'zerodha' AND bf.symbol = ua.symbol
+WHERE ua.used_by IS NOT NULL
+ORDER BY stock;
+
+-- UA2. All NSE catalog rows by data source (counts)
+SELECT data_source, instrument_type, count(*) AS rows, count(*) FILTER (WHERE is_active) AS active
+FROM instruments WHERE exchange = 'NSE' GROUP BY 1, 2 ORDER BY 1, 2;
