@@ -402,3 +402,33 @@ async def test_rs_rotation_weekly_gets_the_fixed_code_as_its_next_version(db_eng
     assert (await latest(edited_id)).version_number == 3  # someone's own edit of it is left alone
     [audit] = (await db_session.execute(select(AuditLog).where(AuditLog.object_id == str(weekly_id)))).scalars().all()
     assert audit.new_value["version_number"] == 4
+
+
+async def test_the_four_listed_stocks_with_no_data_get_downloads_and_a_zerodha_source(db_engine, db_session):
+    from app.models.backfill_platform import BfBackfillJob
+
+    stocks = {s: Instrument(exchange="NSE", symbol=s, name=f"{s} Ltd", instrument_type="equity", data_source="unassigned", external_ref=s)
+              for s in ("CUPID", "MTARTECH", "STLTECH")}
+    stocks["TDPOWERSYS"] = Instrument(exchange="NSE", symbol="TDPOWERSYS", name="TD Power", instrument_type="equity",
+                                      data_source="zerodha_kite", external_ref="TDPOWERSYS")  # already sorted: left alone
+    other = Instrument(exchange="NSE", symbol="RELIANCE", name="Reliance", instrument_type="equity", data_source="unassigned", external_ref="RELIANCE")
+    db_session.add_all([*stocks.values(), other])
+    db_session.add(BfSymbol(source="zerodha", symbol="STLTECH", display_name="STL"))  # on the list already: reused
+    await db_session.flush()
+    ids, other_id = {s: i.id for s, i in stocks.items()}, other.id
+    await db_session.commit()
+
+    migration = _load("9b3d5f7a2c46_backfill_the_four_unassigned_listed_stocks")
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    sources = {s: (await db_session.get(Instrument, i)).data_source for s, i in ids.items()}
+    assert set(sources.values()) == {"zerodha_kite"} and (await db_session.get(Instrument, other_id)).data_source == "unassigned"
+    listed = {b.symbol: b for b in (await db_session.execute(select(BfSymbol).where(BfSymbol.source == "zerodha"))).scalars()}
+    assert set(listed) == {"CUPID", "MTARTECH", "STLTECH"} and listed["CUPID"].display_name == "CUPID Ltd"
+    jobs = (await db_session.execute(select(BfBackfillJob))).scalars().all()
+    assert sorted(j.timeframe for j in jobs if j.symbol_id == listed["CUPID"].id) == ["15m", "1d", "5m"]
+    assert len(jobs) == 9 and {j.status for j in jobs} == {"pending"} and {j.source for j in jobs} == {"zerodha"}
+    audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "BF_BACKFILL_STARTED"))).scalars().all()
+    assert len(audit) == 3
