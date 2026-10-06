@@ -2147,7 +2147,7 @@ SELECT data_source, instrument_type, count(*) AS rows, count(*) FILTER (WHERE is
 FROM instruments WHERE exchange = 'NSE' GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo
-\echo '== PF1. NIFTY PCR per session since its records began (market data): the PCR filter of RS Rotation 15 MIN / MACD - RSI - 15 MIN sells all below 0.80, buys again above 0.90'
+\echo '== PG1. NIFTY PCR per session since its records began (market data): the PCR filter of RS Rotation 15 MIN / MACD - RSI - 15 MIN sells all below 0.80, buys again above 0.90'
 SELECT session_date, count(*) AS records, round(min(pcr)::numeric, 3) AS min_pcr, round(max(pcr)::numeric, 3) AS max_pcr,
        round((array_agg(pcr ORDER BY ts))[1]::numeric, 3) AS first_pcr, round((array_agg(pcr ORDER BY ts DESC))[1]::numeric, 3) AS last_pcr,
        count(*) FILTER (WHERE pcr < 0.80) AS marks_below_080, count(*) FILTER (WHERE pcr > 0.90) AS marks_above_090,
@@ -2155,7 +2155,7 @@ SELECT session_date, count(*) AS records, round(min(pcr)::numeric, 3) AS min_pcr
 FROM pcr_snapshots WHERE underlying = 'NIFTY' AND pcr IS NOT NULL
 GROUP BY session_date ORDER BY session_date;
 
--- PF2. Runs of the two 15-minute cash strategies by code version (counts only): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
+-- PG2. Runs of the two 15-minute cash strategies by code version (counts only): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
 SELECT trim(s.name) AS strategy, d.status, v.version_number,
        CASE md5(replace(v.python_code, E'\r', ''))
          WHEN '561759bbee3e25378f16c524c7f2f07b' THEN 'MACD before PCR filter' WHEN '988246769bebae7d1d8c3cdfbcf91be8' THEN 'RS 15 before PCR filter'
