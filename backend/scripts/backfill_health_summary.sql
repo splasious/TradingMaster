@@ -2155,16 +2155,23 @@ SELECT session_date, count(*) AS records, round(min(pcr)::numeric, 3) AS min_pcr
 FROM pcr_snapshots WHERE underlying = 'NIFTY' AND pcr IS NOT NULL
 GROUP BY session_date ORDER BY session_date;
 
--- PG2. Runs of the two 15-minute cash strategies by code version (counts only): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
-SELECT trim(s.name) AS strategy, d.status, v.version_number,
-       CASE md5(replace(v.python_code, E'\r', ''))
-         WHEN '561759bbee3e25378f16c524c7f2f07b' THEN 'MACD before PCR filter' WHEN '988246769bebae7d1d8c3cdfbcf91be8' THEN 'RS 15 before PCR filter'
-         WHEN '5f43c1d04e769861328c0e7b54ff2729' THEN 'MACD with PCR filter' WHEN '92c7c0d9723cb8962692b9e39bb0166b' THEN 'RS 15 with PCR filter'
-         ELSE 'other code' END AS code,
-       (SELECT count(*) FROM live_native_deployments l WHERE l.paper_deployment_id = d.id AND l.status IN ('active', 'paused')) AS live_runs_on,
-       (SELECT count(*) FROM live_native_deployments l WHERE l.paper_deployment_id = d.id AND l.status IN ('active', 'paused')
-          AND l.strategy_version_id = d.strategy_version_id) AS live_on_same_version,
-       (d.state ->> 'pcr_risk_off') AS out_on_pcr
+-- PG2. The two 15-minute cash strategies (counts only): their newest version's code -- what a backtest runs -- and each running card's
+-- (switched with "Use latest version"): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
+WITH label AS (
+  SELECT * FROM (VALUES ('561759bbee3e25378f16c524c7f2f07b', 'MACD before PCR filter'), ('988246769bebae7d1d8c3cdfbcf91be8', 'RS 15 before PCR filter'),
+                        ('5f43c1d04e769861328c0e7b54ff2729', 'MACD with PCR filter'), ('92c7c0d9723cb8962692b9e39bb0166b', 'RS 15 with PCR filter')) t(md5, code)
+)
+SELECT trim(s.name) AS strategy, 'newest version' AS what, v.version_number, coalesce(l.code, 'other code') AS code, NULL::bigint AS live_runs_on,
+       NULL::text AS out_on_pcr
+FROM strategies s JOIN LATERAL (SELECT * FROM strategy_versions v WHERE v.strategy_id = s.id ORDER BY v.version_number DESC LIMIT 1) v ON true
+LEFT JOIN label l ON l.md5 = md5(replace(v.python_code, E'\r', ''))
+WHERE trim(s.name) IN ('RS Rotation 15 MIN', 'MACD - RSI - 15 MIN')
+UNION ALL
+SELECT trim(s.name), 'running (' || d.status || ')', v.version_number, coalesce(l.code, 'other code'),
+       (SELECT count(*) FROM live_native_deployments x WHERE x.paper_deployment_id = d.id AND x.status IN ('active', 'paused')
+          AND x.strategy_version_id = d.strategy_version_id),
+       (d.state ->> 'pcr_risk_off')
 FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+LEFT JOIN label l ON l.md5 = md5(replace(v.python_code, E'\r', ''))
 WHERE trim(s.name) IN ('RS Rotation 15 MIN', 'MACD - RSI - 15 MIN') AND d.status IN ('active', 'paused')
-ORDER BY 1, 3;
+ORDER BY 1, 2;

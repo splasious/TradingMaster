@@ -439,7 +439,7 @@ async def test_the_four_listed_stocks_with_no_data_get_downloads_and_a_zerodha_s
 
 # ------------------------------------------------ PCR filter (6 Oct) -----
 
-async def test_the_15min_cash_strategies_get_the_pcr_filter_and_their_runs_move_with_them(db_engine, db_session):
+async def test_the_15min_cash_strategies_get_the_pcr_filter_as_their_next_version_and_runs_stay_put(db_engine, db_session):
     from app.models.broker import Broker, BrokerAccount
     from app.models.live_native import LiveNativeDeployment
 
@@ -461,9 +461,10 @@ async def test_the_15min_cash_strategies_get_the_pcr_filter_and_their_runs_move_
                                 capital=100000, product_style="overnight")
     db_session.add(live)
     await db_session.flush()
-    ids = [macd.id, rs.id, edited.id, stopped.id]
-    before = {d.id: d.strategy_version_id for d in (macd, rs, edited, stopped)}
-    live_id, stopped_strategy = live.id, stopped.strategy_id
+    runs = [macd, rs, edited, stopped]
+    before = {d.id: d.strategy_version_id for d in runs}
+    strategy_of = {d.id: d.strategy_id for d in runs}
+    live_id, live_before = live.id, live.strategy_version_id
     await db_session.commit()
 
     migration = _load("c5d7e9f1a3b4_pcr_filter_for_the_15min_cash_strategies")
@@ -475,22 +476,23 @@ async def test_the_15min_cash_strategies_get_the_pcr_filter_and_their_runs_move_
     await _run(db_engine, migration)  # a second run changes nothing
     db_session.expire_all()
 
-    for deployment_id, filename in ((ids[0], "macd_rsi_15min.py"), (ids[1], "nifty_rs_rotation_15min.py")):
-        moved = await db_session.get(PaperNativeDeployment, deployment_id)
-        version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    async def newest(strategy_id):
+        return (await db_session.execute(
+            select(StrategyVersion).where(StrategyVersion.strategy_id == strategy_id).order_by(StrategyVersion.version_number.desc())
+        )).scalars().first()
+
+    # Every run stays on the version it was on, the live one too: switched later with "Use latest version".
+    for run_id, version_id in before.items():
+        assert (await db_session.get(PaperNativeDeployment, run_id)).strategy_version_id == version_id
+    assert (await db_session.get(LiveNativeDeployment, live_id)).strategy_version_id == live_before
+    # The strategies on the code before (running or not) get the filter as their newest version -- what a backtest runs.
+    for run, filename in ((macd, "macd_rsi_15min.py"), (rs, "nifty_rs_rotation_15min.py"), (stopped, "macd_rsi_15min.py")):
+        version = await newest(strategy_of[run.id])
         assert version.version_number == 12 and version.python_code == (BUILTIN.parent / filename).read_text(encoding="utf-8")
         assert "PCR_EXIT_BELOW = 0.80" in version.python_code and version.parameters == {"x": 1}
-        assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0
-    assert (await db_session.get(LiveNativeDeployment, live_id)).strategy_version_id == (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id
-    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]
-    # Stopped: the run stays where it was, but its strategy (latest version the old code) gets the new version for backtests.
-    assert (await db_session.get(PaperNativeDeployment, ids[3])).strategy_version_id == before[ids[3]]
-    newest = (await db_session.execute(
-        select(StrategyVersion).where(StrategyVersion.strategy_id == stopped_strategy).order_by(StrategyVersion.version_number.desc())
-    )).scalars().first()
-    assert newest.version_number == 12 and "PCR_EXIT_BELOW" in newest.python_code
+    assert (await newest(strategy_of[edited.id])).version_number == 11
 
     audit = (await db_session.execute(select(AuditLog))).scalars().all()
-    assert sorted((a.action, a.new_value["version_number"]) for a in audit) == sorted(
-        [("STRATEGY_VERSION_CREATED", 12)] * 3 + [("PAPER_NATIVE_VERSION_UPDATED", 12)] * 2
+    assert sorted((a.action, a.object_id, a.new_value["version_number"]) for a in audit) == sorted(
+        ("STRATEGY_VERSION_CREATED", str(strategy_of[r.id]), 12) for r in (macd, rs, stopped)
     )

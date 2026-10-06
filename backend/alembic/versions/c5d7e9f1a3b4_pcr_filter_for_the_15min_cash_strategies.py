@@ -9,11 +9,12 @@ built-in's "PCR filter" section.
 
 Each strategy whose latest version is exactly the code before (its md5 in
 FROM_MD5S -- the 57-stock MACD of 1 Oct, the RS that carries a close into an
-empty slot) gets the built-in code as its next version (TO_MD5), and its
-active or paused paper run on that code moves onto it, keeping its state,
-with its live run if it has one. A strategy edited by hand since is left
-alone, and nothing happens if the built-in isn't this code. Recorded in
-audit_logs.
+empty slot) gets the built-in code as its next version (TO_MD5). Running
+paper (and live) runs stay on the version they are on: the user backtests
+the new one first (a backtest runs a strategy's latest version) and
+switches a run with "Use latest version" (decided 6 Oct). A strategy edited
+by hand since is left alone, and nothing happens if the built-in isn't this
+code. Recorded in audit_logs.
 
 Revision ID: c5d7e9f1a3b4
 Revises: 9b3d5f7a2c46
@@ -46,14 +47,6 @@ versions = sa.table(
     sa.column("timeframe", sa.String), sa.column("instrument_ids", sa.JSON), sa.column("parameters", sa.JSON),
     sa.column("entry_rules", sa.JSON), sa.column("exit_rules", sa.JSON), sa.column("python_code", sa.Text),
     sa.column("position_sizing", sa.JSON), sa.column("risk_rules", sa.JSON), sa.column("created_by", sa.Uuid),
-)
-deployments = sa.table(
-    "paper_native_deployments", sa.column("id", sa.Uuid), sa.column("strategy_id", sa.Uuid),
-    sa.column("strategy_version_id", sa.Uuid), sa.column("status", sa.String),
-)
-live_runs = sa.table(
-    "live_native_deployments", sa.column("id", sa.Uuid), sa.column("paper_deployment_id", sa.Uuid),
-    sa.column("strategy_version_id", sa.Uuid), sa.column("status", sa.String),
 )
 audit_logs = sa.table(
     "audit_logs", sa.column("id", sa.Uuid), sa.column("user_id", sa.Uuid), sa.column("action", sa.String),
@@ -100,24 +93,6 @@ def upgrade() -> None:
                 object_id=str(row["strategy_id"]), previous_value={"version_number": row["version_number"]},
                 new_value={"version_number": row["version_number"] + 1, "reason": REASON},
             ))
-            running = bind.execute(
-                sa.select(deployments.c.id, versions.c.id.label("version_id"), versions.c.version_number, versions.c.python_code)
-                .join(versions, versions.c.id == deployments.c.strategy_version_id)
-                .where(deployments.c.strategy_id == row["strategy_id"], deployments.c.status.in_(("active", "paused")))
-            ).mappings().all()
-            for run in running:
-                if _md5(run["python_code"]) not in from_md5s:
-                    continue  # on another version of its own: left there
-                bind.execute(deployments.update().where(deployments.c.id == run["id"]).values(strategy_version_id=new_id))
-                bind.execute(live_runs.update().where(
-                    live_runs.c.paper_deployment_id == run["id"], live_runs.c.strategy_version_id == run["version_id"],
-                    live_runs.c.status.in_(("active", "paused")),
-                ).values(strategy_version_id=new_id))
-                bind.execute(audit_logs.insert().values(
-                    id=uuid.uuid4(), user_id=None, action="PAPER_NATIVE_VERSION_UPDATED", object_type="paper_native_deployment",
-                    object_id=str(run["id"]), previous_value={"version_number": run["version_number"]},
-                    new_value={"version_number": row["version_number"] + 1, "reason": REASON},
-                ))
 
 
 def downgrade() -> None:
