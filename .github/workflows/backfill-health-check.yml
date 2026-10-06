@@ -79,6 +79,37 @@ jobs:
                 | sed -E 's/^\| //; s/:$//' | sort | uniq -c | sort -rn | head -8 || true
               rm -f /tmp/backend-72h.log
               ;;
+            web-today)
+              # Today since 09:00 IST, counts only: API answers by URL pattern
+              # (ids and query strings masked) and status; live-price
+              # websocket opens/closes; the chart-candle sync's failures by
+              # data source and timeframe (symbols masked); frontend errors
+              # by kind. No IPs, names or message text.
+              since=$(date -u -d "$(TZ=Asia/Kolkata date +%F) 09:00 IST" +%Y-%m-%dT%H:%M:%SZ)
+              compose logs --since "$since" --no-color backend > /tmp/backend-today.log 2>&1 || true
+              compose logs --since "$since" --no-color frontend > /tmp/frontend-today.log 2>&1 || true
+              echo "-- since $since: backend lines $(wc -l < /tmp/backend-today.log), frontend lines $(wc -l < /tmp/frontend-today.log)"
+              echo "-- API answers (count, method, path, status):"
+              grep -oE '"(GET|POST|PUT|PATCH|DELETE) /api/v1/[^ ?"]*[^"]*" [0-9]{3}' /tmp/backend-today.log \
+                | sed -E 's/\?[^ ]*//; s#/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#/{id}#g; s# HTTP/[0-9.]+"#"#; s/"//g' \
+                | sort | uniq -c | sort -rn | head -40 || true
+              echo "-- Websocket (count, line kind):"
+              grep -oE '"WebSocket [^ ?"]+[^"]*" \[?[a-z]+\]?|connection (open|closed)' /tmp/backend-today.log \
+                | sed -E 's/\?[^ "]*//; s#/[0-9a-f-]{36}#/{id}#g' | sort | uniq -c | sort -rn | head -10 || true
+              echo "-- Candle sync failures (count, data source named in the error):"
+              grep -oE "No market data source registered for '[A-Za-z0-9_]+'" /tmp/backend-today.log | sort | uniq -c || true
+              echo "-- Candle sync failures (failures, distinct instruments, timeframe, NIFTY or other):"
+              grep -oE 'Active timeframe sync failed for .*:[0-9]+[a-z]+' /tmp/backend-today.log \
+                | sed -E 's/Active timeframe sync failed for //' \
+                | awk '{n = split($0, a, ":"); kind = ($0 ~ /^NIFTY/) ? "NIFTY" : "other"; print a[n] "|" kind "|" $0}' \
+                | sort | uniq -c \
+                | awk '{split($2, b, "|"); k = b[1] " " b[2]; inst[k]++; fails[k] += $1}
+                       END {for (k in inst) printf "%7d %4d  %s\n", fails[k], inst[k], k}' || true
+              echo "-- Frontend log lines by kind (count):"
+              grep -oiE '(ChunkLoadError|TypeError|ReferenceError|SyntaxError|Unhandled|ECONNREFUSED|ETIMEDOUT|fetch failed|Error: [A-Za-z ]{0,30}|digest)' /tmp/frontend-today.log \
+                | sed -E 's/Error: .*/Error: (text)/' | sort | uniq -c | sort -rn | head -10 || true
+              rm -f /tmp/backend-today.log /tmp/frontend-today.log
+              ;;
           esac
           REMOTE
 
@@ -99,6 +130,10 @@ jobs:
           echo
           echo "== Backend log lines in the last 72 hours matching (count)"
           remote log-counts
+
+          echo
+          echo "== Today on the site since 09:00 IST (counts only)"
+          remote web-today
 
       - name: Remove the SSH key
         if: always()
