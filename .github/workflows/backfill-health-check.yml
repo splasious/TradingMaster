@@ -93,6 +93,14 @@ jobs:
               grep -oE '"(GET|POST|PUT|PATCH|DELETE) /api/v1/[^ ?"]*[^"]*" [0-9]{3}' /tmp/backend-today.log \
                 | sed -E 's/\?[^ ]*//; s#/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}#/{id}#g; s# HTTP/[0-9.]+"#"#; s/"//g' \
                 | sort | uniq -c | sort -rn | head -40 || true
+              echo "-- Session refresh and login calls, in order (IST time, call, status) -- times only:"
+              compose logs --since "$since" --no-color --timestamps backend 2>/dev/null \
+                | grep -E '"POST /api/v1/auth/(refresh|login|logout)' \
+                | sed -E 's/^[^ ]+ +\| +//' \
+                | awk '{t = $0; sub(/ .*/, "", t); match($0, /\/api\/v1\/auth\/[a-z]+/); call = substr($0, RSTART + 13, RLENGTH - 13);
+                        match($0, /HTTP\/[0-9.]+" [0-9]+/); st = substr($0, RSTART + RLENGTH - 3, 3); print t, call, st}' \
+                | while read -r t call st; do printf '%s %-8s %s\n' "$(TZ=Asia/Kolkata date -d "$t" +%H:%M:%S)" "$call" "$st"; done \
+                | tail -60 || true
               echo "-- Websocket (count, line kind):"
               grep -oE '"WebSocket [^ ?"]+[^"]*" \[?[a-z]+\]?|connection (open|closed)' /tmp/backend-today.log \
                 | sed -E 's/\?[^ "]*//; s#/[0-9a-f-]{36}#/{id}#g' | sort | uniq -c | sort -rn | head -10 || true
