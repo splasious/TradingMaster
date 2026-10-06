@@ -32,6 +32,20 @@ comment, just using live portfolio equity instead of a fixed simulated
 CAPITAL constant. A fresh up-cross that finds no free slot is passed over
 for good; it's listed in the Last Signal reason.
 
+Revised 6-Oct-2026 -- PCR filter (pcr_filter below):
+  - Each time it runs, NIFTY's PCR (the 15-minute record over its next 4
+    expiries -- the Options page's PCR -- the latest one, same session, at
+    most 30 minutes old).
+  - Below PCR_EXIT_BELOW (0.80): every holding is sold at once and nothing
+    is bought -- out of the market. Above PCR_REENTER_ABOVE (0.90): back in.
+    In between, or with no record, it stays as it was (in or out), so it
+    doesn't flip in and out around one level.
+  - Back in, it buys only as ever: a fresh up-cross on the newest finished
+    candle (decided 6 Oct) -- so it may sit in cash a while after PCR
+    recovers. An up-cross while out is listed in the reason, not bought.
+  - Before the first PCR record (a backtest of dates before about
+    23-Sep-2026) there is no filter: it trades as before.
+
 Revised 30-Sep-2026 -- buy on the up-cross candle only:
   - A symbol used to stay buy-eligible from its up-cross until its next
     down-cross, so a slot freed hours or days later was refilled with a
@@ -90,7 +104,9 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import select
 
+from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
+from app.services.options.pcr_snapshots import first_record_ts, latest_pcr
 
 WATCHLIST = [
     "ABCAPITAL", "ACUTAAS", "ADANIENSOL", "ADANIPOWER", "AMBER", "ANANDRATHI", "APARINDS", "ASHOKLEY", "ATHERENERG", "AUBANK",
@@ -108,6 +124,10 @@ FAST, SLOW = 12, 26  # see module docstring before changing FAST
 RSI_PERIOD = 14
 MIN_BARS = 151  # the original script's own warm-up minimum
 HISTORY_BARS = 300  # ample warm-up beyond MIN_BARS
+
+PCR_UNDERLYING = "NIFTY"
+PCR_EXIT_BELOW = 0.80  # NIFTY PCR under this: sell everything, stay out
+PCR_REENTER_ABOVE = 0.90  # over this: back in
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -161,6 +181,23 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
+async def pcr_filter(ctx) -> tuple[bool, str]:
+    """(out of the market?, a note) after the latest PCR -- see "PCR filter"
+    above. Kept in state["pcr_risk_off"]."""
+    risk_off = bool(ctx.state.get("pcr_risk_off"))
+    first = await first_record_ts(ctx.db, PCR_UNDERLYING)
+    if first is None or first > as_aware_utc(ctx.now):
+        return False, "PCR filter off (no PCR records this far back)"
+    pcr = await latest_pcr(ctx.db, PCR_UNDERLYING, as_aware_utc(ctx.now).astimezone(timezone.utc))
+    if pcr is not None and pcr < PCR_EXIT_BELOW:
+        risk_off = True
+    elif pcr is not None and pcr > PCR_REENTER_ABOVE:
+        risk_off = False
+    ctx.state["pcr_risk_off"] = risk_off
+    reading = f"PCR {pcr:.2f}" if pcr is not None else "no PCR record in the last 30 min"
+    return risk_off, f"{reading}: {f'out until PCR > {PCR_REENTER_ABOVE:.2f}' if risk_off else 'in the market'}"
+
+
 async def evaluate(ctx) -> None:
     universe_result = await ctx.db.execute(
         select(Instrument).where(Instrument.exchange == "NSE", Instrument.symbol.in_(WATCHLIST))
@@ -179,10 +216,31 @@ async def evaluate(ctx) -> None:
         signals[symbol] = sig
 
     holdings = ctx.state.get("holdings", {})  # {symbol: {instrument_id, quantity, entry_price, opened_at}}
+    risk_off, pcr_note = await pcr_filter(ctx)
+
+    # --- Out on PCR: sell everything now (one with no price yet: next run).
+    sold = []
+    for symbol in list(holdings.keys()) if risk_off else []:
+        leg = holdings[symbol]
+        instrument = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+        price = (await ctx.get_price(instrument.id)) if instrument else None
+        if instrument is None or price is None:
+            continue
+        holdings.pop(symbol)
+        await ctx.close_leg(instrument, "sell", leg["quantity"], price)
+        pnl = (price - leg["entry_price"]) * leg["quantity"]
+        await ctx.record_trade(
+            legs=[{
+                "instrument_id": leg["instrument_id"], "side": "long", "quantity": leg["quantity"],
+                "entry_price": leg["entry_price"], "exit_price": price,
+            }],
+            pnl=pnl, pnl_pct=(pnl / (leg["entry_price"] * leg["quantity"]) * 100) if leg["entry_price"] else 0.0,
+            exit_reason=f"pcr_below_{PCR_EXIT_BELOW:.2f}", opened_at=datetime.fromisoformat(leg["opened_at"]),
+        )
+        sold.append(f"{symbol} (PCR)")
 
     # --- Exits: the latest zero-cross is down, on a candle closing after entry.
-    sold = []
-    for symbol in list(holdings.keys()):
+    for symbol in [] if risk_off else list(holdings.keys()):
         sig = signals.get(symbol)
         if sig is None or sig["active"] or sig["last_sell_at"] is None:
             continue
@@ -224,7 +282,8 @@ async def evaluate(ctx) -> None:
 
     bought = []
     no_slot = []
-    for symbol in eligible:
+    out_on_pcr = eligible if risk_off else []
+    for symbol in [] if risk_off else eligible:
         if len(holdings) >= MAX_POSITIONS:
             no_slot.append(symbol)
             continue
@@ -249,13 +308,15 @@ async def evaluate(ctx) -> None:
 
     ctx.state["holdings"] = holdings
 
-    note_bits = []
+    note_bits = [pcr_note]  # first: the reason is cut at 500 characters
     if bought:
         note_bits.append(f"bought: {', '.join(bought)}")
     if sold:
         note_bits.append(f"sold: {', '.join(sold)}")
     if no_slot:
         note_bits.append(f"up-cross, no free slot: {', '.join(no_slot)}")
+    if out_on_pcr:
+        note_bits.append(f"up-cross, not bought (out on PCR): {', '.join(out_on_pcr)}")
     if missing:
         note_bits.append(f"not found: {', '.join(missing)}")
     if skipped:

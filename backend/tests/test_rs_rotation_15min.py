@@ -199,3 +199,77 @@ def test_it_ranks_the_57_stocks_of_the_macd_rsi_list():
     assert rot.STOCK_UNIVERSE == WATCHLIST
     added_1_oct = ["CUPID", "HFCL", "KIRLOSENG", "MTARTECH", "STLTECH", "TDPOWERSYS", "WELCORP"]
     assert rot.STOCK_UNIVERSE[-7:] == added_1_oct
+
+
+# --------------------------------------------------------- PCR filter (6 Oct) --
+
+async def _pcr(db, mark: datetime, value: float) -> None:
+    from app.models.pcr import SOURCE_LIVE, PcrSnapshot
+
+    db.add(PcrSnapshot(underlying="NIFTY", ts=mark.astimezone(timezone.utc), session_date=mark.astimezone(IST).date(), captured_at=mark,
+                       source=SOURCE_LIVE, strike_window=40, expiries=[], contracts_expected=100, contracts_with_oi=100, pcr=value))
+    await db.commit()
+
+
+async def test_pcr_below_080_sells_everything_and_it_stays_out_until_pcr_is_above_090(db_session, monkeypatch):
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    prices = {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0}
+    _live(instruments, prices)
+
+    async def close(hh: int, mm: int, pcr: float | None, state: dict) -> NativeContext:
+        if pcr is not None:
+            await _pcr(db_session, at(hh, mm), pcr)
+        ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=state, now=at(hh, mm, 3))
+        await rot.evaluate(ctx)
+        return ctx
+
+    ctx = await close(9, 30, 0.95, {})
+    assert len(ctx.state["holdings"]) == 10 and ctx.state["pcr_risk_off"] is False
+    assert "PCR 0.95: in the market" in ctx._last_reason
+
+    ctx = await close(9, 45, 0.78, ctx.state)  # below 0.80: everything out, nothing bought
+    assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is True
+    assert "sold: S24 (PCR)" in ctx._last_reason and "bought: none" in ctx._last_reason
+    assert "PCR 0.78: out until PCR > 0.90" in ctx._last_reason
+    await db_session.commit()
+    trades = (await db_session.execute(select(PaperNativeTrade))).scalars().all()
+    assert len(trades) == 10 and {t.exit_reason for t in trades} == {"pcr_below_0.80"}
+    assert portfolio.cash == pytest.approx(1_000_000.0)  # same prices in and out
+
+    ctx = await close(10, 0, 0.85, ctx.state)  # between the two: stays out
+    assert ctx.state["holdings"] == {} and "bought: none" in ctx._last_reason and ctx.state["pcr_risk_off"] is True
+    hold = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=ctx.state, now=at(10, 5))
+    await rot.evaluate(hold)
+    assert "out of the market (PCR)" in hold._last_reason
+
+    ctx = await close(10, 15, 0.92, ctx.state)  # above 0.90: back in, the top ten again
+    assert sorted(ctx.state["holdings"]) == [f"S{i}" for i in range(15, 25)] and ctx.state["pcr_risk_off"] is False
+
+    ctx = await close(10, 30, 0.85, ctx.state)  # between the two while in: stays in
+    assert len(ctx.state["holdings"]) == 10 and "sold: none" in ctx._last_reason
+
+
+async def test_without_a_pcr_record_it_stays_as_it_was_and_before_any_record_there_is_no_filter(db_session, monkeypatch):
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    _live(instruments, {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0})
+
+    # PCR records begin only after this close (a backtest of earlier dates): no filter.
+    await _pcr(db_session, at(11, 0), 0.50)
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 30, 3))
+    await rot.evaluate(ctx)
+    assert len(ctx.state["holdings"]) == 10 and "PCR filter off" in ctx._last_reason
+
+    # Records exist, but none this session within 30 minutes: in stays in ...
+    await _pcr(db_session, at(9, 0) - timedelta(days=1), 0.50)
+    kept = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=ctx.state, now=at(9, 45, 3))
+    await rot.evaluate(kept)
+    assert len(kept.state["holdings"]) == 10 and "sold: none" in kept._last_reason
+    assert kept.state["pcr_risk_off"] is False and "no PCR record in the last 30 min: in the market" in kept._last_reason
+
+    # ... and out stays out (as after a PCR exit: nothing held, the cash back).
+    portfolio.cash = 1_000_000.0
+    out = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment,
+                        state={**kept.state, "holdings": {}, "pcr_risk_off": True}, now=at(10, 0, 3))
+    await rot.evaluate(out)
+    assert out.state["holdings"] == {} and "bought: none" in out._last_reason
+    assert out.state["pcr_risk_off"] is True and "no PCR record in the last 30 min: out until PCR > 0.90" in out._last_reason

@@ -133,10 +133,13 @@ def test_the_built_ins_are_the_approved_code():
     fresh_cross = _load("4abb8d69a900_macd_rsi_fresh_cross_version")
     seven = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
     carry = _load("7dab5ef6e158_rs_15min_carry_close_into_empty_slot")
+    pcr = _load("c5d7e9f1a3b4_pcr_filter_for_the_15min_cash_strategies")
     assert seven.CHANGES["macd_rsi_15min.py"][0] == fresh_cross.NEW_MD5  # each moves on from the version before
     assert seven.CHANGES["nifty_rs_rotation_15min.py"][1] in carry.CHANGES["nifty_rs_rotation_15min.py"][0]
-    assert _md5(BUILTIN) == seven.CHANGES["macd_rsi_15min.py"][1]
-    assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == carry.CHANGES["nifty_rs_rotation_15min.py"][1]
+    assert pcr.CHANGES["macd_rsi_15min.py"][0] == {seven.CHANGES["macd_rsi_15min.py"][1]}
+    assert pcr.CHANGES["nifty_rs_rotation_15min.py"][0] == {carry.CHANGES["nifty_rs_rotation_15min.py"][1]}
+    assert _md5(BUILTIN) == pcr.CHANGES["macd_rsi_15min.py"][1]
+    assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == pcr.CHANGES["nifty_rs_rotation_15min.py"][1]
 
 
 async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, db_session):
@@ -151,8 +154,8 @@ async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, d
 
     migration = _load("cc8323c6d54e_add_seven_stocks_to_15min_lists")
     migration.CHANGES = {
-        "macd_rsi_15min.py": (hashlib.md5(macd_code.encode()).hexdigest(), migration.CHANGES["macd_rsi_15min.py"][1]),
-        # the RS built-in has moved on since (7dab5ef6e158)
+        # both built-ins have moved on since (7dab5ef6e158, c5d7e9f1a3b4)
+        "macd_rsi_15min.py": (hashlib.md5(macd_code.encode()).hexdigest(), _md5(BUILTIN)),
         "nifty_rs_rotation_15min.py": (hashlib.md5(rs_code.encode()).hexdigest(), _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py")),
     }
     await _run(db_engine, migration)
@@ -184,7 +187,7 @@ async def test_a_running_rs_15min_deployment_moves_to_the_carry_forward_version(
     await db_session.commit()
 
     migration = _load("7dab5ef6e158_rs_15min_carry_close_into_empty_slot")
-    to_md5 = migration.CHANGES["nifty_rs_rotation_15min.py"][1]
+    to_md5 = _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py")  # the built-in has moved on since (c5d7e9f1a3b4)
     migration.CHANGES = {"nifty_rs_rotation_15min.py": ({hashlib.md5(c.encode()).hexdigest() for c in (fifty, fifty_seven)}, to_md5)}
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -432,3 +435,62 @@ async def test_the_four_listed_stocks_with_no_data_get_downloads_and_a_zerodha_s
     assert len(jobs) == 9 and {j.status for j in jobs} == {"pending"} and {j.source for j in jobs} == {"zerodha"}
     audit = (await db_session.execute(select(AuditLog).where(AuditLog.action == "BF_BACKFILL_STARTED"))).scalars().all()
     assert len(audit) == 3
+
+
+# ------------------------------------------------ PCR filter (6 Oct) -----
+
+async def test_the_15min_cash_strategies_get_the_pcr_filter_and_their_runs_move_with_them(db_engine, db_session):
+    from app.models.broker import Broker, BrokerAccount
+    from app.models.live_native import LiveNativeDeployment
+
+    macd_old, rs_old = "# MACD, 57 stocks\n", "# RS 15, carries a close forward\n"
+    macd = await _deployment(db_session, "pcr_a@tradingmaster.internal", macd_old)
+    rs = await _deployment(db_session, "pcr_b@tradingmaster.internal", rs_old)
+    edited = await _deployment(db_session, "pcr_c@tradingmaster.internal", "# edited by hand since\n")
+    stopped = await _deployment(db_session, "pcr_d@tradingmaster.internal", macd_old, status=DeploymentStatus.STOPPED.value)
+    # The RS one also trades live, on the same version.
+    rs_strategy = await db_session.get(Strategy, rs.strategy_id)
+    broker = (await db_session.execute(select(Broker))).scalars().first() or Broker(code="zerodha_kite", name="Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    account = BrokerAccount(user_id=rs_strategy.owner_id, broker_id=broker.id, account_label="Kite", environment="live")
+    db_session.add(account)
+    await db_session.flush()
+    live = LiveNativeDeployment(owner_id=rs_strategy.owner_id, strategy_id=rs.strategy_id, strategy_version_id=rs.strategy_version_id,
+                                broker_account_id=account.id, paper_deployment_id=rs.id, status="active", lots_per_leg=1,
+                                capital=100000, product_style="overnight")
+    db_session.add(live)
+    await db_session.flush()
+    ids = [macd.id, rs.id, edited.id, stopped.id]
+    before = {d.id: d.strategy_version_id for d in (macd, rs, edited, stopped)}
+    live_id, stopped_strategy = live.id, stopped.strategy_id
+    await db_session.commit()
+
+    migration = _load("c5d7e9f1a3b4_pcr_filter_for_the_15min_cash_strategies")
+    migration.CHANGES = {
+        "macd_rsi_15min.py": ({hashlib.md5(macd_old.encode()).hexdigest()}, migration.CHANGES["macd_rsi_15min.py"][1]),
+        "nifty_rs_rotation_15min.py": ({hashlib.md5(rs_old.encode()).hexdigest()}, migration.CHANGES["nifty_rs_rotation_15min.py"][1]),
+    }
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    for deployment_id, filename in ((ids[0], "macd_rsi_15min.py"), (ids[1], "nifty_rs_rotation_15min.py")):
+        moved = await db_session.get(PaperNativeDeployment, deployment_id)
+        version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+        assert version.version_number == 12 and version.python_code == (BUILTIN.parent / filename).read_text(encoding="utf-8")
+        assert "PCR_EXIT_BELOW = 0.80" in version.python_code and version.parameters == {"x": 1}
+        assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0
+    assert (await db_session.get(LiveNativeDeployment, live_id)).strategy_version_id == (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id
+    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]
+    # Stopped: the run stays where it was, but its strategy (latest version the old code) gets the new version for backtests.
+    assert (await db_session.get(PaperNativeDeployment, ids[3])).strategy_version_id == before[ids[3]]
+    newest = (await db_session.execute(
+        select(StrategyVersion).where(StrategyVersion.strategy_id == stopped_strategy).order_by(StrategyVersion.version_number.desc())
+    )).scalars().first()
+    assert newest.version_number == 12 and "PCR_EXIT_BELOW" in newest.python_code
+
+    audit = (await db_session.execute(select(AuditLog))).scalars().all()
+    assert sorted((a.action, a.new_value["version_number"]) for a in audit) == sorted(
+        [("STRATEGY_VERSION_CREATED", 12)] * 3 + [("PAPER_NATIVE_VERSION_UPDATED", 12)] * 2
+    )

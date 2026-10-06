@@ -46,6 +46,18 @@ Trading, as decided on 30-Sep-2026:
   - Cash (delivery) positions, held overnight: no end-of-day square-off;
     a sale's proceeds fund the next buy.
 
+PCR filter, added 6-Oct-2026 (pcr_filter below):
+  - At each decision, NIFTY's PCR (the 15-minute record over its next 4
+    expiries -- the Options page's PCR -- the latest one at or before the
+    decision, same session, at most 30 minutes old).
+  - Below PCR_EXIT_BELOW (0.80): every holding is sold at that close and
+    nothing is bought -- out of the market. Above PCR_REENTER_ABOVE (0.90):
+    back in, buying the top TOP_N again at that close. In between, or with
+    no record, it stays as it was (in or out), so it doesn't flip in and
+    out around one level. The ranking keeps running while out.
+  - Before the first PCR record (a backtest of dates before about
+    23-Sep-2026) there is no filter: it trades as before.
+
 Runs through services/paper_trading/native_runner.py -- the same ctx
 contract as the other native strategies (ctx.state, ctx.db, ctx.now,
 ctx.portfolio, ctx.get_prices, ctx.open_leg, ctx.close_leg,
@@ -62,6 +74,7 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.nse_holidays import is_trading_holiday
+from app.services.options.pcr_snapshots import first_record_ts, latest_pcr
 
 # --- Amend this list to change which stocks are tracked ------------------
 STOCK_UNIVERSE = [
@@ -90,6 +103,10 @@ RS_WINDOW = 10
 RS_SUM_DIVISOR = 13.0
 RS_MULTIPLIER = 12.0
 CARRY_BACK = 25  # candles searched back for a close to carry into an empty seed slot -- a session's worth
+
+PCR_UNDERLYING = "NIFTY"
+PCR_EXIT_BELOW = 0.80  # NIFTY PCR under this: sell everything, stay out
+PCR_REENTER_ABOVE = 0.90  # over this: back in
 
 
 def _is_trading_day(d: date) -> bool:
@@ -198,6 +215,23 @@ async def _seeded_series(ctx, bar: datetime, instruments: dict) -> dict:
     return {"bars": [s.isoformat() for s in slots], "closes": closes}
 
 
+async def pcr_filter(ctx) -> tuple[bool, str]:
+    """(out of the market?, a note) after this decision's PCR -- see "PCR
+    filter" above. Kept in state["pcr_risk_off"]."""
+    risk_off = bool(ctx.state.get("pcr_risk_off"))
+    first = await first_record_ts(ctx.db, PCR_UNDERLYING)
+    if first is None or first > as_aware_utc(ctx.now):
+        return False, "PCR filter off (no PCR records this far back)"
+    pcr = await latest_pcr(ctx.db, PCR_UNDERLYING, as_aware_utc(ctx.now).astimezone(timezone.utc))
+    if pcr is not None and pcr < PCR_EXIT_BELOW:
+        risk_off = True
+    elif pcr is not None and pcr > PCR_REENTER_ABOVE:
+        risk_off = False
+    ctx.state["pcr_risk_off"] = risk_off
+    reading = f"PCR {pcr:.2f}" if pcr is not None else "no PCR record in the last 30 min"
+    return risk_off, f"{reading}: {f'out until PCR > {PCR_REENTER_ABOVE:.2f}' if risk_off else 'in the market'}"
+
+
 async def evaluate(ctx) -> None:
     now_ist = ctx.now.astimezone(IST)
     holdings = ctx.state.get("holdings", {})  # {symbol: {instrument_id, quantity, entry_price, opened_at, rank}}
@@ -207,7 +241,8 @@ async def evaluate(ctx) -> None:
 
     bar = just_closed_bar(now_ist)
     if bar is None or (series["bars"] and series["bars"][-1] == bar.isoformat()):
-        ctx.note("hold", reason=f"holding {len(holdings)}/{TOP_N} | next decision {upcoming:%d-%b %H:%M}")
+        out = " | out of the market (PCR)" if ctx.state.get("pcr_risk_off") else ""
+        ctx.note("hold", reason=f"holding {len(holdings)}/{TOP_N}{out} | next decision {upcoming:%d-%b %H:%M}")
         return
     close_label = f"{bar + BAR:%H:%M}"
 
@@ -244,12 +279,15 @@ async def evaluate(ctx) -> None:
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     rank = {symbol: i + 1 for i, (symbol, _) in enumerate(ranked)}
 
-    # --- Sells: ranked below EXIT_RANK, or no longer in the universe. ------
+    risk_off, pcr_note = await pcr_filter(ctx)
+
+    # --- Sells: everything while out on PCR; else ranked below EXIT_RANK, or
+    # no longer in the universe. -------------------------------------------
     sold = []
     for symbol in list(holdings):
         leg = holdings[symbol]
         out_of_universe = symbol not in universe
-        if not out_of_universe and (symbol not in rank or rank[symbol] <= EXIT_RANK):
+        if not risk_off and not out_of_universe and (symbol not in rank or rank[symbol] <= EXIT_RANK):
             continue
         instrument = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
         price = prices.get(uuid.UUID(leg["instrument_id"]))
@@ -264,17 +302,20 @@ async def evaluate(ctx) -> None:
                 "entry_price": leg["entry_price"], "exit_price": price,
             }],
             pnl=pnl, pnl_pct=(pnl / (leg["entry_price"] * leg["quantity"]) * 100) if leg["entry_price"] else 0.0,
-            exit_reason="left_universe" if out_of_universe else f"rank_below_{EXIT_RANK}",
+            exit_reason=(
+                f"pcr_below_{PCR_EXIT_BELOW:.2f}" if risk_off else "left_universe" if out_of_universe else f"rank_below_{EXIT_RANK}"
+            ),
             opened_at=datetime.fromisoformat(leg["opened_at"]),
         )
-        sold.append(f"{symbol} ({'not in list' if out_of_universe else f'rank {rank[symbol]}'})")
+        why = "PCR" if risk_off else "not in list" if out_of_universe else f"rank {rank[symbol]}"
+        sold.append(f"{symbol} ({why})")
 
     # --- Buys: the top TOP_N not held, highest first, into the free slots. --
     equity = ctx.portfolio.cash + sum(
         prices.get(uuid.UUID(leg["instrument_id"]), leg["entry_price"]) * leg["quantity"] for leg in holdings.values()
     )
     bought = []
-    for symbol, _ in ranked[:TOP_N]:
+    for symbol, _ in ([] if risk_off else ranked[:TOP_N]):
         if len(holdings) >= TOP_N:
             break
         if symbol in holdings:
@@ -300,7 +341,7 @@ async def evaluate(ctx) -> None:
     )
     reason = (
         f"{close_label} close: bought: {', '.join(bought) or 'none'} | sold: {', '.join(sold) or 'none'} | "
-        f"holding {len(holdings)}/{TOP_N} | {ranked_note} | next decision {upcoming:%H:%M}"
+        f"holding {len(holdings)}/{TOP_N} | {pcr_note} | {ranked_note} | next decision {upcoming:%H:%M}"
     )
     if bought or sold:
         ctx.note("entered" if bought else "exited", signal="REBALANCE", reason=reason)

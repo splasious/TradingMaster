@@ -2145,3 +2145,26 @@ ORDER BY stock;
 -- UA2. All NSE catalog rows by data source (counts)
 SELECT data_source, instrument_type, count(*) AS rows, count(*) FILTER (WHERE is_active) AS active
 FROM instruments WHERE exchange = 'NSE' GROUP BY 1, 2 ORDER BY 1, 2;
+
+\echo
+\echo '== PF1. NIFTY PCR per session since its records began (market data): the PCR filter of RS Rotation 15 MIN / MACD - RSI - 15 MIN sells all below 0.80, buys again above 0.90'
+SELECT session_date, count(*) AS records, round(min(pcr)::numeric, 3) AS min_pcr, round(max(pcr)::numeric, 3) AS max_pcr,
+       round((array_agg(pcr ORDER BY ts))[1]::numeric, 3) AS first_pcr, round((array_agg(pcr ORDER BY ts DESC))[1]::numeric, 3) AS last_pcr,
+       count(*) FILTER (WHERE pcr < 0.80) AS marks_below_080, count(*) FILTER (WHERE pcr > 0.90) AS marks_above_090,
+       count(*) FILTER (WHERE contracts_expected = 0 OR contracts_with_oi < 0.9 * contracts_expected) AS low_coverage
+FROM pcr_snapshots WHERE underlying = 'NIFTY' AND pcr IS NOT NULL
+GROUP BY session_date ORDER BY session_date;
+
+-- PF2. Runs of the two 15-minute cash strategies by code version (counts only): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
+SELECT trim(s.name) AS strategy, d.status, v.version_number,
+       CASE md5(replace(v.python_code, E'\r', ''))
+         WHEN '561759bbee3e25378f16c524c7f2f07b' THEN 'MACD before PCR filter' WHEN '988246769bebae7d1d8c3cdfbcf91be8' THEN 'RS 15 before PCR filter'
+         WHEN '5f43c1d04e769861328c0e7b54ff2729' THEN 'MACD with PCR filter' WHEN '92c7c0d9723cb8962692b9e39bb0166b' THEN 'RS 15 with PCR filter'
+         ELSE 'other code' END AS code,
+       (SELECT count(*) FROM live_native_deployments l WHERE l.paper_deployment_id = d.id AND l.status IN ('active', 'paused')) AS live_runs_on,
+       (SELECT count(*) FROM live_native_deployments l WHERE l.paper_deployment_id = d.id AND l.status IN ('active', 'paused')
+          AND l.strategy_version_id = d.strategy_version_id) AS live_on_same_version,
+       (d.state ->> 'pcr_risk_off') AS out_on_pcr
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+WHERE trim(s.name) IN ('RS Rotation 15 MIN', 'MACD - RSI - 15 MIN') AND d.status IN ('active', 'paused')
+ORDER BY 1, 3;

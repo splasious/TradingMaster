@@ -369,3 +369,65 @@ async def test_a_new_deployment_buys_only_on_an_up_cross(db_session: AsyncSessio
 
 async def _instrument(db_session: AsyncSession, symbol: str) -> Instrument:
     return (await db_session.execute(select(Instrument).where(Instrument.symbol == symbol))).scalar_one()
+
+
+# --------------------------------------------------------- PCR filter (6 Oct) --
+
+async def _pcr(db_session: AsyncSession, mark: datetime, value: float) -> None:
+    from app.models.pcr import SOURCE_LIVE, PcrSnapshot
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    db_session.add(PcrSnapshot(underlying="NIFTY", ts=mark.astimezone(timezone.utc), session_date=mark.astimezone(ist).date(),
+                               captured_at=mark, source=SOURCE_LIVE, strike_window=40, expiries=[],
+                               contracts_expected=100, contracts_with_oi=100, pcr=value))
+    await db_session.commit()
+
+
+async def _pcr_setup(db_session: AsyncSession):
+    """SOLARINDS held (bought after its down-cross, so the MACD rule keeps
+    it), alone; SBIN crossing up on the newest candle."""
+    _, cross = _solarinds_closes()
+    ctx, deployment, instruments = await _setup(db_session, START + (cross + 2) * BAR_LENGTH)
+    ctx.state["holdings"] = {"SOLARINDS": ctx.state["holdings"]["SOLARINDS"]}
+    return ctx, deployment, instruments
+
+
+async def test_pcr_below_080_sells_everything_and_skips_the_up_cross(db_session: AsyncSession):
+    ctx, deployment, _ = await _pcr_setup(db_session)
+    await _pcr(db_session, ctx.now - timedelta(minutes=10), 0.79)
+
+    await evaluate(ctx)
+
+    assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is True
+    assert "sold: SOLARINDS (PCR)" in ctx._last_reason
+    assert "up-cross, not bought (out on PCR): SBIN" in ctx._last_reason
+    assert "PCR 0.79: out until PCR > 0.90" in ctx._last_reason
+    await db_session.commit()
+    trade = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == deployment.id))).scalar_one()
+    assert trade.exit_reason == "pcr_below_0.80"
+
+
+async def test_out_on_pcr_it_waits_above_090_then_buys_only_a_fresh_up_cross(db_session: AsyncSession):
+    ctx, _, _ = await _pcr_setup(db_session)
+    ctx.state = {"holdings": {}, "pcr_risk_off": True}
+    await _pcr(db_session, ctx.now - timedelta(minutes=10), 0.85)
+
+    await evaluate(ctx)  # between 0.80 and 0.90: still out
+    assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is True
+    assert "up-cross, not bought (out on PCR): SBIN" in ctx._last_reason
+
+    await _pcr(db_session, ctx.now - timedelta(minutes=1), 0.91)
+    await evaluate(ctx)  # above 0.90: back in, and SBIN's up-cross is still fresh
+    assert "SBIN" in ctx.state["holdings"] and ctx.state["pcr_risk_off"] is False
+    assert "PCR 0.91: in the market" in ctx._last_reason
+
+
+async def test_back_in_on_pcr_a_stale_up_cross_is_not_bought(db_session: AsyncSession):
+    length = len(_solarinds_closes()[0])
+    ctx, _, _ = await _setup(db_session, START, sbin_closes=_stale(_sbin_closes(length), 2))
+    ctx.state = {"holdings": {}, "pcr_risk_off": True}
+    await _pcr(db_session, ctx.now - timedelta(minutes=5), 0.95)
+
+    await evaluate(ctx)
+
+    assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is False  # in again, but no fresh cross to buy
