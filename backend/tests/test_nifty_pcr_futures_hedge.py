@@ -295,13 +295,18 @@ async def test_a_backtest_books_a_future_the_same_way(market):
     assert market.portfolio.cash == pytest.approx(CASH + QTY * 20)
 
 
-async def test_a_position_held_overnight_reacts_from_0915_the_next_morning(market):
-    """Entries wait for 09:45; a position carried from the day before
-    doesn't -- its exit is checked from the first run after 09:15."""
+async def _carried_bullish(market) -> None:
+    """Monday 5 Oct: bullish at 11:00, still held at the close (1.22)."""
     market.prices(at(5, 11, 0, 5))
-    await market.check(at(5, 11, 0, 5), 1.30)  # Monday: bullish, held into the close at 1.22
+    await market.check(at(5, 11, 0, 5), 1.30)
     market.prices(at(5, 15, 29, 55))
     assert (await market.check(at(5, 15, 29, 55), 1.22)).state["position"] is not None
+
+
+async def test_a_position_held_overnight_reacts_from_0915_the_next_morning(market):
+    """Entries from flat wait for 09:45; a position carried from the day
+    before doesn't -- its exit is checked from the first run after 09:15."""
+    await _carried_bullish(market)
 
     market.prices(at(6, 9, 15, 10))
     held = await market.check(at(6, 9, 15, 10), 1.21)  # Tuesday 09:15, still above 1.20: held, not "outside the window"
@@ -311,4 +316,32 @@ async def test_a_position_held_overnight_reacts_from_0915_the_next_morning(marke
     out = await market.check(at(6, 9, 15, 20), 1.10)  # the next check, below 1.20: both legs closed at 09:15
     [trade] = await market.trades()
     assert out.state["position"] is None and trade.exit_reason == "pcr_below_1.20"
-    assert "entries 09:45-15:00" in out._last_reason  # flat again: a new entry waits for 09:45
+    assert "enters below 0.75 or above 1.25" in out._last_reason  # neutral: flat, but entries are open from 09:15 today
+
+
+async def test_a_carried_position_flips_into_the_other_side_at_0915(market):
+    await _carried_bullish(market)
+
+    market.prices(at(6, 9, 15, 10))
+    ctx = await market.check(at(6, 9, 15, 10), 0.70)  # below 0.75 at the open: bullish out, bearish in, same check
+    assert ctx.state["position"]["bias"] == "bearish" and ctx._last_signal == "SHORT_FUT_PE"
+    assert "closed bullish" in ctx._last_reason
+    assert [t.exit_reason for t in await market.trades()] == ["pcr_below_1.20"]
+
+
+async def test_after_a_carried_exit_an_entry_before_0945_is_taken_that_day_only(market):
+    await _carried_bullish(market)
+
+    market.prices(at(6, 9, 15, 10))
+    assert (await market.check(at(6, 9, 15, 10), 1.10)).state["position"] is None  # out, neutral
+    market.prices(at(6, 9, 30, 5))
+    back = await market.check(at(6, 9, 30, 5), 1.30)  # 09:30, before 09:45: entered (the session opened with a carried position)
+    assert back.state["position"]["bias"] == "bullish" and back._last_signal == "LONG_FUT_CE"
+
+    market.prices(at(6, 10, 0, 5))
+    await market.check(at(6, 10, 0, 5), 1.10)  # out again at 10:00: flat into Wednesday
+    market.prices(at(7, 9, 30, 5))
+    wed = await market.check(at(7, 9, 30, 5), 0.70)  # Wednesday opened flat: a new entry waits for 09:45
+    assert wed.state.get("position") is None and "entries 09:45-15:00" in wed._last_reason
+    market.prices(at(7, 9, 45, 5))
+    assert (await market.check(at(7, 9, 45, 5), 0.70)).state["position"]["bias"] == "bearish"

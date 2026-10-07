@@ -573,3 +573,28 @@ async def test_with_no_kite_login_connected_the_latest_downloads_user_is_used(db
 
     job = await db_session.get(BfBackfillJob, failed_id)
     assert job.status == "pending" and job.requested_by == user_id
+
+
+# ------------------------ PCR Futures Hedge: carried position from 09:15 --
+
+async def test_the_pcr_futures_hedge_moves_to_the_carried_position_version(db_engine, db_session):
+    old = "# Nifty PCR Futures Hedge, 1 Oct\n"
+    running = await _deployment(db_session, "hedge_a@tradingmaster.internal", old)
+    edited = await _deployment(db_session, "hedge_b@tradingmaster.internal", "# Nifty PCR Futures Hedge, edited by hand\n")
+    other = await _deployment(db_session, "hedge_c@tradingmaster.internal", old.replace("Nifty PCR Futures Hedge", "something else"))
+    ids, before = [running.id, edited.id, other.id], {d.id: d.strategy_version_id for d in (running, edited, other)}
+    await db_session.commit()
+
+    migration = _load("e7f9a1b3c5d6_pcr_futures_hedge_carried_position_from_0915")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    migration.FROM_MD5S = {hashlib.md5(old.encode()).hexdigest(), hashlib.md5(old.replace("Nifty PCR Futures Hedge", "something else").encode()).hexdigest()}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and "MARKET_OPEN = time(9, 15)" in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]  # not this strategy's code

@@ -24,6 +24,11 @@ As agreed on 1-Oct-2026:
             entry from that day on takes next month's future.
   Timing:   entries 09:45-15:00 IST; exits and rolls whenever the market is
             open; positions are held overnight -- there is no square-off.
+            A session that opens with a position carried from an earlier
+            day follows every rule from 09:15 (added 7-Oct-2026): its exit,
+            a flip into the other side on the same check, and -- once flat
+            that day -- any new entry, all from 09:15 rather than 09:45
+            (state["_early_entries_on"], the session it applies to).
   Size:     LOTS lots per leg at the contract's own lot size. Both legs or
             neither: no live price for either one, no entry.
   Risk:     no stop-loss. Short futures with a short ITM put pays at most
@@ -56,6 +61,7 @@ BULLISH_ENTRY, BULLISH_EXIT = 1.25, 1.20
 TARGET_PREMIUM = 150.0
 ITM_STRIKES_PRICED = 20  # nearest in-the-money strikes looked at when picking one
 ENTRY_START, ENTRY_END = time(9, 45), time(15, 0)
+MARKET_OPEN = time(9, 15)  # entries from here on a session that opened with a carried position
 OPTION_ROLL_AT = time(9, 20)  # on the weekly option's expiry day
 FUTURES_ROLL_AT = time(15, 0)  # one trading day before the monthly expiry
 
@@ -252,6 +258,12 @@ async def evaluate(ctx) -> None:
     pcr = await ctx.get_pcr()
     closed_note = None
 
+    # A position from an earlier day held into this session: every rule
+    # applies from 09:15 today, entries included.
+    if position is not None and datetime.fromisoformat(position["opened_at"]).astimezone(IST).date() < today:
+        ctx.state["_early_entries_on"] = today.isoformat()
+    entry_start = MARKET_OPEN if ctx.state.get("_early_entries_on") == today.isoformat() else ENTRY_START
+
     # --- Holding: exit, else roll whatever is due. ---------------------------
     if position is not None:
         legs = position["legs"]
@@ -293,8 +305,8 @@ async def evaluate(ctx) -> None:
         ctx.note("exited" if closed_note else "skipped", signal="COVER" if closed_note else None,
                  reason=f"{closed_note} | {text}" if closed_note else text)
 
-    if not ENTRY_START <= now_ist.time() < ENTRY_END:
-        flat(f"flat | {_pcr_text(pcr)} | entries {ENTRY_START:%H:%M}-{ENTRY_END:%H:%M} IST")
+    if not entry_start <= now_ist.time() < ENTRY_END:
+        flat(f"flat | {_pcr_text(pcr)} | entries {entry_start:%H:%M}-{ENTRY_END:%H:%M} IST")
         return
     if pcr is None:
         flat("flat | no PCR record yet")
