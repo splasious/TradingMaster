@@ -1342,8 +1342,8 @@ FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE '
 GROUP BY i.expiry ORDER BY i.expiry;
 
 \echo
-\echo '== PF1. Nifty PCR Futures Hedge: deployments on its code, the open position (bias, leg kinds and expiries), last check, and closed trades by exit reason with the last one's open/close times (no P&L in this public log)'
-SELECT s.name AS strategy, sv.version_number, d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
+\echo '== PF1. Nifty PCR Futures Hedge: deployments on its code (version, code md5 -- the built-in of 1 Oct is df0f74e6...), the open position (bias, leg kinds and expiries), last check, closed trades by exit reason, and when the last trade opened and closed (no P and L in this public log)'
+SELECT s.name AS strategy, sv.version_number, md5(replace(sv.python_code, E'\r', '')) AS code_md5, d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
        to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
        d.state::jsonb -> 'position' ->> 'bias' AS bias, d.state::jsonb -> 'position' ->> 'pcr_at_entry' AS pcr_at_entry,
        d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'expiry' AS future_expiry, d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'side' AS future_side,
