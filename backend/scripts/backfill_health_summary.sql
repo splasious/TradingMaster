@@ -1342,14 +1342,15 @@ FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE '
 GROUP BY i.expiry ORDER BY i.expiry;
 
 \echo
-\echo '== PF1. Nifty PCR Futures Hedge: deployments on its code, the open position (bias, leg kinds and expiries), last check, and closed trades by exit reason'
+\echo '== PF1. Nifty PCR Futures Hedge: deployments on its code, the open position (bias, leg kinds and expiries), last check, and closed trades by exit reason with the last one's open/close times (no P&L in this public log)'
 SELECT s.name AS strategy, sv.version_number, d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
        to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
        d.state::jsonb -> 'position' ->> 'bias' AS bias, d.state::jsonb -> 'position' ->> 'pcr_at_entry' AS pcr_at_entry,
        d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'expiry' AS future_expiry, d.state::jsonb -> 'position' -> 'legs' -> 'future' ->> 'side' AS future_side,
        d.state::jsonb -> 'position' -> 'legs' -> 'option' ->> 'option_type' AS option_type, d.state::jsonb -> 'position' -> 'legs' -> 'option' ->> 'expiry' AS option_expiry,
        (SELECT string_agg(t.exit_reason || ' x' || t.n, ', ') FROM (SELECT exit_reason, count(*) AS n FROM paper_native_trades WHERE deployment_id = d.id GROUP BY 1) t) AS trades,
-       (SELECT round(sum(pnl)::numeric, 0) FROM paper_native_trades WHERE deployment_id = d.id) AS realised_pnl
+       (SELECT to_char(max(closed_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM paper_native_trades WHERE deployment_id = d.id) AS last_closed_ist,
+       (SELECT to_char(max(opened_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM paper_native_trades WHERE deployment_id = d.id) AS last_opened_ist
 FROM strategy_versions sv JOIN strategies s ON s.id = sv.strategy_id JOIN paper_native_deployments d ON d.strategy_version_id = sv.id
 WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
 ORDER BY d.created_at;
