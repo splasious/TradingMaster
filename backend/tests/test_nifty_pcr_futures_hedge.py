@@ -293,3 +293,22 @@ async def test_a_backtest_books_a_future_the_same_way(market):
     assert market.portfolio.cash == CASH
     await ctx.close_leg(market.oct_fut, "sell", QTY, 23500.0, entry_price=23480.0)
     assert market.portfolio.cash == pytest.approx(CASH + QTY * 20)
+
+
+async def test_a_position_held_overnight_reacts_from_0915_the_next_morning(market):
+    """Entries wait for 09:45; a position carried from the day before
+    doesn't -- its exit is checked from the first run after 09:15."""
+    market.prices(at(5, 11, 0, 5))
+    await market.check(at(5, 11, 0, 5), 1.30)  # Monday: bullish, held into the close at 1.22
+    market.prices(at(5, 15, 29, 55))
+    assert (await market.check(at(5, 15, 29, 55), 1.22)).state["position"] is not None
+
+    market.prices(at(6, 9, 15, 10))
+    held = await market.check(at(6, 9, 15, 10), 1.21)  # Tuesday 09:15, still above 1.20: held, not "outside the window"
+    assert held.state["position"] is not None and held._last_action == "hold" and "exit below 1.20" in held._last_reason
+
+    market.prices(at(6, 9, 15, 20), spot=SPOT - 50)
+    out = await market.check(at(6, 9, 15, 20), 1.10)  # the next check, below 1.20: both legs closed at 09:15
+    [trade] = await market.trades()
+    assert out.state["position"] is None and trade.exit_reason == "pcr_below_1.20"
+    assert "entries 09:45-15:00" in out._last_reason  # flat again: a new entry waits for 09:45
