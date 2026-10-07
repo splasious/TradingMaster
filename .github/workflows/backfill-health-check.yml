@@ -114,6 +114,21 @@ jobs:
               echo "-- Websocket (count, line kind):"
               grep -oE '"WebSocket [^ ?"]+[^"]*" \[?[a-z]+\]?|connection (open|closed)' /tmp/backend-today.log \
                 | sed -E 's/\?[^ "]*//; s#/[0-9a-f-]{36}#/{id}#g' | sort | uniq -c | sort -rn | head -10 || true
+              echo "-- Zerodha live feed (Kite ticker) now, as /api/v1/system/health reports it (state and error code only):"
+              compose exec -T backend python -c "import json, re, urllib.request; c = json.load(urllib.request.urlopen('http://localhost:8000/api/v1/system/health', timeout=20)).get('components', {}).get('kite_ticker', 'missing'); m = re.match(r'error: *([0-9]+)', c); print('error ' + m.group(1) if m else ('error (no code)' if c.startswith('error') else c))" 2>/dev/null || echo "unavailable"
+              echo "-- Kite ticker events today (IST time, event, close/error code) -- no message text:"
+              compose logs --since "$since" --no-color --timestamps backend 2>/dev/null \
+                | grep -E 'Kite ticker (connection closed|connection error|refresh failed|: streaming)|Kite allows [0-9]+ per connection' \
+                | sed -E 's/^([^ ]+) +[^|]*\| */\1 /' \
+                | awk '{t = $1; ev = "other"; code = "";
+                        if ($0 ~ /connection closed/) { ev = "closed"; if (match($0, /closed: [0-9]+/)) code = substr($0, RSTART + 8, RLENGTH - 8) }
+                        else if ($0 ~ /connection error/) { ev = "error"; if (match($0, /error: [0-9]+/)) code = substr($0, RSTART + 7, RLENGTH - 7) }
+                        else if ($0 ~ /refresh failed/) ev = "refresh_failed"
+                        else if ($0 ~ /streaming/) ev = "added_instruments"
+                        else if ($0 ~ /Kite allows/) ev = "over_3000_cap";
+                        print t, ev, code}' \
+                | while read -r t ev code; do printf '%s %-18s %s\n' "$(TZ=Asia/Kolkata date -d "$t" +%H:%M:%S)" "$ev" "$code"; done \
+                | tail -40 || true
               echo "-- Candle sync failures (count, data source named in the error):"
               grep -oE "No market data source registered for '[A-Za-z0-9_]+'" /tmp/backend-today.log | sort | uniq -c || true
               echo "-- Candle sync failures (failures, distinct instruments, timeframe, NIFTY or other):"
