@@ -2201,6 +2201,8 @@ WITH held AS (
   WHERE trim(s.name) = 'RS Rotation 15 MIN' AND t.exit_reason LIKE 'pcr_below%' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
 ), today AS (SELECT (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata') AS start_utc)
 SELECT 'held ' || row_number() OVER (ORDER BY i.symbol) AS which, i.exchange, i.data_source, i.external_ref = i.symbol AS zerodha_symbol_is_the_symbol, i.is_active,
+       (SELECT count(*) FROM instruments j WHERE j.exchange = i.exchange AND j.external_ref = i.external_ref) AS rows_with_its_zerodha_symbol,
+       (SELECT count(*) FROM instruments j WHERE j.exchange = i.exchange AND j.symbol = i.symbol) AS rows_with_its_symbol,
        (SELECT string_agg(x.source || '/' || x.timeframe || ':' || x.n, ' ' ORDER BY x.source, x.timeframe) FROM (
           SELECT c.source, c.timeframe, count(*) AS n FROM ohlcv_candles c, today WHERE c.instrument_id = i.id AND c.ts >= today.start_utc GROUP BY 1, 2) x) AS candles_today,
        (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = i.id) AS last_candle_ist
@@ -2208,6 +2210,19 @@ FROM held JOIN instruments i ON i.id = held.iid
 UNION ALL
 SELECT 'sold today (' || (SELECT count(*) FROM sold) || ')', NULL, (SELECT string_agg(DISTINCT i.data_source, '/') FROM sold JOIN instruments i ON i.id = sold.iid),
        (SELECT bool_and(i.external_ref = i.symbol) FROM sold JOIN instruments i ON i.id = sold.iid), NULL,
+       (SELECT max((SELECT count(*) FROM instruments j WHERE j.exchange = i.exchange AND j.external_ref = i.external_ref)) FROM sold JOIN instruments i ON i.id = sold.iid),
+       (SELECT max((SELECT count(*) FROM instruments j WHERE j.exchange = i.exchange AND j.symbol = i.symbol)) FROM sold JOIN instruments i ON i.id = sold.iid),
        (SELECT string_agg(x.source || '/' || x.timeframe || ':' || x.n, ' ' ORDER BY x.source, x.timeframe) FROM (
           SELECT c.source, c.timeframe, count(*) AS n FROM ohlcv_candles c, today WHERE c.instrument_id IN (SELECT iid FROM sold) AND c.ts >= today.start_utc GROUP BY 1, 2) x),
        NULL;
+
+-- PX3. NSE stock symbols in the catalog more than once (counts only): how many, and how many of RS Rotation 15 MIN's 57
+SELECT count(*) AS symbols_listed_twice_or_more,
+       count(*) FILTER (WHERE symbol IN ('ABCAPITAL','ACUTAAS','ADANIENSOL','ADANIPOWER','AMBER','ANANDRATHI','APARINDS','ASHOKLEY','ATHERENERG','AUBANK',
+         'BANKINDIA','BHARATFORG','BHEL','BSE','CANBK','CUMMINSIND','DELHIVERY','EICHERMOT','FEDERALBNK','FORTIS','GLENMARK','GVT&D','HDFCAMC','HINDALCO',
+         'HINDCOPPER','IDEA','IIFL','INDIANB','KARURVYSYA','LAURUSLABS','LTF','MANAPPURAM','MCX','MFSL','MUTHOOTFIN','NATIONALUM','NAVINFLUOR','NYKAA','PAYTM',
+         'POLYCAB','POWERINDIA','RADICO','RBLBANK','SAIL','SBIN','SHRIRAMFIN','SOLARINDS','TVSMOTOR','UNIONBANK','VEDL','CUPID','HFCL','KIRLOSENG','MTARTECH',
+         'STLTECH','TDPOWERSYS','WELCORP')) AS of_the_rs_list,
+       string_agg(DISTINCT data_sources, ' | ') AS source_mixes
+FROM (SELECT symbol, string_agg(data_source, '+' ORDER BY data_source) AS data_sources FROM instruments WHERE exchange = 'NSE' AND instrument_type = 'equity'
+      GROUP BY symbol HAVING count(*) > 1) d;
