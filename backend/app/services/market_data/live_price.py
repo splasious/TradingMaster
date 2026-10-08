@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
-from app.services.broker.zerodha_broker import KiteAPIError
+from app.services.broker.zerodha_broker import KiteAPIError, ltp_with_be_fallback
 from app.services.fo_scan.pacing import quote_pacer
 from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import tick_engine
@@ -46,9 +46,8 @@ async def live_price(db: AsyncSession, instrument: Instrument, now: datetime) ->
     if broker is None:
         return None
     key = f"{instrument.exchange}:{instrument.external_ref}"
-    await quote_pacer.wait()
     try:
-        price = (await broker.get_ltp_batch([key])).get(key)
+        price = (await ltp_with_be_fallback(broker, [key], pace=quote_pacer.wait)).get(key)
     except KiteAPIError:
         return None
     if not price:
@@ -84,9 +83,8 @@ async def live_prices(db: AsyncSession, instruments: list[Instrument], now: date
         batch = {f"{inst.exchange}:{inst.external_ref}": inst for inst in missing[i : i + LTP_BATCH]}
         quotes = None
         for attempt in range(1, BATCH_ATTEMPTS + 1):
-            await quote_pacer.wait()
             try:
-                quotes = await broker.get_ltp_batch(list(batch))
+                quotes = await ltp_with_be_fallback(broker, list(batch), pace=quote_pacer.wait)
                 break
             except KiteAPIError as exc:
                 # Once left every instrument of the batch without a price, silently:

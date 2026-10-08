@@ -112,6 +112,25 @@ def resolve_tradingsymbol_with_be_fallback(by_symbol: dict, symbol: str):
     return by_symbol.get(f"{symbol}-BE")
 
 
+async def ltp_with_be_fallback(broker, keys: list[str], pace=None) -> dict[str, float]:
+    """broker.get_ltp_batch(keys), and an NSE stock it has no price for asked
+    again as "<SYMBOL>-BE" (see resolve_tradingsymbol_with_be_fallback) --
+    keyed by the key asked for. On 8 Oct, with the live feed down, HFCL's
+    "NSE:HFCL" got no answer and RS Rotation 15 MIN couldn't sell it for 45
+    minutes. `pace`: awaited before each request (a shared rate limit)."""
+    if pace is not None:
+        await pace()
+    prices = dict(await broker.get_ltp_batch(keys))
+    retry = {f"{key}-BE": key for key in keys if key not in prices and key.startswith("NSE:") and not key.endswith("-BE")}
+    if retry:
+        if pace is not None:
+            await pace()
+        for be_key, price in (await broker.get_ltp_batch(list(retry))).items():
+            if be_key in retry:
+                prices[retry[be_key]] = price
+    return prices
+
+
 class KiteLoginRequired(KiteAPIError):
     """Raised by authenticate() when only api_key/api_secret are available
     and no request_token or previously-issued access_token was supplied --

@@ -39,7 +39,7 @@ from sqlalchemy import select
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
-from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker, ltp_with_be_fallback
 from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import TickEngine, tick_engine
 
@@ -114,7 +114,7 @@ class KiteRestPriceFeed:
         updated = 0
         for batch in batches:
             try:
-                prices = await broker.get_ltp_batch(batch)
+                prices = await ltp_with_be_fallback(broker, batch)
             except KiteAPIError:
                 logger.exception("Kite REST LTP batch fetch failed (%d instruments)", len(batch))
                 continue

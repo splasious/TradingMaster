@@ -142,3 +142,23 @@ async def test_a_failed_price_batch_is_asked_for_once_more(db_session, market_op
         assert prices == {inst.id: 131.25} and len(kite.calls) == 2
     finally:
         _forget(inst.id)
+
+
+async def test_a_stock_moved_to_the_be_series_is_priced_from_its_be_quote(db_session, market_open, monkeypatch):
+    """NSE moves a stock under surveillance to trade-to-trade, and Kite then
+    quotes it only as "<SYMBOL>-BE": on 8 Oct, with the live feed down,
+    "NSE:HFCL" got no answer and RS Rotation 15 MIN couldn't sell HFCL."""
+    stock = Instrument(exchange="NSE", symbol="HFCL", name="HFCL", instrument_type="equity", data_source="zerodha_kite", external_ref="HFCL")
+    plain = Instrument(exchange="NSE", symbol="SBIN", name="SBIN", instrument_type="equity", data_source="zerodha_kite", external_ref="SBIN")
+    db_session.add_all([stock, plain])
+    await db_session.commit()
+    kite = FakeKite({"NSE:HFCL-BE": 269.0, "NSE:SBIN": 800.0})
+    _kite(monkeypatch, kite)
+    try:
+        assert await _ctx(db_session).get_prices([stock.id, plain.id]) == {stock.id: 269.0, plain.id: 800.0}
+        assert kite.calls == [["NSE:HFCL", "NSE:SBIN"], ["NSE:HFCL-BE"]]  # asked again as -BE, only for the one with no answer
+        _forget(stock.id)
+        assert await _ctx(db_session).get_price(stock.id) == 269.0  # the single-price path too
+    finally:
+        _forget(stock.id)
+        _forget(plain.id)
