@@ -15,6 +15,7 @@ Kite's last traded price fetched right now. If Kite can't answer there is
 no price -- the strategy skips this tick and tries again on the next.
 """
 
+import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,8 @@ from app.services.fo_scan.pacing import quote_pacer
 from app.services.market_data.hours import nse_market_open
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.pcr_snapshot_scheduler import kite_broker
+
+logger = logging.getLogger(__name__)
 
 # The REST feed re-polls every tracked instrument every 15 s, so a price
 # older than this means nothing is updating it.
@@ -56,6 +59,7 @@ async def live_price(db: AsyncSession, instrument: Instrument, now: datetime) ->
 
 # Kite's /quote/ltp takes at most this many instruments a request.
 LTP_BATCH = 500
+BATCH_ATTEMPTS = 2  # a failed batch is asked for once more before its instruments go without a price
 
 
 async def live_prices(db: AsyncSession, instruments: list[Instrument], now: datetime) -> dict:
@@ -78,10 +82,17 @@ async def live_prices(db: AsyncSession, instruments: list[Instrument], now: date
         return prices
     for i in range(0, len(missing), LTP_BATCH):
         batch = {f"{inst.exchange}:{inst.external_ref}": inst for inst in missing[i : i + LTP_BATCH]}
-        await quote_pacer.wait()
-        try:
-            quotes = await broker.get_ltp_batch(list(batch))
-        except KiteAPIError:
+        quotes = None
+        for attempt in range(1, BATCH_ATTEMPTS + 1):
+            await quote_pacer.wait()
+            try:
+                quotes = await broker.get_ltp_batch(list(batch))
+                break
+            except KiteAPIError as exc:
+                # Once left every instrument of the batch without a price, silently:
+                # on 8 Oct an RS Rotation 15 MIN PCR exit kept 2 of 10 holdings.
+                logger.warning("Kite LTP batch of %d failed (attempt %d of %d): %s", len(batch), attempt, BATCH_ATTEMPTS, type(exc).__name__)
+        if quotes is None:
             continue
         for key, price in quotes.items():
             if price:

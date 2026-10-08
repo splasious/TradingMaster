@@ -119,3 +119,26 @@ async def test_outside_market_hours_the_stored_close_still_serves(db_session, mo
         assert await _ctx(db_session).get_price(inst.id) == 203.65
     finally:
         _forget(inst.id)
+
+
+async def test_a_failed_price_batch_is_asked_for_once_more(db_session, market_open, monkeypatch):
+    """8 Oct: one failed Kite request at a 15-minute close left every stock in
+    it without a price, and RS Rotation 15 MIN's PCR exit kept two holdings."""
+    from app.services.broker.zerodha_broker import KiteAPIError
+
+    inst = await _option(db_session)
+
+    class FlakyKite(FakeKite):
+        async def get_ltp_batch(self, keys):
+            self.calls.append(keys)
+            if len(self.calls) == 1:
+                raise KiteAPIError("Too many requests")
+            return {k: self.prices[k] for k in keys if k in self.prices}
+
+    kite = FlakyKite({"NFO:NIFTY26O0622800CE": 131.25})
+    _kite(monkeypatch, kite)
+    try:
+        prices = await _ctx(db_session).get_prices([inst.id])
+        assert prices == {inst.id: 131.25} and len(kite.calls) == 2
+    finally:
+        _forget(inst.id)

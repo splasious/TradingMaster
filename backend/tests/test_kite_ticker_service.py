@@ -672,3 +672,41 @@ def test_stop_closes_ticker_but_never_calls_stop():
     assert not hasattr(_FakeTicker, "stop")  # the fake doesn't even define one -- would AttributeError if called
     service.stop()
     assert fake.closed is True
+
+
+async def test_once_the_reactor_runs_connect_and_close_are_handed_to_its_thread(db_session: AsyncSession, monkeypatch):
+    """8 Oct: after the 15:30 close the morning connect() was made from the
+    asyncio thread into the idle, already-running reactor and never
+    connected -- nothing streamed all day. Both now go through the reactor's
+    own thread (callFromThread, which also wakes it)."""
+    from twisted.internet import reactor
+
+    _FakeTicker.instances.clear()
+    monkeypatch.setattr(svc, "KiteTicker", _FakeTicker)
+    monkeypatch.setattr(svc, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+    await _seed_connected_account(db_session, connected=True, access_token="tok_a")
+    db_session.add(Instrument(exchange="NFO", symbol="NIFTY26SEP23000CE", name="NIFTY26SEP23000CE", instrument_type="option",
+                              data_source="zerodha_kite", external_ref="NIFTY26SEP23000CE"))
+    await db_session.commit()
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return [{"tradingsymbol": "NIFTY26SEP23000CE", "instrument_token": "555"}]
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+    handed_over = []
+    monkeypatch.setattr(reactor, "running", True, raising=False)
+    monkeypatch.setattr(reactor, "callFromThread", lambda fn, *a, **kw: handed_over.append((fn, a, kw)))
+
+    service = svc.KiteTickerService(TickEngine())
+    await service._refresh(now=MARKET_OPEN_NOW)
+    ticker = _FakeTicker.instances[0]
+    assert ticker.connected is False and len(handed_over) == 1  # not called from here...
+    fn, args, kwargs = handed_over.pop()
+    fn(*args, **kwargs)  # ...but on the reactor's thread
+    assert ticker.connected is True and ticker.subscribed == [555]
+
+    await service._refresh(now=datetime(2026, 9, 12, 8, 30, tzinfo=timezone.utc))  # market shut: closed the same way
+    assert ticker.closed is False and len(handed_over) == 1
+    fn, args, kwargs = handed_over.pop()
+    fn(*args, **kwargs)
+    assert ticker.closed is True and service._ticker is None

@@ -26,9 +26,14 @@ minute (_add_in_use).
 only ever be started once per process: `connect(threaded=True)` starts it
 in a daemon thread the first time; every subsequent `KiteTicker` instance
 in this process just adds another connection to that SAME already-running
-reactor (calling `connect()` again is safe; calling `.stop()` -- which
-stops the reactor for good -- would break every future ticker in this
-process, so this module only ever calls `.close()`, never `.stop()`).
+reactor (calling `.stop()` -- which stops the reactor for good -- would
+break every future ticker in this process, so this module only ever calls
+`.close()`, never `.stop()`). Once the reactor is running, a connection is
+opened and closed from the reactor's own thread (_in_reactor), never from
+FastAPI's: Twisted isn't thread-safe, and a connect() made from here sat
+unattended in the idle reactor after the 15:30 close -- on 8 Oct the
+morning reconnect never connected and nothing streamed all day (each
+morning before had followed a deploy, i.e. the process's first connect).
 
 Its callbacks (`on_ticks`, `on_connect`, ...) all run on that reactor
 thread, never on FastAPI's own asyncio loop -- but `TickEngine.set_real_price`/
@@ -287,10 +292,16 @@ def _select_tokens(
 
 def _in_reactor(fn) -> None:
     """KiteTicker's socket belongs to Twisted's reactor thread; a call into
-    it from the asyncio loop is handed over rather than made here."""
+    it from the asyncio loop is handed over rather than made here (which
+    also wakes the reactor if it's idle). Before the reactor first runs --
+    the process's first connect() starts it -- there's no thread to hand
+    over to, and the call is made here."""
     from twisted.internet import reactor
 
-    reactor.callFromThread(fn)
+    if reactor.running:
+        reactor.callFromThread(fn)
+    else:
+        fn()
 
 
 class KiteTickerService:
@@ -315,7 +326,7 @@ class KiteTickerService:
             self._supervisor_task.cancel()
             self._supervisor_task = None
         if self._ticker is not None:
-            self._ticker.close()
+            _in_reactor(self._ticker.close)
             self._ticker = None
 
     @property
@@ -345,7 +356,7 @@ class KiteTickerService:
             # otherwise. Closing here means the next _refresh() cycle once
             # the market reopens reconnects cleanly, same as a cold start.
             if self._ticker is not None:
-                self._ticker.close()
+                _in_reactor(self._ticker.close)
                 self._ticker = None
                 self._current_access_token = None
             self.last_error = None
@@ -397,12 +408,12 @@ class KiteTickerService:
         new_ticker.on_connect = self._on_connect
         new_ticker.on_close = self._on_close
         new_ticker.on_error = self._on_error
-        new_ticker.connect(threaded=True)
+        _in_reactor(lambda: new_ticker.connect(threaded=True))
 
         self._ticker = new_ticker
         self._current_access_token = access_token
         if old_ticker is not None:
-            old_ticker.close()
+            _in_reactor(old_ticker.close)
 
     def _remember(self, token_maps: dict[str, dict[int, uuid.UUID]]) -> None:
         self._token_map = {token: iid for segment in token_maps.values() for token, iid in segment.items()}
