@@ -2176,3 +2176,38 @@ FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN s
 LEFT JOIN label l ON l.md5 = md5(replace(v.python_code, E'\r', ''))
 WHERE trim(s.name) IN ('RS Rotation 15 MIN', 'MACD - RSI - 15 MIN') AND d.status IN ('active', 'paused')
 ORDER BY 1, 2;
+
+\echo
+\echo '== PX1. RS Rotation 15 MIN running cards: version, holdings now, out on PCR, last run; trades closed today by exit reason and minute (counts only)'
+SELECT trim(s.name) AS strategy, v.version_number, d.status,
+       (SELECT count(*) FROM jsonb_object_keys(coalesce(d.state::jsonb -> 'holdings', '{}'::jsonb))) AS holdings_now,
+       d.state::jsonb ->> 'pcr_risk_off' AS out_on_pcr,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_run_ist, d.last_signal,
+       (SELECT string_agg(t.exit_reason || ' ' || t.hhmm || ' x' || t.n, ', ' ORDER BY t.hhmm) FROM (
+          SELECT exit_reason, to_char(closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hhmm, count(*) AS n FROM paper_native_trades
+          WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date GROUP BY 1, 2) t) AS closed_today
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+WHERE trim(s.name) = 'RS Rotation 15 MIN' AND d.status IN ('active', 'paused');
+
+-- PX2. Each stock still held by an RS card that is out on PCR (numbered, no names) beside the stocks those cards sold on PCR today (one row):
+--      catalog source, whether its Zerodha symbol is the plain symbol, today's chart candles per source label and timeframe, the last candle
+WITH held AS (
+  SELECT DISTINCT (h.value ->> 'instrument_id')::uuid AS iid
+  FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id, jsonb_each(coalesce(d.state::jsonb -> 'holdings', '{}'::jsonb)) h
+  WHERE trim(s.name) = 'RS Rotation 15 MIN' AND d.status IN ('active', 'paused') AND d.state::jsonb ->> 'pcr_risk_off' = 'true'
+), sold AS (
+  SELECT DISTINCT (t.legs -> 0 ->> 'instrument_id')::uuid AS iid
+  FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+  WHERE trim(s.name) = 'RS Rotation 15 MIN' AND t.exit_reason LIKE 'pcr_below%' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), today AS (SELECT (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata') AS start_utc)
+SELECT 'held ' || row_number() OVER (ORDER BY i.symbol) AS which, i.exchange, i.data_source, i.external_ref = i.symbol AS zerodha_symbol_is_the_symbol, i.is_active,
+       (SELECT string_agg(x.source || '/' || x.timeframe || ':' || x.n, ' ' ORDER BY x.source, x.timeframe) FROM (
+          SELECT c.source, c.timeframe, count(*) AS n FROM ohlcv_candles c, today WHERE c.instrument_id = i.id AND c.ts >= today.start_utc GROUP BY 1, 2) x) AS candles_today,
+       (SELECT to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') FROM ohlcv_candles c WHERE c.instrument_id = i.id) AS last_candle_ist
+FROM held JOIN instruments i ON i.id = held.iid
+UNION ALL
+SELECT 'sold today (' || (SELECT count(*) FROM sold) || ')', NULL, (SELECT string_agg(DISTINCT i.data_source, '/') FROM sold JOIN instruments i ON i.id = sold.iid),
+       (SELECT bool_and(i.external_ref = i.symbol) FROM sold JOIN instruments i ON i.id = sold.iid), NULL,
+       (SELECT string_agg(x.source || '/' || x.timeframe || ':' || x.n, ' ' ORDER BY x.source, x.timeframe) FROM (
+          SELECT c.source, c.timeframe, count(*) AS n FROM ohlcv_candles c, today WHERE c.instrument_id IN (SELECT iid FROM sold) AND c.ts >= today.start_utc GROUP BY 1, 2) x),
+       NULL;
