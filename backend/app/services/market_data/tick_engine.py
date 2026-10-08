@@ -100,6 +100,13 @@ class TickEngine:
         if RealPriceFeed has one on file, simulated fallback otherwise."""
         return self._real_price.get(instrument_id, self._last_price.get(instrument_id))
 
+    def get_real_price_at(self, instrument_id: uuid.UUID) -> tuple[float, datetime] | None:
+        """The last real price on file and when it arrived -- never the
+        simulated walk. For a page to say how fresh a price is."""
+        at = self._real_price_at.get(instrument_id)
+        price = self._real_price.get(instrument_id)
+        return (price, at) if at is not None and price is not None else None
+
     def get_fresh_real_price(self, instrument_id: uuid.UUID, max_age: timedelta, now: datetime) -> float | None:
         """The real price, only if it arrived within `max_age` of `now` --
         never the simulated walk, and never one held over from earlier

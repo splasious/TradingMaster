@@ -2130,6 +2130,7 @@ function NativeDeploymentCard({
             <SummaryField label="Position">
               <span className="text-text-muted">flat</span>
             </SummaryField>
+            {deployment.reads_pcr && <FlatPcrFields />}
           </div>
         )}
 
@@ -2148,6 +2149,50 @@ function NativeDeploymentCard({
         {expanded && <NativeDeploymentDetail deployment={deployment} />}
       </CardContent>
     </Card>
+  );
+}
+
+/** A real price counts as live when it arrived within this (the server's own
+ * LIVE_PRICE_MAX_AGE): older, the card says when it's from instead. */
+const LIVE_PRICE_MS = 60_000;
+
+function arrivedWithin(iso: string | null | undefined, ms: number): boolean {
+  return iso != null && Date.now() - new Date(iso).getTime() <= ms;
+}
+
+/** A flat PCR strategy's card: NIFTY's live price and the PCR it decides
+ * on -- the same 15-minute record its code reads -- so the card still shows
+ * what it's watching while there's no position. Same query (and 15s poll) as
+ * PcrTicker above, so no extra request; the rule it waits for is in its Last
+ * Signal line. */
+function FlatPcrFields() {
+  const { data } = useEffectivePcr("NIFTY 50");
+  const live = arrivedWithin(data?.spot_at, LIVE_PRICE_MS);
+  return (
+    <>
+      <SummaryField label="NIFTY 50">
+        {data?.spot_price != null ? formatPrice(data.spot_price) : "--"}{" "}
+        {data?.spot_price != null &&
+          (live ? (
+            <Badge tone="positive" title="Live price from Zerodha, refreshed every 15 seconds">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+              live
+            </Badge>
+          ) : data.spot_at ? (
+            <span className="text-xs text-text-muted" title={istDateTime(data.spot_at)}>
+              as of {istShortTime(data.spot_at)}
+            </span>
+          ) : null)}
+      </SummaryField>
+      <SummaryField label="PCR">
+        {data?.pcr != null ? data.pcr.toFixed(3) : "--"}{" "}
+        {data?.pcr_at && (
+          <span className="text-xs text-text-muted" title="NIFTY PCR over the next 4 expiries, recorded every 15 minutes">
+            {istShortTime(data.pcr_at)} reading
+          </span>
+        )}
+      </SummaryField>
+    </>
   );
 }
 

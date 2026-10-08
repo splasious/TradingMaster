@@ -124,7 +124,8 @@ async def test_effective_pcr_endpoint_matches_the_service_function(client: Async
     assert body["underlying_symbol"] == "NIFTY 50"
     assert body["pcr"] == 0.5
     assert body["bias"] == "bearish"
-    assert body["spot_price"] == 23345.5
+    assert body["spot_price"] == 23345.5 and body["spot_at"] is not None  # a real Zerodha price, with when it arrived
+    assert body["pcr_at"] is None  # no 15-minute record on file: the roll-up, no mark to show
 
 
 async def test_history_depth_without_connected_account_reports_our_data_only(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
@@ -181,3 +182,30 @@ async def test_history_depth_queries_kite_live_through_connected_session(client:
     assert body["kite_candle_count"] == 2
     assert datetime.fromisoformat(body["kite_earliest"].replace("Z", "+00:00")) == datetime(2026, 8, 20, tzinfo=timezone.utc)
     assert datetime.fromisoformat(body["kite_latest"].replace("Z", "+00:00")) == datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+async def test_effective_pcr_gives_the_records_mark_and_no_simulated_spot(client: AsyncClient, seeded_admin: dict, db_session: AsyncSession):
+    """The card shows the PCR with the time of its 15-minute record, and NIFTY
+    only from a real price -- never the simulated walk."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.pcr import SOURCE_LIVE, PcrSnapshot
+    from app.services.market_data.tick_engine import tick_engine
+
+    underlying = Instrument(exchange="NSE", symbol="NIFTY 50", name="NIFTY 50", instrument_type="index", data_source="zerodha_kite",
+                            external_ref="NIFTY 50")
+    db_session.add(underlying)
+    mark = datetime.now(timezone.utc) - timedelta(seconds=1)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    db_session.add(PcrSnapshot(underlying="NIFTY", ts=mark, session_date=mark.astimezone(ist).date(), captured_at=mark, source=SOURCE_LIVE,
+                               strike_window=40, expiries=[], contracts_expected=100, contracts_with_oi=100, pcr=0.914))
+    await db_session.commit()
+    tick_engine.forget([underlying.id])
+    tick_engine.subscribe(underlying.id, seed_price=22000.0)  # a simulated walk only
+
+    headers = {"Authorization": f"Bearer {await _login(client, seeded_admin['email'], seeded_admin['password'])}"}
+    body = (await client.get("/api/v1/options/effective-pcr", headers=headers)).json()
+    assert body["pcr"] == 0.914 and body["pcr_at"] is not None
+    assert body["pcr_at"].startswith(mark.strftime("%Y-%m-%dT%H:%M:%S"))  # the record's mark
+    assert body["spot_price"] is None and body["spot_at"] is None
+    tick_engine.forget([underlying.id])

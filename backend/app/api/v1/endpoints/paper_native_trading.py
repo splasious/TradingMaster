@@ -231,12 +231,14 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     portfolios = {p.id: p for p in (await db.execute(select(PaperPortfolio).where(PaperPortfolio.id.in_(portfolio_ids)))).scalars()}
     running = (
         await db.execute(
-            select(StrategyVersion.id, StrategyVersion.version_number, StrategyVersion.python_code.like("%force_exit%"))
+            select(StrategyVersion.id, StrategyVersion.version_number, StrategyVersion.python_code.like("%force_exit%"),
+                   StrategyVersion.python_code.like("%ctx.get_pcr(%"))
             .where(StrategyVersion.id.in_({d.strategy_version_id for d in deployments}))
         )
     ).all()
-    running_versions = {version_id: number for version_id, number, _ in running}
-    can_exit = {version_id: bool(exits) for version_id, _, exits in running}
+    running_versions = {version_id: number for version_id, number, _, _ in running}
+    can_exit = {version_id: bool(exits) for version_id, _, exits, _ in running}
+    reads_pcr = {version_id: bool(pcr) for version_id, _, _, pcr in running}
     latest_versions = dict(
         (await db.execute(
             select(StrategyVersion.strategy_id, func.max(StrategyVersion.version_number))
@@ -256,6 +258,7 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=_public_state(d.state),
                 position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
                 latest_version_number=latest_versions.get(d.strategy_id), can_exit=can_exit.get(d.strategy_version_id, False),
+                reads_pcr=reads_pcr.get(d.strategy_version_id, False),
                 next_check_at=paper_trading_scheduler.next_wakeup(d.id) if d.status == DeploymentStatus.ACTIVE.value else None,
                 created_at=d.created_at, stopped_at=d.stopped_at,
             )

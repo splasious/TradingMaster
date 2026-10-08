@@ -54,10 +54,14 @@ class EffectivePcrOut(BaseModel):
     timeframe: str
     pcr: float | None
     bias: str  # "bearish" | "bullish" | "neutral" | "unavailable" (pcr is None)
-    # The underlying's live tick, straight from TickEngine (same source the
-    # native PCR strategy itself reads via ctx.get_price) -- None if the
-    # underlying isn't found or has no live tick on file yet.
+    # The underlying's last real price from Zerodha (the live feed or a
+    # quote -- what the native PCR strategy itself trades on), and when it
+    # arrived -- None if there's none on file yet (never the simulated walk).
     spot_price: float | None
+    spot_at: datetime | None = None
+    # The mark of the 15-minute PCR record `pcr` comes from (None before the
+    # records begin, or for an underlying without them).
+    pcr_at: datetime | None = None
 
 
 class PcrSnapshotExpiryOut(BaseModel):

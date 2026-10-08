@@ -552,6 +552,12 @@ async def latest_pcr(db: AsyncSession, underlying: str, as_of: datetime) -> floa
     there's none: before the day's first capture, or while captures have
     stopped (Zerodha logged out). On 30 Sep a strategy opened at 09:52 on the
     previous session's 15:30 record because none had been made that morning."""
+    record = await latest_record(db, underlying, as_of)
+    return record.pcr if record is not None else None
+
+
+async def latest_record(db: AsyncSession, underlying: str, as_of: datetime) -> PcrSnapshot | None:
+    """The record latest_pcr reads its PCR from (its mark is `ts`)."""
     as_of = as_aware_utc(as_of)
     snaps = (
         await db.execute(
@@ -564,7 +570,7 @@ async def latest_pcr(db: AsyncSession, underlying: str, as_of: datetime) -> floa
     ).scalars().all()
     for snap in snaps:
         if snap.contracts_expected and snap.contracts_with_oi >= LOW_COVERAGE * snap.contracts_expected:
-            return snap.pcr
+            return snap
     return None
 
 

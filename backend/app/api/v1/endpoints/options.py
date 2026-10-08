@@ -23,9 +23,11 @@ from app.schemas.options import (
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
-from app.services.options.pcr import compute_effective_pcr, compute_pcr_series
+from app.services.options.pcr import SNAPSHOT_UNDERLYINGS, compute_effective_pcr, compute_pcr_series
 from app.services.options.pcr_snapshot_scheduler import pcr_snapshot_scheduler
-from app.services.options.pcr_snapshots import EXPIRIES, MARKS_PER_SESSION, MAX_ROWS, STRIKE_WINDOW, UNDERLYINGS, snapshot_rows
+from app.services.options.pcr_snapshots import (
+    EXPIRIES, MARKS_PER_SESSION, MAX_ROWS, STRIKE_WINDOW, UNDERLYINGS, latest_record, snapshot_rows,
+)
 
 router = APIRouter()
 
@@ -102,11 +104,14 @@ async def get_effective_pcr(
         bias = "neutral"
 
     underlying = (await db.execute(select(Instrument).where(Instrument.symbol == underlying_symbol))).scalar_one_or_none()
-    spot_price = tick_engine.get_current_price(underlying.id) if underlying is not None else None
+    real = tick_engine.get_real_price_at(underlying.id) if underlying is not None else None
+    record = None
+    if pcr is not None and underlying_symbol in SNAPSHOT_UNDERLYINGS and num_expiries == EXPIRIES and timeframe == "15m":
+        record = await latest_record(db, SNAPSHOT_UNDERLYINGS[underlying_symbol], datetime.now(timezone.utc))
 
     return EffectivePcrOut(
         underlying_symbol=underlying_symbol, num_expiries=num_expiries, timeframe=timeframe, pcr=pcr, bias=bias,
-        spot_price=spot_price,
+        spot_price=real[0] if real else None, spot_at=real[1] if real else None, pcr_at=record.ts if record is not None else None,
     )
 
 

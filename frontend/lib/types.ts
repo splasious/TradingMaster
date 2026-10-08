@@ -338,6 +338,8 @@ export interface EffectivePcrOut {
   pcr: number | null;
   bias: string;
   spot_price: number | null;
+  spot_at?: string | null; // when that real Zerodha price arrived (never the simulated walk)
+  pcr_at?: string | null; // the mark of the 15-minute PCR record
 }
 
 export interface NativeDeploymentOut {
@@ -361,6 +363,7 @@ export interface NativeDeploymentOut {
   /** Its code closes its own positions when asked -- Exit, and "Exit
    * positions, then stop", only work when true. */
   can_exit: boolean;
+  reads_pcr?: boolean; // its code reads the PCR: the card shows NIFTY and the PCR live while it's flat
   /** When the strategy asked to be checked next, if it did (otherwise every ~10s while NSE is open). */
   next_check_at?: string | null;
   created_at: string;

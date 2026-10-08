@@ -210,6 +210,8 @@ class NativeDeploymentOut(BaseModel):
     # -- see native_runner.exit_native_deployment_now): the Exit button, and
     # "Exit positions, then stop", only work when this is true.
     can_exit: bool = False
+    # Its code reads the PCR (ctx.get_pcr): the card shows NIFTY and the PCR live while it's flat.
+    reads_pcr: bool = False
     # When the strategy asked to be checked next (ctx.wake_at), if it did;
     # otherwise it's checked every ~10 seconds while NSE is open.
     next_check_at: datetime | None = None

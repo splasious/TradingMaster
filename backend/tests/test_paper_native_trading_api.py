@@ -599,3 +599,17 @@ async def test_stop_refuses_to_exit_what_the_strategy_cant_close_and_plain_stop_
 
     kept = await client.post(f"/api/v1/paper-trading/native-deployments/{deployment['id']}/stop", headers=headers)
     assert kept.status_code == 200 and kept.json()["status"] == "stopped" and "SBIN" in kept.json()["state"]["holdings"]
+
+
+PCR_READING_CODE = (
+    "async def evaluate(ctx):\n"
+    "    pcr = await ctx.get_pcr()\n"
+    "    ctx.note('skipped', reason=f'flat | PCR {pcr}')\n"
+)
+
+
+async def test_a_strategy_that_reads_the_pcr_is_flagged_for_the_cards_live_nifty_and_pcr(client: AsyncClient, seeded_admin: dict):
+    headers = {"Authorization": f"Bearer {await _login(client, seeded_admin['email'], seeded_admin['password'])}"}
+    reading = await _deploy_with(client, headers, "PCR Reading Strategy", PCR_READING_CODE)
+    holding = await _deploy_with(client, headers, "Holding Strategy 2", HOLDING_CODE)
+    assert reading["reads_pcr"] is True and holding["reads_pcr"] is False
