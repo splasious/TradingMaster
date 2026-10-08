@@ -8,7 +8,7 @@ from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.services.market_data.oi_snapshot_scheduler import (
     _bucket_start,
-    _tracked_option_ids,
+    _tracked_contract_ids,
     snapshot_once,
 )
 from app.services.market_data.tick_engine import tick_engine
@@ -48,10 +48,56 @@ async def test_tracked_option_ids_excludes_past_expiry_and_non_nfo_options(db_se
     db_session.add_all([live_ce, expired_pe, other_source])
     await db_session.commit()
 
-    tracked = set(await _tracked_option_ids(db_session))
+    tracked = set(await _tracked_contract_ids(db_session))
     assert live_ce.id in tracked
     assert expired_pe.id not in tracked
     assert other_source.id not in tracked
+
+
+def _future(underlying_id, expiry):
+    symbol = f"FUT{uuid.uuid4().hex[:8]}"
+    return Instrument(
+        exchange="NFO", symbol=symbol, name=symbol, instrument_type="future", data_source="zerodha_kite",
+        external_ref=symbol, expiry=expiry, lot_size=65, underlying_instrument_id=underlying_id,
+    )
+
+
+async def test_tracked_contract_ids_take_index_futures_but_not_stock_futures(db_session: AsyncSession):
+    index = await _seed_underlying(db_session)
+    stock = Instrument(
+        exchange="NSE", symbol=f"STK{uuid.uuid4().hex[:6]}", name="A stock", instrument_type="equity",
+        data_source="zerodha_kite", external_ref="STK",
+    )
+    db_session.add(stock)
+    await db_session.flush()
+    today = date.today()
+    index_future = _future(index.id, today + timedelta(days=20))
+    expired_index_future = _future(index.id, today - timedelta(days=1))
+    stock_future = _future(stock.id, today + timedelta(days=20))
+    db_session.add_all([index_future, expired_index_future, stock_future])
+    await db_session.commit()
+
+    tracked = set(await _tracked_contract_ids(db_session))
+    assert index_future.id in tracked
+    assert expired_index_future.id not in tracked
+    assert stock_future.id not in tracked
+
+
+async def test_snapshot_once_saves_an_index_futures_bar_from_live_ticks(db_session: AsyncSession):
+    """8 Oct: the NIFTY future had no candle for the day until the evening
+    download, so its close after 15:30 was still the day before's."""
+    underlying = await _seed_underlying(db_session)
+    fut = _future(underlying.id, date.today() + timedelta(days=20))
+    db_session.add(fut)
+    await db_session.commit()
+
+    tick_engine.set_real_price(fut.id, 25110.5, source="kite")
+    tick_engine.set_real_oi(fut.id, 15000000.0)
+
+    assert await snapshot_once(db_session) == 1
+    row = (await db_session.execute(select(OhlcvCandle).where(OhlcvCandle.instrument_id == fut.id))).scalar_one()
+    assert (row.timeframe, row.close, row.source) == ("15m", 25110.5, "kite_live")
+    assert row.open_interest == 15000000.0
 
 
 async def test_snapshot_once_returns_zero_when_nothing_is_live(db_session: AsyncSession):

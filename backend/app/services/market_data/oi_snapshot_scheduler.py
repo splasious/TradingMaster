@@ -32,6 +32,14 @@ a bucket's 15 minutes are up, its stored value is whatever was true right
 before it closed -- which is what a strategy or the dashboard reading
 "the latest bar" should see, not just the first tick that happened to land
 in that window.
+
+Index futures (NIFTY's) are saved the same way, from the same ticks: they
+are streamed alongside the nearest index options, and until the evening
+download (~19:00) brings Kite's own candles in they otherwise had none for
+the day -- so a futures leg's close on the Trading page, read from the
+newest saved candle after 15:30, was still the day before's (8 Oct). The
+evening copy replaces these with Kite's final candles, as it does for
+options. Stock futures are left to their downloads.
 """
 
 import asyncio
@@ -39,8 +47,9 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
@@ -67,19 +76,26 @@ def _bucket_start(now: datetime) -> datetime:
     return now.replace(minute=floor_minute, second=0, microsecond=0)
 
 
-async def _tracked_option_ids(db: AsyncSession) -> list[uuid.UUID]:
+async def _tracked_contract_ids(db: AsyncSession) -> list[uuid.UUID]:
     """Every live NFO option contract PCR could plausibly read -- not
     hand-limited to 4 expiries here (that's compute_effective_pcr's own
     `.limit(num_expiries)`, applied at read time): nfo_expiry_rotation.py
     already keeps the catalog itself windowed to what matters, so this
     just tracks whatever it's put there and lets a lapsed contract fall
-    out naturally once its expiry is in the past."""
+    out naturally once its expiry is in the past -- and every live index
+    future (one written against an index row)."""
     today_ist = datetime.now(timezone.utc).astimezone(IST).date()
+    underlying = aliased(Instrument)
     rows = (
         await db.execute(
-            select(Instrument.id).where(
+            select(Instrument.id)
+            .outerjoin(underlying, underlying.id == Instrument.underlying_instrument_id)
+            .where(
                 Instrument.exchange == "NFO",
-                Instrument.instrument_type == "option",
+                or_(
+                    Instrument.instrument_type == "option",
+                    and_(Instrument.instrument_type == "future", underlying.instrument_type == "index"),
+                ),
                 Instrument.data_source == "zerodha_kite",
                 Instrument.expiry.is_not(None),
                 Instrument.expiry >= today_ist,
@@ -90,11 +106,11 @@ async def _tracked_option_ids(db: AsyncSession) -> list[uuid.UUID]:
 
 
 async def snapshot_once(db: AsyncSession) -> int:
-    """One pass: for every tracked NFO option with a live OI on file right
-    now, upsert the current 15m bucket. Returns how many contracts were
-    written (0 when the ticker has nothing live yet, e.g. outside market
-    hours or before the first tick of the day)."""
-    instrument_ids = await _tracked_option_ids(db)
+    """One pass: for every tracked NFO option and index future with a live
+    OI on file right now, upsert the current 15m bucket. Returns how many
+    contracts were written (0 when the ticker has nothing live yet, e.g.
+    outside market hours or before the first tick of the day)."""
+    instrument_ids = await _tracked_contract_ids(db)
     if not instrument_ids:
         return 0
 
