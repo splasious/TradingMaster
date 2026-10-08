@@ -2226,3 +2226,34 @@ SELECT count(*) AS symbols_listed_twice_or_more,
        string_agg(DISTINCT data_sources, ' | ') AS source_mixes
 FROM (SELECT symbol, string_agg(data_source, '+' ORDER BY data_source) AS data_sources FROM instruments WHERE exchange = 'NSE' AND instrument_type = 'equity'
       GROUP BY symbol HAVING count(*) > 1) d;
+
+-- PF3. Nifty PCR Futures Hedge's open legs (NIFTY contracts): candles saved per timeframe, the newest one, today's -- what the
+--      Trading page's "Close" after 15:30 is read from (closing_price.py: the 1d close, else the newest intraday bar) -- no prices
+WITH legs AS (
+  SELECT d.id AS deployment_id, l.key AS leg, (l.value ->> 'instrument_id')::uuid AS iid
+  FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id,
+       jsonb_each(coalesce(d.state::jsonb -> 'position' -> 'legs', '{}'::jsonb)) l
+  WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AND d.status IN ('active', 'paused')
+)
+SELECT legs.leg, i.symbol, i.instrument_type, c.timeframe, count(*) AS candles_last_14d,
+       to_char(max(c.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS newest_ist,
+       count(*) FILTER (WHERE (c.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS today,
+       string_agg(DISTINCT c.source, '/') AS sources
+FROM legs JOIN instruments i ON i.id = legs.iid
+LEFT JOIN ohlcv_candles c ON c.instrument_id = i.id AND c.ts >= now() - interval '14 days'
+GROUP BY legs.leg, i.symbol, i.instrument_type, c.timeframe ORDER BY legs.leg, c.timeframe;
+
+-- PF4. The same legs in the backfill store (bf_ohlcv_bars): bars per timeframe, the newest, today's
+WITH legs AS (
+  SELECT l.key AS leg, (l.value ->> 'instrument_id')::uuid AS iid
+  FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id,
+       jsonb_each(coalesce(d.state::jsonb -> 'position' -> 'legs', '{}'::jsonb)) l
+  WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AND d.status IN ('active', 'paused')
+)
+SELECT legs.leg, i.symbol, b.timeframe, count(*) AS bars_last_14d, to_char(max(b.ts) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS newest_ist,
+       count(*) FILTER (WHERE (b.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS today,
+       to_char(max(bs.last_synced_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS copied_to_charts_ist
+FROM legs JOIN instruments i ON i.id = legs.iid
+LEFT JOIN bf_symbols bs ON bs.symbol = i.symbol AND bs.source = 'zerodha_nfo'
+LEFT JOIN bf_ohlcv_bars b ON b.symbol_id = bs.id AND b.ts >= now() - interval '14 days'
+GROUP BY legs.leg, i.symbol, b.timeframe ORDER BY legs.leg, b.timeframe;
