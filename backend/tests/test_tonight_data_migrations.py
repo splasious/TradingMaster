@@ -139,7 +139,9 @@ def test_the_built_ins_are_the_approved_code():
     assert pcr.CHANGES["macd_rsi_15min.py"][0] == {seven.CHANGES["macd_rsi_15min.py"][1]}
     assert pcr.CHANGES["nifty_rs_rotation_15min.py"][0] == {carry.CHANGES["nifty_rs_rotation_15min.py"][1]}
     assert _md5(BUILTIN) == pcr.CHANGES["macd_rsi_15min.py"][1]
-    assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == pcr.CHANGES["nifty_rs_rotation_15min.py"][1]
+    own_close = _load("f1b3d5e7a9c2_rs_15min_decides_on_its_close_pcr")
+    assert own_close.FROM_MD5S == {pcr.CHANGES["nifty_rs_rotation_15min.py"][1]}
+    assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == own_close.TO_MD5
 
 
 async def test_running_15min_deployments_move_to_the_57_stock_lists(db_engine, db_session):
@@ -470,7 +472,8 @@ async def test_the_15min_cash_strategies_get_the_pcr_filter_as_their_next_versio
     migration = _load("c5d7e9f1a3b4_pcr_filter_for_the_15min_cash_strategies")
     migration.CHANGES = {
         "macd_rsi_15min.py": ({hashlib.md5(macd_old.encode()).hexdigest()}, migration.CHANGES["macd_rsi_15min.py"][1]),
-        "nifty_rs_rotation_15min.py": ({hashlib.md5(rs_old.encode()).hexdigest()}, migration.CHANGES["nifty_rs_rotation_15min.py"][1]),
+        # the RS built-in has moved on since (f1b3d5e7a9c2)
+        "nifty_rs_rotation_15min.py": ({hashlib.md5(rs_old.encode()).hexdigest()}, _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py")),
     }
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -598,3 +601,51 @@ async def test_the_pcr_futures_hedge_moves_to_the_carried_position_version(db_en
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
     assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]  # not this strategy's code
+
+
+async def test_the_rs_15min_pcr_filter_run_moves_to_the_own_close_pcr_version(db_engine, db_session):
+    from app.models.broker import Broker, BrokerAccount
+    from app.models.live_native import LiveNativeDeployment
+
+    filtered, before_filter = "# RS Rotation 15 MIN, PCR filter of 6 Oct\n", "# RS Rotation 15 MIN, before the PCR filter\n"
+    on_filter = await _deployment(db_session, "own_close_a@tradingmaster.internal", filtered)
+    on_old = await _deployment(db_session, "own_close_b@tradingmaster.internal", before_filter)
+    edited = await _deployment(db_session, "own_close_c@tradingmaster.internal", "# RS Rotation 15 MIN, edited by hand\n")
+    # The card still on the code before the filter, in a strategy whose newest version has it.
+    db_session.add(StrategyVersion(strategy_id=on_old.strategy_id, version_number=12, timeframe="15m", instrument_ids=[], parameters={"x": 1},
+                                   python_code=filtered, position_sizing={}, risk_rules={}))
+    broker = Broker(code="zerodha_kite_own_close", name="Kite", is_enabled=True)
+    db_session.add(broker)
+    await db_session.flush()
+    account = BrokerAccount(user_id=(await db_session.get(Strategy, on_filter.strategy_id)).owner_id, broker_id=broker.id,
+                            account_label="Kite", environment="live")
+    db_session.add(account)
+    await db_session.flush()
+    live = LiveNativeDeployment(owner_id=account.user_id, strategy_id=on_filter.strategy_id, strategy_version_id=on_filter.strategy_version_id,
+                                broker_account_id=account.id, paper_deployment_id=on_filter.id, status="active", lots_per_leg=1,
+                                capital=100000, product_style="overnight")
+    db_session.add(live)
+    await db_session.flush()
+    ids = [on_filter.id, on_old.id, edited.id]
+    before = {d.id: d.strategy_version_id for d in (on_filter, on_old, edited)}
+    old_strategy, live_id = on_old.strategy_id, live.id
+    await db_session.commit()
+
+    migration = _load("f1b3d5e7a9c2_rs_15min_decides_on_its_close_pcr")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    migration.FROM_MD5S = {hashlib.md5(filtered.encode()).hexdigest()}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and "async def waiting_for_pcr" in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(LiveNativeDeployment, live_id)).strategy_version_id == version.id
+    # The card before the filter stays on its code; its strategy gets the fix as its newest version.
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+    newest = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == old_strategy)
+                                       .order_by(StrategyVersion.version_number.desc()))).scalars().first()
+    assert newest.version_number == 13 and "async def waiting_for_pcr" in newest.python_code
+    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]

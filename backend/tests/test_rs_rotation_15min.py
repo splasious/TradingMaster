@@ -261,7 +261,7 @@ async def test_without_a_pcr_record_it_stays_as_it_was_and_before_any_record_the
 
     # Records exist, but none this session within 30 minutes: in stays in ...
     await _pcr(db_session, at(9, 0) - timedelta(days=1), 0.50)
-    kept = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=ctx.state, now=at(9, 45, 3))
+    kept = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=ctx.state, now=at(9, 46, 5))
     await rot.evaluate(kept)
     assert len(kept.state["holdings"]) == 10 and "sold: none" in kept._last_reason
     assert kept.state["pcr_risk_off"] is False and "no PCR record in the last 30 min: in the market" in kept._last_reason
@@ -269,7 +269,59 @@ async def test_without_a_pcr_record_it_stays_as_it_was_and_before_any_record_the
     # ... and out stays out (as after a PCR exit: nothing held, the cash back).
     portfolio.cash = 1_000_000.0
     out = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment,
-                        state={**kept.state, "holdings": {}, "pcr_risk_off": True}, now=at(10, 0, 3))
+                        state={**kept.state, "holdings": {}, "pcr_risk_off": True}, now=at(10, 1, 5))
     await rot.evaluate(out)
     assert out.state["holdings"] == {} and "bought: none" in out._last_reason
     assert out.state["pcr_risk_off"] is True and "no PCR record in the last 30 min: out until PCR > 0.90" in out._last_reason
+
+
+async def test_a_close_waits_for_its_own_pcr_record_then_decides_on_it(db_session, monkeypatch):
+    """12 Oct: the 11:15 record (0.77) was saved at 11:15:08, the decision
+    at 11:15:03 read the 11:00 one (0.85) and stayed in; it sold at 11:30."""
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    _live(instruments, {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0})
+    await _pcr(db_session, at(9, 30), 0.95)
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 30, 3))
+    await rot.evaluate(ctx)
+    assert len(ctx.state["holdings"]) == 10
+
+    early = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=ctx.state, now=at(9, 45, 3))
+    await rot.evaluate(early)  # the 09:45 record isn't saved yet: nothing decided, looked at again in 5 s
+    assert "waiting for the 09:45 PCR record" in early._last_reason and len(early.state["holdings"]) == 10
+    assert early.state["_series"]["bars"][-1] == ctx.state["_series"]["bars"][-1]  # this close is still to decide
+    assert early._wake_at == at(9, 45, 8).astimezone(timezone.utc)
+
+    await _pcr(db_session, at(9, 45), 0.77)  # saved at 09:45:08
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state=early.state, now=at(9, 45, 8))
+    await rot.evaluate(ctx)
+    assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is True
+    assert "PCR 0.77: out until PCR > 0.90" in ctx._last_reason
+    await db_session.commit()
+    trades = (await db_session.execute(select(PaperNativeTrade))).scalars().all()
+    assert len(trades) == 10 and {t.exit_reason for t in trades} == {"pcr_below_0.80"}
+
+
+async def test_a_close_whose_pcr_record_never_comes_is_decided_after_the_wait_on_the_newest(db_session, monkeypatch):
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    _live(instruments, {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0})
+    await _pcr(db_session, at(9, 30), 0.95)
+
+    waiting = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 45, 3) + rot.PCR_WAIT - timedelta(seconds=4))
+    await rot.evaluate(waiting)
+    assert "waiting for the 09:45 PCR record" in waiting._last_reason
+
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 45) + rot.PCR_WAIT)
+    await rot.evaluate(ctx)  # no 09:45 record by then (a failed capture): the 09:30 one decides
+    assert len(ctx.state["holdings"]) == 10 and "PCR 0.95: in the market" in ctx._last_reason
+    assert at(9, 45) + rot.PCR_WAIT - at(9, 45) < rot.DECIDE_WITHIN  # still inside the close's window
+
+
+async def test_a_backtest_never_waits_for_a_pcr_record(db_session, monkeypatch):
+    deployment, portfolio, instruments = await _setup(db_session, monkeypatch)
+    _live(instruments, {s: 100.0 + i for i, s in enumerate(SYMBOLS)} | {"NIFTY 50": 20000.0})
+    await _pcr(db_session, at(9, 30), 0.95)
+    ctx = NativeContext(db=db_session, portfolio=portfolio, deployment=deployment, state={}, now=at(9, 45, 3))
+    monkeypatch.setattr(ctx, "is_backtest", True)
+    assert await rot.waiting_for_pcr(ctx, at(9, 45)) is False
+    ctx.is_backtest = False
+    assert await rot.waiting_for_pcr(ctx, at(9, 45)) is True

@@ -20,7 +20,8 @@ Trading, as decided on 30-Sep-2026:
     A close is acted on only within DECIDE_WITHIN of it: one missed (a
     restart, Zerodha logged out) is skipped, never traded late.
   - Prices: live, at the close -- each stock's last traded price a few
-    seconds after the candle ends (ctx.get_prices: the live feed's ticks,
+    seconds after the candle ends, once that close's PCR record is in (see
+    "PCR filter") (ctx.get_prices: the live feed's ticks,
     else a single Kite request for all of them). That is the newest bar's close
     and the price anything is bought or sold at on it.
   - Earlier bars: the closes this strategy keeps itself (state["_series"],
@@ -57,6 +58,13 @@ PCR filter, added 6-Oct-2026 (pcr_filter below):
     out around one level. The ranking keeps running while out.
   - Before the first PCR record (a backtest of dates before about
     23-Sep-2026) there is no filter: it trades as before.
+  - Each close is decided on that close's own PCR (waiting_for_pcr below,
+    12-Oct-2026): the record of each 15-minute mark is saved a few seconds
+    after it (4-9 s on 12 Oct), and a decision 3 s after the close read the
+    one before -- every exit and re-entry came a close late (12 Oct: PCR
+    0.77 at 11:15, sold at 11:30). The decision now waits for the record,
+    at most PCR_WAIT; if it still isn't in by then (a failed capture,
+    Zerodha logged out) the newest record decides, as before.
 
 Runs through services/paper_trading/native_runner.py -- the same ctx
 contract as the other native strategies (ctx.state, ctx.db, ctx.now,
@@ -72,6 +80,7 @@ from sqlalchemy import select
 from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
+from app.models.pcr import PcrSnapshot
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.nse_holidays import is_trading_holiday
 from app.services.options.pcr_snapshots import first_record_ts, latest_pcr
@@ -107,6 +116,8 @@ CARRY_BACK = 25  # candles searched back for a close to carry into an empty seed
 PCR_UNDERLYING = "NIFTY"
 PCR_EXIT_BELOW = 0.80  # NIFTY PCR under this: sell everything, stay out
 PCR_REENTER_ABOVE = 0.90  # over this: back in
+PCR_WAIT = timedelta(seconds=60)  # a close's decision waits at most this long for that close's PCR record
+PCR_RECHECK = timedelta(seconds=5)  # how soon it looks again while waiting
 
 
 def _is_trading_day(d: date) -> bool:
@@ -232,6 +243,24 @@ async def pcr_filter(ctx) -> tuple[bool, str]:
     return risk_off, f"{reading}: {f'out until PCR > {PCR_REENTER_ABOVE:.2f}' if risk_off else 'in the market'}"
 
 
+async def waiting_for_pcr(ctx, close: datetime) -> bool:
+    """True while the PCR record of this close's mark is still to come -- see
+    "PCR filter" above. Never in a backtest (every record is already there),
+    before the records begin, or once PCR_WAIT has passed."""
+    if ctx.is_backtest or ctx.now - close >= PCR_WAIT:
+        return False
+    close_utc = as_aware_utc(close).astimezone(timezone.utc)
+    first = await first_record_ts(ctx.db, PCR_UNDERLYING)
+    if first is None or first > close_utc:
+        return False
+    saved = (
+        await ctx.db.execute(
+            select(PcrSnapshot.id).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts >= close_utc).limit(1)
+        )
+    ).first()
+    return saved is None
+
+
 async def evaluate(ctx) -> None:
     now_ist = ctx.now.astimezone(IST)
     holdings = ctx.state.get("holdings", {})  # {symbol: {instrument_id, quantity, entry_price, opened_at, rank}}
@@ -245,6 +274,12 @@ async def evaluate(ctx) -> None:
         ctx.note("hold", reason=f"holding {len(holdings)}/{TOP_N}{out} | next decision {upcoming:%d-%b %H:%M}")
         return
     close_label = f"{bar + BAR:%H:%M}"
+    if await waiting_for_pcr(ctx, bar + BAR):
+        # Not marked done: decided at the next look, once the record is in.
+        ctx.wake_at(ctx.now + PCR_RECHECK)
+        out = " | out of the market (PCR)" if ctx.state.get("pcr_risk_off") else ""
+        ctx.note("hold", reason=f"holding {len(holdings)}/{TOP_N}{out} | waiting for the {close_label} PCR record")
+        return
 
     benchmark = (await ctx.db.execute(select(Instrument).where(Instrument.symbol == BENCHMARK_SYMBOL))).scalar_one_or_none()
     if benchmark is None:
