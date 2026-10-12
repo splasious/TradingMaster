@@ -2160,7 +2160,8 @@ GROUP BY session_date ORDER BY session_date;
 -- (switched with "Use latest version"): before the filter (561759bb / 98824676) or with it (c5d7e9f1a3b4)
 WITH label AS (
   SELECT * FROM (VALUES ('561759bbee3e25378f16c524c7f2f07b', 'MACD before PCR filter'), ('988246769bebae7d1d8c3cdfbcf91be8', 'RS 15 before PCR filter'),
-                        ('5f43c1d04e769861328c0e7b54ff2729', 'MACD with PCR filter'), ('92c7c0d9723cb8962692b9e39bb0166b', 'RS 15 with PCR filter')) t(md5, code)
+                        ('5f43c1d04e769861328c0e7b54ff2729', 'MACD with PCR filter'), ('92c7c0d9723cb8962692b9e39bb0166b', 'RS 15 with PCR filter'),
+                        ('2f2f1ffaf4340cc53444ffbc923dedba', 'RS 15, PCR of its own close')) t(md5, code)
 )
 SELECT trim(s.name) AS strategy, 'newest version' AS what, v.version_number, coalesce(l.code, 'other code') AS code, NULL::bigint AS live_runs_on,
        NULL::text AS out_on_pcr
