@@ -2189,6 +2189,27 @@ SELECT trim(s.name) AS strategy, v.version_number, d.status,
 FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
 WHERE trim(s.name) = 'RS Rotation 15 MIN' AND d.status IN ('active', 'paused');
 
+-- PG3. Today's NIFTY PCR records against the RS / MACD 15-minute decisions (market data and times only): each mark, when it was saved
+--      (seconds after the mark), its PCR; then each card's trades closed today per minute with the first second (a decision's time),
+--      and the PCR its last note read
+\echo
+\echo '== PG3. NIFTY PCR records today: mark, saved N seconds after it, PCR -- the 15-minute cards decide 3 s after each close and read the newest record saved by then'
+SELECT to_char(ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS mark_ist, source,
+       round(extract(epoch FROM (captured_at - ts))::numeric, 1) AS saved_secs_after_mark, round(pcr::numeric, 3) AS pcr
+FROM pcr_snapshots
+WHERE underlying = 'NIFTY' AND session_date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+ORDER BY ts;
+SELECT trim(s.name) AS strategy, v.version_number, d.state::jsonb ->> 'pcr_risk_off' AS out_on_pcr,
+       substring(d.last_signal_reason FROM '(PCR [0-9.]+[^|]*|no PCR record[^|]*)') AS pcr_in_last_note,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_run_ist,
+       (SELECT string_agg(t.hhmm || ' ' || t.first_sec || ' ' || t.exit_reason || ' x' || t.n, ', ' ORDER BY t.hhmm) FROM (
+          SELECT to_char(closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS hhmm, to_char(min(closed_at) AT TIME ZONE 'Asia/Kolkata', 'SS') AS first_sec,
+                 exit_reason, count(*) AS n FROM paper_native_trades
+          WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date GROUP BY 1, 3) t) AS closed_today_min_sec
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+WHERE trim(s.name) IN ('RS Rotation 15 MIN', 'MACD - RSI - 15 MIN') AND d.status IN ('active', 'paused')
+ORDER BY 1, 2;
+
 -- PX2. Each stock still held by an RS card that is out on PCR (numbered, no names) beside the stocks those cards sold on PCR today (one row):
 --      catalog source, whether its Zerodha symbol is the plain symbol, today's chart candles per source label and timeframe, the last candle
 WITH held AS (
