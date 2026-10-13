@@ -2278,3 +2278,74 @@ FROM legs JOIN instruments i ON i.id = legs.iid
 LEFT JOIN bf_symbols bs ON bs.symbol = i.symbol AND bs.source = 'zerodha_nfo'
 LEFT JOIN bf_ohlcv_bars b ON b.symbol_id = bs.id AND b.ts >= now() - interval '14 days'
 GROUP BY legs.leg, i.symbol, b.timeframe ORDER BY legs.leg, b.timeframe;
+
+-- AM10. AM OP TRD 15 MIN entry legs today (market data, strikes and times only). The expiry it trades (on an expiry day, the
+--       next one -- nifty_pcr_multi_regime.py), each upcoming expiry's strikes in the app catalog (what ctx.find_option
+--       searches) vs the backfill list, when the expiry was added and NIFTY then (its strike window is centred there). Then
+--       at each of today's PCR marks: the regime, the ATM it rounds to and the legs that regime opens, found in the catalog or not.
+\echo
+\echo '== AM10. AM OP TRD 15 MIN entry legs today: catalog strikes per upcoming expiry (the one it trades today marked), and at each PCR mark the legs its regime needs -- in the catalog or not'
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50'),
+today AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS d),
+ex AS (
+  SELECT expiry, row_number() OVER (ORDER BY expiry) AS n FROM (
+    SELECT DISTINCT expiry FROM instruments
+    WHERE underlying_instrument_id IN (SELECT id FROM u) AND instrument_type = 'option' AND expiry >= (SELECT d FROM today)) x),
+traded AS (
+  SELECT CASE WHEN (SELECT expiry FROM ex WHERE n = 1) = (SELECT d FROM today) AND EXISTS (SELECT 1 FROM ex WHERE n = 2)
+              THEN (SELECT expiry FROM ex WHERE n = 2) ELSE (SELECT expiry FROM ex WHERE n = 1) END AS expiry)
+SELECT ex.n, ex.expiry, to_char(ex.expiry, 'Dy') AS day, ex.expiry = (SELECT expiry FROM traded) AS traded_today,
+       cat.pe, cat.ce, cat.min_strike, cat.max_strike, cat.inactive, to_char(cat.added AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS added_ist,
+       (SELECT round(p.spot::numeric) FROM pcr_snapshots p WHERE p.underlying = 'NIFTY' AND p.ts <= cat.added ORDER BY p.ts DESC LIMIT 1) AS nifty_when_added,
+       bf.pe AS bf_pe, bf.ce AS bf_ce, bf.min_strike AS bf_min_strike, bf.max_strike AS bf_max_strike
+FROM ex
+LEFT JOIN LATERAL (
+  SELECT count(*) FILTER (WHERE i.option_type = 'PE') AS pe, count(*) FILTER (WHERE i.option_type = 'CE') AS ce,
+         min(i.strike) AS min_strike, max(i.strike) AS max_strike, count(*) FILTER (WHERE NOT i.is_active) AS inactive, min(i.created_at) AS added
+  FROM instruments i WHERE i.underlying_instrument_id IN (SELECT id FROM u) AND i.instrument_type = 'option' AND i.expiry = ex.expiry) cat ON true
+LEFT JOIN LATERAL (
+  SELECT count(*) FILTER (WHERE b.option_type = 'PE') AS pe, count(*) FILTER (WHERE b.option_type = 'CE') AS ce,
+         min(b.strike) AS min_strike, max(b.strike) AS max_strike
+  FROM bf_symbols b WHERE b.source = 'zerodha_nfo' AND b.underlying_symbol = 'NIFTY' AND b.option_type IS NOT NULL AND b.expiry = ex.expiry) bf ON true
+WHERE ex.n <= 4 ORDER BY ex.n;
+
+WITH u AS (SELECT id FROM instruments WHERE symbol = 'NIFTY 50'),
+today AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS d),
+ex AS (
+  SELECT expiry, row_number() OVER (ORDER BY expiry) AS n FROM (
+    SELECT DISTINCT expiry FROM instruments
+    WHERE underlying_instrument_id IN (SELECT id FROM u) AND instrument_type = 'option' AND expiry >= (SELECT d FROM today)) x),
+traded AS (
+  SELECT CASE WHEN (SELECT expiry FROM ex WHERE n = 1) = (SELECT d FROM today) AND EXISTS (SELECT 1 FROM ex WHERE n = 2)
+              THEN (SELECT expiry FROM ex WHERE n = 2) ELSE (SELECT expiry FROM ex WHERE n = 1) END AS expiry),
+marks AS (
+  SELECT ts, spot, pcr, floor(spot / 100 + 0.5) * 100 AS atm,
+         CASE WHEN pcr IS NULL THEN 'none' WHEN pcr BETWEEN 0.80 AND 1.20 THEN 'sideways' WHEN pcr > 1.25 THEN 'bullish'
+              WHEN pcr < 0.75 THEN 'bearish' ELSE 'buffer' END AS regime
+  FROM pcr_snapshots WHERE underlying = 'NIFTY' AND session_date = (SELECT d FROM today) AND spot IS NOT NULL),
+spec(regime, offset_pts, option_type) AS (VALUES
+  ('sideways', 0, 'CE'), ('sideways', 0, 'PE'), ('bullish', -200, 'PE'), ('bullish', -400, 'PE'), ('bearish', 200, 'CE'), ('bearish', 400, 'CE')),
+legs AS (
+  SELECT m.ts, m.atm + s.offset_pts AS strike, s.option_type,
+         EXISTS (SELECT 1 FROM instruments i WHERE i.underlying_instrument_id IN (SELECT id FROM u) AND i.instrument_type = 'option'
+                 AND i.expiry = (SELECT expiry FROM traded) AND i.strike = m.atm + s.offset_pts AND i.option_type = s.option_type) AS in_catalog,
+         EXISTS (SELECT 1 FROM bf_symbols b WHERE b.source = 'zerodha_nfo' AND b.underlying_symbol = 'NIFTY'
+                 AND b.expiry = (SELECT expiry FROM traded) AND b.strike = m.atm + s.offset_pts AND b.option_type = s.option_type) AS in_backfill
+  FROM marks m JOIN spec s ON s.regime = m.regime)
+SELECT to_char(m.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS mark_ist, round(m.spot::numeric, 1) AS nifty, round(m.pcr::numeric, 3) AS pcr,
+       m.regime, m.atm, (SELECT expiry FROM traded) AS expiry,
+       string_agg(l.strike::int || l.option_type || CASE WHEN l.in_catalog THEN '' WHEN l.in_backfill THEN ' (NOT IN CATALOG, in backfill list)'
+                  ELSE ' (NOT IN CATALOG)' END, ', ' ORDER BY l.strike DESC) AS legs_needed,
+       count(*) FILTER (WHERE l.in_catalog) || '/' || count(l.ts) AS legs_in_catalog
+FROM marks m LEFT JOIN legs l ON l.ts = m.ts
+GROUP BY m.ts, m.spot, m.pcr, m.regime, m.atm ORDER BY m.ts;
+
+-- The contract named on 13 Oct: NIFTY 22300 PE, 19 Oct -- in the app catalog, the backfill list, today's candles
+SELECT 'catalog' AS where_, i.symbol, i.data_source, i.is_active, i.underlying_instrument_id IN (SELECT id FROM instruments WHERE symbol = 'NIFTY 50') AS linked_to_nifty,
+       to_char(i.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS added_ist,
+       (SELECT count(*) FROM ohlcv_candles c WHERE c.instrument_id = i.id AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS candles_today
+FROM instruments i WHERE i.instrument_type = 'option' AND i.expiry = DATE '2026-10-19' AND i.strike = 22300 AND i.option_type = 'PE'
+UNION ALL
+SELECT 'backfill list', b.symbol, b.source, NULL, NULL, to_char(b.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI'),
+       (SELECT count(*) FROM bf_ohlcv_bars x WHERE x.symbol_id = b.id AND (x.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date)
+FROM bf_symbols b WHERE b.source = 'zerodha_nfo' AND b.expiry = DATE '2026-10-19' AND b.strike = 22300 AND b.option_type = 'PE';
