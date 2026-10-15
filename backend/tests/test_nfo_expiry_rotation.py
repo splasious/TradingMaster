@@ -136,13 +136,13 @@ async def test_ensure_underlying_expiries_backfills_missing_expiry_with_atm_wind
     assert all(s.expiry == FUTURE_EXPIRY for s in symbols)
 
 
-async def test_ensure_underlying_expiries_skips_expiry_already_in_catalog(db_session: AsyncSession, monkeypatch):
+async def test_a_contract_already_tracked_isnt_added_again(db_session: AsyncSession, monkeypatch):
     underlying = await _seed_underlying(db_session)
-    # Simulate catalog_sync_scheduler having already bridged this expiry
+    # Simulate catalog_sync_scheduler having already bridged this contract
     # into the main Instrument catalog on a previous tick.
     db_session.add(Instrument(
-        exchange="NFO", symbol="NIFTY_ALREADY_SYNCED_CE", name="NIFTY_ALREADY_SYNCED_CE", instrument_type="option",
-        data_source="zerodha_kite", external_ref="NIFTY_ALREADY_SYNCED_CE", expiry=FUTURE_EXPIRY, strike=23000,
+        exchange="NFO", symbol=_nfo_row("NIFTY", FUTURE_EXPIRY_STR, 23000, "CE", 1)["tradingsymbol"], name="x",
+        instrument_type="option", data_source="zerodha_kite", external_ref="x", expiry=FUTURE_EXPIRY, strike=23000,
         option_type="CE", underlying_instrument_id=underlying.id,
     ))
     await db_session.commit()
@@ -153,14 +153,70 @@ async def test_ensure_underlying_expiries_skips_expiry_already_in_catalog(db_ses
         return rows
 
     async def fake_get_ltp(self, exchange, tradingsymbol):
-        raise AssertionError("get_ltp should not be called when the expiry is already covered")
+        return {"price": 23000.0, "instrument_token": 999}
 
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
     monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp", fake_get_ltp)
 
     broker = ZerodhaKiteBroker()
-    added = await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4())
-    assert added == 0
+    # Only the 23000 PE is new; once it's added, nothing is.
+    assert await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4()) == 1
+    assert await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4()) == 0
+
+
+async def test_the_strike_window_follows_the_index_and_the_new_contracts_are_in_the_catalog_at_once(db_session: AsyncSession, monkeypatch):
+    """13 Oct: 19 Oct's strikes were picked on 23 Sep around NIFTY 23,350;
+    with NIFTY at 22,569 AM OP TRD 15 MIN's bull put spread needed a
+    22,200 PE hedge leg the catalog didn't have, and never opened."""
+    from sqlalchemy import select
+
+    from app.models.backfill_platform import BfBackfillJob, BfSymbol
+    from app.services.paper_trading.native_runner import NativeContext
+
+    monkeypatch.setattr(rotation, "STRIKE_WINDOW", 4)
+    underlying = await _seed_underlying(db_session)
+    rows = _option_rows("NIFTY", FUTURE_EXPIRY_STR, [float(s) for s in range(22000, 24001, 100)], start_token=1)
+    spot = {"price": 23350.0}
+
+    async def fake_get_instruments(self, segment="NSE"):
+        return rows
+
+    async def fake_get_ltp(self, exchange, tradingsymbol):
+        return {"price": spot["price"], "instrument_token": 999}
+
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fake_get_instruments)
+    monkeypatch.setattr(ZerodhaKiteBroker, "get_ltp", fake_get_ltp)
+    broker = ZerodhaKiteBroker()
+
+    # The expiry comes in around 23,350: 22,900-23,700 (23,300 is nearest, ±4).
+    assert await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4()) == 18
+    ctx = NativeContext(db=db_session, portfolio=None, deployment=None, state={})
+    assert await ctx.find_option(underlying.id, FUTURE_EXPIRY, 22200.0, "PE") is None
+
+    # NIFTY falls to 22,569: the window moves to 22,200-23,000; 22,900 and 23,000 were already there.
+    spot["price"] = 22569.0
+    assert await rotation._ensure_underlying_expiries(db_session, broker, underlying, account_user_id=uuid.uuid4()) == 14
+    hedge = await ctx.find_option(underlying.id, FUTURE_EXPIRY, 22200.0, "PE")
+    assert hedge is not None and hedge.data_source == "zerodha_kite" and hedge.is_active
+    assert hedge.lot_size == 50 and hedge.exchange == "NFO" and hedge.external_ref == hedge.symbol
+
+    strikes = {s.strike for s in (await db_session.execute(select(BfSymbol))).scalars()}
+    assert strikes == {float(s) for s in range(22200, 23701, 100)}
+    jobs = (await db_session.execute(select(BfBackfillJob))).scalars().all()
+    assert len(jobs) == 32 and {j.status for j in jobs} == {"pending"}  # their candles still follow by download
+
+
+def test_checks_every_15_minutes_while_nse_trades_else_up_to_the_next_morning():
+    from datetime import datetime
+
+    ist = rotation.IST
+    tue = lambda h, m: datetime(2026, 10, 13, h, m, tzinfo=ist)  # a Tuesday
+    assert rotation.seconds_to_next_check(tue(9, 10)) == 15 * 60
+    assert rotation.seconds_to_next_check(tue(12, 0)) == 15 * 60
+    assert rotation.seconds_to_next_check(tue(15, 30)) == 15 * 60
+    assert rotation.seconds_to_next_check(tue(15, 45)) == rotation.CHECK_INTERVAL_SECONDS
+    assert rotation.seconds_to_next_check(tue(6, 0)) == 3 * 3600 + 10 * 60  # wakes at 09:10, not 12:00
+    assert rotation.seconds_to_next_check(datetime(2026, 10, 17, 12, 0, tzinfo=ist)) == rotation.CHECK_INTERVAL_SECONDS  # a Saturday
 
 
 async def _seed_connected_account(db_session: AsyncSession) -> uuid.UUID:

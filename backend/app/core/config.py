@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # keep alerts in-app only.
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    # NIFTY's top-3 OTM open interest (resistance/support) pushed to that
+    # chat every this many minutes from 09:15 IST, at a 15-minute PCR record
+    # (services/options/oi_levels.py) -- 15, 30, 60...; 0 turns it off.
+    oi_levels_alert_minutes: int = 15
 
     # Hard cap on a single manual (deployment-free) live order's notional
     # (quantity * price), independent of broker margin -- a manual order

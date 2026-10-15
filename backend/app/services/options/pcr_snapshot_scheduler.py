@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from app.db.session import AsyncSessionLocal
 from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
 from app.services.broker.zerodha_broker import KiteAPIError, ZerodhaKiteBroker
+from app.services.options.oi_levels import send_oi_levels
 from app.services.options.pcr_snapshots import UNDERLYINGS, capture_live, due_capture_mark, fill_gaps, missing_marks
 
 logger = logging.getLogger(__name__)
@@ -91,16 +92,26 @@ class PcrSnapshotScheduler:
             if broker is None:
                 self.last_error = NOT_LOGGED_IN
                 return False
+            saved = []
             for underlying in UNDERLYINGS:
                 try:
-                    await capture_live(db, broker, underlying, mark)
+                    snap = await capture_live(db, broker, underlying, mark)
                 except KiteAPIError as exc:
                     self.last_error = str(exc)
                     return False
-        self._captured = {m for m in self._captured if now - m < timedelta(days=2)} | {mark}
-        self.last_capture_ts = mark
-        self.last_capture_at = datetime.now(timezone.utc)
-        self.last_error = None
+                if snap is not None:
+                    saved.append(snap)
+            self._captured = {m for m in self._captured if now - m < timedelta(days=2)} | {mark}
+            self.last_capture_ts = mark
+            self.last_capture_at = datetime.now(timezone.utc)
+            self.last_error = None
+            # After the record is saved and counted: the alert is extra, and
+            # its failure mustn't cost the record or a retry of the mark.
+            for snap in saved:
+                try:
+                    await send_oi_levels(db, snap)
+                except Exception:
+                    logger.exception("OI levels alert failed for %s %s", snap.underlying, mark)
         return True
 
     async def fill(self, now: datetime) -> None:

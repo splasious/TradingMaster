@@ -19,8 +19,19 @@ at, in the same Data Backfill watchlists. So at each monthly expiry the next
 month's future is already there; a new one is backfilled from as far back as
 Kite has it (FUTURES_HISTORY_DAYS).
 
-Purely additive: this only ensures a target set of expiries exist and
-no-ops once they do. Contracts that have expired are retired separately,
+The strike window follows the index (13 Oct): every check takes ATM
+±STRIKE_WINDOW around the index's price at that moment, for each maintained
+expiry, and adds any contract in it not tracked yet. It used to be picked
+once, when an expiry first came in about four weeks out, and never moved:
+19 Oct was picked on 23 Sep with NIFTY near 23,350 (strikes 22,350-24,350),
+so on 13 Oct, with NIFTY near 22,550, AM OP TRD 15 MIN's bull put spread
+found no 22,200 PE hedge leg in the catalog and never opened. A new
+contract goes into the app catalog at once -- a strategy can pick it on its
+next tick, priced live -- and its candles follow with its download. While
+NSE is open this runs every MARKET_CHECK_INTERVAL_SECONDS.
+
+Purely additive: this only ensures a target set of expiries and strikes
+exist and no-ops once they do. Contracts that have expired are retired separately,
 four trading days on (retire_expired.py): stock contracts are deleted, and
 index contracts keep their candles -- the history backtests of past weeklies
 run on -- but leave lists and watchlists.
@@ -42,7 +53,7 @@ and doesn't apply here.
 import asyncio
 import logging
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,7 +68,7 @@ from app.models.backfill_platform import (
     BfWatchlistItem,
 )
 from app.models.instrument import Instrument
-from app.services.backfill_platform.catalog_sync import UNDERLYING_NAME_ALIASES
+from app.services.backfill_platform.catalog_sync import UNDERLYING_NAME_ALIASES, sync_symbol_to_catalog
 from app.services.backfill_platform.symbols import get_or_create_symbol
 from app.services.backfill_platform.worker import backfill_worker
 from app.services.broker.kite_ticker_service import find_connected_zerodha_account, find_connected_zerodha_credentials
@@ -77,8 +88,16 @@ STRIKE_WINDOW = 20
 BACKFILL_TIMEFRAME = "15m"
 # Expiries only roll over weekly/monthly -- cheap to check far more often
 # than that (one cached instrument-dump read when nothing's missing), but
-# no need to.
+# no need to while the market is shut.
 CHECK_INTERVAL_SECONDS = 6 * 3600
+# While NSE trades the strike window has to keep up with the index: NIFTY
+# rose 550 points between 09:00 and 10:00 on 13 Oct. Each check is one
+# cached dump read and one LTP call per underlying.
+MARKET_CHECK_INTERVAL_SECONDS = 15 * 60
+# The trading-day stretch checked at that pace, IST (weekdays): from just
+# before the 09:15 open -- NIFTY's pre-open price is set by 09:08 -- to the close.
+MARKET_CHECKS_FROM = time(9, 10)
+MARKET_CHECKS_UNTIL = time(15, 30)
 
 # Futures kept per underlying: the current month and the next.
 FUTURES_TO_MAINTAIN = 2
@@ -145,10 +164,11 @@ async def _tracked_underlyings(db: AsyncSession) -> list[Instrument]:
 async def _ensure_underlying_expiries(
     db: AsyncSession, broker: ZerodhaKiteBroker, underlying: Instrument, account_user_id: uuid.UUID
 ) -> int:
-    """Backfills every strike in the ATM±STRIKE_WINDOW window, for every
-    expiry among this underlying's nearest EXPIRIES_TO_MAINTAIN not
-    already present in the Instrument catalog. Returns how many new
-    contracts were queued (0 when everything's already covered)."""
+    """Keeps every strike in the ATM±STRIKE_WINDOW window around the
+    underlying's price now tracked, for each of its nearest
+    EXPIRIES_TO_MAINTAIN expiries: a contract not tracked yet goes into the
+    app catalog at once and is queued for its download. Returns how many
+    contracts were added (0 when the window is already covered)."""
     nfo_rows = await broker.get_instruments("NFO")
     kite_name = _kite_name_for(underlying.symbol)
     # IST calendar date, not the server's raw UTC one -- NSE expiries are
@@ -159,26 +179,30 @@ async def _ensure_underlying_expiries(
     if not targets:
         return 0
 
-    existing = (
-        await db.execute(
-            select(Instrument.expiry).where(
-                Instrument.underlying_instrument_id == underlying.id, Instrument.instrument_type == "option"
-            )
-        )
-    ).scalars().all()
-    missing = [expiry for expiry in targets if expiry not in set(existing)]
-    if not missing:
+    try:
+        ltp = await broker.get_ltp("NSE", underlying.external_ref)
+    except KiteAPIError:
+        logger.exception("Could not fetch spot price for %s -- its strike windows aren't checked this time", underlying.symbol)
         return 0
+    spot = ltp["price"]
 
-    queued = 0
-    for expiry in missing:
-        try:
-            ltp = await broker.get_ltp("NSE", underlying.external_ref)
-        except KiteAPIError:
-            logger.exception("Could not fetch spot price for %s -- skipping expiry %s", underlying.symbol, expiry)
-            continue
-        spot = ltp["price"]
+    # Tracked: on the backfill list (what the catalog is copied from) or
+    # already in the catalog.
+    tracked = set(
+        (await db.execute(select(BfSymbol.symbol).where(BfSymbol.source == "zerodha_nfo", BfSymbol.expiry.in_(targets)))).scalars()
+    ) | set(
+        (
+            await db.execute(
+                select(Instrument.symbol).where(
+                    Instrument.underlying_instrument_id == underlying.id, Instrument.instrument_type == "option",
+                    Instrument.expiry.in_(targets),
+                )
+            )
+        ).scalars()
+    )
 
+    added: list[BfSymbol] = []
+    for expiry in targets:
         expiry_str = expiry.isoformat()
         rows_for_expiry = [
             row for row in nfo_rows
@@ -196,7 +220,7 @@ async def _ensure_underlying_expiries(
         for strike in window:
             for option_type in ("CE", "PE"):
                 row = by_strike_and_type.get((strike, option_type))
-                if row is None:
+                if row is None or row["tradingsymbol"] in tracked:
                     continue
                 tradingsymbol = row["tradingsymbol"]
                 lot_size_raw = row.get("lot_size")
@@ -209,11 +233,16 @@ async def _ensure_underlying_expiries(
                     symbol_id=symbol_row.id, source="zerodha_nfo", timeframe=BACKFILL_TIMEFRAME,
                     requested_by=account_user_id, priority=JOB_PRIORITY_SCHEDULED,
                 ))
-                queued += 1
+                added.append(symbol_row)
+    # Into the catalog now, not after the download: scheduled downloads wait
+    # behind any others, and a strategy needs only the contract (it prices
+    # it live). The catalog sync copies its candles in once they're saved.
+    for symbol_row in added:
+        await sync_symbol_to_catalog(db, symbol_row)
     await db.commit()
-    if queued:
+    if added:
         backfill_worker.wake()
-    return queued
+    return len(added)
 
 
 def _row_expiry(row: dict) -> date | None:
@@ -310,6 +339,20 @@ async def _ensure_futures(db: AsyncSession, broker: ZerodhaKiteBroker, account_u
     return queued
 
 
+def seconds_to_next_check(now: datetime) -> float:
+    """MARKET_CHECK_INTERVAL_SECONDS on a weekday from MARKET_CHECKS_FROM to
+    MARKET_CHECKS_UNTIL IST; otherwise CHECK_INTERVAL_SECONDS, but never past
+    the next MARKET_CHECKS_FROM -- so the window is centred on the opening
+    price before the 09:15 open, not hours into the session."""
+    ist = now.astimezone(IST)
+    if ist.weekday() < 5 and MARKET_CHECKS_FROM <= ist.time() <= MARKET_CHECKS_UNTIL:
+        return MARKET_CHECK_INTERVAL_SECONDS
+    next_from = datetime.combine(ist.date(), MARKET_CHECKS_FROM, tzinfo=IST)
+    if next_from <= ist:
+        next_from += timedelta(days=1)
+    return max(1.0, min(CHECK_INTERVAL_SECONDS, (next_from - ist).total_seconds()))
+
+
 class NfoExpiryRotationScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -332,8 +375,8 @@ class NfoExpiryRotationScheduler:
 
     async def _run(self) -> None:
         # Acts immediately on start(), sleeps only afterward -- with a 6h
-        # interval, a sleep-first loop would leave a fresh deploy waiting
-        # 6 hours for its very first check.
+        # interval off-hours, a sleep-first loop would leave a fresh deploy
+        # waiting hours for its very first check.
         while True:
             try:
                 self.last_added_count = await self.check_once()
@@ -344,7 +387,7 @@ class NfoExpiryRotationScheduler:
             except Exception as exc:
                 logger.exception("NFO expiry rotation check failed")
                 self.last_error = str(exc)
-            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+            await asyncio.sleep(seconds_to_next_check(datetime.now(timezone.utc)))
 
     async def check_once(self) -> int:
         async with AsyncSessionLocal() as db:
