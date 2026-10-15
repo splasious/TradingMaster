@@ -1353,9 +1353,9 @@ LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id AND d.statu
 WHERE s.name ILIKE '%AM OP%'
 ORDER BY 1, 2;
 
--- AM1. Whether each edit of the AM OP MA exit (15 Oct) finds its place in AM OP TRD 15 MIN's running code (md5 93a247f5...):
+-- AM9. Whether each edit of the AM OP MA exit (15 Oct) finds its place in AM OP TRD 15 MIN's running code (md5 93a247f5...):
 --      how many times each anchor -- built-in code, public -- occurs there (1 = applies). Counts only, no code.
-\echo '== AM1. AM OP MA-exit edits: occurrences of each anchor in the running AM OP TRD 15 MIN code (1 = applies)'
+\echo '== AM9. AM OP MA-exit edits: occurrences of each anchor in the running AM OP TRD 15 MIN code (1 = applies)'
 WITH code AS (
   SELECT replace(v.python_code, E'\r', '') AS c FROM strategy_versions v JOIN strategies s ON s.id = v.strategy_id
   WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND md5(replace(v.python_code, E'\r', '')) = '93a247f5b3c48d565d8ea652c192324d'
@@ -1377,9 +1377,7 @@ $amop$),
   (4, $amop$SIDEWAYS_EXIT_HIGH = 1.25
 
 $amop$),
-  (5, $amop$    raise ValueError(f"no exit band for regime '{regime}'")
-
-$amop$),
+  (5, $amop$def in_entry_window(t: dtime) -> bool:$amop$),
   (6, $amop$    regime = None
 
 $amop$),
