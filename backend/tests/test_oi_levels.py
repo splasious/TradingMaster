@@ -79,28 +79,29 @@ async def test_the_message_lists_resistance_and_support_with_their_oi_and_change
 
     assert subject == "NIFTY OI levels 10:15 · S 22,500 / R 22,600"
     lines = body.splitlines()
-    assert lines[0].startswith("NIFTY 22,560.5 (+35.2)  PCR ")
+    assert lines[0].startswith("NIFTY 22,560.5 (+35.2) PCR ")
     assert lines[1:] == [
         "",
         "Expiry 29 Sep",
         "RESISTANCE: call OI above NIFTY",
-        "#  Strike  OI(L)   Δ15m   ΔDay  Away",
-        "1  22,600   98.4  +12.1  +40.2   +40",  # lowest strike first, # = OI rank
-        "3  22,800   61.7   -1.2   +5.5  +240",
-        "2  23,000   85.2   -4.8  +10.0  +440",
+        "# Strike OI(L)  Δ15m   ΔDay Away",
+        "1 22,600  98.4 +12.1  +40.2  +40",  # lowest strike first, # = OI rank
+        "3 22,800  61.7  -1.2   +5.5 +240",
+        "2 23,000  85.2  -4.8  +10.0 +440",
         "SUPPORT: put OI below NIFTY",
-        "#  Strike  OI(L)   Δ15m   ΔDay  Away",
-        "2  22,000   90.1   +5.0  +11.1  -560",
-        "3  22,300   55.8   +0.9   +2.2  -260",
-        "1  22,500  102.3  +18.6  +52.0   -60",
+        "# Strike OI(L)  Δ15m   ΔDay Away",
+        "2 22,000  90.1  +5.0  +11.1 -560",
+        "3 22,300  55.8  +0.9   +2.2 -260",
+        "1 22,500 102.3 +18.6  +52.0  -60",
         "Range 22,500 – 22,600",
-        "Shift: resistance 23,000 → 22,600",
-        "Shift: support 22,000 → 22,500",
+        "Shift R: 23,000 → 22,600",
+        "Shift S: 22,000 → 22,500",
         "",
-        "OI(L) lakh · Away = pts from NIFTY",
+        "OI(L) in lakh · Away in points",
         "ΔDay = since previous close",
     ]
-    assert max(len(line) for line in lines) <= 40  # readable on a phone
+    # Fits a group's narrower block on a phone, where 36 characters wrapped (15 Oct).
+    assert max(len(line) for line in lines) <= oi_levels.MAX_WIDTH == 32
 
 
 async def test_on_expiry_day_the_next_expiry_is_shown_too(db_session: AsyncSession):
@@ -110,6 +111,7 @@ async def test_on_expiry_day_the_next_expiry_is_shown_too(db_session: AsyncSessi
     _, body = await oi_levels.oi_levels_message(db_session, snap)
     assert "Expiry 29 Sep (today)" in body and "Expiry 06 Oct" in body
     assert "Δprev" in body and "Shift" not in body  # nothing before it to compare with
+    assert max(len(line) for line in body.splitlines()) <= oi_levels.MAX_WIDTH
 
 
 async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monkeypatch):

@@ -26,6 +26,10 @@ from app.services.notifications.telegram import send_telegram
 from app.services.options.pcr_snapshots import Key, _strike_map
 
 TOP_N = 3
+# Characters per line of the monospace block. In a group Telegram shows the
+# sender's photo beside each message, so the block is narrower than in the
+# private chat: 36-character rows wrapped there on a phone (15 Oct).
+MAX_WIDTH = 32
 FIRST_ALERT = time(9, 15)
 LAKH = 100_000.0
 
@@ -79,11 +83,11 @@ def _lakh(value: float | None, signed: bool = False) -> str:
 def _table(title: str, levels: list[Level], spot: float, change_label: str) -> list[str]:
     """`levels` most OI first; listed lowest strike first (15 Oct), each
     with its OI rank in the # column."""
-    lines = [title, f"#  {'Strike':>6} {'OI(L)':>6} {change_label:>6} {'ΔDay':>6} {'Away':>5}"]
+    lines = [title, f"# {'Strike':>6} {'OI(L)':>5} {change_label:>5} {'ΔDay':>6} {'Away':>4}"]
     for rank, lvl in sorted(enumerate(levels, start=1), key=lambda ranked: ranked[1].strike):
         lines.append(
-            f"{rank}  {lvl.strike:>6,.0f} {_lakh(lvl.oi):>6} {_lakh(lvl.change, True):>6} {_lakh(lvl.change_day, True):>6} "
-            f"{lvl.strike - spot:>+5.0f}"
+            f"{rank} {lvl.strike:>6,.0f} {_lakh(lvl.oi):>5} {_lakh(lvl.change, True):>5} {_lakh(lvl.change_day, True):>6} "
+            f"{lvl.strike - spot:>+4.0f}"
         )
     if not levels:
         lines.append("   none in the captured strikes")
@@ -110,7 +114,7 @@ def format_message(
     if snap.spot_change is not None:
         head += f" ({snap.spot_change:+.1f})"
     if snap.pcr is not None:
-        head += f"  PCR {snap.pcr:.2f}"
+        head += f" PCR {snap.pcr:.2f}"
     lines = [head]
     for expiry, res, sup, prev_res, prev_sup in sections:
         lines.append("")
@@ -120,11 +124,11 @@ def format_message(
         if res and sup:
             lines.append(f"Range {sup[0].strike:,.0f} – {res[0].strike:,.0f}")
         if res and prev_res is not None and prev_res != res[0].strike:
-            lines.append(f"Shift: resistance {prev_res:,.0f} → {res[0].strike:,.0f}")
+            lines.append(f"Shift R: {prev_res:,.0f} → {res[0].strike:,.0f}")
         if sup and prev_sup is not None and prev_sup != sup[0].strike:
-            lines.append(f"Shift: support {prev_sup:,.0f} → {sup[0].strike:,.0f}")
+            lines.append(f"Shift S: {prev_sup:,.0f} → {sup[0].strike:,.0f}")
     lines.append("")
-    lines.append("OI(L) lakh · Away = pts from NIFTY")
+    lines.append("OI(L) in lakh · Away in points")
     lines.append("ΔDay = since previous close")
     return subject, "\n".join(lines)
 
