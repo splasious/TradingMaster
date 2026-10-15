@@ -23,6 +23,7 @@ import logging
 import httpx
 
 from app.core.config import get_settings
+from app.services.notifications.telegram_group import send_to_group, telegram_to_group
 
 logger = logging.getLogger(__name__)
 
@@ -36,27 +37,39 @@ telegram_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar("telegra
 TELEGRAM_MAX_LEN = 4000
 
 
-async def send_telegram(subject: str, body: str) -> None:
+async def send_telegram(subject: str, body: str, *, to_group: bool = False) -> None:
     """Never raises: a Telegram timeout/connection error used to propagate
     straight out of the calling strategy's evaluate(), aborting that tick
     part-way -- e.g. after the 9:20 scan had already been marked done but
     before the remaining per-stock alerts went out, which then never got
     sent at all. A failed push is logged and skipped instead; the in-app
-    alert the caller creates alongside it is unaffected."""
+    alert the caller creates alongside it is unaffected.
+
+    `to_group` (or the telegram_to_group context): the group as well
+    (telegram_group.py) -- after the private chat, and a group failure never
+    costs the private message."""
     settings = get_settings()
     if not settings.telegram_bot_token or not settings.telegram_chat_id or not telegram_allowed.get():
         return
 
     api_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     full_text = f"<b>{html.escape(subject)}</b>\n<pre>{html.escape(body)}</pre>"
+    chunks = _chunk(full_text)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for chunk in _chunk(full_text):
+            for chunk in chunks:
                 resp = await client.post(api_url, json={"chat_id": settings.telegram_chat_id, "text": chunk, "parse_mode": "HTML"})
                 if resp.status_code != 200:
                     logger.error("Telegram send failed (%s): %s", resp.status_code, resp.text)
     except httpx.HTTPError as exc:
         logger.error("Telegram send failed for %r: %s: %s", subject, type(exc).__name__, exc)
+    if not (to_group or telegram_to_group.get()):
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await send_to_group(client, settings.telegram_bot_token, chunks)
+    except Exception as exc:  # the group is extra: never let it break the caller
+        logger.error("Telegram group send failed for %r: %s: %s", subject, type(exc).__name__, exc)
 
 
 def _chunk(text: str, limit: int = TELEGRAM_MAX_LEN) -> list[str]:

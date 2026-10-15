@@ -130,6 +130,9 @@ jobs:
           except Exception:
               print('error')
           " 2>/dev/null || echo "unavailable"
+              echo "-- Telegram group for the OI-levels and scanner alerts: found or not, groups the bot has been seen in (no names or IDs), group send failures today (count):"
+              compose exec -T backend python -c "import asyncio; from app.services.notifications.telegram_group import group_status; print(asyncio.run(group_status()))" 2>/dev/null || echo "unavailable"
+              grep -c 'Telegram group send failed' /tmp/backend-today.log || true
               echo "-- OI-levels alerts today that failed before sending (count):"
               grep -c 'OI levels alert failed' /tmp/backend-today.log || true
               echo "-- Kite ticker events today (IST time, event, close/error code) -- no message text:"

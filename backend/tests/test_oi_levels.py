@@ -121,8 +121,8 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
     monkeypatch.setattr(sched, "AsyncSessionLocal", factory)
     sent = []
 
-    async def fake_send(subject, body):
-        sent.append((subject, body))
+    async def fake_send(subject, body, to_group=False):
+        sent.append((subject, body, to_group))
 
     monkeypatch.setattr(oi_levels, "send_telegram", fake_send)
     marks = [at(25, 9, 0), at(25, 9, 15)]
@@ -138,7 +138,7 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
         await scheduler.tick(mark + timedelta(seconds=5))
         assert scheduler.last_capture_ts == mark
     # 09:00 is the pre-open; 09:15 is the first alert.
-    assert [s for s, _ in sent] == ["NIFTY OI levels 09:15 · S 22,500 / R 22,600"]
+    assert [(s, to_group) for s, _, to_group in sent] == [("NIFTY OI levels 09:15 · S 22,500 / R 22,600", True)]  # the group too
 
     # Turned off, or failing: the record is still saved and counted.
     monkeypatch.setattr(get_settings(), "oi_levels_alert_minutes", 0)
@@ -151,7 +151,7 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
 
     monkeypatch.setattr(get_settings(), "oi_levels_alert_minutes", 15)
 
-    async def broken_send(subject, body):
+    async def broken_send(subject, body, to_group=False):
         raise RuntimeError("telegram down")
 
     monkeypatch.setattr(oi_levels, "send_telegram", broken_send)

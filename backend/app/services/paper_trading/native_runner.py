@@ -43,6 +43,7 @@ from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.live_price import live_price, live_prices, needs_live_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.telegram import telegram_allowed
+from app.services.notifications.telegram_group import sends_to_group, telegram_to_group
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
@@ -357,6 +358,7 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
     # tick reloaded the old holdings and sold the same stocks again.
     ctx = NativeContext(db=db, portfolio=portfolio, deployment=deployment, state=copy.deepcopy(deployment.state or {}))
     telegram_token = telegram_allowed.set(await _is_administrator(db, portfolio.user_id))
+    group_token = telegram_to_group.set(sends_to_group(version.python_code))  # the scanner's alerts: the group too
     try:
         await evaluate_fn(ctx)
     except Exception as exc:
@@ -366,6 +368,7 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
         return EvaluationOutcome(action="error", reason=f"{type(exc).__name__}: {exc}", wake_at=ctx._wake_at)
     finally:
         telegram_allowed.reset(telegram_token)
+        telegram_to_group.reset(group_token)
 
     deployment.state = ctx.state
     await db.commit()

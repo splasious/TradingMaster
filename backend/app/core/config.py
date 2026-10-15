@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     # keep alerts in-app only.
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    # The group that also gets the OI-levels and F&O scanner alerts, by its
+    # name (services/notifications/telegram_group.py); unset, the group
+    # named on 15 Oct.
+    telegram_group_name: str | None = None
     # NIFTY's top-3 OTM open interest (resistance/support) pushed to that
     # chat every this many minutes from 09:15 IST, at a 15-minute PCR record
     # (services/options/oi_levels.py) -- 15, 30, 60...; 0 turns it off.

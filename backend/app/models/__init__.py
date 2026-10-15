@@ -44,6 +44,7 @@ from app.models.pcr import PcrSnapshot, PcrSnapshotExpiry, PcrStrikeOi
 from app.models.scan import SavedScan
 from app.models.session import Session
 from app.models.strategy import Strategy, StrategyVersion
+from app.models.telegram import TelegramChat
 from app.models.user import Role, User, UserRole
 
 __all__ = [
@@ -104,6 +105,7 @@ __all__ = [
     "Session",
     "Strategy",
     "StrategyVersion",
+    "TelegramChat",
     "Role",
     "User",
     "UserRole",

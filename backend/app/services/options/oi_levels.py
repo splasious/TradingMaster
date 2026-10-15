@@ -179,5 +179,5 @@ async def send_oi_levels(db: AsyncSession, snap: PcrSnapshot) -> bool:
     message = await oi_levels_message(db, snap)
     if message is None:
         return False
-    await send_telegram(*message)
+    await send_telegram(*message, to_group=True)
     return True
