@@ -1398,6 +1398,23 @@ $amop$)
 SELECT anchors.edit, (length(code.c) - length(replace(code.c, anchors.a, ''))) / length(anchors.a) AS occurrences
 FROM anchors CROSS JOIN code ORDER BY anchors.edit;
 
+-- AM9b. The names the MA-exit code uses from AM OP TRD 15 MIN's running code (1 = present), and names it adds (0 = no clash). Counts only.
+\echo '== AM9b. AM OP running code: names the MA exit relies on (1 = present) and names it adds (0 = free)'
+WITH code AS (
+  SELECT replace(v.python_code, E'\r', '') AS c FROM strategy_versions v JOIN strategies s ON s.id = v.strategy_id
+  WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND md5(replace(v.python_code, E'\r', '')) = '93a247f5b3c48d565d8ea652c192324d'
+  ORDER BY v.version_number DESC LIMIT 1
+), probes(probe, a) AS (VALUES
+  ('uses now_utc', $p$now_utc = ctx.now$p$), ('uses now_ist', $p$now_ist = now_utc.astimezone(IST)$p$),
+  ('uses underlying', $p$    underlying = ($p$), ('uses position', $p$position = ctx.state.get("position")$p$),
+  ('uses close_position', $p$async def close_position(exit_reason: str)$p$), ('uses regime', $p$regime = position["regime"]$p$),
+  ('uses is_rollover', $p$is_rollover = False$p$), ('uses ctx.get_candles', $p$ctx.get_candles$p$),
+  ('adds moving_average', $p$moving_average$p$), ('adds MA_CANDLES', $p$MA_CANDLES$p$), ('adds _ma_stop', $p$_ma_stop$p$),
+  ('adds closed_against', $p$closed_against$p$), ('adds BAR =', $p$BAR = $p$), ('adds re_armed', $p$re_armed$p$)
+)
+SELECT probes.probe, (length(code.c) - length(replace(code.c, probes.a, ''))) / length(probes.a) AS occurrences
+FROM probes CROSS JOIN code ORDER BY 1;
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
