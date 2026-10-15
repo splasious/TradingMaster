@@ -589,7 +589,9 @@ async def test_the_pcr_futures_hedge_moves_to_the_carried_position_version(db_en
     await db_session.commit()
 
     migration = _load("e7f9a1b3c5d6_pcr_futures_hedge_carried_position_from_0915")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    intraday = _load("a2c4e6f8b0d1_pcr_futures_hedge_intraday_with_ma")
+    assert intraday.FROM_MD5S == {migration.TO_MD5}  # the built-in has moved on since (a2c4e6f8b0d1)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     migration.FROM_MD5S = {hashlib.md5(old.encode()).hexdigest(), hashlib.md5(old.replace("Nifty PCR Futures Hedge", "something else").encode()).hexdigest()}
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -649,3 +651,31 @@ async def test_the_rs_15min_pcr_filter_run_moves_to_the_own_close_pcr_version(db
                                        .order_by(StrategyVersion.version_number.desc()))).scalars().first()
     assert newest.version_number == 13 and "async def waiting_for_pcr" in newest.python_code
     assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == before[ids[2]]
+
+
+async def test_the_pcr_futures_hedge_gets_the_intraday_ma_version_and_no_run_moves(db_engine, db_session):
+    seventh = "# Nifty PCR Futures Hedge, 7 Oct\n"
+    running = await _deployment(db_session, "intraday_a@tradingmaster.internal", seventh)
+    edited = await _deployment(db_session, "intraday_b@tradingmaster.internal", "# Nifty PCR Futures Hedge, edited by hand\n")
+    ids, before = [running.id, edited.id], {d.id: d.strategy_version_id for d in (running, edited)}
+    strategy_of = {running.id: running.strategy_id, edited.id: edited.strategy_id}
+    await db_session.commit()
+
+    migration = _load("a2c4e6f8b0d1_pcr_futures_hedge_intraday_with_ma")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    migration.FROM_MD5S = {hashlib.md5(seventh.encode()).hexdigest()}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    async def newest(strategy_id):
+        return (await db_session.execute(
+            select(StrategyVersion).where(StrategyVersion.strategy_id == strategy_id).order_by(StrategyVersion.version_number.desc())
+        )).scalars().first()
+
+    version = await newest(strategy_of[ids[0]])
+    assert version.version_number == 12 and 'MA_TIMEFRAME, MA_CANDLES = "15m", 8' in version.python_code
+    assert "ENTRY_START, SQUARE_OFF = time(9, 30), time(15, 0)" in version.python_code and "_roll_option" not in version.python_code
+    assert (await newest(strategy_of[ids[1]])).version_number == 11
+    for run_id in ids:  # backtest first: no card moves
+        assert (await db_session.get(PaperNativeDeployment, run_id)).strategy_version_id == before[run_id]
