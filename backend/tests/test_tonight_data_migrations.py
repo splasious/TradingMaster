@@ -662,7 +662,9 @@ async def test_the_pcr_futures_hedge_gets_the_intraday_ma_version_and_no_run_mov
     await db_session.commit()
 
     migration = _load("a2c4e6f8b0d1_pcr_futures_hedge_intraday_with_ma")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    candle_stop = _load("c4e6a8b0d2f3_pcr_futures_hedge_stop_on_candle_close")
+    assert candle_stop.FROM_MD5S == {migration.TO_MD5}  # the built-in has moved on since (c4e6a8b0d2f3)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     migration.FROM_MD5S = {hashlib.md5(seventh.encode()).hexdigest()}
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -676,6 +678,28 @@ async def test_the_pcr_futures_hedge_gets_the_intraday_ma_version_and_no_run_mov
     version = await newest(strategy_of[ids[0]])
     assert version.version_number == 12 and 'MA_TIMEFRAME, MA_CANDLES = "15m", 8' in version.python_code
     assert "ENTRY_START, SQUARE_OFF = time(9, 30), time(15, 0)" in version.python_code and "_roll_option" not in version.python_code
+    assert "def ma_stop_due(bias: str, newest: dict" in version.python_code  # the code it is now
     assert (await newest(strategy_of[ids[1]])).version_number == 11
     for run_id in ids:  # backtest first: no card moves
         assert (await db_session.get(PaperNativeDeployment, run_id)).strategy_version_id == before[run_id]
+
+
+async def test_the_pcr_futures_hedge_card_moves_to_the_candle_close_stop(db_engine, db_session):
+    intraday = "# Nifty PCR Futures Hedge, intraday of 15 Oct\n"
+    running = await _deployment(db_session, "candle_a@tradingmaster.internal", intraday)
+    edited = await _deployment(db_session, "candle_b@tradingmaster.internal", "# Nifty PCR Futures Hedge, edited by hand\n")
+    ids, before = [running.id, edited.id], {d.id: d.strategy_version_id for d in (running, edited)}
+    await db_session.commit()
+
+    migration = _load("c4e6a8b0d2f3_pcr_futures_hedge_stop_on_candle_close")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    migration.FROM_MD5S = {hashlib.md5(intraday.encode()).hexdigest()}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and "def ma_stop_due(bias: str, newest: dict" in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]

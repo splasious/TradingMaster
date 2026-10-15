@@ -158,8 +158,10 @@ def test_the_ma_is_eight_candles_of_ohlc_over_4():
     bars = [bar(100, 100, 100, 100)] * 2 + [bar(100, 120, 90, 110)] * 7 + [bar(200, 200, 200, 200)]
     assert hedge.moving_average(bars) == pytest.approx((105 * 7 + 200) / 8)  # the last 8 only
     assert hedge.moving_average(bars[:7]) is None
-    assert hedge.ma_stop_due("bullish", 99.9, 100) and not hedge.ma_stop_due("bullish", 100.1, 100)
-    assert hedge.ma_stop_due("bearish", 100.1, 100) and not hedge.ma_stop_due("bearish", 99.9, 100)
+    candle = {"ts": at(1, 10, 0).astimezone(timezone.utc), "close": 99.9}  # ends 10:15
+    assert hedge.ma_stop_due("bullish", candle, 100, at(1, 10, 5)) and not hedge.ma_stop_due("bearish", candle, 100, at(1, 10, 5))
+    assert not hedge.ma_stop_due("bullish", candle, 100, at(1, 10, 15))  # closed by the entry: doesn't count
+    assert hedge.ma_stop_due("bearish", {**candle, "close": 100.1}, 100, at(1, 10, 5))
 
 
 def test_the_ma_counts_only_with_recent_candles():
@@ -255,25 +257,26 @@ async def test_the_first_entry_is_at_0930_on_the_previous_sessions_ma(market):
     assert ctx.state["position"]["bias"] == "bullish" and ctx.state["position"]["ma_at_entry"] == 23400.0
 
 
-async def test_the_trailing_stop_closes_a_bullish_trade_and_it_re_enters_after_a_15_min_close_back_above(market):
+async def test_the_trailing_stop_closes_a_bullish_trade_on_a_15_min_close_below_the_ma_and_it_re_enters_after_one_above(market):
     await market.history(23400.0, at(1, 10, 0))  # MA 23400
     market.prices(at(1, 10, 0, 5))
     await market.check(at(1, 10, 0, 5), 1.20)
 
-    market.prices(at(1, 10, 5), spot=23390.0)  # NIFTY under the MA: stopped, PCR still bullish
-    stopped = await market.check(at(1, 10, 5), 1.20)
+    market.prices(at(1, 10, 5), spot=23390.0)  # a dip under the MA mid-candle: held (15 Oct, closed at 14:24)
+    dip = await market.check(at(1, 10, 5), 1.20)
+    assert dip.state["position"] is not None and "stop on a 15-min close below it" in dip._last_reason
+
+    await market.candles(at(1, 10, 0), at(1, 10, 0), 23380.0)  # 10:00-10:15 closes under the MA (23397.5): stopped
+    market.prices(at(1, 10, 15, 40), spot=23390.0)
+    stopped = await market.check(at(1, 10, 15, 40), 1.20)
     [trade] = await market.trades()
     assert stopped.state["position"] is None and trade.exit_reason == "ma_stop"
-    assert "closed bullish (trailing stop: NIFTY 23,390.0 vs MA 23,400.0)" in stopped._last_reason
+    assert "closed bullish (trailing stop: 10:15 close 23,380.0 vs MA 23,397.5)" in stopped._last_reason
     assert stopped.state["_ma_stop"]["bias"] == "bullish"
 
-    market.prices(at(1, 10, 10))  # NIFTY back over the MA, but no 15-min candle has closed since the stop
-    wait = await market.check(at(1, 10, 10), 1.20)
-    assert wait.state.get("position") is None and "bullish stopped out at 10:05 -- waits for a 15-min close above the MA" in wait._last_reason
-
-    await market.candles(at(1, 10, 0), at(1, 10, 0), 23380.0)  # 10:00-10:15 closes under the MA (23397.5): still waits
-    market.prices(at(1, 10, 15, 30))
-    assert (await market.check(at(1, 10, 15, 30), 1.20)).state.get("position") is None
+    market.prices(at(1, 10, 20))  # NIFTY back over the MA, but no 15-min candle has closed since the stop
+    wait = await market.check(at(1, 10, 20), 1.20)
+    assert wait.state.get("position") is None and "bullish stopped out at 10:15 -- waits for a 15-min close above the MA" in wait._last_reason
 
     await market.candles(at(1, 10, 15), at(1, 10, 15), 23480.0)  # 10:15-10:30 closes over the MA (23407.5): back in
     market.prices(at(1, 10, 30, 30))
@@ -281,12 +284,26 @@ async def test_the_trailing_stop_closes_a_bullish_trade_and_it_re_enters_after_a
     assert back.state["position"]["bias"] == "bullish" and back._last_signal == "LONG_FUT_CE" and "_ma_stop" not in back.state
 
 
-async def test_the_trailing_stop_closes_a_bearish_trade_when_nifty_rises_above_the_ma(market):
+async def test_a_candle_that_closed_before_the_entry_never_stops_it(market):
+    await market.history(23400.0, at(1, 9, 45))
+    await market.candles(at(1, 9, 45), at(1, 9, 45), 23380.0)  # 09:45-10:00 closed under the MA (23397.5)
+    market.prices(at(1, 10, 5))  # 10:05, NIFTY back over it: bullish
+    await market.check(at(1, 10, 5), 1.20)
+    market.prices(at(1, 10, 6))
+    held = await market.check(at(1, 10, 6), 1.20)
+    assert held.state["position"] is not None and "last 10:00 close 23,380.0 vs MA 23,397.5" in held._last_reason
+
+
+async def test_the_trailing_stop_closes_a_bearish_trade_on_a_15_min_close_above_the_ma(market):
     await market.history(23500.0, at(1, 10, 0))  # MA 23500
     market.prices(at(1, 10, 0, 5))
     await market.check(at(1, 10, 0, 5), 0.85)
     market.prices(at(1, 10, 5), spot=23510.0)
-    out = await market.check(at(1, 10, 5), 0.85)
+    assert (await market.check(at(1, 10, 5), 0.85)).state["position"] is not None  # over the MA mid-candle: held
+
+    await market.candles(at(1, 10, 0), at(1, 10, 0), 23520.0)  # closes over the MA (23502.5)
+    market.prices(at(1, 10, 15, 40), spot=23510.0)
+    out = await market.check(at(1, 10, 15, 40), 0.85)
     [trade] = await market.trades()
     assert out.state["position"] is None and trade.exit_reason == "ma_stop"
     assert trade.pnl == pytest.approx(-QTY * 60 + QTY * 60)  # short future -60/unit, the put 60 cheaper
