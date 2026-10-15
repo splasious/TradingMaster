@@ -126,7 +126,7 @@ jobs:
           try:
               s = get_settings()
               me = json.load(urllib.request.urlopen('https://api.telegram.org/bot' + s.telegram_bot_token + '/getMe', timeout=15))
-              print('yes' if hashlib.md5(me['result']['username'].lower().encode()).hexdigest() == 'b86eed304ebbb16bedd3e0f55f847aad' else 'no')
+              print('yes' if hashlib.md5(me['result']['username'].lower().encode()).hexdigest() == '8c50cd9b733b12d7d50a2a2d81d34ef6' else 'no')
           except Exception:
               print('error')
           " 2>/dev/null || echo "unavailable"
