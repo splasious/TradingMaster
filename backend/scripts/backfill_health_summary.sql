@@ -1342,6 +1342,17 @@ FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE '
 GROUP BY i.expiry ORDER BY i.expiry;
 
 \echo
+\echo '== AM0. Strategies named like AM OP (any code): each version, its code md5 and whether it is the built-in (6386eaee... on 15 Oct), and the paper runs on it'
+SELECT trim(s.name) AS strategy, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
+       to_char(v.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS version_saved_ist,
+       d.status AS run_status, to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS run_last_ist,
+       d.state::jsonb -> 'position' ->> 'regime' AS regime,
+       (SELECT count(*) FROM live_native_deployments x WHERE x.paper_deployment_id = d.id AND x.status IN ('active', 'paused')) AS live_runs
+FROM strategies s JOIN strategy_versions v ON v.strategy_id = s.id
+LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id AND d.status IN ('active', 'paused')
+WHERE s.name ILIKE '%AM OP%'
+ORDER BY 1, 2;
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
