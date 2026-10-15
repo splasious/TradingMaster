@@ -1,17 +1,21 @@
-"""Nifty PCR Futures Hedge (native_strategies/nifty_pcr_futures_hedge.py):
-PCR below 0.75 -> short future + short ITM PUT, out above 0.80; above 1.25
--> long future + short ITM CALL, out below 1.20; the option rolls at 09:20
-on its expiry day, the future at 15:00 the trading day before its expiry.
-A future books only its profit or loss (native_runner.open_leg/close_leg)."""
+"""Nifty PCR Futures Hedge (native_strategies/nifty_pcr_futures_hedge.py),
+intraday since 15 Oct: PCR below 0.90 with NIFTY 50 under its MA -> short
+future + short ITM PUT, out above 1.05; above 1.10 with NIFTY over the MA ->
+long future + short ITM CALL, out below 0.95. The MA -- 8 completed 15-minute
+NIFTY 50 candles' (O+H+L+C)/4 -- trails: NIFTY crossing it closes the trade,
+and that side re-enters after a 15-minute close back across it. Entries
+09:30-15:00, everything closed at 15:00. A future books only its profit or
+loss (native_runner.open_leg/close_leg)."""
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 
 import app.services.strategy.native_strategies.nifty_pcr_futures_hedge as hedge
 from app.models.instrument import Instrument
+from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
@@ -74,6 +78,7 @@ class Market:
         ]
         db.add_all([self.oct_fut, self.nov_fut, *self.options])
         await db.commit()
+        self.monkeypatch.setattr(hedge, "note_native_candle_demand", lambda *a, **k: None, raising=False)
 
         async def get_pcr(ctx, *args, **kwargs):
             return self.pcr
@@ -98,11 +103,28 @@ class Market:
 
     async def check(self, now: datetime, pcr: float | None) -> NativeContext:
         self.pcr = pcr
-        ctx = NativeContext(db=self.db, portfolio=self.portfolio, deployment=self.deployment, state=self.deployment.state or {}, now=now)
+        ctx = NativeContext(db=self.db, portfolio=self.portfolio, deployment=self.deployment, state=self.deployment.state or {},
+                            now=now.astimezone(timezone.utc))  # as the runner passes it
         await hedge.evaluate(ctx)
         self.deployment.state = ctx.state
         await self.db.commit()
         return ctx
+
+    async def candles(self, first: datetime, last: datetime, level: float) -> None:
+        """NIFTY 50 15-minute candles opening at `first` .. `last` (same
+        day), each flat at `level` -- so (O+H+L+C)/4 = `level`."""
+        ts = first
+        while ts <= last:
+            self.db.add(OhlcvCandle(instrument_id=self.nifty.id, timeframe="15m", ts=ts.astimezone(timezone.utc),
+                                    open=level, high=level, low=level, close=level, volume=None, source="test"))
+            ts += timedelta(minutes=15)
+        await self.db.commit()
+
+    async def history(self, level: float, until: datetime) -> None:
+        """The MA at `level`: 30 Sep 13:00-15:15, then 1 Oct's candles opening before `until`."""
+        await self.candles(at(30, 13, 0, month=9), at(30, 15, 15, month=9), level)
+        if until > at(1, 9, 15):
+            await self.candles(at(1, 9, 15), until - timedelta(minutes=15), level)
 
     async def trades(self) -> list[PaperNativeTrade]:
         return (await self.db.execute(select(PaperNativeTrade).order_by(PaperNativeTrade.closed_at))).scalars().all()
@@ -116,22 +138,42 @@ async def market(db_session, monkeypatch):
 
 
 def test_the_rules():
-    assert hedge.entry_bias(0.74) == "bearish" and hedge.entry_bias(0.75) is None and hedge.entry_bias(1.26) == "bullish"
-    assert hedge.exit_due("bearish", 0.81) and not hedge.exit_due("bearish", 0.80) and hedge.exit_due("bullish", 1.19)
+    assert hedge.entry_bias(0.89) == "bearish" and hedge.entry_bias(0.90) is None and hedge.entry_bias(1.10) is None
+    assert hedge.entry_bias(1.11) == "bullish"
+    assert hedge.exit_due("bearish", 1.06) and not hedge.exit_due("bearish", 1.05)
+    assert hedge.exit_due("bullish", 0.94) and not hedge.exit_due("bullish", 0.95)
     assert hedge.futures_roll_day(date(2026, 10, 27)) == date(2026, 10, 26)
     assert hedge.futures_roll_day(date(2026, 10, 6)) == date(2026, 10, 5)  # Monday, 2 Oct's holiday is before
-    assert not hedge.option_roll_due(date(2026, 10, 6), at(6, 9, 19, 59)) and hedge.option_roll_due(date(2026, 10, 6), at(6, 9, 20))
-    assert hedge.option_roll_due(date(2026, 10, 6), at(7, 9, 15))  # missed: rolled at the next check
-    assert not hedge.futures_roll_due(date(2026, 10, 27), at(26, 14, 59)) and hedge.futures_roll_due(date(2026, 10, 27), at(26, 15, 0))
     # ITM closest to 150; the shallowest ITM when every one costs more.
     assert hedge.pick_strike([(23500, 110.0), (23550, 160.0), (23600, 210.0), (23400, 60.0)], "PE", SPOT) == (23550, 160.0)
     assert hedge.pick_strike([(23500, 200.0), (23550, 250.0)], "PE", SPOT) == (23500, 200.0)
     assert hedge.pick_strike([(23400, 110.0), (23350, 160.0), (23500, 150.0)], "CE", SPOT) == (23350, 160.0)
 
 
-async def test_bearish_enters_below_075_and_both_legs_exit_above_080(market):
+def test_the_ma_is_eight_candles_of_ohlc_over_4():
+    def bar(o, h, lo, c):
+        return {"open": o, "high": h, "low": lo, "close": c}
+
+    assert hedge.typical(bar(100, 120, 90, 110)) == 105
+    bars = [bar(100, 100, 100, 100)] * 2 + [bar(100, 120, 90, 110)] * 7 + [bar(200, 200, 200, 200)]
+    assert hedge.moving_average(bars) == pytest.approx((105 * 7 + 200) / 8)  # the last 8 only
+    assert hedge.moving_average(bars[:7]) is None
+    assert hedge.ma_stop_due("bullish", 99.9, 100) and not hedge.ma_stop_due("bullish", 100.1, 100)
+    assert hedge.ma_stop_due("bearish", 100.1, 100) and not hedge.ma_stop_due("bearish", 99.9, 100)
+
+
+def test_the_ma_counts_only_with_recent_candles():
+    assert hedge.ma_is_current(at(1, 10, 0), at(1, 10, 30)) and not hedge.ma_is_current(at(1, 10, 0), at(1, 10, 31))
+    # At the open the previous session's last candle counts, for the first half hour.
+    assert hedge.ma_is_current(at(30, 15, 30, month=9), at(1, 9, 30)) and not hedge.ma_is_current(at(30, 15, 30, month=9), at(1, 9, 46))
+    assert hedge.ma_is_current(at(1, 15, 30), at(5, 9, 20))  # Monday after Thursday: 2 Oct and the weekend shut
+    assert not hedge.ma_is_current(at(29, 15, 30, month=9), at(1, 9, 30))  # two sessions back: behind
+
+
+async def test_bearish_enters_below_090_under_the_ma_and_both_legs_exit_above_105(market):
+    await market.history(23500.0, at(1, 10, 0))  # MA 23500, NIFTY 23450 under it
     market.prices(at(1, 10, 0, 5))
-    ctx = await market.check(at(1, 10, 0, 5), 0.70)
+    ctx = await market.check(at(1, 10, 0, 5), 0.85)
 
     legs = ctx.state["position"]["legs"]
     assert ctx.state["position"]["bias"] == "bearish" and ctx._last_signal == "SHORT_FUT_PE"
@@ -140,123 +182,158 @@ async def test_bearish_enters_below_075_and_both_legs_exit_above_080(market):
     # 6 Oct weekly, ITM put closest to 150: 23550 (100 in the money + 60 = 160).
     assert (legs["option"]["symbol"], legs["option"]["side"], legs["option"]["entry_price"]) == ("NIFTY26100623550PE", "sell", 160.0)
     assert market.portfolio.cash == CASH + QTY * 160.0  # the premium only -- the future moves no cash
+    assert "NIFTY 23,450.0 vs MA 23,500.0" in ctx._last_reason
 
-    market.prices(at(1, 10, 15, 5))
-    held = await market.check(at(1, 10, 15, 5), 0.78)  # between 0.75 and 0.80: held
-    assert held.state["position"] is not None and held._last_action == "hold"
+    market.prices(at(1, 10, 10))
+    held = await market.check(at(1, 10, 10), 1.04)  # PCR up to 1.04, NIFTY still under the MA: held
+    assert held.state["position"] is not None and held._last_action == "hold" and "exit above 1.05" in held._last_reason
 
     # NIFTY falls 100: the short future gains 100/unit, the put costs 100 more.
-    market.prices(at(1, 10, 30, 5), spot=SPOT - 100)
-    out = await market.check(at(1, 10, 30, 5), 0.81)
+    market.prices(at(1, 10, 14), spot=SPOT - 100)
+    out = await market.check(at(1, 10, 14), 1.06)
     assert out.state["position"] is None and out._last_signal == "COVER"
     [trade] = await market.trades()
-    assert trade.exit_reason == "pcr_above_0.80" and len(trade.legs) == 2
+    assert trade.exit_reason == "pcr_above_1.05" and len(trade.legs) == 2
     assert trade.pnl == pytest.approx(QTY * 100 - QTY * 100)  # +65,000 future, -65,000 put
     assert market.portfolio.cash == pytest.approx(CASH + trade.pnl)
 
 
-async def test_bullish_enters_above_125_and_exits_below_120(market):
+async def test_bullish_enters_above_110_over_the_ma_and_exits_below_095(market):
+    await market.history(23400.0, at(1, 11, 0))  # MA 23400, NIFTY 23450 over it
     market.prices(at(1, 11, 0, 5))
-    ctx = await market.check(at(1, 11, 0, 5), 1.30)
+    ctx = await market.check(at(1, 11, 0, 5), 1.20)
     legs = ctx.state["position"]["legs"]
     assert ctx._last_signal == "LONG_FUT_CE" and legs["future"]["side"] == "buy"
     assert (legs["option"]["symbol"], legs["option"]["entry_price"]) == ("NIFTY26100623350CE", 160.0)  # 100 ITM + 60
 
-    market.prices(at(1, 11, 15, 5), spot=SPOT + 40)
-    held = await market.check(at(1, 11, 15, 5), 1.21)
-    assert held.state["position"] is not None
+    market.prices(at(1, 11, 5), spot=SPOT + 40)
+    assert (await market.check(at(1, 11, 5), 0.96)).state["position"] is not None
 
-    market.prices(at(1, 11, 30, 5), spot=SPOT + 40)
-    out = await market.check(at(1, 11, 30, 5), 1.19)
+    market.prices(at(1, 11, 10), spot=SPOT + 40)
+    out = await market.check(at(1, 11, 10), 0.94)
     [trade] = await market.trades()
-    assert out.state["position"] is None and trade.exit_reason == "pcr_below_1.20"
+    assert out.state["position"] is None and trade.exit_reason == "pcr_below_0.95"
     assert trade.pnl == pytest.approx(QTY * 40 - QTY * 40)  # long future +40/unit, short call -40/unit
     assert market.portfolio.cash == pytest.approx(CASH + trade.pnl)
 
 
-async def test_no_entry_outside_the_window_in_the_neutral_zone_or_without_both_prices(market):
-    market.prices(at(1, 9, 40))
-    assert (await market.check(at(1, 9, 40), 0.70)).state.get("position") is None  # before 09:45
+async def test_no_entry_with_nifty_on_the_wrong_side_of_the_ma_or_without_an_ma(market):
+    market.prices(at(1, 10, 0, 5))
+    no_ma = await market.check(at(1, 10, 0, 5), 0.85)  # no candles at all
+    assert no_ma.state.get("position") is None and "no MA: fewer than 8 NIFTY 15-min candles" in no_ma._last_reason
+
+    await market.history(23400.0, at(1, 10, 0))  # MA 23400: NIFTY 23450 is over it
+    wrong_side = await market.check(at(1, 10, 0, 6), 0.85)
+    assert wrong_side.state.get("position") is None and "bearish waits for NIFTY below the MA" in wrong_side._last_reason
+
+    market.prices(at(1, 11, 0))
+    behind = await market.check(at(1, 11, 0), 1.20)  # the newest candle ended at 10:00: an hour behind
+    assert behind.state.get("position") is None and "NIFTY 15-min candles behind" in behind._last_reason
+    assert market.portfolio.cash == CASH
+
+
+async def test_no_entry_outside_09_30_to_15_00_in_the_neutral_zone_or_without_both_prices(market):
+    await market.history(23400.0, at(1, 10, 0))
+    market.prices(at(1, 9, 29, 55))
+    early = await market.check(at(1, 9, 29, 55), 1.20)
+    assert early.state.get("position") is None and "entries 09:30-15:00" in early._last_reason
     market.prices(at(1, 10, 0))
     flat = await market.check(at(1, 10, 0), 1.00)
-    assert flat.state.get("position") is None and "enters below 0.75 or above 1.25" in flat._last_reason
+    assert flat.state.get("position") is None and "enters below 0.90 (NIFTY under the MA) or above 1.10 (over it)" in flat._last_reason
     assert (await market.check(at(1, 10, 1), None)).state.get("position") is None  # no PCR record
 
     market.prices(at(1, 10, 5), skip=(market.oct_fut,))
-    missing = await market.check(at(1, 10, 5), 0.70)
+    missing = await market.check(at(1, 10, 5), 1.20)
     assert missing.state.get("position") is None and "no live price for NIFTY26OCTFUT" in missing._last_reason
     assert market.portfolio.cash == CASH  # neither leg opened
 
 
-async def test_a_jump_from_bearish_to_bullish_exits_and_enters_on_the_same_check(market):
-    market.prices(at(1, 10, 0))
-    await market.check(at(1, 10, 0), 0.70)
-    market.prices(at(1, 10, 15))
-    ctx = await market.check(at(1, 10, 15), 1.30)
-    assert ctx.state["position"]["bias"] == "bullish" and ctx._last_signal == "LONG_FUT_CE"
-    assert "closed bearish" in ctx._last_reason
-    assert [t.exit_reason for t in await market.trades()] == ["pcr_above_0.80"]
+async def test_the_first_entry_is_at_0930_on_the_previous_sessions_ma(market):
+    await market.history(23400.0, at(1, 9, 15))  # 30 Sep's candles only
+    market.prices(at(1, 9, 30, 5))
+    ctx = await market.check(at(1, 9, 30, 5), 1.20)
+    assert ctx.state["position"]["bias"] == "bullish" and ctx.state["position"]["ma_at_entry"] == 23400.0
 
 
-async def test_the_option_rolls_to_next_week_at_0920_on_its_expiry_day(market):
-    market.prices(at(1, 10, 0))
-    await market.check(at(1, 10, 0), 0.70)
-    future_before = market.deployment.state["position"]["legs"]["future"]
+async def test_the_trailing_stop_closes_a_bullish_trade_and_it_re_enters_after_a_15_min_close_back_above(market):
+    await market.history(23400.0, at(1, 10, 0))  # MA 23400
+    market.prices(at(1, 10, 0, 5))
+    await market.check(at(1, 10, 0, 5), 1.20)
 
-    market.prices(at(6, 9, 19, 50))
-    early = await market.check(at(6, 9, 19, 50), 0.78)
-    assert early.state["position"]["legs"]["option"]["expiry"] == "2026-10-06" and not await market.trades()
-
-    market.prices(at(6, 9, 20, 5))
-    ctx = await market.check(at(6, 9, 20, 5), 0.78)
-    legs = ctx.state["position"]["legs"]
-    # 13 Oct weekly: even the shallowest ITM put costs 200 (50 + 150) -- taken.
-    assert (legs["option"]["symbol"], legs["option"]["entry_price"]) == ("NIFTY26101323500PE", 200.0)
-    assert legs["future"] == future_before and ctx._last_signal == "ROLL"
+    market.prices(at(1, 10, 5), spot=23390.0)  # NIFTY under the MA: stopped, PCR still bullish
+    stopped = await market.check(at(1, 10, 5), 1.20)
     [trade] = await market.trades()
-    assert trade.exit_reason == "option_rollover" and len(trade.legs) == 1 and trade.legs[0]["exit_price"] == 160.0  # 6 Oct 23550 PE bought back
+    assert stopped.state["position"] is None and trade.exit_reason == "ma_stop"
+    assert "closed bullish (trailing stop: NIFTY 23,390.0 vs MA 23,400.0)" in stopped._last_reason
+    assert stopped.state["_ma_stop"]["bias"] == "bullish"
 
-    # A new entry on an expiry day takes next week's option too.
-    market.prices(at(6, 10, 0))
-    await market.check(at(6, 10, 0), 0.81)  # exit
-    market.prices(at(6, 10, 15))
-    again = await market.check(at(6, 10, 15), 0.70)
-    assert again.state["position"]["legs"]["option"]["expiry"] == "2026-10-13"
+    market.prices(at(1, 10, 10))  # NIFTY back over the MA, but no 15-min candle has closed since the stop
+    wait = await market.check(at(1, 10, 10), 1.20)
+    assert wait.state.get("position") is None and "bullish stopped out at 10:05 -- waits for a 15-min close above the MA" in wait._last_reason
+
+    await market.candles(at(1, 10, 0), at(1, 10, 0), 23380.0)  # 10:00-10:15 closes under the MA (23397.5): still waits
+    market.prices(at(1, 10, 15, 30))
+    assert (await market.check(at(1, 10, 15, 30), 1.20)).state.get("position") is None
+
+    await market.candles(at(1, 10, 15), at(1, 10, 15), 23480.0)  # 10:15-10:30 closes over the MA (23407.5): back in
+    market.prices(at(1, 10, 30, 30))
+    back = await market.check(at(1, 10, 30, 30), 1.20)
+    assert back.state["position"]["bias"] == "bullish" and back._last_signal == "LONG_FUT_CE" and "_ma_stop" not in back.state
 
 
-async def test_the_future_rolls_to_next_month_at_1500_the_day_before_expiry(market):
-    market.prices(at(26, 10, 0))
-    entered = await market.check(at(26, 10, 0), 1.30)
-    # From the roll day on, an entry takes next month's future.
-    assert entered.state["position"]["legs"]["future"]["symbol"] == "NIFTY26NOVFUT"
-    await market.check(at(26, 10, 15), 1.19)  # out again
-    market.deployment.state = None
-    await market.db.commit()
+async def test_the_trailing_stop_closes_a_bearish_trade_when_nifty_rises_above_the_ma(market):
+    await market.history(23500.0, at(1, 10, 0))  # MA 23500
+    market.prices(at(1, 10, 0, 5))
+    await market.check(at(1, 10, 0, 5), 0.85)
+    market.prices(at(1, 10, 5), spot=23510.0)
+    out = await market.check(at(1, 10, 5), 0.85)
+    [trade] = await market.trades()
+    assert out.state["position"] is None and trade.exit_reason == "ma_stop"
+    assert trade.pnl == pytest.approx(-QTY * 60 + QTY * 60)  # short future -60/unit, the put 60 cheaper
 
-    market.prices(at(23, 10, 0))
-    await market.check(at(23, 10, 0), 1.30)  # Fri 23 Oct: October's future
-    assert market.deployment.state["position"]["legs"]["future"]["symbol"] == "NIFTY26OCTFUT"
-    market.deployment.state["position"]["legs"]["option"]["expiry"] = "2026-10-27"  # keep the option out of this test
 
-    market.prices(at(26, 14, 59, 50), futures=SPOT + 80)
-    early = await market.check(at(26, 14, 59, 50), 1.30)
-    assert early.state["position"]["legs"]["future"]["symbol"] == "NIFTY26OCTFUT"
+async def test_a_jump_from_bearish_to_bullish_exits_and_enters_on_the_same_check(market):
+    await market.history(23500.0, at(1, 10, 0))
+    market.prices(at(1, 10, 0))
+    await market.check(at(1, 10, 0), 0.85)
+    market.prices(at(1, 10, 5), spot=23550.0)  # over the MA, PCR 1.20: the PCR exit, then bullish
+    ctx = await market.check(at(1, 10, 5), 1.20)
+    assert ctx.state["position"]["bias"] == "bullish" and ctx._last_signal == "LONG_FUT_CE"
+    assert "closed bearish (PCR 1.200)" in ctx._last_reason
+    assert [t.exit_reason for t in await market.trades()] == ["pcr_above_1.05"]
 
-    trades_before = len(await market.trades())
-    market.prices(at(26, 15, 0, 5), futures=SPOT + 80)
-    ctx = await market.check(at(26, 15, 0, 5), 1.30)
-    future = ctx.state["position"]["legs"]["future"]
-    assert (future["symbol"], future["side"], future["entry_price"]) == ("NIFTY26NOVFUT", "buy", SPOT + 80 + 120)
-    rolled = (await market.trades())[trades_before:]
-    assert [t.exit_reason for t in rolled] == ["futures_rollover"] and rolled[0].pnl == pytest.approx(QTY * 50)  # 23480 -> 23530
+
+async def test_everything_closes_at_1500_and_nothing_enters_after(market):
+    await market.history(23400.0, at(1, 14, 45))
+    market.prices(at(1, 14, 0))
+    held = await market.check(at(1, 14, 0), 1.20)
+    assert held.state["position"] is not None and held._wake_at == at(1, 15, 0).astimezone(timezone.utc)
+
+    market.prices(at(1, 15, 0))
+    out = await market.check(at(1, 15, 0), 1.20)
+    assert out.state["position"] is None and out._last_action == "exited" and "15:00 exit" in out._last_reason
+    assert [t.exit_reason for t in await market.trades()] == ["square_off_1500"]
+    market.prices(at(1, 15, 5))
+    after = await market.check(at(1, 15, 5), 1.20)
+    assert after.state.get("position") is None and "entries 09:30-15:00" in after._last_reason
+
+
+async def test_a_position_from_an_earlier_day_is_closed_at_the_first_check(market):
+    await market.history(23400.0, at(1, 11, 0))
+    market.prices(at(1, 11, 0, 5))
+    await market.check(at(1, 11, 0, 5), 1.20)  # held past 15:00 (the card was stopped then)
+    market.prices(at(5, 9, 15, 10))
+    out = await market.check(at(5, 9, 15, 10), 1.20)
+    assert out.state["position"] is None and [t.exit_reason for t in await market.trades()] == ["carried_overnight"]
 
 
 async def test_stop_and_exit_closes_both_legs(market):
+    await market.history(23500.0, at(1, 10, 0))
     market.prices(at(1, 10, 0))
-    await market.check(at(1, 10, 0), 0.70)
+    await market.check(at(1, 10, 0), 0.85)
     market.deployment.state = {**market.deployment.state, "force_exit": True}
     market.prices(at(1, 10, 1))
-    ctx = await market.check(at(1, 10, 1), 0.70)  # still bearish: closed because it was asked
+    ctx = await market.check(at(1, 10, 1), 0.85)  # still bearish: closed because it was asked
     assert ctx.state["position"] is None and [t.exit_reason for t in await market.trades()] == ["manual"]
 
 
@@ -277,8 +354,9 @@ async def test_a_future_books_only_its_profit_or_loss(market):
 async def test_the_card_shows_the_future_as_profit_or_loss(market):
     from app.api.v1.endpoints.paper_native_trading import _build_position_out
 
+    await market.history(23500.0, at(1, 10, 0))
     market.prices(at(1, 10, 0))
-    await market.check(at(1, 10, 0), 0.70)
+    await market.check(at(1, 10, 0), 0.85)
     market.prices(at(1, 10, 5), spot=SPOT - 100)  # future +100/unit (short), put -100/unit
     out = await _build_position_out(market.db, market.deployment.state)
     assert out.trade_value == pytest.approx(QTY * 160.0) and out.live_value == pytest.approx(QTY * 260.0)  # the put only
@@ -293,55 +371,3 @@ async def test_a_backtest_books_a_future_the_same_way(market):
     assert market.portfolio.cash == CASH
     await ctx.close_leg(market.oct_fut, "sell", QTY, 23500.0, entry_price=23480.0)
     assert market.portfolio.cash == pytest.approx(CASH + QTY * 20)
-
-
-async def _carried_bullish(market) -> None:
-    """Monday 5 Oct: bullish at 11:00, still held at the close (1.22)."""
-    market.prices(at(5, 11, 0, 5))
-    await market.check(at(5, 11, 0, 5), 1.30)
-    market.prices(at(5, 15, 29, 55))
-    assert (await market.check(at(5, 15, 29, 55), 1.22)).state["position"] is not None
-
-
-async def test_a_position_held_overnight_reacts_from_0915_the_next_morning(market):
-    """Entries from flat wait for 09:45; a position carried from the day
-    before doesn't -- its exit is checked from the first run after 09:15."""
-    await _carried_bullish(market)
-
-    market.prices(at(6, 9, 15, 10))
-    held = await market.check(at(6, 9, 15, 10), 1.21)  # Tuesday 09:15, still above 1.20: held, not "outside the window"
-    assert held.state["position"] is not None and held._last_action == "hold" and "exit below 1.20" in held._last_reason
-
-    market.prices(at(6, 9, 15, 20), spot=SPOT - 50)
-    out = await market.check(at(6, 9, 15, 20), 1.10)  # the next check, below 1.20: both legs closed at 09:15
-    [trade] = await market.trades()
-    assert out.state["position"] is None and trade.exit_reason == "pcr_below_1.20"
-    assert "enters below 0.75 or above 1.25" in out._last_reason  # neutral: flat, but entries are open from 09:15 today
-
-
-async def test_a_carried_position_flips_into_the_other_side_at_0915(market):
-    await _carried_bullish(market)
-
-    market.prices(at(6, 9, 15, 10))
-    ctx = await market.check(at(6, 9, 15, 10), 0.70)  # below 0.75 at the open: bullish out, bearish in, same check
-    assert ctx.state["position"]["bias"] == "bearish" and ctx._last_signal == "SHORT_FUT_PE"
-    assert "closed bullish" in ctx._last_reason
-    assert [t.exit_reason for t in await market.trades()] == ["pcr_below_1.20"]
-
-
-async def test_after_a_carried_exit_an_entry_before_0945_is_taken_that_day_only(market):
-    await _carried_bullish(market)
-
-    market.prices(at(6, 9, 15, 10))
-    assert (await market.check(at(6, 9, 15, 10), 1.10)).state["position"] is None  # out, neutral
-    market.prices(at(6, 9, 30, 5))
-    back = await market.check(at(6, 9, 30, 5), 1.30)  # 09:30, before 09:45: entered (the session opened with a carried position)
-    assert back.state["position"]["bias"] == "bullish" and back._last_signal == "LONG_FUT_CE"
-
-    market.prices(at(6, 10, 0, 5))
-    await market.check(at(6, 10, 0, 5), 1.10)  # out again at 10:00: flat into Wednesday
-    market.prices(at(7, 9, 30, 5))
-    wed = await market.check(at(7, 9, 30, 5), 0.70)  # Wednesday opened flat: a new entry waits for 09:45
-    assert wed.state.get("position") is None and "entries 09:45-15:00" in wed._last_reason
-    market.prices(at(7, 9, 45, 5))
-    assert (await market.check(at(7, 9, 45, 5), 0.70)).state["position"]["bias"] == "bearish"
