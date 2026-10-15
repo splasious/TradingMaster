@@ -77,10 +77,12 @@ def _lakh(value: float | None, signed: bool = False) -> str:
 
 
 def _table(title: str, levels: list[Level], spot: float, change_label: str) -> list[str]:
+    """`levels` most OI first; listed lowest strike first (15 Oct), each
+    with its OI rank in the # column."""
     lines = [title, f"#  {'Strike':>6} {'OI(L)':>6} {change_label:>6} {'ΔDay':>6} {'Away':>5}"]
-    for i, lvl in enumerate(levels, start=1):
+    for rank, lvl in sorted(enumerate(levels, start=1), key=lambda ranked: ranked[1].strike):
         lines.append(
-            f"{i}  {lvl.strike:>6,.0f} {_lakh(lvl.oi):>6} {_lakh(lvl.change, True):>6} {_lakh(lvl.change_day, True):>6} "
+            f"{rank}  {lvl.strike:>6,.0f} {_lakh(lvl.oi):>6} {_lakh(lvl.change, True):>6} {_lakh(lvl.change_day, True):>6} "
             f"{lvl.strike - spot:>+5.0f}"
         )
     if not levels:
