@@ -1353,6 +1353,53 @@ LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id AND d.statu
 WHERE s.name ILIKE '%AM OP%'
 ORDER BY 1, 2;
 
+-- AM1. Whether each edit of the AM OP MA exit (15 Oct) finds its place in AM OP TRD 15 MIN's running code (md5 93a247f5...):
+--      how many times each anchor -- built-in code, public -- occurs there (1 = applies). Counts only, no code.
+\echo '== AM1. AM OP MA-exit edits: occurrences of each anchor in the running AM OP TRD 15 MIN code (1 = applies)'
+WITH code AS (
+  SELECT replace(v.python_code, E'\r', '') AS c FROM strategy_versions v JOIN strategies s ON s.id = v.strategy_id
+  WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND md5(replace(v.python_code, E'\r', '')) = '93a247f5b3c48d565d8ea652c192324d'
+  ORDER BY v.version_number DESC LIMIT 1
+), anchors(edit, a) AS (VALUES
+  (0, $amop$      Exit when PCR rises back above 0.80.
+
+$amop$),
+  (1, $amop$import uuid
+from datetime import datetime, time as dtime
+
+$amop$),
+  (2, $amop$
+from app.models.instrument import Instrument
+$amop$),
+  (3, $amop$from app.services.broker.zerodha_broker import IST
+
+$amop$),
+  (4, $amop$SIDEWAYS_EXIT_HIGH = 1.25
+
+$amop$),
+  (5, $amop$    raise ValueError(f"no exit band for regime '{regime}'")
+
+$amop$),
+  (6, $amop$    regime = None
+
+$amop$),
+  (7, $amop$
+        entry_spot = position.get("entry_spot")
+$amop$),
+  (8, $amop$        else:
+            ctx.note("hold", reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved)")
+            return
+$amop$),
+  (9, $amop$            ctx.note("skipped", reason=f"PCR {pcr:.3f} in a hysteresis buffer zone -- no edge either way")
+            return
+$amop$),
+  (10, $amop$        await ctx.open_leg(leg["instrument"], leg["side"], quantity, leg["price"])
+
+$amop$)
+)
+SELECT anchors.edit, (length(code.c) - length(replace(code.c, anchors.a, ''))) / length(anchors.a) AS occurrences
+FROM anchors CROSS JOIN code ORDER BY anchors.edit;
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
