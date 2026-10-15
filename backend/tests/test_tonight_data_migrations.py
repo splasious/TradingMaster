@@ -703,3 +703,49 @@ async def test_the_pcr_futures_hedge_card_moves_to_the_candle_close_stop(db_engi
     assert version.version_number == 12 and "def ma_stop_due(bias: str, newest: dict" in version.python_code
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+
+
+def _before_the_ma_exit(migration) -> str:
+    """The AM OP code the edits were written for: today's built-in with them undone."""
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    for old, new in reversed(migration.EDITS):
+        assert code.count(new) == 1
+        code = code.replace(new, old)
+    return code
+
+
+async def test_am_op_trd_15_min_gets_the_ma_exit_by_its_edits_and_its_card_moves(db_engine, db_session):
+    migration = _load("d5f7b9c1e3a4_am_op_ma_exit")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    before = _before_the_ma_exit(migration)
+    assert _md5_text(before) == "6386eaee813268e9839408a14fafccb6"  # the edits turn the 23 Sep built-in into today's
+    assert migration.edited(before) == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert migration.edited(before.replace("now_utc", "now_at")) is None  # a name the added code uses is gone
+    assert migration.edited(before.replace("    is_rollover = False\n", "    is_rollover = (\n")) is None  # doesn't compile
+
+    running = await _deployment(db_session, "amop_ma_a@tradingmaster.internal", before)
+    (await db_session.get(Strategy, running.strategy_id)).name = "AM OP TRD 15 MIN"
+    other = await _deployment(db_session, "amop_ma_b@tradingmaster.internal", before)  # same code, another strategy's name
+    (await db_session.get(Strategy, other.strategy_id)).name = "AM OP TRAD 15 MIN H"
+    unlike = before.replace("def in_entry_window(t: dtime) -> bool:", "def in_window(t):")
+    no_place = await _deployment(db_session, "amop_ma_c@tradingmaster.internal", unlike)  # an edit has nowhere to go
+    (await db_session.get(Strategy, no_place.strategy_id)).name = "AM OP TRD 15 MIN"
+    ids = [running.id, other.id, no_place.id]
+    versions_before = {d.id: d.strategy_version_id for d in (running, other, no_place)}
+    await db_session.commit()
+
+    migration.FROM_MD5S = {_md5_text(before), _md5_text(unlike)}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    for run_id in ids[1:]:
+        assert (await db_session.get(PaperNativeDeployment, run_id)).strategy_version_id == versions_before[run_id]
+
+
+def _md5_text(code: str) -> str:
+    return hashlib.md5(code.replace("\r", "").encode()).hexdigest()

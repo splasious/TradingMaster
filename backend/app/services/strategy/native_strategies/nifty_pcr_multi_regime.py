@@ -21,6 +21,19 @@ purely from the current (15m-timeframe) PCR reading:
       Bear call credit spread: sell CE at ATM+200, buy CE at ATM+400.
       Exit when PCR rises back above 0.80.
 
+MA exit (15-Oct-2026, as Nifty PCR Futures): the bull put spread also
+closes when a 15-minute NIFTY 50 candle closes below the MA -- the average
+of the last MA_CANDLES (8) completed 15-minute candles' (open + high + low
++ close) / 4, including that candle -- and the bear call spread when one
+closes above it. Only a candle completed after the position opened (or
+was last rolled) counts, acted on when it comes in from Zerodha, within
+about a minute of its close. The straddle has no MA exit. After one, that
+spread opens again only once a later 15-minute candle closes back on its
+side of the MA (bullish: above, bearish: below), the PCR still in its zone
+-- state["_ma_stop"], that day only. With fewer than 8 candles, or NIFTY's
+candles behind (none newer than 30 minutes; at the open, the previous
+session's last), there's no MA: no MA exit, and no wait.
+
 0.75<->0.80 and 1.20<->1.25 are hysteresis buffers: PCR sitting right on a
 boundary can't flip the position every tick, and PCR sitting IN a buffer
 zone with no open position just stays flat (no edge either way).
@@ -79,12 +92,14 @@ ctx.close_leg, ctx.record_trade, ctx.note).
 """
 
 import uuid
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 from sqlalchemy import select
 
+from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.services.broker.zerodha_broker import IST
+from app.services.market_data.nse_holidays import is_trading_holiday
 
 STRIKE_STEP = 100
 OTM_OFFSET = 200            # bullish/bearish short-leg distance from ATM; their hedge leg is a further OTM_OFFSET beyond that (sideways has no hedge leg -- see leg_specs_for)
@@ -105,6 +120,11 @@ BEARISH_EXIT = 0.80
 BULLISH_EXIT = 1.20
 SIDEWAYS_EXIT_LOW = 0.75
 SIDEWAYS_EXIT_HIGH = 1.25
+
+MA_TIMEFRAME, MA_CANDLES = "15m", 8
+BAR = timedelta(minutes=15)
+MA_STALE_AFTER = timedelta(minutes=30)  # newest candle ended longer ago than this: no MA
+MARKET_OPEN = dtime(9, 15)
 
 
 def round_to_nearest_100(spot: float, tie_break: str = "up") -> float:
@@ -140,6 +160,71 @@ def pcr_exit_band(regime: str) -> tuple[float | None, float | None]:
     if regime == "bearish":
         return None, BEARISH_EXIT
     raise ValueError(f"no exit band for regime '{regime}'")
+
+
+def _previous_trading_day(d: date) -> date:
+    d -= timedelta(days=1)
+    while d.weekday() >= 5 or is_trading_holiday(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def moving_average(bars: list[dict]) -> float | None:
+    """The MA of the last MA_CANDLES bars' (open + high + low + close) / 4."""
+    if len(bars) < MA_CANDLES:
+        return None
+    return sum((b["open"] + b["high"] + b["low"] + b["close"]) / 4 for b in bars[-MA_CANDLES:]) / MA_CANDLES
+
+
+def ma_is_current(newest_end: datetime, now_ist: datetime) -> bool:
+    """The newest candle ended at most MA_STALE_AFTER ago -- or, in the
+    session's first half hour, it is the previous session's last."""
+    newest_end = newest_end.astimezone(IST)
+    if newest_end.date() == now_ist.date():
+        return now_ist - newest_end <= MA_STALE_AFTER
+    opening = datetime.combine(now_ist.date(), MARKET_OPEN, tzinfo=IST)
+    return newest_end.date() == _previous_trading_day(now_ist.date()) and now_ist - opening <= MA_STALE_AFTER
+
+
+def closed_against(regime: str, close: float, ma: float) -> bool:
+    """A close on the wrong side of the MA for this spread: under it for the
+    bull put spread, over it for the bear call spread."""
+    return close < ma if regime == "bullish" else close > ma
+
+
+def ma_exit_due(regime: str, newest: dict, ma: float, opened_at: datetime) -> bool:
+    """The spread's MA exit: a candle completed since it opened closed against it."""
+    if regime not in ("bullish", "bearish"):
+        return False
+    ended = as_aware_utc(newest["ts"]) + BAR
+    return ended > opened_at and closed_against(regime, newest["close"], ma)
+
+
+def re_armed(stop: dict, newest: dict | None, ma: float | None) -> bool:
+    """After an MA exit: a candle completed since closed back on the spread's side."""
+    if newest is None or ma is None:
+        return False
+    ended = as_aware_utc(newest["ts"]) + BAR
+    back = newest["close"] > ma if stop["regime"] == "bullish" else newest["close"] < ma
+    return ended > datetime.fromisoformat(stop["at"]) and back
+
+
+async def _ma(ctx, underlying: Instrument, now_ist: datetime) -> tuple[float | None, dict | None]:
+    """(MA, the newest completed 15-minute candle); (None, ...) when there's no MA."""
+    bars = await ctx.get_candles(underlying.id, MA_TIMEFRAME, MA_CANDLES)
+    if len(bars) < MA_CANDLES:
+        return None, None
+    newest = bars[-1]
+    if not ma_is_current(as_aware_utc(newest["ts"]) + BAR, now_ist):
+        return None, newest
+    return moving_average(bars), newest
+
+
+def _candle_text(newest: dict | None, ma: float | None) -> str:
+    if newest is None or ma is None:
+        return "no MA"
+    ended = (as_aware_utc(newest["ts"]) + BAR).astimezone(IST)
+    return f"{ended:%H:%M} close {newest['close']:,.1f} vs MA {ma:,.1f}"
 
 
 def in_entry_window(t: dtime) -> bool:
@@ -224,6 +309,11 @@ async def evaluate(ctx) -> None:
 
     is_rollover = False
     regime = None
+    ma, newest = await _ma(ctx, underlying, now_ist)
+    stop = ctx.state.get("_ma_stop")
+    if stop is not None and datetime.fromisoformat(stop["at"]).astimezone(IST).date() != now_ist.date():
+        ctx.state.pop("_ma_stop")  # an MA exit holds back re-entry that day only
+        stop = None
 
     if position is not None:
         regime = position["regime"]
@@ -247,6 +337,12 @@ async def evaluate(ctx) -> None:
                 ctx.note("exited", signal="COVER", reason=f"PCR {pcr:.3f} left the {regime} band")
                 return
 
+        if ma is not None and ma_exit_due(regime, newest, ma, datetime.fromisoformat(position["opened_at"])):
+            await close_position("ma_exit")
+            ctx.state["_ma_stop"] = {"regime": regime, "at": now_utc.isoformat()}
+            ctx.note("exited", signal="COVER", reason=f"{regime} spread closed on the MA: {_candle_text(newest, ma)}")
+            return
+
         entry_spot = position.get("entry_spot")
         moved = abs(spot - entry_spot) if entry_spot is not None else 0.0
         if entry_spot is not None and moved >= ROLL_TRIGGER:
@@ -254,7 +350,10 @@ async def evaluate(ctx) -> None:
             is_rollover = True
             position = None  # fall through to reopen the SAME regime at the new ATM below, same tick
         else:
-            ctx.note("hold", reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved)")
+            ma_part = ""
+            if regime in ("bullish", "bearish"):
+                ma_part = f" | last {_candle_text(newest, ma)} (MA exit on a 15-min close {'below' if regime == 'bullish' else 'above'} it)"
+            ctx.note("hold", reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved){ma_part}")
             return
 
     if not in_entry_window(now_ist.time()):
@@ -270,6 +369,14 @@ async def evaluate(ctx) -> None:
         regime = determine_regime(pcr)
         if regime == "buffer":
             ctx.note("skipped", reason=f"PCR {pcr:.3f} in a hysteresis buffer zone -- no edge either way")
+            return
+        if stop is not None and stop["regime"] == regime and not re_armed(stop, newest, ma):
+            stopped = datetime.fromisoformat(stop["at"]).astimezone(IST)
+            side = "above" if regime == "bullish" else "below"
+            ctx.note("skipped", reason=(
+                f"PCR {pcr:.3f}: {regime} closed on the MA at {stopped:%H:%M} -- waits for a 15-min close {side} it | "
+                f"last {_candle_text(newest, ma)}"
+            ))
             return
     # else: `regime` was already set above from the position this tick just
     # rolled out of -- a roll always reopens the same position type, never
@@ -304,6 +411,8 @@ async def evaluate(ctx) -> None:
 
     for leg in legs.values():
         await ctx.open_leg(leg["instrument"], leg["side"], quantity, leg["price"])
+    if stop is not None and stop["regime"] == regime:
+        ctx.state.pop("_ma_stop", None)
 
     exit_below, exit_above = pcr_exit_band(regime)
     ctx.state["position"] = {
