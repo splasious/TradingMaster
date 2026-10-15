@@ -116,6 +116,9 @@ jobs:
                 | sed -E 's/\?[^ "]*//; s#/[0-9a-f-]{36}#/{id}#g' | sort | uniq -c | sort -rn | head -10 || true
               echo "-- Zerodha live feed (Kite ticker) now, as /api/v1/system/health reports it (state and error code only):"
               compose exec -T backend python -c "import json, re, urllib.request; c = json.load(urllib.request.urlopen('http://localhost:8000/api/v1/system/health', timeout=20)).get('components', {}).get('kite_ticker', 'missing'); m = re.match(r'error: *([0-9]+)', c); print('error ' + m.group(1) if m else ('error (no code)' if c.startswith('error') else c))" 2>/dev/null || echo "unavailable"
+              echo "-- Telegram alerts set up (bot token and chat ID both set -- yes/no only), and Telegram send failures today (count):"
+              compose exec -T backend python -c "from app.core.config import get_settings as g; s = g(); print('yes' if s.telegram_bot_token and s.telegram_chat_id else 'no')" 2>/dev/null || echo "unavailable"
+              grep -c 'Telegram send failed' /tmp/backend-today.log || true
               echo "-- Kite ticker events today (IST time, event, close/error code) -- no message text:"
               compose logs --since "$since" --no-color --timestamps backend 2>/dev/null \
                 | grep -E 'Kite ticker (connection closed|connection error|refresh failed|: streaming)|Kite allows [0-9]+ per connection' \
