@@ -1342,6 +1342,17 @@ FROM instruments i WHERE i.exchange = 'NFO' AND i.expiry < (now() AT TIME ZONE '
 GROUP BY i.expiry ORDER BY i.expiry;
 
 \echo
+\echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
+SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
+       v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
+       to_char(v.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS version_saved_ist,
+       d.status AS run_status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS run_created_ist,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS run_last_ist, d.state::jsonb -> 'position' ->> 'bias' AS bias
+FROM strategies s JOIN strategy_versions v ON v.strategy_id = s.id
+LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id
+WHERE s.name ILIKE '%PCR Futures%'
+ORDER BY 1, 3;
+
 \echo '== PF1. Nifty PCR Futures Hedge: deployments on its code (version, code md5 -- the built-in of 1 Oct is df0f74e6...), the open position (bias, leg kinds and expiries), last check, closed trades by exit reason, and when the last trade opened and closed (no P and L in this public log)'
 SELECT s.name AS strategy, sv.version_number, md5(replace(sv.python_code, E'\r', '')) AS code_md5, d.status, to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS deployed_ist,
        to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
