@@ -749,3 +749,27 @@ async def test_am_op_trd_15_min_gets_the_ma_exit_by_its_edits_and_its_card_moves
 
 def _md5_text(code: str) -> str:
     return hashlib.md5(code.replace("\r", "").encode()).hexdigest()
+
+
+async def test_am_op_trad_15_min_h_moves_onto_the_built_in_with_the_ma_exit(db_engine, db_session):
+    migration = _load("e6a8c0d2f4b5_am_op_h_ma_exit")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    before = _before_the_ma_exit(_load("d5f7b9c1e3a4_am_op_ma_exit"))  # the 23 Sep built-in
+    assert migration.FROM_MD5S == {_md5_text(before)}
+
+    h = await _deployment(db_session, "amop_h_a@tradingmaster.internal", before)
+    (await db_session.get(Strategy, h.strategy_id)).name = "AM OP TRAD 15 MIN H"
+    other = await _deployment(db_session, "amop_h_b@tradingmaster.internal", before)  # same code, not this strategy
+    (await db_session.get(Strategy, other.strategy_id)).name = "Someone's AM OP"
+    ids, versions_before = [h.id, other.id], {h.id: h.strategy_version_id, other.id: other.strategy_version_id}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "def ma_exit_due(" in version.python_code and moved.state["holdings"]["SBIN"]["quantity"] == 10.0
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == versions_before[ids[1]]
