@@ -23,7 +23,7 @@ import logging
 import httpx
 
 from app.core.config import get_settings
-from app.services.notifications.telegram_group import send_to_group, telegram_to_group
+from app.services.notifications.telegram_group import CAPTION_MAX, post_message, send_to_group, telegram_to_group
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ telegram_allowed: contextvars.ContextVar[bool] = contextvars.ContextVar("telegra
 TELEGRAM_MAX_LEN = 4000
 
 
-async def send_telegram(subject: str, body: str, *, to_group: bool = False) -> None:
+async def send_telegram(subject: str, body: str, *, to_group: bool = False, photo: bytes | None = None) -> None:
     """Never raises: a Telegram timeout/connection error used to propagate
     straight out of the calling strategy's evaluate(), aborting that tick
     part-way -- e.g. after the 9:20 scan had already been marked done but
@@ -47,18 +47,23 @@ async def send_telegram(subject: str, body: str, *, to_group: bool = False) -> N
 
     `to_group` (or the telegram_to_group context): the group as well
     (telegram_group.py) -- after the private chat, and a group failure never
-    costs the private message."""
+    costs the private message.
+
+    `photo` (PNG bytes): sent as a picture with the message as its caption --
+    or, too long for a caption, with the first line alone and the rest after
+    it. Telegram refusing the picture still delivers the text."""
     settings = get_settings()
     if not settings.telegram_bot_token or not settings.telegram_chat_id or not telegram_allowed.get():
         return
 
-    api_url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     full_text = f"<b>{html.escape(subject)}</b>\n<pre>{html.escape(body)}</pre>"
     chunks = _chunk(full_text)
+    if photo is not None and len(full_text) > CAPTION_MAX:
+        chunks = [f"<b>{html.escape(subject)}</b>", *_chunk(f"<pre>{html.escape(body)}</pre>")]
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for chunk in chunks:
-                resp = await client.post(api_url, json={"chat_id": settings.telegram_chat_id, "text": chunk, "parse_mode": "HTML"})
+        async with httpx.AsyncClient(timeout=30.0 if photo is not None else 15.0) as client:
+            for n, chunk in enumerate(chunks):
+                resp = await post_message(client, settings.telegram_bot_token, settings.telegram_chat_id, chunk, photo if n == 0 else None)
                 if resp.status_code != 200:
                     logger.error("Telegram send failed (%s): %s", resp.status_code, resp.text)
     except httpx.HTTPError as exc:
@@ -66,8 +71,8 @@ async def send_telegram(subject: str, body: str, *, to_group: bool = False) -> N
     if not (to_group or telegram_to_group.get()):
         return
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            await send_to_group(client, settings.telegram_bot_token, chunks)
+        async with httpx.AsyncClient(timeout=30.0 if photo is not None else 15.0) as client:
+            await send_to_group(client, settings.telegram_bot_token, chunks, photo)
     except Exception as exc:  # the group is extra: never let it break the caller
         logger.error("Telegram group send failed for %r: %s: %s", subject, type(exc).__name__, exc)
 

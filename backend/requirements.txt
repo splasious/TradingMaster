@@ -20,6 +20,7 @@ numpy>=2.0
 RestrictedPython>=8.5
 psutil>=7.0
 openpyxl>=3.1
+matplotlib>=3.9  # the chart pictures in Telegram trade alerts (notifications/trade_chart.py)
 kiteconnect>=5.0
 pyotp>=2.9
 # Kotak Neo's broker SDK (kotakneoapi, package neo_api_client) is

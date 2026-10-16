@@ -47,6 +47,7 @@ GROUP_STRATEGY_MARKERS = ("F&O Opening-Candle Momentum Scanner",)
 MEMBER_STATUSES = ("creator", "administrator", "member", "restricted")
 GONE_STATUSES = ("left", "kicked")
 RECHECK_AFTER = timedelta(hours=6)
+CAPTION_MAX = 1024  # a picture's caption, in characters
 UPDATE_KINDS = ["message", "edited_message", "my_chat_member"]
 
 # Set by the native runner while a strategy whose alerts go to the group runs.
@@ -191,21 +192,39 @@ async def _mark(chat_id: int, *, moved_to: int | None = None, bot_status: str | 
         await db.commit()
 
 
-async def send_to_group(client: httpx.AsyncClient, token: str, chunks: list[str]) -> bool:
-    """Sends these HTML chunks to the group. False when there's no group to
-    send to (none found, or the bot was removed from it)."""
+def _answer(resp: httpx.Response) -> dict:
+    return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+
+
+async def post_message(client: httpx.AsyncClient, token: str, chat_id: int | str, text: str, photo: bytes | None = None) -> httpx.Response:
+    """sendMessage -- or, with `photo` (PNG bytes), sendPhoto with `text` as
+    its caption (CAPTION_MAX at most). A picture Telegram refuses (a 400 that
+    isn't a group upgrade) goes again as the text alone."""
+    if photo is not None:
+        resp = await client.post(
+            API.format(token=token, method="sendPhoto"), data={"chat_id": str(chat_id), "caption": text, "parse_mode": "HTML"},
+            files={"photo": ("chart.png", photo, "image/png")},
+        )
+        if resp.status_code != 400 or (_answer(resp).get("parameters") or {}).get("migrate_to_chat_id"):
+            return resp
+        logger.warning("Telegram refused the picture (%s): %s -- sent as text", resp.status_code, _answer(resp).get("description"))
+    return await client.post(API.format(token=token, method="sendMessage"), json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+
+
+async def send_to_group(client: httpx.AsyncClient, token: str, chunks: list[str], photo: bytes | None = None) -> bool:
+    """Sends these HTML chunks to the group, `photo` with the first (its
+    caption). False when there's no group to send to (none found, or the
+    bot was removed from it)."""
     global _found
     chat_id = await find_group(client, token)
     if chat_id is None:
         return False
-    for chunk in chunks:
+    for n, chunk in enumerate(chunks):
         for _ in range(2):  # a second go only to an upgraded group's new ID
-            resp = await client.post(
-                API.format(token=token, method="sendMessage"), json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"},
-            )
+            resp = await post_message(client, token, chat_id, chunk, photo if n == 0 else None)
             if resp.status_code == 200:
                 break
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            data = _answer(resp)
             new_id = (data.get("parameters") or {}).get("migrate_to_chat_id")
             if new_id:
                 await _mark(chat_id, moved_to=new_id)

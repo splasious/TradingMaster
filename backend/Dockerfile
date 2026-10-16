@@ -10,6 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # websocket-client, pyotp, structlog, tenacity, python-decouple) are in
 # requirements.txt above.
 RUN pip install --no-cache-dir --no-deps "kotakneoapi==3.0.7"
+# matplotlib's font cache, built here once rather than on the first trade
+# alert after each start (notifications/trade_chart.py).
+RUN python -c "import matplotlib; matplotlib.use('Agg'); import matplotlib.font_manager"
 
 COPY . .
 

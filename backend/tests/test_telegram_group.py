@@ -4,6 +4,7 @@ the group named "Open Interest Bot" -- found from the bot's updates, and
 only with the private chat's owner in it."""
 
 import json
+import re
 
 import httpx
 import pytest
@@ -40,6 +41,8 @@ class FakeTelegram:
         self.removed: set[int] = set()
         self.sent: list[int] = []
         self.offsets: list[int | None] = []
+        self.calls: list[tuple[str, int, str]] = []  # (method, chat ID, text or caption)
+        self.refuse_photos = False
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         method = request.url.path.rsplit("/", 1)[-1]
@@ -51,13 +54,20 @@ class FakeTelegram:
         if method == "getChatMember":
             status = self.members.get((int(request.url.params["chat_id"]), int(request.url.params["user_id"])), "left")
             return httpx.Response(200, json={"ok": True, "result": {"status": status}})
-        chat_id = json.loads(request.content)["chat_id"]
+        if method == "sendPhoto":  # multipart: chat_id, caption, parse_mode, photo
+            fields = dict(re.findall(rb'name="(\w+)"\r\n\r\n(.*?)\r\n--', request.content, re.S))
+            chat_id, text = int(fields[b"chat_id"]), fields[b"caption"].decode()
+            if self.refuse_photos:
+                return httpx.Response(400, json={"ok": False, "description": "Bad Request: PHOTO_INVALID_DIMENSIONS"})
+        else:
+            chat_id, text = json.loads(request.content)["chat_id"], json.loads(request.content)["text"]
         if chat_id in self.moved:
             return httpx.Response(400, json={"ok": False, "description": "Bad Request: group chat was upgraded to a supergroup chat",
                                              "parameters": {"migrate_to_chat_id": self.moved[chat_id]}})
         if chat_id in self.removed:
             return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was kicked from the supergroup chat"})
         self.sent.append(int(chat_id))
+        self.calls.append((method, int(chat_id), text))
         return httpx.Response(200, json={"ok": True, "result": {}})
 
 
@@ -171,3 +181,27 @@ async def test_a_failing_group_never_costs_the_private_message(api, monkeypatch)
     monkeypatch.setattr(telegram, "send_to_group", broken)
     await send_telegram("NIFTY OI levels", "table", to_group=True)
     assert api.sent == [OWNER]
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"chart" * 50
+
+
+async def test_a_picture_goes_with_the_text_as_its_caption_to_both_chats(api):
+    api.updates = [added(10, GROUP, "Open Interest Bot")]
+    api.members[(GROUP, OWNER)] = "creator"
+    await send_telegram("🟢 Nifty PCR Futures: trade closed", "Net P&L   +1,000.00", to_group=True, photo=PNG)
+    caption = "<b>🟢 Nifty PCR Futures: trade closed</b>\n<pre>Net P&amp;L   +1,000.00</pre>"
+    assert api.calls == [("sendPhoto", OWNER, caption), ("sendPhoto", GROUP, caption)]
+
+
+async def test_a_picture_telegram_refuses_still_delivers_the_text(api):
+    api.updates = [added(10, GROUP, "Open Interest Bot")]
+    api.members[(GROUP, OWNER)] = "creator"
+    api.refuse_photos = True
+    await send_telegram("trade taken", "rows", to_group=True, photo=PNG)
+    assert [(method, chat) for method, chat, _ in api.calls] == [("sendMessage", OWNER), ("sendMessage", GROUP)]
+
+
+async def test_text_too_long_for_a_caption_follows_the_picture(api):
+    await send_telegram("trade closed", "x" * 1100, photo=PNG)
+    assert [(method, text[:20]) for method, _, text in api.calls] == [("sendPhoto", "<b>trade closed</b>"), ("sendMessage", "<pre>xxxxxxxxxxxxxxx")]

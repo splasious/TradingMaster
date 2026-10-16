@@ -255,7 +255,10 @@ class NativeContext:
         lots) would otherwise swing the pool's cash for as long as it's held."""
         cash_change = 0.0 if instrument.instrument_type == "future" else None
         await self._move_cash(side, quantity, price, "PAPER_NATIVE_LEG_OPENED", instrument, cash_change)
-        self.opened_legs.append({"symbol": instrument.symbol, "side": side, "quantity": quantity, "price": price, "lot_size": instrument.lot_size})
+        self.opened_legs.append({
+            "symbol": instrument.symbol, "side": side, "quantity": quantity, "price": price, "lot_size": instrument.lot_size,
+            "instrument_type": instrument.instrument_type, "strike": instrument.strike, "option_type": instrument.option_type,
+        })
 
     async def close_leg(self, instrument: Instrument, side: str, quantity: float, price: float, entry_price: float | None = None) -> None:
         """side is the CLOSING action -- "buy" to cover a short leg,
@@ -366,6 +369,8 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
     # state["holdings"]) changed both alike and was never saved -- every
     # tick reloaded the old holdings and sold the same stocks again.
     ctx = NativeContext(db=db, portfolio=portfolio, deployment=deployment, state=copy.deepcopy(deployment.state or {}))
+    position_before = ctx.state.get("position")  # what a trade closed in this check was (trade alerts)
+    position_before = copy.deepcopy(position_before) if isinstance(position_before, dict) else None
     is_admin = await _is_administrator(db, portfolio.user_id)
     telegram_token = telegram_allowed.set(is_admin)
     group_token = telegram_to_group.set(sends_to_group(version.python_code))  # the scanner's alerts: the group too
@@ -383,7 +388,7 @@ async def _run_native_strategy(db: AsyncSession, deployment: PaperNativeDeployme
     deployment.state = ctx.state
     await db.commit()
     if is_admin and (ctx.opened_legs or ctx.closed_trades):
-        await send_trade_alerts(db, deployment, ctx)  # never raises
+        await send_trade_alerts(db, deployment, ctx, position_before)  # never raises
     return EvaluationOutcome(action=ctx._last_action, signal=ctx._last_signal, reason=ctx._last_reason, wake_at=ctx._wake_at)
 
 
