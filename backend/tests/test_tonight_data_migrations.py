@@ -773,3 +773,28 @@ async def test_am_op_trad_15_min_h_moves_onto_the_built_in_with_the_ma_exit(db_e
     assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
     assert "def ma_exit_due(" in version.python_code and moved.state["holdings"]["SBIN"]["quantity"] == 10.0
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == versions_before[ids[1]]
+
+
+async def test_am_op_trd_15_min_straddle_moves_to_the_50_point_strike_by_its_edits(db_engine, db_session):
+    migration = _load("f7b9d1e3a5c6_am_op_straddle_50")
+    current = AM_OP.read_text(encoding="utf-8")  # the built-in shares the places the edits go
+    after = migration.edited(current)
+    assert after is not None and "async def _straddle_strike(" in after and migration.edited(after) is None  # never twice
+
+    running = await _deployment(db_session, "amop_50_a@tradingmaster.internal", current)
+    (await db_session.get(Strategy, running.strategy_id)).name = "AM OP TRD 15 MIN"
+    h = await _deployment(db_session, "amop_50_b@tradingmaster.internal", current)  # the H card: not asked for
+    (await db_session.get(Strategy, h.strategy_id)).name = "AM OP TRAD 15 MIN H"
+    ids, before = [running.id, h.id], {running.id: running.strategy_version_id, h.id: h.strategy_version_id}
+    await db_session.commit()
+
+    migration.FROM_MD5S = {_md5_text(current)}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == after
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]

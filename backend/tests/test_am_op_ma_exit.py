@@ -29,8 +29,12 @@ def at(day: int, hh: int, mm: int, ss: int = 0, month: int = 10) -> datetime:
 
 
 class Market:
-    def __init__(self, db, monkeypatch):
+    STRIKE_STEP = 100  # the option chain listed
+
+    def __init__(self, db, monkeypatch, evaluate=None):
         self.db, self.monkeypatch, self.pcr = db, monkeypatch, None
+        self.evaluate = evaluate or amop.evaluate
+        self.premiums: dict[tuple[float, str], float] = {}  # (strike, CE/PE) -> premium; 100 otherwise
 
     async def build(self) -> "Market":
         db = self.db
@@ -55,7 +59,7 @@ class Market:
             Instrument(exchange="NFO", symbol=f"NIFTY26O06{strike}{kind}", name="opt", instrument_type="option", data_source="zerodha_kite",
                        external_ref=f"NIFTY26O06{strike}{kind}", expiry=EXPIRY, strike=float(strike), option_type=kind, lot_size=65,
                        underlying_instrument_id=self.nifty.id)
-            for strike in range(22800, 24201, 100) for kind in ("CE", "PE")
+            for strike in range(22800, 24201, self.STRIKE_STEP) for kind in ("CE", "PE")
         ]
         db.add_all(self.options)
         await db.commit()
@@ -67,7 +71,8 @@ class Market:
         return self
 
     def prices(self, now: datetime, spot: float = SPOT) -> None:
-        for instrument, price in [(self.nifty, spot)] + [(o, 100.0) for o in self.options]:
+        quotes = [(o, self.premiums.get((o.strike, o.option_type), 100.0)) for o in self.options]
+        for instrument, price in [(self.nifty, spot)] + quotes:
             tick_engine.set_real_price(instrument.id, price, source="test")
             tick_engine._real_price_at[instrument.id] = now
 
@@ -90,7 +95,7 @@ class Market:
         self.prices(now, spot)
         ctx = NativeContext(db=self.db, portfolio=self.portfolio, deployment=self.deployment, state=self.deployment.state or {},
                             now=now.astimezone(timezone.utc))
-        await amop.evaluate(ctx)
+        await self.evaluate(ctx)
         self.deployment.state = ctx.state
         await self.db.commit()
         return ctx
