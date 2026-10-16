@@ -1428,7 +1428,11 @@ WITH code AS (
 $p$),
   ('round_to_nearest_100 signature', $p$def round_to_nearest_100(spot: float, tie_break: str = "up") -> float:$p$),
   ('regime = determine_regime(pcr)', $p$regime = determine_regime(pcr)$p$),
-  ('adds round_to_nearest_50', $p$round_to_nearest_50$p$)
+  ('adds round_to_nearest_50', $p$round_to_nearest_50$p$),
+  ('expiry = expiries[0]', $p$expiry = expiries[0]$p$), ('ctx.find_option(underlying.id, expiry, strike, option_type)',
+  $p$ctx.find_option(underlying.id, expiry, strike, option_type)$p$),
+  ('adds _straddle_strike', $p$_straddle_strike$p$), ('adds STRADDLE_STEP', $p$STRADDLE_STEP$p$),
+  ('Entry: 9:45 AM IST onward.', $p$Entry: 9:45 AM IST onward.$p$)
 )
 SELECT probes.probe, (length(code.c) - length(replace(code.c, probes.a, ''))) / length(probes.a) AS occurrences
 FROM probes CROSS JOIN code ORDER BY 1;
