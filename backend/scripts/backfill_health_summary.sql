@@ -1415,6 +1415,24 @@ WITH code AS (
 SELECT probes.probe, (length(code.c) - length(replace(code.c, probes.a, ''))) / length(probes.a) AS occurrences
 FROM probes CROSS JOIN code ORDER BY 1;
 
+-- AM9c. The straddle's 50-point strike (16 Oct): whether each anchor of its edits occurs once in AM OP TRD 15 MIN's running
+--       version 9 code (md5 7d346130...), and that the name it adds is free (0). Counts only.
+\echo '== AM9c. AM OP straddle-50 edits: anchors in the running AM OP TRD 15 MIN code (1 = applies; round_to_nearest_50 0 = free)'
+WITH code AS (
+  SELECT replace(v.python_code, E'\r', '') AS c FROM strategy_versions v JOIN strategies s ON s.id = v.strategy_id
+  WHERE trim(s.name) = 'AM OP TRD 15 MIN' AND md5(replace(v.python_code, E'\r', '')) = '7d346130e740eb8239822b2864467a65'
+  ORDER BY v.version_number DESC LIMIT 1
+), probes(probe, a) AS (VALUES
+  ('def determine_regime', $p$def determine_regime(pcr: float) -> str:$p$),
+  ('atm = round_to_nearest_100(spot)', $p$    atm = round_to_nearest_100(spot)
+$p$),
+  ('round_to_nearest_100 signature', $p$def round_to_nearest_100(spot: float, tie_break: str = "up") -> float:$p$),
+  ('regime = determine_regime(pcr)', $p$regime = determine_regime(pcr)$p$),
+  ('adds round_to_nearest_50', $p$round_to_nearest_50$p$)
+)
+SELECT probes.probe, (length(code.c) - length(replace(code.c, probes.a, ''))) / length(probes.a) AS occurrences
+FROM probes CROSS JOIN code ORDER BY 1;
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
