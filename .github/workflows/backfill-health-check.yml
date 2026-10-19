@@ -188,6 +188,21 @@ jobs:
                         '| MPIN:', '4 or 6 digits' if re.fullmatch(r'[0-9]{4}|[0-9]{6}', (c.get('mpin') or '').strip()) else 'empty or other shape')
           asyncio.run(main())
           " 2>/dev/null || echo "unavailable"
+              echo "-- Static IP for broker orders: does the backend reach the internet over IPv6, and do Kotak Neo's API hosts have IPv6 addresses (yes/no only, no addresses):"
+              compose exec -T backend python -c "
+          import socket, urllib.request
+          try:
+              v6 = ':' in urllib.request.urlopen('https://api64.ipify.org', timeout=10).read().decode()
+              print('backend goes out over IPv6:', 'yes' if v6 else 'no (IPv4 only)')
+          except Exception:
+              print('backend goes out over IPv6: could not tell')
+          for h in ('mis.kotaksecurities.com', 'cis.kotaksecurities.com', 'lapi.kotaksecurities.com', 'e21.kotaksecurities.com'):
+              try:
+                  fams = {ai[0] for ai in socket.getaddrinfo(h, 443)}
+                  print(h + ':', 'IPv4 and IPv6' if socket.AF_INET6 in fams else 'IPv4 only')
+              except Exception:
+                  print(h + ':', 'lookup failed')
+          " 2>/dev/null || echo "unavailable"
               echo "-- OI-levels alerts today that failed before sending (count):"
               grep -c 'OI levels alert failed' /tmp/backend-today.log || true
               echo "-- Trade alerts today sent without their chart picture (count each): chart not drawn, data not loaded, picture refused by Telegram, alerts failed:"
