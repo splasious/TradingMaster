@@ -3,7 +3,7 @@ import types
 
 import pytest
 
-from app.services.broker.kotak_neo_broker import KotakNeoAPIError, KotakNeoBroker, KotakNeoLoginRequired, _is_error_response
+from app.services.broker.kotak_neo_broker import KotakNeoAPIError, KotakNeoBroker, KotakNeoLoginRequired, _is_error_response, _nothing_held
 
 
 def test_is_error_response_detects_all_known_shapes():
@@ -224,3 +224,36 @@ async def test_the_real_sdk_sends_a_protected_limit_in_kotaks_words(monkeypatch)
     await broker.get_balance()
     limits = next(r for r in sent if r.url.path.endswith("/quick/user/limits"))
     assert _form(limits) == {"seg": "ALL", "exch": "ALL", "prod": "ALL"}
+
+
+class _Answers:
+    """A logged-in SDK client whose holdings()/positions() answer as given."""
+
+    def __init__(self, holdings, positions):
+        self._holdings, self._positions = holdings, positions
+
+    def holdings(self):
+        return self._holdings
+
+    def positions(self):
+        return self._positions
+
+
+def test_kotaks_nothing_found_answers_are_told_from_real_errors():
+    assert _nothing_held("No holdings found for this client AB123") and _nothing_held("no positions found")
+    assert _nothing_held("No Data")
+    assert not _nothing_held("Complete the 2fa process before accessing this application")
+    assert not _nothing_held("Invalid session, please login again") and not _nothing_held("Unexpected response format")
+
+
+async def test_an_account_holding_nothing_reads_as_empty_not_failed():
+    """19 Oct: the broker test on a Kotak account holding no shares stopped
+    at "couldn't read the account's positions and holdings"."""
+    broker = KotakNeoBroker()
+    broker._client = _Answers({"error": [{"code": "10", "message": "No holdings found for this client AB123"}]},
+                              {"Error Message": "No positions found"})
+    assert await broker.get_holdings() == [] and await broker.get_positions() == []
+
+    broker._client = _Answers({"Error": "Invalid session, please login again"}, {"data": []})
+    with pytest.raises(KotakNeoAPIError, match="get_holdings failed: Invalid session"):
+        await broker.get_holdings()

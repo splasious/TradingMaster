@@ -100,6 +100,7 @@ awaited natively.
 
 import asyncio
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -153,6 +154,17 @@ def _is_error_response(resp: Any) -> str | None:
     if "Error Message" in resp:
         return str(resp["Error Message"])
     return None
+
+
+# An account with nothing in it: Kotak answers with an error -- "No
+# holdings found for this client <UCC>" (19 Oct, the broker test on an
+# account holding no shares) -- not an empty list. That is an answer, not a
+# failure: nothing is held.
+_NOTHING_HELD = re.compile(r"\bno (holdings?|positions?) found\b|^no data\b", re.IGNORECASE)
+
+
+def _nothing_held(error: str) -> bool:
+    return bool(_NOTHING_HELD.search(error.strip()))
 
 
 class KotakNeoBroker(BrokerInterface):
@@ -246,6 +258,8 @@ class KotakNeoBroker(BrokerInterface):
         client = self._require_client()
         result = await asyncio.to_thread(client.positions)
         error = _is_error_response(result)
+        if error and _nothing_held(error):
+            return []
         if error:
             raise KotakNeoAPIError(f"Kotak Neo get_positions failed: {error}")
         data = result.get("data", []) if isinstance(result, dict) else result
@@ -255,6 +269,8 @@ class KotakNeoBroker(BrokerInterface):
         client = self._require_client()
         result = await asyncio.to_thread(client.holdings)
         error = _is_error_response(result)
+        if error and _nothing_held(error):
+            return []
         if error:
             raise KotakNeoAPIError(f"Kotak Neo get_holdings failed: {error}")
         data = result.get("data", []) if isinstance(result, dict) else result
