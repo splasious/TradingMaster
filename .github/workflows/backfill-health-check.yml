@@ -133,6 +133,61 @@ jobs:
               echo "-- Telegram group for the OI-levels and scanner alerts: found or not, groups the bot has been seen in (no names or IDs), group send failures today (count):"
               compose exec -T backend python -c "import asyncio; from app.services.notifications.telegram_group import group_status; print(asyncio.run(group_status()))" 2>/dev/null || echo "unavailable"
               grep -c 'Telegram group send failed' /tmp/backend-today.log || true
+              echo "-- Kotak Neo broker accounts (numbered): status, when set up, why the last login failed (its kind only), and the SHAPE of what was entered -- never the values:"
+              compose exec -T backend python -c "
+          import asyncio, base64, binascii, json, re
+          from sqlalchemy import select
+          from sqlalchemy.orm import selectinload
+          from app.core.encryption import decrypt_payload
+          from app.db.session import AsyncSessionLocal
+          from app.models.broker import Broker, BrokerAccount
+          from app.services.broker.zerodha_broker import IST
+          def secret(v):
+              v = (v or '').strip()
+              if not v: return 'empty'
+              if re.fullmatch(r'[0-9]{6}', v): return 'a 6-digit code, not the key'
+              k = v.replace(' ', '').upper()
+              try:
+                  base64.b32decode(k + '=' * (-len(k) % 8))
+              except (binascii.Error, ValueError):
+                  return 'not a base32 key'
+              return ('base32 key' if len(k) >= 16 else 'too short for a key') + (' (has spaces)' if ' ' in v else '') + (' (lower case)' if v != v.upper() else '')
+          def mobile(v):
+              v = (v or '').strip()
+              if re.fullmatch(r'[+]91[0-9]{10}', v): return '+91 and 10 digits'
+              if re.fullmatch(r'[0-9]{10}', v): return '10 digits, no +91'
+              return 'empty' if not v else 'other shape'
+          def kind(e):
+              if not e: return '-'
+              l = e.lower()
+              if 'non-base32' in l or 'padding' in l: return 'TOTP secret is not a base32 key'
+              if 'all required' in l: return 'a field was left empty'
+              words = [w for w in ('totp', 'otp', 'mobile', 'ucc', 'consumer', 'mpin', 'credential', 'invalid', 'expired', 'blocked', 'not registered', 'timeout', 'connection') if w in l]
+              step = 'TOTP login refused' if 'totp login failed' in l else 'MPIN step refused' if 'mpin validation failed' in l else 'other error'
+              return step + (' [words: ' + ', '.join(words) + ']' if words else '')
+          async def main():
+              async with AsyncSessionLocal() as db:
+                  rows = (await db.execute(select(BrokerAccount).join(Broker).where(Broker.code == 'kotak_neo')
+                          .options(selectinload(BrokerAccount.credential), selectinload(BrokerAccount.connection))
+                          .order_by(BrokerAccount.created_at))).scalars().all()
+              print('kotak_neo accounts:', len(rows))
+              for n, a in enumerate(rows, 1):
+                  try:
+                      c = json.loads(decrypt_payload(a.credential.encrypted_payload)) if a.credential else {}
+                  except Exception:
+                      c = None
+                  conn = a.connection
+                  print(f'Account {n}: {a.environment}, active {a.is_active}, set up {a.created_at.astimezone(IST):%d %b %H:%M}, status {conn.status if conn else "none"}, last error: {kind(conn.last_error if conn else None)}')
+                  if c is None:
+                      print('  credentials: could not be read')
+                      continue
+                  print('  consumer key:', 'entered' if (c.get('consumer_key') or '').strip() else 'empty',
+                        '| mobile:', mobile(c.get('mobile_number')),
+                        '| UCC:', 'entered' if (c.get('ucc') or '').strip() else 'empty',
+                        '| TOTP secret:', secret(c.get('totp_secret')),
+                        '| MPIN:', '4 or 6 digits' if re.fullmatch(r'[0-9]{4}|[0-9]{6}', (c.get('mpin') or '').strip()) else 'empty or other shape')
+          asyncio.run(main())
+          " 2>/dev/null || echo "unavailable"
               echo "-- OI-levels alerts today that failed before sending (count):"
               grep -c 'OI levels alert failed' /tmp/backend-today.log || true
               echo "-- Trade alerts today sent without their chart picture (count each): chart not drawn, data not loaded, picture refused by Telegram, alerts failed:"
