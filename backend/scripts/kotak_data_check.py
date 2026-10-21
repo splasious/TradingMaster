@@ -118,20 +118,32 @@ def history(client, neosymbol: str, interval: str, start: date, end: date) -> tu
     return [], "error 429"
 
 
-def shape(value, depth: int = 0) -> str:
+def shape(value, depth: int = 0, deepest: int = 2) -> str:
     """The answer's layout -- field names and types only, never values."""
     if isinstance(value, dict):
-        if depth >= 2:
+        if depth >= deepest:
             return "{" + ", ".join(sorted(value)[:12]) + "}"
-        return "{" + ", ".join(f"{k}: {shape(v, depth + 1)}" for k, v in sorted(value.items())[:12]) + "}"
+        return "{" + ", ".join(f"{k}: {shape(v, depth + 1, deepest)}" for k, v in sorted(value.items())[:14]) + "}"
     if isinstance(value, list):
-        return f"[{len(value)} x {shape(value[0], depth + 1)}]" if value else "[]"
+        return f"[{len(value)} x {shape(value[0], depth + 1, deepest)}]" if value else "[]"
     return type(value).__name__
 
 
 def quote_rows(resp) -> list[dict]:
     rows = resp.get("data", resp) if isinstance(resp, dict) else resp
     return rows if isinstance(rows, list) else []
+
+
+def fault_text(resp) -> str:
+    """Kotak's own validation message for a refused call (no account detail is in these), cut short."""
+    fault = resp.get("fault") if isinstance(resp, dict) else None
+    if isinstance(fault, dict):
+        return f"{fault.get('code')}: {str(fault.get('message') or fault.get('description') or '')[:90]}"
+    return failed(resp) or "?"
+
+
+def pick(row: dict, *names):
+    return next((row[n] for n in names if isinstance(row, dict) and row.get(n) not in (None, "")), None)
 
 
 def num(value) -> float | None:
@@ -272,10 +284,22 @@ async def main() -> None:
                 print(f"  Kotak's candles are of: {days}{' (' + err + ')' if err else ''}")
                 theirs = {as_key(c["ts"]): c for c in got}
                 compare("as stamped", ours, theirs)
-                if theirs and len(set(ours) & set(theirs)) < len(theirs) // 2:
-                    compare("Kotak stamped 15 min later (end of candle)", ours, {k - 900: v for k, v in theirs.items()})
-                if got:
-                    print(f"  Kotak's first/last today: {min(c['ts'] for c in got).astimezone(IST):%H:%M} / {max(c['ts'] for c in got).astimezone(IST):%H:%M}")
+                both = sorted(set(ours) & set(theirs))
+                worst = sorted(both, key=lambda t: -abs(ours[t]["open"] - theirs[t]["open"]))[:3]
+                for t in worst:
+                    o, k = ours[t], theirs[t]
+                    print(f"    {as_ist(datetime.fromtimestamp(t, tz=timezone.utc)):%H:%M}  ours O {o['open']:,.2f} H {o['high']:,.2f} L {o['low']:,.2f} "
+                          f"C {o['close']:,.2f} | Kotak O {k['open']:,.2f} H {k['high']:,.2f} L {k['low']:,.2f} C {k['close']:,.2f}")
+                # The 5 sessions before it too: how often closes agree.
+                week = {as_key(c.ts): {"open": c.open, "high": c.high, "low": c.low, "close": c.close} for c in (await db.execute(
+                    select(OhlcvCandle).where(OhlcvCandle.instrument_id == nifty_id, OhlcvCandle.timeframe == "15m",
+                                              OhlcvCandle.ts >= start_utc - timedelta(days=8), OhlcvCandle.ts < end_utc))).scalars()}
+                got, err = history(client, symbol, "15min", session - timedelta(days=8), session)
+                compare("the last ~6 sessions", week, {as_key(c["ts"]): c for c in got})
+                closes = [abs(week[t]["close"] - c["close"]) for t, c in ((as_key(c["ts"]), c) for c in got) if t in week]
+                if closes:
+                    print(f"    close gap: median {statistics.median(closes):.2f} pts, within 1 pt {sum(g <= 1 for g in closes)}/{len(closes)}, "
+                          f"within 3 pts {sum(g <= 3 for g in closes)}/{len(closes)}")
             if kite and symbol and symbol.startswith("nse_cm"):
                 try:
                     kd = await kite.get_historical_data("NIFTY 50", "1d", datetime.now(timezone.utc) - timedelta(days=45), datetime.now(timezone.utc), segment="NSE")
@@ -292,8 +316,17 @@ async def main() -> None:
                 kite_symbol = (await db.execute(select(Instrument.symbol).where(
                     Instrument.exchange == "NFO", Instrument.instrument_type == "future", Instrument.expiry == fut.expiry,
                     Instrument.symbol.like("NIFTY%FUT")))).scalars().first()
-                got, err = history(client, f"nse_fo|{fut.contract.token}", "15min", session, session)
-                print(f"  expiry {fut.expiry:%d %b}: Kotak {len(got)} candles{' (' + err + ')' if err else ''}; Zerodha symbol found: {'yes' if kite_symbol else 'no'}")
+                got, err = [], None
+                for way, neosymbol, start in (("token, one day", f"nse_fo|{fut.contract.token}", session),
+                                              ("token, 5 days", f"nse_fo|{fut.contract.token}", session - timedelta(days=5)),
+                                              ("trading symbol", f"nse_fo|{fut.contract.symbol}", session - timedelta(days=5)),
+                                              ("daily, token", f"nse_fo|{fut.contract.token}", session - timedelta(days=30))):
+                    rows, err = history(client, neosymbol, "D" if way.startswith("daily") else "15min", start, session)
+                    print(f"  future by {way}: {len(rows)} candles{' (' + err + ')' if err else ''}")
+                    if rows and not way.startswith("daily"):
+                        got = [c for c in rows if as_ist(c["ts"]).date() == session]
+                        break
+                print(f"  expiry {fut.expiry:%d %b}: Kotak {len(got)} candles of {session:%d %b}; Zerodha symbol found: {'yes' if kite_symbol else 'no'}")
                 if kite_symbol:
                     try:
                         kd = await kite.get_historical_data(kite_symbol, "15m", start_utc, end_utc, segment="NFO")
@@ -322,7 +355,7 @@ async def main() -> None:
                 started = time.monotonic()
                 resp = client.option_chain(exchange="nse_fo", underlying="NIFTY", expiry=on.isoformat() if on else None,
                                            instrument_type="option", count=count)
-                data = resp.get("data") if isinstance(resp, dict) else None
+                data = resp.get("data") if isinstance(resp, dict) and isinstance(resp.get("data"), dict) else resp
                 if isinstance(data, dict) and (data.get("call") or data.get("put")):
                     chain = data
                     print(f"  chain with count={count}: {len(data.get('call') or [])} calls, {len(data.get('put') or [])} puts "
@@ -331,12 +364,16 @@ async def main() -> None:
                 print(f"  chain with count={count}{'' if on else ', no expiry given'}: no ({failed(resp) or 'empty'}); layout {shape(resp)}")
                 time.sleep(PAUSE)
             kotak_oi = {}
-            for side in ("call", "put"):
+            for side, kind in (("call", "CE"), ("put", "PE")):
                 for row in (chain or {}).get(side) or []:
-                    inst, oi = row.get("instrument") or {}, row.get("openInterest") or {}
-                    strike, kind = num(inst.get("strikePrice")), inst.get("optionType")
-                    if strike is not None and kind and num(oi.get("current")) is not None:
-                        kotak_oi[(strike, kind)] = (num(oi["current"]), inst.get("neoSymbol"))
+                    inst = pick(row, "inst", "instrument") or {}
+                    oi = pick(row, "oi", "openInterest") or {}
+                    strike = num(pick(inst, "strikePrice", "strike", "stkPrc", "sp"))
+                    current = num(pick(oi, "cur", "current", "oi"))
+                    if strike is not None and current is not None:
+                        kotak_oi[(strike, pick(inst, "optionType", "optTp") or kind)] = (current, pick(inst, "neoSymbol", "neosymbol"))
+            if chain and not kotak_oi:
+                print(f"  a chain row's layout: {shape((chain.get('call') or [{}])[0], deepest=3)}")
             if snap and expiry:
                 rows = (await db.execute(select(PcrStrikeOi).where(PcrStrikeOi.snapshot_id == snap.id, PcrStrikeOi.expiry == expiry))).scalars().all()
                 ours_oi = {(r.strike, r.option_type): r.oi for r in rows if r.oi is not None}
@@ -363,8 +400,17 @@ async def main() -> None:
                                      quote_type="all")
                 took = 1000 * (time.monotonic() - started)
                 rows = quote_rows(resp)
-                print(f"  {len(rows)} quotes back in {took:.0f} ms{' (' + failed(resp) + ')' if failed(resp) else ''}; layout of one: "
-                      f"{shape(rows[0]) if rows else shape(resp)}")
+                print(f"  50 at once: {len(rows)} quotes back in {took:.0f} ms" + (f" (refused, {fault_text(resp)})" if failed(resp) else ""))
+                if not rows:
+                    for size, quote_type in ((10, "all"), (1, "all"), (1, "oi"), (1, "ltp")):
+                        resp = client.quotes(instrument_tokens=[{"instrument_token": r.contract.token, "exchange_segment": "nse_fo"}
+                                                                for r in near[:size]], quote_type=quote_type)
+                        got_rows = quote_rows(resp)
+                        print(f"  {size} at once, {quote_type}: {len(got_rows)} back" + (f" (refused, {fault_text(resp)})" if failed(resp) else ""))
+                        if got_rows:
+                            rows = got_rows
+                            print(f"  layout of one: {shape(rows[0])}")
+                            break
                 by_token = {str(r.get("exchange_token")): num(r.get("open_int")) for r in rows}
                 pairs = [(by_token.get(r.contract.token), ours_oi.get((r.strike, r.option_type))) for r in near]
                 pairs = [(k, o) for k, o in pairs if k is not None and o]
@@ -380,9 +426,12 @@ async def main() -> None:
         with section("7. OI in Kotak's option candles"):
             atm = near[0] if near else None
             if atm:
-                got, err = history(client, f"nse_fo|{atm.contract.token}", "15min", session, session)
-                print(f"  the option nearest NIFTY, last session: {len(got)} candles{' (' + err + ')' if err else ''}, "
-                      f"with OI: {sum(1 for c in got if num(c['oi']))}")
+                for way, neosymbol in (("token", f"nse_fo|{atm.contract.token}"), ("trading symbol", f"nse_fo|{atm.contract.symbol}")):
+                    got, err = history(client, neosymbol, "15min", session - timedelta(days=5), session)
+                    print(f"  the option nearest NIFTY by {way}, last 5 days: {len(got)} candles{' (' + err + ')' if err else ''}, "
+                          f"with OI: {sum(1 for c in got if num(c['oi']))}")
+                    if got:
+                        break
         print(f"\nKotak answered 'too many requests' {RATE_LIMITED['times']} times (each retried after a wait)")
         if kite:
             await kite.aclose()
