@@ -11,11 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       oi_preview:
-        description: "Instead of the check: send the latest OI-levels picture to the private Telegram chat only (not the group)"
-        type: boolean
-        default: false
-      pictures_preview:
-        description: "Instead of the check: send the OI-levels and trade-alert pictures drawn by THIS BRANCH's code (not yet deployed) to the private Telegram chat only"
+        description: "Instead of the check: send the latest OI-levels picture and the latest closed trade's alert picture to the private Telegram chat only (not the group)"
         type: boolean
         default: false
 
@@ -33,10 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            backend/scripts
-            backend/app/services/notifications
-            backend/app/services/options
+          sparse-checkout: backend/scripts
 
       - name: Check backfill data on the VPS
         env:
@@ -265,46 +258,10 @@ jobs:
               rm -f /tmp/backend-today.log /tmp/frontend-today.log
               ;;
             oi-preview)
-              # The latest live NIFTY record's OI-levels picture and summary,
-              # to the private chat only (to_group off): to see it on real data.
+              # The OI-levels picture of the latest in-session NIFTY record and
+              # the latest closed trade's alert picture, from real data, to the
+              # private chat only (to_group off). Prints counts and yes/no only.
               compose exec -T backend python -c "
-          import asyncio
-          from sqlalchemy import select
-          from app.db.session import AsyncSessionLocal
-          from app.models.pcr import SOURCE_LIVE, PcrSnapshot
-          from app.services.broker.zerodha_broker import IST
-          from app.services.notifications.telegram import send_telegram
-          from app.services.options import oi_levels
-          async def main():
-              async with AsyncSessionLocal() as db:
-                  snap = (await db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == 'NIFTY', PcrSnapshot.source == SOURCE_LIVE,
-                          PcrSnapshot.spot.is_not(None)).order_by(PcrSnapshot.ts.desc()).limit(1))).scalar_one_or_none()
-                  if snap is None:
-                      return print('no live NIFTY record')
-                  built = await oi_levels._sections(db, snap)
-                  if built is None:
-                      return print('no levels in that record')
-                  sections, label = built
-                  photo = await oi_levels._picture(snap, sections, label)
-                  if photo is None:
-                      return print('picture not drawn')
-                  subject, body = oi_levels.caption(snap, sections)
-                  await send_telegram('Preview · ' + subject, body, photo=photo)
-                  print(f'sent to the private chat: the {snap.ts.astimezone(IST):%d %b %H:%M} record, {len(sections)} expiry panel(s), picture {len(photo) // 1024} KB')
-          asyncio.run(main())
-          " 2>/dev/null || echo "failed"
-              ;;
-            pictures-preview)
-              # $2: this branch's picture modules, uploaded. Drawn by a one-off
-              # process from a copy of the app in /tmp with them in place --
-              # the running app is untouched -- from today's real data, and
-              # sent to the private chat only (to_group off). Prints counts
-              # and yes/no only.
-              trap 'rm -rf "$2"; compose exec -T backend rm -rf /tmp/pictures-preview >/dev/null 2>&1 || true' EXIT
-              compose exec -T backend sh -c 'rm -rf /tmp/pictures-preview && mkdir -p /tmp/pictures-preview && cp -r /app/app /tmp/pictures-preview/app \
-                && find /tmp/pictures-preview -name __pycache__ -prune -exec rm -rf {} +'
-              compose cp "$2/app/." backend:/tmp/pictures-preview/app/ >/dev/null
-              compose exec -T -w /tmp/pictures-preview backend python -c "
           import asyncio
           from sqlalchemy import select
           from app.db.session import AsyncSessionLocal
@@ -371,7 +328,6 @@ jobs:
                     f'forming {\"yes\" if session.recent.forming else \"no\"})')
 
           async def main():
-              print('new picture code: ' + ('yes' if hasattr(oi_levels, '_profile') else 'no'))
               for part in (oi, trade):
                   async with AsyncSessionLocal() as db:
                       try:
@@ -390,18 +346,8 @@ jobs:
           }
           remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
 
-          if [ "${{ inputs.pictures_preview }}" = "true" ]; then
-            echo "== This branch's pictures on real data (private chat only)"
-            tar -C backend -cf "$RUNNER_TEMP/pictures.tar" app/services/notifications/candle_panel.py \
-              app/services/notifications/trade_chart.py app/services/notifications/trade_alerts.py \
-              app/services/options/oi_levels_chart.py app/services/options/oi_levels.py
-            dir=$(vps 'd=$(mktemp -d /tmp/pictures-XXXXXX) && tar -x -C "$d" && echo "$d"' < "$RUNNER_TEMP/pictures.tar")
-            remote pictures-preview "$dir"
-            exit 0
-          fi
-
           if [ "${{ inputs.oi_preview }}" = "true" ]; then
-            echo "== OI-levels picture preview (private chat only)"
+            echo "== OI-levels and trade-alert pictures (private chat only)"
             remote oi-preview
             exit 0
           fi
