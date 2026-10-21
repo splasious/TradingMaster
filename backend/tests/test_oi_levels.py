@@ -1,4 +1,6 @@
-"""NIFTY top-3 OTM open interest alert (services/options/oi_levels.py)."""
+"""NIFTY top-3 OTM open interest alert (services/options/oi_levels.py): a
+price-ladder picture (oi_levels_chart.py) with a short summary, or the
+full table as text when the picture can't be drawn."""
 
 from datetime import date, timedelta
 
@@ -6,7 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.services.options import oi_levels
+from app.services.options import oi_levels, oi_levels_chart
 from tests.test_pcr_snapshots import EXPIRIES, FakeKite, at, capture
 
 NEAR = EXPIRIES[0]  # 29 Sep
@@ -123,8 +125,9 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
     monkeypatch.setattr(sched, "AsyncSessionLocal", factory)
     sent = []
 
-    async def fake_send(subject, body, to_group=False):
+    async def fake_send(subject, body, to_group=False, photo=None):
         sent.append((subject, body, to_group))
+        assert photo[:4] == b"\x89PNG"  # the picture, the summary under it
 
     monkeypatch.setattr(oi_levels, "send_telegram", fake_send)
     marks = [at(25, 9, 0), at(25, 9, 15)]
@@ -153,7 +156,7 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
 
     monkeypatch.setattr(get_settings(), "oi_levels_alert_minutes", 15)
 
-    async def broken_send(subject, body, to_group=False):
+    async def broken_send(subject, body, to_group=False, photo=None):
         raise RuntimeError("telegram down")
 
     monkeypatch.setattr(oi_levels, "send_telegram", broken_send)
@@ -162,3 +165,52 @@ async def test_the_scheduler_sends_it_after_saving_a_due_record(db_engine, monke
     kite.now = mark
     await scheduler.tick(mark + timedelta(seconds=5))
     assert scheduler.last_capture_ts == mark and scheduler.last_error is None
+
+
+async def test_the_picture_ladders_each_expirys_levels_and_the_caption_sums_them_up(db_session: AsyncSession):
+    snap = await _three_records(db_session)
+    sections, change_label = await oi_levels._sections(db_session, snap)
+    chart = oi_levels.chart_of(snap, sections, change_label)
+    [panel] = chart.panels
+    assert (chart.change_text, panel.title) == ("15m", "Expiry 29 Sep")
+    assert [(b.rank, b.strike, b.oi, b.change, b.change_day) for b in panel.resistance] == [
+        (1, 22600, 98.4, pytest.approx(12.1), pytest.approx(40.2)), (2, 23000, 85.2, pytest.approx(-4.8), pytest.approx(10.0)),
+        (3, 22800, 61.7, pytest.approx(-1.2), pytest.approx(5.5))]
+    assert panel.notes == ["Range 22,500 – 22,600", "▲ Support moved up  22,000 → 22,500", "▼ Resistance moved down  23,000 → 22,600"]
+    assert chart.summary == "29 Sep: NIFTY 22,560 is 40 pts below resistance 22,600 and 60 pts above support 22,500."
+    png = oi_levels_chart.draw(chart)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 20_000
+
+    subject, body = oi_levels.caption(snap, sections)
+    assert subject == "NIFTY OI levels 10:15 · S 22,500 / R 22,600"
+    assert body.splitlines()[1:] == ["29 Sep  S 22,500 · R 22,600", "29 Sep  S moved 22,000→22,500", "29 Sep  R moved 23,000→22,600"]
+    assert max(len(line) for line in body.splitlines()) <= oi_levels.MAX_WIDTH
+
+
+async def test_on_expiry_day_the_picture_has_both_expiries(db_session: AsyncSession):
+    mark = at(29, 11, 0)
+    kite = StackedKite({mark: 22560.5}, {mark: STACKS["10:15"]})
+    snap = await capture(db_session, kite, mark)
+    sections, change_label = await oi_levels._sections(db_session, snap)
+    chart = oi_levels.chart_of(snap, sections, change_label)
+    assert [p.title for p in chart.panels] == ["Expiry 29 Sep · today", "Expiry 06 Oct"]
+    assert all(b.change is None for p in chart.panels for b in p.resistance + p.support)  # nothing before it: no outlines
+    assert oi_levels_chart.draw(chart)[:4] == b"\x89PNG"
+
+
+async def test_a_picture_that_cant_be_drawn_sends_the_table(db_session: AsyncSession, monkeypatch):
+    snap = await _three_records(db_session)
+    sent = []
+
+    async def fake_send(subject, body, to_group=False, photo=None):
+        sent.append((body, photo))
+
+    def broken(chart):
+        raise RuntimeError("no fonts")
+
+    monkeypatch.setattr(oi_levels, "send_telegram", fake_send)
+    monkeypatch.setattr(oi_levels_chart, "draw", broken)
+    monkeypatch.setattr(get_settings(), "oi_levels_alert_minutes", 15)
+    assert await oi_levels.send_oi_levels(db_session, snap)
+    [(body, photo)] = sent
+    assert photo is None and "RESISTANCE: call OI above NIFTY" in body

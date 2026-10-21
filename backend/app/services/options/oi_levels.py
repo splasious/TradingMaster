@@ -10,8 +10,14 @@ nearest expiry; on its expiry day the next one as well, since the expiring
 contracts' OI unwinds through the afternoon. Sent for live records from
 09:15 (09:00 is the pre-open, still yesterday's OI) every
 Settings.oi_levels_alert_minutes; a gap-filled record is history, not news.
+
+Sent as a picture (21 Oct, oi_levels_chart.py: each expiry a price ladder)
+with a short summary under it -- the levels, NIFTY and PCR, any level that
+moved. A picture that can't be drawn sends the full table as text instead.
 """
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
@@ -23,7 +29,11 @@ from app.core.time import as_aware_utc
 from app.models.pcr import PcrSnapshot
 from app.services.broker.zerodha_broker import IST
 from app.services.notifications.telegram import send_telegram
+from app.services.options import oi_levels_chart
+from app.services.options.oi_levels_chart import Bar, OiChart, Panel
 from app.services.options.pcr_snapshots import Key, _strike_map
+
+logger = logging.getLogger(__name__)
 
 TOP_N = 3
 # Characters per line of the monospace block. In a group Telegram shows the
@@ -98,24 +108,32 @@ def _strike(levels: list[Level]) -> str:
     return f"{levels[0].strike:,.0f}" if levels else "—"
 
 
-def format_message(
-    snap: PcrSnapshot, sections: list[tuple[date, list[Level], list[Level], float | None, float | None]],
-    change_label: str,
-) -> tuple[str, str]:
-    """(subject, body) for send_telegram -- the body goes out as a
-    monospace block, so columns line up. `sections`: per expiry shown,
-    (expiry, resistance, support, previous record's #1 resistance strike,
-    previous #1 support strike)."""
+Section = tuple[date, list[Level], list[Level], float | None, float | None]
+
+
+def _subject(snap: PcrSnapshot, sections: list[Section]) -> str:
     mark = as_aware_utc(snap.ts).astimezone(IST)
     _, first_res, first_sup, _, _ = sections[0]
-    subject = f"NIFTY OI levels {mark:%H:%M} · S {_strike(first_sup)} / R {_strike(first_res)}"
+    return f"NIFTY OI levels {mark:%H:%M} · S {_strike(first_sup)} / R {_strike(first_res)}"
 
+
+def _head(snap: PcrSnapshot) -> str:
     head = f"NIFTY {snap.spot:,.1f}"
     if snap.spot_change is not None:
         head += f" ({snap.spot_change:+.1f})"
     if snap.pcr is not None:
         head += f" PCR {snap.pcr:.2f}"
-    lines = [head]
+    return head
+
+
+def format_message(snap: PcrSnapshot, sections: list[Section], change_label: str) -> tuple[str, str]:
+    """(subject, body) for send_telegram -- the body goes out as a
+    monospace block, so columns line up. `sections`: per expiry shown,
+    (expiry, resistance, support, previous record's #1 resistance strike,
+    previous #1 support strike)."""
+    mark = as_aware_utc(snap.ts).astimezone(IST)
+    subject = _subject(snap, sections)
+    lines = [_head(snap)]
     for expiry, res, sup, prev_res, prev_sup in sections:
         lines.append("")
         lines.append(f"Expiry {expiry:%d %b}" + (" (today)" if expiry == mark.date() else ""))
@@ -141,9 +159,56 @@ async def _record_at(db: AsyncSession, underlying: str, ts: datetime | None) -> 
     ).scalar_one_or_none()
 
 
-async def oi_levels_message(db: AsyncSession, snap: PcrSnapshot) -> tuple[str, str] | None:
-    """(subject, body) of the OI-levels alert for this record, or None when
-    it has no NIFTY level or expiries to read."""
+def caption(snap: PcrSnapshot, sections: list[Section]) -> tuple[str, str]:
+    """(subject, body) under the picture: the levels per expiry and any #1
+    strike that moved since the previous record."""
+    lines = [_head(snap)]
+    for expiry, res, sup, _, _ in sections:
+        lines.append(f"{expiry:%d %b}  S {_strike(sup)} · R {_strike(res)}")
+    for expiry, res, sup, prev_res, prev_sup in sections:
+        if sup and prev_sup is not None and prev_sup != sup[0].strike:
+            lines.append(f"{expiry:%d %b}  S moved {prev_sup:,.0f}→{sup[0].strike:,.0f}")
+        if res and prev_res is not None and prev_res != res[0].strike:
+            lines.append(f"{expiry:%d %b}  R moved {prev_res:,.0f}→{res[0].strike:,.0f}")
+    return _subject(snap, sections), "\n".join(lines)
+
+
+def _bars(levels: list[Level]) -> list[Bar]:
+    def lakh(value: float | None) -> float | None:
+        return None if value is None else value / LAKH
+
+    return [Bar(rank, lvl.strike, lvl.oi / LAKH, lakh(lvl.change), lakh(lvl.change_day)) for rank, lvl in enumerate(levels, start=1)]
+
+
+def _moved(name: str, before: float | None, levels: list[Level]) -> str | None:
+    if not levels or before is None or before == levels[0].strike:
+        return None
+    up = levels[0].strike > before
+    return f"{'▲' if up else '▼'} {name} moved {'up' if up else 'down'}  {before:,.0f} → {levels[0].strike:,.0f}"
+
+
+def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str) -> OiChart:
+    mark = as_aware_utc(snap.ts).astimezone(IST)
+    panels = []
+    for expiry, res, sup, prev_res, prev_sup in sections:
+        notes = [f"Range {sup[0].strike:,.0f} – {res[0].strike:,.0f}"] if res and sup else []
+        notes += [note for note in (_moved("Support", prev_sup, sup), _moved("Resistance", prev_res, res)) if note]
+        panels.append(Panel(f"Expiry {expiry:%d %b}" + (" · today" if expiry == mark.date() else ""), _bars(res), _bars(sup), notes))
+    expiry, res, sup, _, _ = sections[0]
+    spot = snap.spot
+    parts = []
+    if res:
+        parts.append(f"{res[0].strike - spot:,.0f} pts below resistance {res[0].strike:,.0f}")
+    if sup:
+        parts.append(f"{spot - sup[0].strike:,.0f} pts above support {sup[0].strike:,.0f}")
+    summary = f"{expiry:%d %b}: NIFTY {spot:,.0f} is " + " and ".join(parts) + "." if parts else f"NIFTY {spot:,.0f}"
+    return OiChart(mark, spot, snap.spot_change, snap.pcr, panels, change_label.removeprefix("Δ"), summary)
+
+
+async def _sections(db: AsyncSession, snap: PcrSnapshot) -> tuple[list[Section], str] | None:
+    """Per expiry shown, its levels (see format_message), and what the
+    changes are against ("Δ15m"); None when the record has no NIFTY level
+    or expiries to read."""
     if snap.spot is None or not snap.expiries:
         return None
     cache: dict = {}
@@ -171,17 +236,38 @@ async def oi_levels_message(db: AsyncSession, snap: PcrSnapshot) -> tuple[str, s
     else:
         minutes = round((as_aware_utc(snap.ts) - as_aware_utc(prev.ts)).total_seconds() / 60)
         change_label = f"Δ{minutes}m" if minutes < 1000 else "Δprev"
-    return format_message(snap, sections, change_label)
+    return sections, change_label
+
+
+async def oi_levels_message(db: AsyncSession, snap: PcrSnapshot) -> tuple[str, str] | None:
+    """(subject, body) of the OI-levels alert as text, or None when the
+    record has no NIFTY level or expiries to read."""
+    built = await _sections(db, snap)
+    return format_message(snap, *built) if built is not None else None
+
+
+async def _picture(snap: PcrSnapshot, sections: list[Section], change_label: str) -> bytes | None:
+    try:
+        return await asyncio.to_thread(oi_levels_chart.draw, chart_of(snap, sections, change_label))
+    except Exception:
+        logger.exception("OI levels picture not drawn; the alert goes as text")
+        return None
 
 
 async def send_oi_levels(db: AsyncSession, snap: PcrSnapshot) -> bool:
-    """Sends this live record's OI-levels alert when one is due. True if a
-    message went to send_telegram (which itself no-ops when Telegram isn't
-    set up)."""
+    """Sends this live record's OI-levels alert when one is due: the picture
+    with a short summary, or the full table as text when the picture can't
+    be drawn. True if a message went to send_telegram (which itself no-ops
+    when Telegram isn't set up)."""
     if not alert_due(snap.ts, get_settings().oi_levels_alert_minutes):
         return False
-    message = await oi_levels_message(db, snap)
-    if message is None:
+    built = await _sections(db, snap)
+    if built is None:
         return False
-    await send_telegram(*message, to_group=True)
+    sections, change_label = built
+    photo = await _picture(snap, sections, change_label)
+    if photo is None:
+        await send_telegram(*format_message(snap, sections, change_label), to_group=True)
+    else:
+        await send_telegram(*caption(snap, sections), to_group=True, photo=photo)
     return True

@@ -28,7 +28,8 @@ UP, DOWN, MA_COLOUR, PCR_COLOUR = "#0ca30c", "#d03b3b", "#3987e5", "#d95926"
 TONES = {"good": "#0ca30c", "bad": "#d03b3b", "neutral": "#3987e5"}
 MARKERS = {"bullish": ("^", "▲"), "bearish": ("v", "▼"), "sideways": ("D", "◆")}
 
-_lock = threading.Lock()
+# One matplotlib chart at a time, app-wide (these and the OI-levels pictures, options/oi_levels_chart.py).
+DRAW_LOCK = threading.Lock()
 
 
 @dataclass
@@ -67,7 +68,7 @@ def _x(spec: ChartSpec, at: datetime) -> float:
 def draw(spec: ChartSpec) -> bytes:
     if not spec.candles:
         raise ValueError("no candles in this session yet")
-    with _lock:
+    with DRAW_LOCK:
         return _draw(spec)
 
 
