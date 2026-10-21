@@ -2,12 +2,15 @@
 price-ladder picture (oi_levels_chart.py) with a short summary, or the
 full table as text when the picture can't be drawn."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.models.instrument import Instrument
+from app.models.market_data import OhlcvCandle
 from app.services.options import oi_levels, oi_levels_chart
 from tests.test_pcr_snapshots import EXPIRIES, FakeKite, at, capture
 
@@ -214,3 +217,65 @@ async def test_a_picture_that_cant_be_drawn_sends_the_table(db_session: AsyncSes
     assert await oi_levels.send_oi_levels(db_session, snap)
     [(body, photo)] = sent
     assert photo is None and "RESISTANCE: call OI above NIFTY" in body
+
+
+async def _nifty_candles(db: AsyncSession, last: datetime) -> Instrument:
+    """NIFTY 50's 15-minute candles: 24 Sep's from 13:15, then 25 Sep's from
+    09:15 up to the one starting at `last`."""
+    nifty = Instrument(exchange="NSE", symbol="NIFTY 50", name="NIFTY 50", instrument_type="index", data_source="zerodha_kite",
+                       external_ref="NIFTY 50")
+    db.add(nifty)
+    await db.flush()
+    starts = [at(24, 13, 15) + timedelta(minutes=15 * n) for n in range(9)]
+    starts += [at(25, 9, 15) + timedelta(minutes=15 * n) for n in range(int((last - at(25, 9, 15)) / timedelta(minutes=15)) + 1)]
+    for n, ts in enumerate(starts):
+        close = 22450.0 + 10 * n
+        db.add(OhlcvCandle(instrument_id=nifty.id, timeframe="15m", ts=ts.astimezone(timezone.utc), open=close - 10, high=close + 6,
+                           low=close - 14, close=close, volume=None, source="test"))
+    await db.commit()
+    return nifty
+
+
+async def test_the_picture_carries_niftys_candles_and_the_one_forming(db_session: AsyncSession):
+    snap = await _three_records(db_session)  # 25 Sep 10:15, NIFTY 22,560.5
+    await _nifty_candles(db_session, at(25, 10, 0))
+    recent = await oi_levels._recent(db_session, snap)
+    assert len(recent.candles) == 13 and recent.forming["close"] == 22560.5
+    assert recent.forming["ts"] == at(25, 10, 15) and recent.forming["open"] == recent.candles[-1]["close"]
+    sections, change_label = await oi_levels._sections(db_session, snap)
+    chart = oi_levels.chart_of(snap, sections, change_label, recent)
+    assert chart.recent is recent and oi_levels_chart.draw(chart)[:4] == b"\x89PNG"
+
+
+async def test_the_candle_that_just_closed_may_be_missing_but_no_more(db_session: AsyncSession):
+    snap = await _three_records(db_session)
+    nifty = await _nifty_candles(db_session, at(25, 9, 45))  # 10:00 not saved yet
+    recent = await oi_levels._recent(db_session, snap)
+    assert recent.candles[-1]["ts"] == at(25, 9, 45) and recent.forming["open"] == 22560.5  # not following 09:45: opens at NIFTY
+    await db_session.execute(delete(OhlcvCandle).where(OhlcvCandle.instrument_id == nifty.id, OhlcvCandle.ts == at(25, 9, 45)))
+    await db_session.commit()
+    assert await oi_levels._recent(db_session, snap) is None  # two behind: the ladders alone
+
+
+async def test_a_live_record_waits_for_the_candle_that_closed_at_the_mark(db_session: AsyncSession, monkeypatch):
+    snap = await _three_records(db_session)
+    nifty = await _nifty_candles(db_session, at(25, 9, 45))
+    mark = snap.ts if snap.ts.tzinfo else snap.ts.replace(tzinfo=timezone.utc)
+    slept = []
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return mark + timedelta(seconds=20)
+
+    async def sleep(seconds):  # the candle sync saves it meanwhile
+        slept.append(seconds)
+        db_session.add(OhlcvCandle(instrument_id=nifty.id, timeframe="15m", ts=at(25, 10, 0).astimezone(timezone.utc), open=22550.0,
+                                   high=22566.0, low=22540.0, close=22558.0, volume=None, source="test"))
+        await db_session.commit()
+
+    monkeypatch.setattr(oi_levels, "datetime", Clock)
+    monkeypatch.setattr(oi_levels.asyncio, "sleep", sleep)
+    recent = await oi_levels._recent(db_session, snap)
+    assert slept == [oi_levels.CANDLE_POLL_SECONDS] and recent.candles[-1]["close"] == 22558.0
+    assert recent.forming["open"] == 22558.0

@@ -212,15 +212,34 @@ def typical(bar: dict) -> float:
     return (bar["open"] + bar["high"] + bar["low"] + bar["close"]) / 4
 
 
-async def test_the_session_is_todays_finished_candles_with_the_ma_and_one_pcr_per_mark(db_session):
+async def test_the_session_is_the_last_25_finished_candles_with_the_ma_and_one_pcr_per_mark(db_session):
     await nifty_day(db_session, CLOSES, PCRS)
-    session = await Session().load(db_session, utc(ist(14, 10)))  # the 14:00 candle still forming
-    assert session.day == DAY and len(session.candles) == 19
-    assert session.ma[0] == pytest.approx((25140 * 7 + typical(session.candles[0])) / 8)  # 15 Oct's candles fill it at the open
+    session = await Session().load(db_session, utc(ist(14, 10)))  # the 14:00 candle still forming; no live price
+    assert session.day == DAY and len(session.candles) == 25 and session.recent.forming is None
+    assert f"{session.candles[0]['ts'].astimezone(IST):%d %H:%M}" == "15 14:00"  # 15 Oct's last 6, then 16 Oct's 19
+    first_today = session.candles[6]
+    assert f"{first_today['ts'].astimezone(IST):%d %H:%M}" == "16 09:15"
+    assert session.ma[6] == pytest.approx((25140 * 7 + typical(first_today)) / 8)  # 15 Oct's candles fill it at the open
     assert [pcr for _, pcr in session.pcr] == PCRS[:20]  # to 14:00, the mark before `now`
     candle, ma = session.last_close_by(ist(11, 30, 4))
     assert f"{candle['ts'].astimezone(IST):%H:%M}" == "11:15"
-    assert ma == pytest.approx(sum(typical(b) for b in session.candles[1:9]) / 8)
+    assert ma == pytest.approx(sum(typical(b) for b in session.candles[7:15]) / 8)
+
+
+async def test_the_forming_candle_takes_the_live_price(db_session):
+    await nifty_day(db_session, CLOSES, PCRS)
+
+    async def price_of(instrument_id):
+        return 25250.0
+
+    stored = await Session().load(db_session, utc(ist(14, 10)), price_of)  # the 14:00 candle was saved while forming
+    forming = stored.recent.forming
+    assert f"{forming['ts'].astimezone(IST):%H:%M}" == "14:00" and forming["close"] == 25250.0 and stored.live == 25250.0
+    assert forming["open"] == CLOSES[-2] and stored.recent.describe() == "last 25 candles + now"
+
+    built = (await Session().load(db_session, utc(ist(14, 20)), price_of)).recent.forming  # none saved: built at the live price
+    assert f"{built['ts'].astimezone(IST):%H:%M}" == "14:15" and (built["open"], built["close"]) == (CLOSES[-1], 25250.0)
+    assert (built["low"], built["high"]) == (25250.0, CLOSES[-1])
 
 
 async def test_the_exit_chart_marks_the_ma_stop_on_the_candle_that_closed_beyond_it(db_session):
@@ -253,7 +272,8 @@ async def test_the_entry_chart_and_a_losing_close_carried_from_an_earlier_day(db
     trade = {"legs": [], "pnl": -12000.0, "charges": 345.0, "exit_reason": "manual",
              "opened_at": utc(ist(14, 30, day=date(2026, 10, 15))), "closed_at": utc(ist(11, 30, 4))}
     closed = exit_chart("AM OP TRD 15 MIN", session, trade, {"regime": "bearish"}, nifty_now=25201.5)
-    assert closed.headline == "▼ Net P&L -12,345" and closed.tone == "bad" and closed.entry is None
+    assert closed.headline == "▼ Net P&L -12,345" and closed.tone == "bad"
+    assert closed.entry.label == "Bearish 15 Oct 14:30\nNIFTY 25,140"  # 15 Oct's candles are on the chart too
     assert closed.subtitle == "Held 15 Oct 14:30 → 11:30 · exit: manual exit" and closed.exit.price == 25201.5
     assert closed.levels == [(0.80, "0.80 exit"), (0.75, "0.75 entry")]  # the built-in's: none recorded
     assert trade_chart.draw(closed)[:4] == b"\x89PNG"
@@ -266,9 +286,18 @@ def test_the_pcr_levels_drawn_are_the_strategys_own():
     assert pcr_levels("Something else", "bullish", None) == []
 
 
-async def test_no_candle_finished_yet_sends_the_text_alone(db_session):
+async def test_early_in_the_day_the_chart_carries_the_previous_session(db_session):
     await nifty_day(db_session, CLOSES[:1], PCRS[:1])
     session = await Session().load(db_session, utc(ist(9, 20)))  # 09:15 still forming
+    assert len(session.candles) == 8 and {c["ts"].astimezone(IST).date() for c in session.candles} == {date(2026, 10, 15)}
+    assert await trade_alerts._picture(lambda: entry_chart("Nifty PCR Futures", session, [], {"bias": "bullish"}, utc(ist(9, 20))))
+
+
+async def test_no_candles_at_all_sends_the_text_alone(db_session):
+    db_session.add(Instrument(exchange="NSE", symbol="NIFTY 50", name="NIFTY 50", instrument_type="index",
+                              data_source="zerodha_kite", external_ref="NIFTY 50"))
+    await db_session.commit()
+    session = await Session().load(db_session, utc(ist(9, 20)))
     assert session.candles == []
     assert await trade_alerts._picture(lambda: entry_chart("Nifty PCR Futures", session, [], {"bias": "bullish"}, utc(ist(9, 20)))) is None
 

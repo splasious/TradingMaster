@@ -11,23 +11,28 @@ contracts' OI unwinds through the afternoon. Sent for live records from
 09:15 (09:00 is the pre-open, still yesterday's OI) every
 Settings.oi_levels_alert_minutes; a gap-filled record is history, not news.
 
-Sent as a picture (21 Oct, oi_levels_chart.py: each expiry a price ladder)
-with a short summary under it -- the levels, NIFTY and PCR, any level that
-moved. A picture that can't be drawn sends the full table as text instead.
+Sent as a picture (21 Oct, oi_levels_chart.py: NIFTY's last 25 15-minute
+candles and the one forming, then each expiry as a price ladder) with a
+short summary under it -- the levels, NIFTY and PCR, any level that moved.
+A picture that can't be drawn sends the full table as text instead; one
+without NIFTY's candles goes with the ladders alone.
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.time import as_aware_utc
+from app.models.instrument import Instrument
 from app.models.pcr import PcrSnapshot
 from app.services.broker.zerodha_broker import IST
+from app.services.notifications import candle_panel
+from app.services.notifications.candle_panel import Recent
 from app.services.notifications.telegram import send_telegram
 from app.services.options import oi_levels_chart
 from app.services.options.oi_levels_chart import Bar, OiChart, Panel
@@ -42,6 +47,12 @@ TOP_N = 3
 MAX_WIDTH = 32
 FIRST_ALERT = time(9, 15)
 LAKH = 100_000.0
+NIFTY = "NIFTY 50"
+# The candle that closed at the mark is saved by the candle sync 10-70 s
+# later (active_timeframe_sync_scheduler.py); the picture waits for it this
+# long, then goes without it.
+CANDLE_WAIT = timedelta(seconds=75)
+CANDLE_POLL_SECONDS = 5
 
 
 @dataclass
@@ -187,7 +198,7 @@ def _moved(name: str, before: float | None, levels: list[Level]) -> str | None:
     return f"{'▲' if up else '▼'} {name} moved {'up' if up else 'down'}  {before:,.0f} → {levels[0].strike:,.0f}"
 
 
-def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str) -> OiChart:
+def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str, recent: Recent | None = None) -> OiChart:
     mark = as_aware_utc(snap.ts).astimezone(IST)
     panels = []
     for expiry, res, sup, prev_res, prev_sup in sections:
@@ -202,7 +213,7 @@ def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str) -> O
     if sup:
         parts.append(f"{spot - sup[0].strike:,.0f} pts above support {sup[0].strike:,.0f}")
     summary = f"{expiry:%d %b}: NIFTY {spot:,.0f} is " + " and ".join(parts) + "." if parts else f"NIFTY {spot:,.0f}"
-    return OiChart(mark, spot, snap.spot_change, snap.pcr, panels, change_label.removeprefix("Δ"), summary)
+    return OiChart(mark, spot, snap.spot_change, snap.pcr, panels, change_label.removeprefix("Δ"), summary, recent)
 
 
 async def _sections(db: AsyncSession, snap: PcrSnapshot) -> tuple[list[Section], str] | None:
@@ -246,9 +257,35 @@ async def oi_levels_message(db: AsyncSession, snap: PcrSnapshot) -> tuple[str, s
     return format_message(snap, *built) if built is not None else None
 
 
-async def _picture(snap: PcrSnapshot, sections: list[Section], change_label: str) -> bytes | None:
+async def _recent(db: AsyncSession, snap: PcrSnapshot) -> Recent | None:
+    """NIFTY's candles at the record, the one forming at its NIFTY level;
+    None (the ladders alone) when there are none to show or they're behind."""
+    nifty = (await db.execute(select(Instrument).where(Instrument.symbol == NIFTY))).scalars().first()
+    if nifty is None:
+        return None
+    mark = as_aware_utc(snap.ts)
+    closed = mark - candle_panel.BAR  # the candle that closed at the mark, if one of today's did
+    in_session = candle_panel.SESSION_OPEN <= closed.astimezone(IST).time() < candle_panel.SESSION_CLOSE
+    due = closed if in_session and closed.astimezone(IST).date() == mark.astimezone(IST).date() else None
+    while True:
+        recent = await candle_panel.load_recent(db, nifty.id, mark, snap.spot)
+        newest = recent.candles[-1]["ts"] if recent.candles else None
+        if due is None or (newest is not None and newest >= due) or datetime.now(mark.tzinfo) >= mark + CANDLE_WAIT:
+            break
+        await asyncio.sleep(CANDLE_POLL_SECONDS)
+    if newest is None or (due is not None and newest < due - candle_panel.BAR):
+        return None  # none stored, or more than the one just closed is missing
+    return recent
+
+
+async def _picture(db: AsyncSession, snap: PcrSnapshot, sections: list[Section], change_label: str) -> bytes | None:
     try:
-        return await asyncio.to_thread(oi_levels_chart.draw, chart_of(snap, sections, change_label))
+        recent = await _recent(db, snap)
+    except Exception:
+        logger.exception("NIFTY candles for the OI levels picture not read; it goes with the ladders alone")
+        recent = None
+    try:
+        return await asyncio.to_thread(oi_levels_chart.draw, chart_of(snap, sections, change_label, recent))
     except Exception:
         logger.exception("OI levels picture not drawn; the alert goes as text")
         return None
@@ -265,7 +302,7 @@ async def send_oi_levels(db: AsyncSession, snap: PcrSnapshot) -> bool:
     if built is None:
         return False
     sections, change_label = built
-    photo = await _picture(snap, sections, change_label)
+    photo = await _picture(db, snap, sections, change_label)
     if photo is None:
         await send_telegram(*format_message(snap, sections, change_label), to_group=True)
     else:
