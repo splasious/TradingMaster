@@ -14,6 +14,10 @@ on:
         description: "Instead of the check: send the latest OI-levels picture and the latest closed trade's alert picture to the private Telegram chat only (not the group)"
         type: boolean
         default: false
+      kotak_data_check:
+        description: "Instead of the check: read-only comparison of Kotak Neo's market data with Zerodha's (backend/scripts/kotak_data_check.py)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +43,7 @@ jobs:
           # expression in it is one expression to GitHub, and this one is
           # past its 21,000-character limit.
           OI_PREVIEW: ${{ inputs.oi_preview }}
+          KOTAK_DATA_CHECK: ${{ inputs.kotak_data_check }}
         run: |
           set -euo pipefail
           umask 077
@@ -341,6 +346,12 @@ jobs:
           asyncio.run(main())
           " 2>/dev/null || echo "failed"
               ;;
+            py)
+              # $2: a read-only Python script from backend/scripts, already
+              # uploaded (removed once run), run inside the backend container.
+              trap 'rm -f "$2"' EXIT
+              compose exec -T backend python - < "$2" 2>/dev/null || echo "failed"
+              ;;
           esac
           REMOTE
 
@@ -349,6 +360,13 @@ jobs:
               -o ConnectTimeout=20 "root@$VPS_HOST" "$@"
           }
           remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
+
+          if [ "${KOTAK_DATA_CHECK:-false}" = "true" ]; then
+            echo "== Kotak Neo market data against Zerodha's (read-only)"
+            py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_data_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
 
           if [ "${OI_PREVIEW:-false}" = "true" ]; then
             echo "== OI-levels and trade-alert pictures (private chat only)"
