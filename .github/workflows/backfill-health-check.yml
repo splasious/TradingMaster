@@ -35,6 +35,10 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          # Passed in here, not written into the script: a script with an
+          # expression in it is one expression to GitHub, and this one is
+          # past its 21,000-character limit.
+          OI_PREVIEW: ${{ inputs.oi_preview }}
         run: |
           set -euo pipefail
           umask 077
@@ -346,7 +350,7 @@ jobs:
           }
           remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
 
-          if [ "${{ inputs.oi_preview }}" = "true" ]; then
+          if [ "${OI_PREVIEW:-false}" = "true" ]; then
             echo "== OI-levels and trade-alert pictures (private chat only)"
             remote oi-preview
             exit 0
