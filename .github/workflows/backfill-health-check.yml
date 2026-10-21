@@ -205,6 +205,8 @@ jobs:
           " 2>/dev/null || echo "unavailable"
               echo "-- OI-levels alerts today that failed before sending (count):"
               grep -c 'OI levels alert failed' /tmp/backend-today.log || true
+              echo "-- OI-levels alerts today sent as the text table because the picture wasn't drawn (count):"
+              grep -c 'OI levels picture not drawn' /tmp/backend-today.log || true
               echo "-- Trade alerts today sent without their chart picture (count each): chart not drawn, data not loaded, picture refused by Telegram, alerts failed:"
               for p in 'Trade alert chart not drawn' 'Trade alert chart data not loaded' 'Telegram refused the picture' 'Trade alerts failed for deployment'; do
                 printf '%s: %s\n' "$p" "$(grep -c "$p" /tmp/backend-today.log || true)"
