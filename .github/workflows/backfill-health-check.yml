@@ -14,6 +14,10 @@ on:
         description: "Instead of the check: send the latest OI-levels picture to the private Telegram chat only (not the group)"
         type: boolean
         default: false
+      pictures_preview:
+        description: "Instead of the check: send the OI-levels and trade-alert pictures drawn by THIS BRANCH's code (not yet deployed) to the private Telegram chat only"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -29,7 +33,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: backend/scripts
+          sparse-checkout: |
+            backend/scripts
+            backend/app/services/notifications
+            backend/app/services/options
 
       - name: Check backfill data on the VPS
         env:
@@ -287,6 +294,93 @@ jobs:
           asyncio.run(main())
           " 2>/dev/null || echo "failed"
               ;;
+            pictures-preview)
+              # $2: this branch's picture modules, uploaded. Drawn by a one-off
+              # process from a copy of the app in /tmp with them in place --
+              # the running app is untouched -- from today's real data, and
+              # sent to the private chat only (to_group off). Prints counts
+              # and yes/no only.
+              trap 'rm -rf "$2"; compose exec -T backend rm -rf /tmp/pictures-preview >/dev/null 2>&1 || true' EXIT
+              compose exec -T backend sh -c 'rm -rf /tmp/pictures-preview && mkdir -p /tmp/pictures-preview && cp -r /app/app /tmp/pictures-preview/app \
+                && find /tmp/pictures-preview -name __pycache__ -prune -exec rm -rf {} +'
+              compose cp "$2/app/." backend:/tmp/pictures-preview/app/ >/dev/null
+              compose exec -T -w /tmp/pictures-preview backend python -c "
+          import asyncio
+          from sqlalchemy import select
+          from app.db.session import AsyncSessionLocal
+          from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade
+          from app.models.pcr import SOURCE_LIVE, PcrSnapshot
+          from app.models.strategy import Strategy
+          from app.services.broker.zerodha_broker import IST
+          from app.services.notifications import candle_panel, trade_alerts
+          from app.services.notifications.telegram import send_telegram
+          from app.services.options import oi_levels
+
+          def view_of(legs):
+              # The position isn't kept with the trade: read the view off its legs.
+              names = [str(leg.get('instrument_symbol') or '') for leg in legs]
+              if any(n.endswith('FUT') for n in names):
+                  return {'bias': 'bullish' if legs[0].get('side') == 'long' else 'bearish'}
+              kinds = {n[-2:] for n, leg in zip(names, legs) if leg.get('side') == 'short'}
+              return {'regime': {frozenset({'CE', 'PE'}): 'sideways', frozenset({'PE'}): 'bullish', frozenset({'CE'}): 'bearish'}.get(frozenset(kinds))}
+
+          async def oi(db):
+              snaps = (await db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == 'NIFTY', PcrSnapshot.source == SOURCE_LIVE,
+                       PcrSnapshot.spot.is_not(None)).order_by(PcrSnapshot.ts.desc()).limit(4))).scalars().all()
+              snap = next((s for s in snaps if candle_panel.period_start(s.ts) is not None), None)  # in the session: a candle forming
+              if snap is None:
+                  return print('OI picture: no live NIFTY record in the session')
+              built = await oi_levels._sections(db, snap)
+              if built is None:
+                  return print('OI picture: no levels in that record')
+              sections, label = built
+              recent, profile = await oi_levels._recent(db, snap), await oi_levels._profile(db, snap)
+              photo = await oi_levels._picture(db, snap, sections, label)
+              if photo is None:
+                  return print('OI picture: not drawn')
+              subject, body = oi_levels.caption(snap, sections)
+              await send_telegram('Preview · ' + subject, body, photo=photo)
+              candles = f'{len(recent.candles)} candles, forming {\"yes\" if recent.forming else \"no\"}' if recent else 'no candles'
+              print(f'OI picture: sent ({snap.ts.astimezone(IST):%d %b %H:%M} record, {len(sections)} panel(s), {candles}, '
+                    f'{len(profile)} strikes in the profile, {len(photo) // 1024} KB)')
+
+          async def trade(db):
+              alerted = trade_alerts.alerted_strategies()
+              rows = (await db.execute(select(PaperNativeTrade, Strategy.name)
+                      .join(PaperNativeDeployment, PaperNativeDeployment.id == PaperNativeTrade.deployment_id)
+                      .join(Strategy, Strategy.id == PaperNativeDeployment.strategy_id)
+                      .order_by(PaperNativeTrade.closed_at.desc()).limit(200))).all()
+              picked = next(((t, n.strip()) for t, n in rows if n.strip().lower() in alerted), None)
+              if picked is None:
+                  return print('trade picture: no closed trade of an alerted strategy')
+              t, name = picked
+              spot = (await db.execute(select(PcrSnapshot.spot).where(PcrSnapshot.underlying == 'NIFTY', PcrSnapshot.ts <= t.closed_at,
+                      PcrSnapshot.spot.is_not(None)).order_by(PcrSnapshot.ts.desc()).limit(1))).scalar_one_or_none()
+
+              async def price_of(_):
+                  return spot  # NIFTY at the record the trade closed on or after
+
+              session = await trade_alerts.Session().load(db, t.closed_at, price_of if spot is not None else None)
+              closed = {'legs': t.legs, 'pnl': t.pnl, 'charges': t.charges, 'exit_reason': t.exit_reason,
+                        'opened_at': t.opened_at, 'closed_at': t.closed_at}
+              photo = await trade_alerts._picture(lambda: trade_alerts.exit_chart(name, session, closed, view_of(t.legs), session.live))
+              day_net, day_trades = await trade_alerts._day_net(db, t.deployment_id, t.closed_at)
+              subject, body = trade_alerts.exit_message(name, closed, day_net, day_trades)
+              await send_telegram('Preview · ' + subject, body, photo=photo)
+              print(f'trade picture: {\"sent\" if photo else \"not drawn (text sent)\"} ({len(session.candles)} candles, '
+                    f'forming {\"yes\" if session.recent.forming else \"no\"})')
+
+          async def main():
+              print('new picture code: ' + ('yes' if hasattr(oi_levels, '_profile') else 'no'))
+              for part in (oi, trade):
+                  async with AsyncSessionLocal() as db:
+                      try:
+                          await part(db)
+                      except Exception as exc:
+                          print(f'{part.__name__}: failed ({type(exc).__name__})')
+          asyncio.run(main())
+          " 2>/dev/null || echo "failed"
+              ;;
           esac
           REMOTE
 
@@ -295,6 +389,16 @@ jobs:
               -o ConnectTimeout=20 "root@$VPS_HOST" "$@"
           }
           remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
+
+          if [ "${{ inputs.pictures_preview }}" = "true" ]; then
+            echo "== This branch's pictures on real data (private chat only)"
+            tar -C backend -cf "$RUNNER_TEMP/pictures.tar" app/services/notifications/candle_panel.py \
+              app/services/notifications/trade_chart.py app/services/notifications/trade_alerts.py \
+              app/services/options/oi_levels_chart.py app/services/options/oi_levels.py
+            dir=$(vps 'd=$(mktemp -d /tmp/pictures-XXXXXX) && tar -x -C "$d" && echo "$d"' < "$RUNNER_TEMP/pictures.tar")
+            remote pictures-preview "$dir"
+            exit 0
+          fi
 
           if [ "${{ inputs.oi_preview }}" = "true" ]; then
             echo "== OI-levels picture preview (private chat only)"
