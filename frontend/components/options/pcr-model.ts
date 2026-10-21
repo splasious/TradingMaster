@@ -191,8 +191,19 @@ export function arrow(v: number | null | undefined, digits: number): string {
   return v > 0 ? "▲" : "▼";
 }
 
-export const crore = (v: number | null | undefined) => (v == null ? "—" : `${(v / 1e7).toFixed(2)} Cr`);
+/** Open interest in lakh (1 L = 100,000 contracts), grouped the Indian way: "1,289.0 L" (21 Oct: was crore). */
+export const lakh = (v: number | null | undefined) =>
+  v == null ? "—" : `${(v / 1e5).toLocaleString("en-IN", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} L`;
 export const lakhSigned = (v: number | null | undefined) => (v == null ? "—" : `${signed(v / 1e5, 1)} L`);
+
+/** A ΔOI as a % of that side's OI at the previous record (now minus the change): how much it grew in the interval. */
+export function oiChangePct(change: number | null | undefined, oiNow: number | null | undefined): number | null {
+  if (change == null || oiNow == null) return null;
+  const before = oiNow - change;
+  return before > 0 ? (change / before) * 100 : null;
+}
+
+export const pctSigned = (v: number | null) => (v == null ? "—" : `${signed(v, 2)}%`);
 
 export function toneOf(v: number | null | undefined, digits = 6): string {
   return v == null || Number(Math.abs(v).toFixed(digits)) === 0 ? "text-text-muted" : v > 0 ? "text-positive" : "text-negative";

@@ -6,7 +6,7 @@ import {
   COI_PCR_FLOOR,
   DRIVERS,
   POSITIONING,
-  crore,
+  lakh,
   dayIst,
   lakhSigned,
   num,
@@ -75,7 +75,7 @@ function panesFor(compact: boolean): Pane[] {
     {
       title: "Total OI: Put vs Call", height: h,
       series: [{ key: "putOi", color: PUT, kind: "line" }, { key: "callOi", color: CALL, kind: "line" }],
-      fmt: (v, st) => `${(v / 1e7).toFixed(dec(st / 1e7))} Cr`, endLabels: ["Put", "Call"],
+      fmt: (v, st) => `${(v / 1e5).toLocaleString("en-IN", { maximumFractionDigits: dec(st / 1e5) })} L`, endLabels: ["Put", "Call"],
     },
     {
       title: "ΔOI (15 min): Put vs Call", height: h,
@@ -280,7 +280,7 @@ function Tooltip({ point: p, left, width }: { point: PcrPoint; left: number; wid
           ["ΔOI PCR", p.coiNm ? `n/m (Call ΔOI < ${COI_PCR_FLOOR / 1e5} L)` : p.coiPcr != null ? `${p.coiPcr.toFixed(2)}${(p.callChg ?? 0) < 0 ? "*" : ""}` : "—"],
           ["Put ΔOI", lakhSigned(p.putChg)],
           ["Call ΔOI", lakhSigned(p.callChg)],
-          ["Put / Call OI", `${crore(p.putOi)} / ${crore(p.callOi)}`],
+          ["Put / Call OI", `${lakh(p.putOi)} / ${lakh(p.callOi)}`],
           ["Positioning", p.positioning ? `${POSITIONING[p.positioning].icon} ${POSITIONING[p.positioning].label}` : "—"],
         ];
   return (

@@ -9,7 +9,7 @@ import {
   COI_PCR_FLOOR,
   DRIVERS,
   buildPoints,
-  crore,
+  lakh,
   dayIst,
   daySummary,
   lakhSigned,
@@ -173,7 +173,7 @@ export function PcrAnalysisView() {
             />
             <Tile
               label="Put OI / Call OI"
-              value={<span className="text-base sm:text-lg">{crore(latest?.putOi)} / {crore(latest?.callOi)}</span>}
+              value={<span className="text-base sm:text-lg">{lakh(latest?.putOi)} / {lakh(latest?.callOi)}</span>}
               sub={<>day: Put {lakhSigned(day?.putDay)} · Call {lakhSigned(day?.callDay)}</>}
             />
             <Tile
