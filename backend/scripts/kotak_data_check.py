@@ -259,6 +259,8 @@ async def main() -> None:
                         first = min(c["ts"] for c in got).astimezone(IST).date() if got else None
                         cells.append(f"{back}d ago: {len(got)}" + (f" (from {first:%d %b %Y})" if first else f" ({err})" if err else ""))
                     print(f"  {interval:5} {span + 1}-day windows ending " + " | ".join(cells))
+                got, _ = history(client, symbol, "15min", session - timedelta(days=5), session)
+                print(f"  index 15-min, last 5 days, of: {', '.join(f'{d:%d %b}' for d in sorted({as_ist(c['ts']).date() for c in got}))}")
                 _, err = history(client, symbol, "15min", today - timedelta(days=90), today)
                 print(f"  a 90-day 15-min request: {'rejected (' + err + ')' if err else 'accepted'}")
             if kite:
@@ -322,7 +324,8 @@ async def main() -> None:
                                               ("trading symbol", f"nse_fo|{fut.contract.symbol}", session - timedelta(days=5)),
                                               ("daily, token", f"nse_fo|{fut.contract.token}", session - timedelta(days=30))):
                     rows, err = history(client, neosymbol, "D" if way.startswith("daily") else "15min", start, session)
-                    print(f"  future by {way}: {len(rows)} candles{' (' + err + ')' if err else ''}")
+                    days = ", ".join(f"{d:%d %b}" for d in sorted({as_ist(c['ts']).date() for c in rows}))
+                    print(f"  future by {way}: {len(rows)} candles{' (' + err + ')' if err else ''}{' of ' + days if days else ''}")
                     if rows and not way.startswith("daily"):
                         got = [c for c in rows if as_ist(c["ts"]).date() == session]
                         break
@@ -368,7 +371,7 @@ async def main() -> None:
                 for row in (chain or {}).get(side) or []:
                     inst = pick(row, "inst", "instrument") or {}
                     oi = pick(row, "oi", "openInterest") or {}
-                    strike = num(pick(inst, "strikePrice", "strike", "stkPrc", "sp"))
+                    strike = num(pick(inst, "strkPrc", "strikePrice", "strike", "stkPrc", "sp"))
                     current = num(pick(oi, "cur", "current", "oi"))
                     if strike is not None and current is not None:
                         kotak_oi[(strike, pick(inst, "optionType", "optTp") or kind)] = (current, pick(inst, "neoSymbol", "neosymbol"))
@@ -389,38 +392,45 @@ async def main() -> None:
                         print(f"  {label} over the same strikes: calls {calls / LAKH:,.1f} L, puts {puts / LAKH:,.1f} L, PCR {puts / calls:.3f}" if calls else "")
 
         # 6. A 50-contract quote.
-        with section("6. Quotes for 50 option contracts near NIFTY: OI against our latest PCR record"):
+        with section("6. The same 40 option contracts from Kotak and Zerodha, at the same moment"):
             spot = snap.spot if snap and snap.spot else 0
-            near = sorted((r for r in options if r.expiry == expiry and r.strike is not None), key=lambda r: abs(r.strike - spot))[:50]
-            if near and snap:
-                ours_oi = {(r.strike, r.option_type): r.oi for r in (await db.execute(
-                    select(PcrStrikeOi).where(PcrStrikeOi.snapshot_id == snap.id, PcrStrikeOi.expiry == expiry))).scalars() if r.oi is not None}
-                started = time.monotonic()
-                resp = client.quotes(instrument_tokens=[{"instrument_token": r.contract.token, "exchange_segment": "nse_fo"} for r in near],
+            near = sorted((r for r in options if r.expiry == expiry and r.strike is not None), key=lambda r: abs(r.strike - spot))[:40]
+            kite_symbols = {(r.strike, r.option_type): r.tradingsymbol for r in (await db.execute(
+                select(PcrStrikeOi).where(PcrStrikeOi.snapshot_id == snap.id, PcrStrikeOi.expiry == expiry))).scalars()} if snap else {}
+            for size in (49, 40, 25):
+                resp = client.quotes(instrument_tokens=[{"instrument_token": r.contract.token, "exchange_segment": "nse_fo"} for r in
+                                                        (near * 2)[:size]], quote_type="all")
+                print(f"  {size} in one quote call: {len(quote_rows(resp))} back" + (f" (refused, {fault_text(resp)})" if failed(resp) else ""))
+            kotak_rows_by_key, kite_by_key = {}, {}
+            started = time.monotonic()
+            for i in range(0, len(near), 20):
+                resp = client.quotes(instrument_tokens=[{"instrument_token": r.contract.token, "exchange_segment": "nse_fo"} for r in near[i:i + 20]],
                                      quote_type="all")
-                took = 1000 * (time.monotonic() - started)
-                rows = quote_rows(resp)
-                print(f"  50 at once: {len(rows)} quotes back in {took:.0f} ms" + (f" (refused, {fault_text(resp)})" if failed(resp) else ""))
-                if not rows:
-                    for size, quote_type in ((10, "all"), (1, "all"), (1, "oi"), (1, "ltp")):
-                        resp = client.quotes(instrument_tokens=[{"instrument_token": r.contract.token, "exchange_segment": "nse_fo"}
-                                                                for r in near[:size]], quote_type=quote_type)
-                        got_rows = quote_rows(resp)
-                        print(f"  {size} at once, {quote_type}: {len(got_rows)} back" + (f" (refused, {fault_text(resp)})" if failed(resp) else ""))
-                        if got_rows:
-                            rows = got_rows
-                            print(f"  layout of one: {shape(rows[0])}")
-                            break
-                by_token = {str(r.get("exchange_token")): num(r.get("open_int")) for r in rows}
-                pairs = [(by_token.get(r.contract.token), ours_oi.get((r.strike, r.option_type))) for r in near]
-                pairs = [(k, o) for k, o in pairs if k is not None and o]
-                if pairs:
-                    gaps = [abs(k - o) / o * 100 for k, o in pairs]
-                    print(f"  OI on both: {len(pairs)}; identical {sum(k == o for k, o in pairs)}; difference median {statistics.median(gaps):.2f}%, "
-                          f"largest {max(gaps):.2f}%")
+                by_token = {str(q.get("exchange_token")): q for q in quote_rows(resp)}
+                for r in near[i:i + 20]:
+                    if r.contract.token in by_token:
+                        kotak_rows_by_key[(r.strike, r.option_type)] = by_token[r.contract.token]
+            print(f"  Kotak: {len(kotak_rows_by_key)}/{len(near)} quoted in {1000 * (time.monotonic() - started):.0f} ms")
+            if kite:
+                wanted = {k: f"NFO:{kite_symbols[k]}" for k in kotak_rows_by_key if k in kite_symbols}
+                quotes = await kite.get_quote_batch(list(wanted.values()))
+                kite_by_key = {k: quotes.get(v) for k, v in wanted.items() if quotes.get(v)}
+                both = [k for k in kite_by_key if k in kotak_rows_by_key]
+                print(f"  Zerodha: {len(kite_by_key)} quoted; on both: {len(both)}")
+                for label, theirs, ours in (("OI", lambda q: num(q.get("open_int")), lambda q: num(q.get("oi"))),
+                                            ("last price", lambda q: num(q.get("ltp")), lambda q: num(q.get("last_price"))),
+                                            ("volume", lambda q: num(q.get("last_volume")), lambda q: num(q.get("volume")))):
+                    pairs = [(theirs(kotak_rows_by_key[k]), ours(kite_by_key[k])) for k in both]
+                    pairs = [(a, b) for a, b in pairs if a is not None and b is not None]
+                    if pairs:
+                        gaps = [abs(a - b) / b * 100 if b else (0.0 if a == b else 100.0) for a, b in pairs]
+                        print(f"  {label:10} identical {sum(a == b for a, b in pairs)}/{len(pairs)}; difference median {statistics.median(gaps):.2f}%, "
+                              f"largest {max(gaps):.2f}%")
                 if kotak_oi:
-                    agree = sum(1 for r in near if (r.strike, r.option_type) in kotak_oi and by_token.get(r.contract.token) == kotak_oi[(r.strike, r.option_type)][0])
-                    print(f"  quote OI same as the chain's: {agree}/{len(near)}")
+                    pairs = [(kotak_oi[k][0], num(kite_by_key[k].get("oi"))) for k in both if k in kotak_oi]
+                    print(f"  chain OI identical to Zerodha's: {sum(a == b for a, b in pairs)}/{len(pairs)}")
+                    agree = sum(1 for k in both if k in kotak_oi and num(kotak_rows_by_key[k].get('open_int')) == kotak_oi[k][0])
+                    print(f"  chain OI identical to Kotak's own quote: {agree}/{len(both)}")
 
         # 7. OI in an option's candles (what the PCR gap fill rebuilds from).
         with section("7. OI in Kotak's option candles"):
