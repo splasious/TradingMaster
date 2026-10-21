@@ -232,10 +232,11 @@ async def test_the_forming_candle_takes_the_live_price(db_session):
     async def price_of(instrument_id):
         return 25250.0
 
-    stored = await Session().load(db_session, utc(ist(14, 10)), price_of)  # the 14:00 candle was saved while forming
-    forming = stored.recent.forming
-    assert f"{forming['ts'].astimezone(IST):%H:%M}" == "14:00" and forming["close"] == 25250.0 and stored.live == 25250.0
-    assert forming["open"] == CLOSES[-2] and stored.recent.describe() == "last 25 candles + now"
+    earlier = await Session().load(db_session, utc(ist(14, 10)), price_of)  # the saved 14:00 candle is from later: left out
+    forming = earlier.recent.forming
+    assert f"{forming['ts'].astimezone(IST):%H:%M}" == "14:00" and forming["close"] == 25250.0 and earlier.live == 25250.0
+    assert (forming["open"], forming["low"]) == (CLOSES[-2], 25250.0) and earlier.recent.describe() == "last 25 candles + now"
+    assert earlier.candles[-1]["close"] == CLOSES[-2]  # 13:45, the newest finished by 14:10
 
     built = (await Session().load(db_session, utc(ist(14, 20)), price_of)).recent.forming  # none saved: built at the live price
     assert f"{built['ts'].astimezone(IST):%H:%M}" == "14:15" and (built["open"], built["close"]) == (CLOSES[-1], 25250.0)

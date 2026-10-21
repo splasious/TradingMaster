@@ -95,25 +95,22 @@ def _forming(bars: list[dict], now: datetime, live: float) -> dict | None:
 
 
 async def load_recent(db, instrument_id, now: datetime, live: float | None = None, n: int = RECENT) -> Recent:
-    """The `n` newest finished 15-minute candles at `now` (with MA_CANDLES
-    more before them for the MA) and, when `live` is given during the
-    session, the one forming."""
+    """The `n` newest candles finished by `now` (with MA_CANDLES more before
+    them for the MA) and, when `live` is given during the session, the one
+    forming. A stored candle that hadn't finished by `now` is left out: live
+    there is none (only finished candles are saved), and for an earlier
+    `now` its high, low and close are from later."""
     now = as_aware_utc(now)
     rows = (
         await db.execute(
             select(OhlcvCandle)
-            .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.timeframe == "15m", OhlcvCandle.ts <= now)
+            .where(OhlcvCandle.instrument_id == instrument_id, OhlcvCandle.timeframe == "15m", OhlcvCandle.ts <= now - BAR)
             .order_by(OhlcvCandle.ts.desc())
-            .limit(n + MA_CANDLES + 1)
+            .limit(n + MA_CANDLES)
         )
     ).scalars().all()
     bars = [{"ts": as_aware_utc(c.ts), "open": c.open, "high": c.high, "low": c.low, "close": c.close} for c in reversed(rows)]
-    stored = bars.pop() if bars and bars[-1]["ts"] + BAR > now else None  # a forming candle saved anyway
-    forming = None
-    if live is not None:
-        forming = _forming(bars, now, live)
-        if stored is not None and forming is not None and stored["ts"] == forming["ts"]:
-            forming = {**stored, "close": live, "high": max(stored["high"], live), "low": min(stored["low"], live)}
+    forming = _forming(bars, now, live) if live is not None else None
     ma = with_ma(bars)
     return Recent(bars[-n:], ma[-n:], forming)
 
