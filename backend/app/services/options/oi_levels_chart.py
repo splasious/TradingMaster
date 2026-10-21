@@ -1,6 +1,9 @@
 """The picture sent with the NIFTY OI-levels alert (21 Oct): NIFTY 50's last 25
 15-minute candles and the one forming (notifications/candle_panel.py) with
-the nearest expiry's #1 resistance and support drawn across them, and under
+the nearest expiry's #1 resistance and support drawn across them and its OI
+at each strike as a profile on their right -- call OI above NIFTY, put OI
+below it, each bar at its strike's price, so where writers are stacked
+reads straight off the candles -- and under
 them each expiry as a price ladder -- its top resistance strikes (call OI)
 above an orange NIFTY line and its top support strikes (put OI) below it, at
 their real price levels. A bar's length is the strike's OI; a dotted outline
@@ -25,6 +28,8 @@ CALL, PUT, BAND, SPOT = "#d03b3b", "#0ca30c", "#3987e5", "#eda100"
 PANEL = "#201f1e"
 FONT = 10.5
 NEAR_LEVELS = 300  # R1 / S1 more than this beyond the candles' range aren't drawn on them
+PROFILE_CANDLES = 6  # the OI profile's width, in candles, right of the forming one
+PROFILE_REACH = 100  # the candle chart shows at least this far either side of NIFTY when it has a profile
 
 
 @dataclass
@@ -45,6 +50,13 @@ class Panel:
 
 
 @dataclass
+class StrikeOi:
+    strike: float
+    option_type: str  # "CE" above NIFTY, "PE" below it
+    oi: float  # lakh
+
+
+@dataclass
 class OiChart:
     mark: datetime  # IST
     spot: float
@@ -54,6 +66,7 @@ class OiChart:
     change_text: str  # "15m": what the outline and the first change are against
     summary: str  # the plain sentence at the bottom
     recent: Recent | None = None  # NIFTY's candles, drawn on top when there are any
+    profile: list[StrikeOi] = field(default_factory=list)  # the nearest expiry's OI by strike, beside the candles
 
 
 def _arrow(value: float | None) -> str:
@@ -106,9 +119,9 @@ def _draw(chart: OiChart) -> bytes:
         fig.text(x + 0.028, top + 0.025 - row * 0.02, label, color=TEXT2, fontsize=FONT)
 
     if candles:
-        upper = fig.add_gridspec(1, 1, left=0.05, right=0.86, top=top - 0.04, bottom=0.605)
+        upper = fig.add_gridspec(1, 1, left=0.05, right=0.86, top=top - 0.04, bottom=0.575)
         _candles(fig.add_subplot(upper[0]), chart)
-        ladders = fig.add_gridspec(1, len(chart.panels), wspace=0.55, left=0.17, right=0.97, top=0.50, bottom=0.10)
+        ladders = fig.add_gridspec(1, len(chart.panels), wspace=0.55, left=0.17, right=0.97, top=0.475, bottom=0.10)
     else:
         ladders = fig.add_gridspec(1, len(chart.panels), wspace=0.55, left=0.17, right=0.97, top=top - 0.11, bottom=0.12)
     for n, panel in enumerate(chart.panels):
@@ -130,13 +143,16 @@ def _candles(ax, chart: OiChart) -> None:
     recent = chart.recent
     candle_panel.draw(ax, recent, font=FONT)
     first = chart.panels[0]
-    lo, hi = candle_panel.price_range(recent, chart.spot)
+    reach = (chart.spot - PROFILE_REACH, chart.spot + PROFILE_REACH) if chart.profile else ()
+    lo, hi = candle_panel.price_range(recent, chart.spot, *reach)
     shown = []
     for levels, colour, tag in ((first.resistance, CALL, "R1"), (first.support, PUT, "S1")):
         if levels and lo - NEAR_LEVELS <= levels[0].strike <= hi + NEAR_LEVELS:
             shown.append((levels[0].strike, colour, tag))
-    lo, hi = candle_panel.price_range(recent, chart.spot, *(s for s, _, _ in shown))
+    lo, hi = candle_panel.price_range(recent, chart.spot, *reach, *(s for s, _, _ in shown))
     ax.set_ylim(lo, hi)
+    if chart.profile:
+        _profile(ax, chart, lo, hi)
     for strike, colour, tag in shown:
         ax.axhline(strike, color=colour, lw=1.6, ls=(0, (6, 3)), zorder=2)
         ax.text(0.01, strike, f" {tag} {strike:,.0f} ", transform=ax.get_yaxis_transform(), color=SURFACE, fontsize=FONT - 0.5,
@@ -147,6 +163,33 @@ def _candles(ax, chart: OiChart) -> None:
     ax.text(1.0, chart.spot, f" {chart.spot:,.0f}", transform=ax.get_yaxis_transform(), color=SURFACE, fontsize=FONT - 0.5,
             fontweight="bold", va="center", ha="left", zorder=7, clip_on=False, bbox=dict(boxstyle="round,pad=0.2", fc=SPOT, ec=SPOT))
     ax.set_title(f"NIFTY 50 · 15-min · {recent.describe()}", color=TEXT, fontsize=FONT + 2.5, fontweight="bold", loc="left", pad=8)
+
+
+def _profile(ax, chart: OiChart, lo: float, hi: float) -> None:
+    """Each strike's OI as a bar growing left from the chart's right edge, in
+    a strip of its own beside the forming candle, labelled in lakh; the
+    expiry's top three each side solid and in bold."""
+    first = chart.panels[0]
+    ranked = {b.strike for b in first.resistance + first.support}
+    start = len(chart.recent.bars) + 0.6
+    edge = start + PROFILE_CANDLES
+    ax.set_xlim(-0.6, edge)
+    ax.axvline(start - 0.2, color=MUTED, lw=0.7, ls=(0, (1, 3)), zorder=1)
+    ax.text(edge, 1.012, "OI by strike · lakh", transform=ax.get_xaxis_transform(), color=TEXT2, fontsize=FONT - 1,
+            ha="right", va="bottom")
+    strikes = sorted(s.strike for s in chart.profile)
+    step = min((b - a for a, b in zip(strikes, strikes[1:]) if b > a), default=50.0)
+    rows = [s for s in chart.profile if lo + step * 0.3 <= s.strike <= hi - step * 0.3]
+    top = max([s.oi for s in rows] + [1e-9])
+    room = PROFILE_CANDLES - 0.3
+    for row in rows:
+        length = room * row.oi / top
+        bold = row.strike in ranked
+        ax.barh(row.strike, length, left=edge - length, height=step * 0.56, color=CALL if row.option_type == "CE" else PUT,
+                alpha=0.9 if bold else 0.5, lw=0, zorder=2)
+        inside = length > 2.6  # room for the number in the bar; otherwise just left of it
+        ax.text(edge - 0.15 if inside else edge - length - 0.15, row.strike, f"{row.oi:.0f}", color=TEXT if inside or bold else TEXT2,
+                fontsize=FONT - 1.5, fontweight="bold" if bold else "normal", ha="right", va="center", zorder=6)
 
 
 def _ladder(ax, panel: Panel, chart: OiChart) -> None:

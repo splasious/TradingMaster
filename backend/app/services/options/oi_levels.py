@@ -12,7 +12,8 @@ contracts' OI unwinds through the afternoon. Sent for live records from
 Settings.oi_levels_alert_minutes; a gap-filled record is history, not news.
 
 Sent as a picture (21 Oct, oi_levels_chart.py: NIFTY's last 25 15-minute
-candles and the one forming, then each expiry as a price ladder) with a
+candles and the one forming with the nearest expiry's OI by strike beside
+them, then each expiry as a price ladder) with a
 short summary under it -- the levels, NIFTY and PCR, any level that moved.
 A picture that can't be drawn sends the full table as text instead; one
 without NIFTY's candles goes with the ladders alone.
@@ -35,7 +36,7 @@ from app.services.notifications import candle_panel
 from app.services.notifications.candle_panel import Recent
 from app.services.notifications.telegram import send_telegram
 from app.services.options import oi_levels_chart
-from app.services.options.oi_levels_chart import Bar, OiChart, Panel
+from app.services.options.oi_levels_chart import Bar, OiChart, Panel, StrikeOi
 from app.services.options.pcr_snapshots import Key, _strike_map
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ NIFTY = "NIFTY 50"
 # long, then goes without it.
 CANDLE_WAIT = timedelta(seconds=75)
 CANDLE_POLL_SECONDS = 5
+PROFILE_POINTS = 400  # strikes this far either side of NIFTY go in the OI profile
 
 
 @dataclass
@@ -198,7 +200,10 @@ def _moved(name: str, before: float | None, levels: list[Level]) -> str | None:
     return f"{'▲' if up else '▼'} {name} moved {'up' if up else 'down'}  {before:,.0f} → {levels[0].strike:,.0f}"
 
 
-def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str, recent: Recent | None = None) -> OiChart:
+def chart_of(
+    snap: PcrSnapshot, sections: list[Section], change_label: str, recent: Recent | None = None,
+    profile: list[StrikeOi] | None = None,
+) -> OiChart:
     mark = as_aware_utc(snap.ts).astimezone(IST)
     panels = []
     for expiry, res, sup, prev_res, prev_sup in sections:
@@ -213,7 +218,7 @@ def chart_of(snap: PcrSnapshot, sections: list[Section], change_label: str, rece
     if sup:
         parts.append(f"{spot - sup[0].strike:,.0f} pts above support {sup[0].strike:,.0f}")
     summary = f"{expiry:%d %b}: NIFTY {spot:,.0f} is " + " and ".join(parts) + "." if parts else f"NIFTY {spot:,.0f}"
-    return OiChart(mark, spot, snap.spot_change, snap.pcr, panels, change_label.removeprefix("Δ"), summary, recent)
+    return OiChart(mark, spot, snap.spot_change, snap.pcr, panels, change_label.removeprefix("Δ"), summary, recent, profile or [])
 
 
 async def _sections(db: AsyncSession, snap: PcrSnapshot) -> tuple[list[Section], str] | None:
@@ -278,14 +283,32 @@ async def _recent(db: AsyncSession, snap: PcrSnapshot) -> Recent | None:
     return recent
 
 
+async def _profile(db: AsyncSession, snap: PcrSnapshot) -> list[StrikeOi]:
+    """The nearest expiry's out-of-the-money OI at each strike within
+    PROFILE_POINTS of NIFTY: calls above it, puts below it, in lakh."""
+    expiry = date.fromisoformat(snap.expiries[0])
+    rows = []
+    for (e, strike, option_type), oi in (await _strike_map(db, snap.id, {})).items():
+        wanted = "CE" if strike > snap.spot else "PE" if strike < snap.spot else None
+        if e == expiry and option_type == wanted and oi is not None and abs(strike - snap.spot) <= PROFILE_POINTS:
+            rows.append(StrikeOi(strike, option_type, oi / LAKH))
+    return sorted(rows, key=lambda r: r.strike)
+
+
 async def _picture(db: AsyncSession, snap: PcrSnapshot, sections: list[Section], change_label: str) -> bytes | None:
     try:
         recent = await _recent(db, snap)
     except Exception:
         logger.exception("NIFTY candles for the OI levels picture not read; it goes with the ladders alone")
         recent = None
+    profile: list[StrikeOi] = []
+    if recent is not None:
+        try:
+            profile = await _profile(db, snap)
+        except Exception:
+            logger.exception("OI profile for the OI levels picture not read; the candles go without it")
     try:
-        return await asyncio.to_thread(oi_levels_chart.draw, chart_of(snap, sections, change_label, recent))
+        return await asyncio.to_thread(oi_levels_chart.draw, chart_of(snap, sections, change_label, recent, profile))
     except Exception:
         logger.exception("OI levels picture not drawn; the alert goes as text")
         return None

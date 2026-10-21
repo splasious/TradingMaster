@@ -243,8 +243,19 @@ async def test_the_picture_carries_niftys_candles_and_the_one_forming(db_session
     assert len(recent.candles) == 13 and recent.forming["close"] == 22560.5
     assert recent.forming["ts"] == at(25, 10, 15) and recent.forming["open"] == recent.candles[-1]["close"]
     sections, change_label = await oi_levels._sections(db_session, snap)
-    chart = oi_levels.chart_of(snap, sections, change_label, recent)
-    assert chart.recent is recent and oi_levels_chart.draw(chart)[:4] == b"\x89PNG"
+    profile = await oi_levels._profile(db_session, snap)
+    chart = oi_levels.chart_of(snap, sections, change_label, recent, profile)
+    assert chart.recent is recent and chart.profile == profile and oi_levels_chart.draw(chart)[:4] == b"\x89PNG"
+
+
+async def test_the_oi_profile_is_the_nearest_expirys_out_of_the_money_oi_by_strike(db_session: AsyncSession):
+    snap = await _three_records(db_session)  # NIFTY 22,560.5
+    profile = {(row.strike, row.option_type): row.oi for row in await oi_levels._profile(db_session, snap)}
+    assert profile[(22600.0, "CE")] == pytest.approx(98.4) and profile[(22500.0, "PE")] == pytest.approx(102.3)
+    assert (22500.0, "CE") not in profile and (22600.0, "PE") not in profile  # in the money: their OI is no level
+    assert {t for (k, t) in profile if k > snap.spot} == {"CE"} and {t for (k, t) in profile if k < snap.spot} == {"PE"}
+    assert min(k for k, _ in profile) >= snap.spot - oi_levels.PROFILE_POINTS and max(k for k, _ in profile) <= snap.spot + 400
+    assert len(profile) == 16  # 22,200 .. 22,950 every 50
 
 
 async def test_the_candle_that_just_closed_may_be_missing_but_no_more(db_session: AsyncSession):
