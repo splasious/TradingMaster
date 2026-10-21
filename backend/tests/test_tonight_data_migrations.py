@@ -8,6 +8,7 @@ RS Rotation 15 MIN onto their 57-stock lists, and 7dab5ef6e158 RS Rotation
 import hashlib
 import importlib.util
 import pathlib
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from alembic.migration import MigrationContext
@@ -798,3 +799,42 @@ async def test_am_op_trd_15_min_straddle_moves_to_the_50_point_strike_by_its_edi
     assert version.version_number == 12 and version.python_code == after
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+
+
+# ------------------------------------------------- AM OP pool to 20 lakh --
+
+async def _amop_pool(db, name: str, strategy_name: str, capital: float, cash: float) -> PaperPortfolio:
+    user = User(email=f"pool_{uuid.uuid4().hex[:8]}@tradingmaster.internal", hashed_password="x", full_name="x")
+    db.add(user)
+    await db.flush()
+    strategy = Strategy(name=strategy_name, owner_id=user.id, code_type="native")
+    pool = PaperPortfolio(user_id=user.id, name=name, cash=cash, initial_capital=capital)
+    db.add_all([strategy, pool])
+    await db.flush()
+    version = StrategyVersion(strategy_id=strategy.id, version_number=1, timeframe="15m", instrument_ids=[], parameters={},
+                              python_code="#", position_sizing={}, risk_rules={})
+    db.add(version)
+    await db.flush()
+    db.add(PaperNativeDeployment(portfolio_id=pool.id, strategy_id=strategy.id, strategy_version_id=version.id,
+                                 status=DeploymentStatus.ACTIVE.value, state=None))
+    await db.commit()
+    return pool
+
+
+async def test_the_am_op_pool_moves_to_20_lakh_keeping_its_pnl(db_engine, db_session):
+    pool = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 500_000.0, 637_897.50)
+    other = await _amop_pool(db_session, "Nifty PCR Futures", "Nifty PCR Futures", 500_000.0, 512_000.0)
+    elsewhere = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRAD 15 MIN H", 500_000.0, 480_000.0)
+    migration = _load("a9c1e3f5b7d8_am_op_pool_20_lakh")
+    await _run(db_engine, migration)
+    for p in (pool, other, elsewhere):
+        await db_session.refresh(p)
+    assert (pool.initial_capital, pool.cash) == (2_000_000.0, 2_137_897.50)  # the +1,37,897.50 kept
+    assert (other.initial_capital, other.cash) == (500_000.0, 512_000.0)
+    assert (elsewhere.initial_capital, elsewhere.cash) == (500_000.0, 480_000.0)  # not that strategy's pool
+    [log] = (await db_session.execute(select(AuditLog).where(AuditLog.action == "PAPER_PORTFOLIO_CAPITAL_RAISED"))).scalars().all()
+    assert log.object_id == str(pool.id) and log.previous_value == {"initial_capital": 500_000.0, "cash": 637_897.50}
+
+    await _run(db_engine, migration)  # once moved it's at 20 lakh: never twice
+    await db_session.refresh(pool)
+    assert (pool.initial_capital, pool.cash) == (2_000_000.0, 2_137_897.50)

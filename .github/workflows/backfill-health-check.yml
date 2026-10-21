@@ -210,6 +210,20 @@ jobs:
           " 2>/dev/null || echo "unavailable"
               echo "-- OI-levels alerts today that failed before sending (count):"
               grep -c 'OI levels alert failed' /tmp/backend-today.log || true
+              echo "-- AM OP TRD 15 MIN's pool on 20 lakh starting capital (21 Oct), and its capital-raise audit rows (yes/no, count -- no amounts):"
+              compose exec -T backend python -c "
+          import asyncio
+          from sqlalchemy import func, select
+          from app.db.session import AsyncSessionLocal
+          from app.models.audit import AuditLog
+          from app.models.paper_trading import PaperPortfolio
+          async def main():
+              async with AsyncSessionLocal() as db:
+                  caps = (await db.execute(select(PaperPortfolio.initial_capital).where(func.lower(PaperPortfolio.name) == 'am op trd 15 min'))).scalars().all()
+                  logs = (await db.execute(select(func.count()).select_from(AuditLog).where(AuditLog.action == 'PAPER_PORTFOLIO_CAPITAL_RAISED'))).scalar()
+              print('pools named so:', len(caps), '| on 20 lakh:', 'yes' if caps and all(abs(c - 2000000) < 0.01 for c in caps) else 'no', '| audit rows:', logs)
+          asyncio.run(main())
+          " 2>/dev/null || echo "unavailable"
               echo "-- OI-levels alerts today sent as the text table because the picture wasn't drawn (count):"
               grep -c 'OI levels picture not drawn' /tmp/backend-today.log || true
               echo "-- Trade alerts today sent without their chart picture (count each): chart not drawn, data not loaded, picture refused by Telegram, alerts failed:"
