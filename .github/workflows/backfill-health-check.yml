@@ -9,6 +9,11 @@ name: Backfill health check
 
 on:
   workflow_dispatch:
+    inputs:
+      oi_preview:
+        description: "Instead of the check: send the latest OI-levels picture to the private Telegram chat only (not the group)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -238,6 +243,36 @@ jobs:
                 | sed -E 's/Error: .*/Error: (text)/' | sort | uniq -c | sort -rn | head -10 || true
               rm -f /tmp/backend-today.log /tmp/frontend-today.log
               ;;
+            oi-preview)
+              # The latest live NIFTY record's OI-levels picture and summary,
+              # to the private chat only (to_group off): to see it on real data.
+              compose exec -T backend python -c "
+          import asyncio
+          from sqlalchemy import select
+          from app.db.session import AsyncSessionLocal
+          from app.models.pcr import SOURCE_LIVE, PcrSnapshot
+          from app.services.broker.zerodha_broker import IST
+          from app.services.notifications.telegram import send_telegram
+          from app.services.options import oi_levels
+          async def main():
+              async with AsyncSessionLocal() as db:
+                  snap = (await db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == 'NIFTY', PcrSnapshot.source == SOURCE_LIVE,
+                          PcrSnapshot.spot.is_not(None)).order_by(PcrSnapshot.ts.desc()).limit(1))).scalar_one_or_none()
+                  if snap is None:
+                      return print('no live NIFTY record')
+                  built = await oi_levels._sections(db, snap)
+                  if built is None:
+                      return print('no levels in that record')
+                  sections, label = built
+                  photo = await oi_levels._picture(snap, sections, label)
+                  if photo is None:
+                      return print('picture not drawn')
+                  subject, body = oi_levels.caption(snap, sections)
+                  await send_telegram('Preview · ' + subject, body, photo=photo)
+                  print(f'sent to the private chat: the {snap.ts.astimezone(IST):%d %b %H:%M} record, {len(sections)} expiry panel(s), picture {len(photo) // 1024} KB')
+          asyncio.run(main())
+          " 2>/dev/null || echo "failed"
+              ;;
           esac
           REMOTE
 
@@ -246,6 +281,12 @@ jobs:
               -o ConnectTimeout=20 "root@$VPS_HOST" "$@"
           }
           remote() { vps bash -s -- "$@" < "$RUNNER_TEMP/remote.sh"; }
+
+          if [ "${{ inputs.oi_preview }}" = "true" ]; then
+            echo "== OI-levels picture preview (private chat only)"
+            remote oi-preview
+            exit 0
+          fi
 
           echo "== Containers"
           remote status
