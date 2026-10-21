@@ -127,8 +127,7 @@ export function OverallOiTable({ points, hover, onHover }: TableProps) {
   );
 }
 
-export function OiChangeTable({ points, hover, onHover, pctLayout = "inline" }: TableProps & { pctLayout?: "inline" | "columns" }) {
-  const cols = pctLayout === "columns";
+export function OiChangeTable({ points, hover, onHover }: TableProps) {
   return (
     <table className="w-full border-collapse text-[13px]" onMouseLeave={() => onHover(null)}>
       <thead>
@@ -136,8 +135,6 @@ export function OiChangeTable({ points, hover, onHover, pctLayout = "inline" }: 
           <th className={cn(TH, "text-left")}>Time</th>
           <th className={TH}>Call ΔOI</th>
           <th className={TH}>Put ΔOI</th>
-          {cols && <th className={TH}>Call Δ%</th>}
-          {cols && <th className={TH}>Put Δ%</th>}
           <th className={TH}>ΔOI PCR</th>
           <th className={TH}>PCR prev → now</th>
           <th className={TH}>NIFTY Δ</th>
@@ -148,7 +145,7 @@ export function OiChangeTable({ points, hover, onHover, pctLayout = "inline" }: 
         {rowsWithDividers(points).map((r) =>
           r.kind === "day" ? (
             <tr key={r.label} className="bg-surface-elevated">
-              <td colSpan={cols ? 9 : 7} className="px-2.5 py-1 text-xs font-semibold text-text-secondary">{r.label} ↓</td>
+              <td colSpan={7} className="px-2.5 py-1 text-xs font-semibold text-text-secondary">{r.label} ↓</td>
             </tr>
           ) : (
             <tr
@@ -161,19 +158,17 @@ export function OiChangeTable({ points, hover, onHover, pctLayout = "inline" }: 
                 {r.p.gapSince && <span className="ml-1 text-[10.5px] text-text-muted">since {timeIst(r.p.gapSince)}</span>}
               </td>
               {r.p.status !== "recorded" ? (
-                <NotRecorded p={r.p} span={cols ? 8 : 6} />
+                <NotRecorded p={r.p} span={6} />
               ) : (
                 <>
                   <td className={cn(TD, toneOf(r.p.callChg))}>
                     {lakhSigned(r.p.callChg)}
-                    {!cols && <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.callChg, r.p.callOi))}</span>}
+                    <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.callChg, r.p.callOi))}</span>
                   </td>
                   <td className={cn(TD, toneOf(r.p.putChg))}>
                     {lakhSigned(r.p.putChg)}
-                    {!cols && <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.putChg, r.p.putOi))}</span>}
+                    <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.putChg, r.p.putOi))}</span>
                   </td>
-                  {cols && <td className={cn(TD, toneOf(r.p.callChg))}>{pctSigned(oiChangePct(r.p.callChg, r.p.callOi))}</td>}
-                  {cols && <td className={cn(TD, toneOf(r.p.putChg))}>{pctSigned(oiChangePct(r.p.putChg, r.p.putOi))}</td>}
                   <td className={TD}>{coiPcrText(r.p)}</td>
                   <td className={TD}>
                     {r.p.prevPcr == null ? (
