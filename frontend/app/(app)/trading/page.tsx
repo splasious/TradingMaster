@@ -36,6 +36,7 @@ import {
   useStrategies,
 } from "@/lib/hooks";
 import { marketLabel } from "@/lib/market";
+import { MEANINGFUL_DAYS, cagrPct, daysBetween, formatPct, roiPct, xirrPct } from "@/lib/returns";
 import { istDateTime, istShortDateTime, istShortTime } from "@/lib/time";
 import { CloseFootnote, CloseMark, priceHeading, sessionDay, valueHeading } from "@/components/trading/close-price";
 import type {
@@ -1657,9 +1658,43 @@ function RecordStat({ label, children }: { label: string; children: React.ReactN
 /** Closed trades as a trading record: one row per trade (date, symbol,
  * structure, entry/exit time and price, qty/lots, gross, charges, net,
  * return, exit reason), click a row for its legs; totals above, CSV export. */
+/** ROI, CAGR and XIRR of a card's paper trades on its own pool's starting
+ * capital, net of estimated charges (lib/returns.ts). Annualised figures
+ * stay greyed under MEANINGFUL_DAYS, with the days they're from. */
+function ReturnStats({ trades, capital, startedAt }: { trades: HistoryTrade[]; capital: number; startedAt: string }) {
+  const paper = trades.filter((t) => (t.mode ?? "paper") === "paper");
+  const net = paper.reduce((sum, t) => sum + t.net_pnl, 0);
+  const start = new Date(startedAt);
+  const now = new Date();
+  const days = daysBetween(start, now);
+  const roi = roiPct(net, capital);
+  const cagr = cagrPct(capital, capital + net, days);
+  const xirr = xirrPct([{ amount: -capital, at: start }, { amount: capital + net, at: now }]);
+  const early = days < MEANINGFUL_DAYS;
+  const why = `Annualised from ${Math.floor(days)} days since the card started${early ? ` -- not meaningful under ${MEANINGFUL_DAYS} days` : ""}`;
+  const suffix = trades.length !== paper.length ? " (paper)" : "";
+  const annual = (value: number | null) => (
+    <span className={early ? "text-text-muted" : toneFor(value ?? 0)} title={why}>
+      {formatPct(value)} <span className="text-xs font-normal text-text-muted">· {Math.floor(days)} days</span>
+    </span>
+  );
+  return (
+    <>
+      <RecordStat label={`ROI${suffix}`}>
+        <span className={toneFor(roi ?? 0)} title="Net P&L on the pool's starting capital">{formatPct(roi)}</span>
+      </RecordStat>
+      <RecordStat label={`CAGR${suffix}`}>{annual(cagr)}</RecordStat>
+      <RecordStat label={`XIRR${suffix}`}>{annual(xirr)}</RecordStat>
+    </>
+  );
+}
+
 function NativeTradeRecord({
-  trades, showStrategy = false, showMode = false, filename,
-}: { trades: HistoryTrade[]; showStrategy?: boolean; showMode?: boolean; filename: string }) {
+  trades, showStrategy = false, showMode = false, filename, returns,
+}: {
+  trades: HistoryTrade[]; showStrategy?: boolean; showMode?: boolean; filename: string;
+  returns?: { capital: number; startedAt: string };
+}) {
   if (!trades.length) return <EmptyState title="No closed trades yet" />;
 
   const wins = trades.filter((t) => t.net_pnl > 0).length;
@@ -1690,6 +1725,7 @@ function NativeTradeRecord({
               <RecordStat label="Net P&amp;L">
                 <span className={toneFor(net)}>{formatMoney(net, currency, true, 2)}</span>
               </RecordStat>
+              {returns && <ReturnStats trades={trades} capital={returns.capital} startedAt={returns.startedAt} />}
             </>
           )}
         </div>
@@ -1732,12 +1768,19 @@ function NativeTradeRecord({
         Times are IST. On a multi-leg trade, Entry/Exit Price is the net premium per unit (short premiums minus long);
         click a row for each leg. Charges are an estimate of brokerage, STT, exchange, SEBI, stamp duty and GST at NSE
         rates -- paper fills pay none, so the pool&apos;s Realized P&amp;L stays gross. Live trades are at the broker&apos;s fills.
+        {returns && (
+          <>
+            {" "}ROI, CAGR and XIRR are net of those charges, on the pool&apos;s starting capital; CAGR and XIRR annualise from
+            the card&apos;s start (greyed under {MEANINGFUL_DAYS} days), and XIRR equals CAGR while the pool has had no deposits or
+            withdrawals.
+          </>
+        )}
       </p>
     </div>
   );
 }
 
-function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOut }) {
+function NativeDeploymentDetail({ deployment, pool }: { deployment: NativeDeploymentOut; pool?: PaperPortfolioOut }) {
   const { data: trades, isLoading } = useNativeTrades(deployment.id);
   const { data: liveTrades } = useLiveNativeTrades();
   const mine = liveHistory((liveTrades ?? []).filter((t) => t.paper_deployment_id === deployment.id));
@@ -1750,7 +1793,10 @@ function NativeDeploymentDetail({ deployment }: { deployment: NativeDeploymentOu
       {isLoading ? (
         <LoadingState />
       ) : (
-        <NativeTradeRecord trades={all} showMode={mine.length > 0} filename={`${deployment.strategy_name}-closed-trades`} />
+        <NativeTradeRecord
+          trades={all} showMode={mine.length > 0} filename={`${deployment.strategy_name}-closed-trades`}
+          returns={pool ? { capital: pool.initial_capital, startedAt: deployment.created_at } : undefined}
+        />
       )}
     </div>
   );
@@ -2146,7 +2192,7 @@ function NativeDeploymentCard({
           {expanded ? "Hide details" : "Show details"}
           {myTrades?.length ? ` · ${myTrades.length} closed trade${myTrades.length === 1 ? "" : "s"}` : ""}
         </button>
-        {expanded && <NativeDeploymentDetail deployment={deployment} />}
+        {expanded && <NativeDeploymentDetail deployment={deployment} pool={soloPortfolio} />}
       </CardContent>
     </Card>
   );
