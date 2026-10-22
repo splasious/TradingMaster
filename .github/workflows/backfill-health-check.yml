@@ -147,6 +147,8 @@ jobs:
               echo "-- Telegram group for the OI-levels and scanner alerts: found or not, groups the bot has been seen in (no names or IDs), group send failures today (count):"
               compose exec -T backend python -c "import asyncio; from app.services.notifications.telegram_group import group_status; print(asyncio.run(group_status()))" 2>/dev/null || echo "unavailable"
               grep -c 'Telegram group send failed' /tmp/backend-today.log || true
+              echo "-- Telegram trade alerts: the strategies alerted on (names only, as the server reads them):"
+              compose exec -T backend python -c "from app.services.notifications.trade_alerts import alerted_strategies as a; print(', '.join(sorted(a())) or 'none')" 2>/dev/null || echo "unavailable"
               echo "-- Kotak Neo broker accounts (numbered): status, when set up, why the last login failed (its kind only), and the SHAPE of what was entered -- never the values:"
               compose exec -T backend python -c "
           import asyncio, base64, binascii, json, re

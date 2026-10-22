@@ -3,7 +3,9 @@ each trade taken and each one closed, with its P&L, for Nifty PCR Futures and
 AM OP TRD 15 MIN -- sent by the native runner after the check, to the
 private chat and the group, for the administrator's cards only -- each as a
 chart picture (trade_chart.py) with the text as its caption. Nifty PCR
-Futures' option shift (22 Oct) is one "option shifted" alert, text only."""
+Futures' option shift (22 Oct) is one "option shifted" alert, text only.
+Nifty PCR Futures was taken off the alerts on 22 Oct; the tests here alert
+on it as well, to try the alerts on both kinds of card."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -16,6 +18,7 @@ from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperPortfolio
 from app.models.pcr import PcrSnapshot
 from app.models.strategy import Strategy, StrategyVersion
+from app.core.config import Settings, get_settings
 from app.models.user import Role, User, UserRole
 from app.services.broker.zerodha_broker import IST
 from app.services.notifications import trade_alerts, trade_chart
@@ -62,6 +65,15 @@ async def evaluate(ctx):
     ctx.state["position"] = {"bias": "bearish", "option_spot": 23300.0, "legs": {"future": {"symbol": "NIFTY26OCTFUT"}}}
     ctx.note("rolled", signal="OPTION_SHIFT")
 """
+
+
+@pytest.fixture(autouse=True)
+def alerted(monkeypatch):
+    monkeypatch.setattr(get_settings(), "telegram_trade_alert_strategies", "Nifty PCR Futures,AM OP TRD 15 MIN")
+
+
+def test_only_am_op_trd_15_min_is_alerted_on_by_default():
+    assert Settings.model_fields["telegram_trade_alert_strategies"].default == "AM OP TRD 15 MIN"
 
 
 def at(hh: int, mm: int, ss: int = 0) -> datetime:
