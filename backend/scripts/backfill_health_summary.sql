@@ -1474,6 +1474,35 @@ WHERE lower(s.name) = 'conti ladder straddle 15 min' AND (t.closed_at AT TIME ZO
 GROUP BY t.exit_reason;
 \echo
 
+\echo '== CL1. Conti Ladder Straddle 15 MIN: why it has or has not shifted -- its entry NIFTY and last check, then every finished NIFTY 15-min candle stored today with its close from that entry (NIFTY market data only)'
+SELECT to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_run_ist, d.last_signal,
+       d.state::json->'position'->>'entry_spot' AS entry_nifty,
+       to_char((d.state::json->'position'->>'opened_at')::timestamptz AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist,
+       d.last_signal_reason AS last_reason
+FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id
+WHERE lower(s.name) = 'conti ladder straddle 15 min';
+WITH ladder AS (
+    SELECT (d.state::json->'position'->>'entry_spot')::float AS entry_spot,
+           (d.state::json->'position'->>'opened_at')::timestamptz AS opened_at
+    FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id
+    WHERE lower(s.name) = 'conti ladder straddle 15 min'
+)
+SELECT to_char(c.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS candle_ist, c.open, c.high, c.low, c.close,
+       round((c.close - l.entry_spot)::numeric, 1) AS close_from_entry,
+       CASE WHEN c.ts + interval '15 minutes' > l.opened_at THEN 'yes' ELSE 'no' END AS closed_after_opening,
+       to_char(c.created_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS saved_ist
+FROM ohlcv_candles c
+JOIN instruments i ON i.id = c.instrument_id AND i.symbol = 'NIFTY 50'
+CROSS JOIN ladder l
+WHERE c.timeframe = '15m' AND (c.ts AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+ORDER BY c.ts;
+\echo '-- Conti Straddle 15 MIN (rolls on the live price) today, for comparison: its trades by exit reason and times'
+SELECT t.exit_reason, string_agg(to_char(t.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') || '-' || to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI'), ', ' ORDER BY t.closed_at) AS held_ist
+FROM paper_native_trades t JOIN paper_native_deployments d ON d.id = t.deployment_id JOIN strategies s ON s.id = d.strategy_id
+WHERE lower(s.name) = 'conti straddle 15 min' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+GROUP BY t.exit_reason;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
