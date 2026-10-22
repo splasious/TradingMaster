@@ -884,3 +884,32 @@ async def test_conti_ladder_straddle_is_created_with_its_pool_and_card_for_am_op
     assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
     actions = (await db_session.execute(select(Log.action).where(Log.user_id == amop.user_id))).scalars().all()
     assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
+
+
+# ------------------------------- Conti Ladder Straddle steps with NIFTY --
+
+async def test_conti_ladder_moves_onto_stepping_with_nifty_keeping_its_open_ladder(db_engine, db_session):
+    migration = _load("e5a7c9b1d3f6_conti_ladder_steps_with_nifty")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v1 = "# Conti Ladder Straddle 15 MIN, version 1: shifts all ten legs on a 15-min close\n"
+    migration.FROM_MD5 = _md5_text(v1)
+
+    running = await _deployment(db_session, "ladder_a@tradingmaster.internal", v1)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Ladder Straddle 15 MIN"
+    edited = await _deployment(db_session, "ladder_b@tradingmaster.internal", "# edited by hand since\n")
+    (await db_session.get(Strategy, edited.strategy_id)).name = "Conti Ladder Straddle 15 MIN"
+    other = await _deployment(db_session, "ladder_c@tradingmaster.internal", v1)  # same code, another strategy
+    ids = {"running": running.id, "edited": edited.id, "other": other.id}
+    before = {"edited": edited.strategy_version_id, "other": other.strategy_version_id}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    for key in ("edited", "other"):
+        assert (await db_session.get(PaperNativeDeployment, ids[key])).strategy_version_id == before[key]
