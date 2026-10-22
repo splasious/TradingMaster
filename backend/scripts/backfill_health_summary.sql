@@ -1503,6 +1503,30 @@ WHERE lower(s.name) = 'conti straddle 15 min' AND (t.closed_at AT TIME ZONE 'Asi
 GROUP BY t.exit_reason;
 \echo
 
+\echo '== CL2. Rolling on a 15-min close (22 Oct): AM OP TRD 15 MIN, AM OP TRAD 15 MIN H and Conti Straddle 15 MIN -- each version (code md5), which one each card runs, its live run, and how many places each roll edit fits in that code (counts only, no code)'
+SELECT trim(s.name) AS strategy, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
+       string_agg(DISTINCT d.status, ',') AS card_status, count(DISTINCT ln.id) FILTER (WHERE ln.status IN ('active', 'paused')) AS live_runs_on,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $e0$Rolling: closes and reopens the SAME regime at the new ATM once spot has
+moved ROLL_TRIGGER (100) points from the spot recorded when the position
+was last opened/rolled$e0$, ''))) / length($e0$Rolling: closes and reopens the SAME regime at the new ATM once spot has
+moved ROLL_TRIGGER (100) points from the spot recorded when the position
+was last opened/rolled$e0$) AS edit0,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $e1$def _candle_text($e1$, ''))) / length($e1$def _candle_text($e1$) AS edit1,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $e2$        entry_spot = position.get("entry_spot")
+        moved = abs(spot - entry_spot) if entry_spot is not None else 0.0
+$e2$, ''))) / length($e2$        entry_spot = position.get("entry_spot")
+        moved = abs(spot - entry_spot) if entry_spot is not None else 0.0
+$e2$) AS edit2,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $e3$reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved){ma_part}"$e3$, ''))) / length($e3$reason=f"{regime} position open, spot {spot} vs entry {entry_spot} ({moved:.1f}pt moved){ma_part}"$e3$) AS edit3
+FROM strategies s JOIN strategy_versions v ON v.strategy_id = s.id
+LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id AND d.status IN ('active', 'paused')
+LEFT JOIN live_native_deployments ln ON ln.paper_deployment_id = d.id AND ln.strategy_version_id = v.id
+WHERE trim(s.name) IN ('AM OP TRD 15 MIN', 'AM OP TRAD 15 MIN H', 'Conti Straddle 15 MIN')
+  AND (v.version_number >= (SELECT max(v2.version_number) - 1 FROM strategy_versions v2 WHERE v2.strategy_id = s.id) OR d.id IS NOT NULL)
+GROUP BY s.id, s.name, v.version_number, v.python_code
+ORDER BY 1, 2;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
