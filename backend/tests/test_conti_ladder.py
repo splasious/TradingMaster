@@ -1,9 +1,8 @@
 """Conti Ladder Straddle 15 MIN (native_strategies/nifty_conti_ladder.py, 22
 Oct): five NIFTY short straddles, 2 lots a leg, at the PCR-picked middle
 strike and 100 and 200 points either side, held from 09:45 to 15:00. Since
-version 2 the ladder steps with live NIFTY, 100 points at a time, trading
-only the straddle that drops off the far end and the one that opens beyond
-the near end."""
+version 3 the whole ladder shifts with live NIFTY, 100 points at a time:
+all ten legs close as one trade and it reopens as a new one."""
 
 from datetime import timezone
 
@@ -60,56 +59,67 @@ async def test_it_opens_five_two_lot_straddles_around_the_pcr_picked_strike(mark
     assert opened._last_signal == "STRADDLE" and "opened at 23,250-23,650" in opened._last_reason
 
 
-async def test_a_100_point_live_move_steps_only_the_far_straddle(market):
+async def test_a_100_point_live_move_shifts_the_whole_ladder_as_one_trade(market):
     await market.check(at(9, 45, 5), 23460.0, 0.92)
     held = await market.check(at(10, 5), 23559.0, 0.92)  # 99 points: nothing moves
     assert ladder_of(held)[1] == [23250, 23350, 23450, 23550, 23650] and await market.trades() == []
-    assert "steps at 23,360.0 / 23,560.0" in held._last_reason
+    assert "shifts at 23,360.0 / 23,560.0" in held._last_reason
 
-    stepped = await market.check(at(10, 6), 23561.0, 1.30)  # 101 points, mid-candle: one step up
+    shifted = await market.check(at(10, 6), 23561.0, 1.30)  # 101 points, mid-candle: all ten legs out, the ladder 100 up
     [trade] = await market.trades()
-    assert trade.exit_reason == "rollover" and strikes_traded(trade) == {23250} and len(trade.legs) == 2
-    assert ladder_of(stepped) == (23550, [23350, 23450, 23550, 23650, 23750], {130.0})
-    p = stepped.state["position"]
-    assert p["reference"] == 23560.0 and p["side"] == "call"  # the PCR isn't read again
-    assert p["legs"]["short_23750_ce"]["opened_at"] == at(10, 6).astimezone(timezone.utc).isoformat()
-    assert p["legs"]["short_23350_ce"]["opened_at"] == at(9, 45, 5).astimezone(timezone.utc).isoformat()  # kept as they were
-    assert "23,250 closed / 23,750 opened" in stepped._last_reason
+    assert trade.exit_reason == "rollover" and len(trade.legs) == 10
+    assert strikes_traded(trade) == {23250, 23350, 23450, 23550, 23650}
+    assert ladder_of(shifted) == (23550, [23350, 23450, 23550, 23650, 23750], {130.0})
+    p = shifted.state["position"]
+    assert p["reference"] == 23560.0 and p["side"] == "call" and p["entry_spot"] == 23561.0  # the PCR isn't read again
+    assert p["opened_at"] == at(10, 6).astimezone(timezone.utc).isoformat() and len(p["legs"]) == 10
+    assert "shifted +100pt" in shifted._last_reason and "reopened at 23,350-23,750" in shifted._last_reason
 
-    down = await market.check(at(10, 40), 23459.0, 0.92)  # back 101 from the new reference: one step down
+    down = await market.check(at(10, 40), 23459.0, 0.92)  # back 101 from the new reference: the whole ladder 100 down
     assert ladder_of(down)[1] == [23250, 23350, 23450, 23550, 23650]
-    assert [strikes_traded(t) for t in await market.trades()] == [{23250}, {23750}]
+    assert [len(t.legs) for t in await market.trades()] == [10, 10]
 
 
-async def test_a_230_point_jump_steps_twice_in_one_check(market):
+async def test_a_230_point_jump_shifts_200_in_one_trade(market):
     await market.check(at(9, 45, 5), 23460.0, 0.92)
     jumped = await market.check(at(10, 5), 23690.0, 0.92)
     assert ladder_of(jumped) == (23650, [23450, 23550, 23650, 23750, 23850], {130.0})
-    assert [strikes_traded(t) for t in await market.trades()] == [{23250}, {23350}]
+    assert [len(t.legs) for t in await market.trades()] == [10]
     assert jumped.state["position"]["reference"] == 23660.0
 
 
-async def test_no_live_price_at_the_new_strike_holds_off_the_step(market):
+async def test_no_live_price_at_a_new_strike_holds_off_the_shift(market):
     await market.check(at(9, 45, 5), 23460.0, 0.92)
     market.missing = {(23750.0, "PE")}
     waiting = await market.check(at(10, 5), 23565.0, 0.92)
     assert ladder_of(waiting)[1] == [23250, 23350, 23450, 23550, 23650] and await market.trades() == []
-    assert "no live CE and PE price at 23,750" in waiting._last_reason
+    assert "shifting waits for live CE and PE prices at 23,750" in waiting._last_reason
     market.missing = set()
     assert ladder_of(await market.check(at(10, 5, 10), 23565.0, 0.92))[1] == [23350, 23450, 23550, 23650, 23750]
 
 
-async def test_everything_closes_at_1500_one_trade_per_straddle(market):
+async def test_everything_closes_at_1500_as_one_trade(market):
     await market.check(at(9, 45, 5), 23460.0, 0.92)
     closed = await market.check(at(15, 0, 3), 23470.0, 0.92)
-    trades = await market.trades()
-    assert closed.state["position"] is None and len(trades) == 5
-    assert {t.exit_reason for t in trades} == {"time_cutoff_3pm"} and all(len(t.legs) == 2 for t in trades)
+    [trade] = await market.trades()
+    assert closed.state["position"] is None and trade.exit_reason == "time_cutoff_3pm" and len(trade.legs) == 10
     after = await market.check(at(15, 0, 13), 23470.0, 0.92)
     assert after.state["position"] is None and "outside entry window" in after._last_reason
 
 
-async def test_a_ladder_opened_by_version_1_steps_too(market):
+async def test_a_ladder_left_by_version_2_shifts_whole_too(market):
+    opened = await market.check(at(9, 45, 5), 23460.0, 0.92)
+    p = opened.state["position"]  # version 2's, after a step down: one straddle newer than the rest
+    p["legs"]["short_23250_ce"]["opened_at"] = p["legs"]["short_23250_pe"]["opened_at"] = at(9, 55).astimezone(timezone.utc).isoformat()
+    market.deployment.state = {"position": p}
+    await market.db.commit()
+    shifted = await market.check(at(10, 6), 23561.0, 0.92)
+    [trade] = await market.trades()
+    assert len(trade.legs) == 10 and trade.opened_at.replace(tzinfo=timezone.utc) == at(9, 45, 5).astimezone(timezone.utc)
+    assert ladder_of(shifted)[1] == [23350, 23450, 23550, 23650, 23750]
+
+
+async def test_a_ladder_opened_by_version_1_shifts_too(market):
     opened = await market.check(at(9, 45, 5), 23460.0, 0.92)
     p = opened.state["position"]
     p.pop("reference")  # version 1's position: no reference, no opening time on its legs
@@ -117,7 +127,7 @@ async def test_a_ladder_opened_by_version_1_steps_too(market):
         leg.pop("opened_at")
     market.deployment.state = {"position": p}
     await market.db.commit()
-    stepped = await market.check(at(10, 6), 23561.0, 0.92)
-    assert ladder_of(stepped)[1] == [23350, 23450, 23550, 23650, 23750] and stepped.state["position"]["reference"] == 23560.0
+    shifted = await market.check(at(10, 6), 23561.0, 0.92)
+    assert ladder_of(shifted)[1] == [23350, 23450, 23550, 23650, 23750] and shifted.state["position"]["reference"] == 23560.0
     [trade] = await market.trades()
-    assert trade.opened_at.replace(tzinfo=timezone.utc) == at(9, 45, 5).astimezone(timezone.utc)
+    assert len(trade.legs) == 10 and trade.opened_at.replace(tzinfo=timezone.utc) == at(9, 45, 5).astimezone(timezone.utc)

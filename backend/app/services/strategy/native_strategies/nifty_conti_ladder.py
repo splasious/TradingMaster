@@ -18,17 +18,15 @@ CANDIDATE_STEPS either side. The ladder opens only when all ten of its
 contracts have a live price; otherwise no ladder that check (a note says
 why), and the next check tries again.
 
-Steps with NIFTY, trading only the legs that change (22 Oct, version 2):
-the ladder keeps a reference level -- NIFTY at the opening. When live
-NIFTY is STEP (100) points or more from it, the ladder steps 100 points
-that way: the straddle at the far end closes and a new one, 2 lots a leg,
-opens 100 points beyond the near end; the other four stay as they are.
-The reference and the middle strike move exactly 100 with it, so the next
-step comes 100 further on, and a jump of 230 points steps twice in one
-check. A step needs live CE and PE prices at the new strike; until it has
-them nothing moves, the far straddle included. The PCR is read only for
-the opening. Each straddle is a trade of its own, recorded when it closes
--- at a step, or at 15:00 with the rest.
+Shifts whole with NIFTY (22 Oct, version 3): the ladder keeps a reference
+level -- NIFTY at the opening. When live NIFTY is STEP (100) points or
+more from it, all ten legs close as one trade and the whole ladder reopens
+100 points that way (200 for a 230-point jump, and so on) as a new one,
+2 lots a leg; the reference and the middle strike move with it, so the
+next shift comes 100 further on. A shift waits for live CE and PE prices
+at all five new strikes; until then nothing moves. The PCR is read only
+for the opening. A ladder is one trade, recorded when it closes -- at a
+shift, or at 15:00.
 
 Entries from 09:45; everything closes at 15:00, no exceptions; nothing
 held overnight. Current week's weekly expiry, next week's on the expiry
@@ -120,13 +118,12 @@ async def evaluate(ctx) -> None:
         ctx.note("skipped", reason="no live NIFTY spot price available")
         return
 
-    async def close_straddle(strike: float, exit_reason: str) -> None:
-        """One straddle's two legs bought back and recorded as a trade."""
-        legs = [leg for leg in position["legs"].values() if leg["strike"] == strike]
+    async def close_position(exit_reason: str) -> None:
+        """All ten legs bought back and recorded as one trade."""
         trade_legs = []
         total_pnl = 0.0
         total_entry_notional = 0.0
-        for leg in legs:
+        for leg in position["legs"].values():
             instrument = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
             exit_price = await ctx.get_price(instrument.id) if instrument else None
             if exit_price is None:
@@ -141,15 +138,8 @@ async def evaluate(ctx) -> None:
         pnl_pct = (total_pnl / total_entry_notional * 100) if total_entry_notional else 0.0
         await ctx.record_trade(
             legs=trade_legs, pnl=total_pnl, pnl_pct=pnl_pct, exit_reason=exit_reason,
-            opened_at=datetime.fromisoformat(legs[0].get("opened_at") or position["opened_at"]),
+            opened_at=datetime.fromisoformat(position["opened_at"]),
         )
-        for option_type in ("CE", "PE"):
-            position["legs"].pop(leg_key(strike, option_type), None)
-        position["strikes"] = [s for s in position["strikes"] if s != strike]
-
-    async def close_position(exit_reason: str) -> None:
-        for strike in list(position["strikes"]):
-            await close_straddle(strike, exit_reason)
         ctx.state["position"] = None
 
     if position is not None:
@@ -162,50 +152,51 @@ async def evaluate(ctx) -> None:
             ctx.note("exited", signal="COVER", reason="3:00pm IST cutoff")
             return
         reference = position.get("reference", position["entry_spot"])
-        steps = int((spot - reference) / STEP)  # whole steps, toward zero
-        taken = []
-        waiting = None
-        for _ in range(abs(steps)):
-            up = steps > 0
-            near, far = (max(position["strikes"]), min(position["strikes"])) if up else (min(position["strikes"]), max(position["strikes"]))
-            new = near + STEP if up else near - STEP
-            pair = {}
-            for option_type in ("CE", "PE"):
-                instrument = await ctx.find_option(underlying.id, date.fromisoformat(position["expiry"]), new, option_type)
-                price = await ctx.get_price(instrument.id) if instrument is not None else None
-                if price is None:
-                    break
-                pair[option_type] = (instrument, price)
-            if len(pair) < 2:
-                waiting = new
-                break
-            await close_straddle(far, "rollover")
-            for option_type, (instrument, price) in pair.items():
-                quantity = float(LOTS_PER_LEG * (instrument.lot_size or DEFAULT_LOT_SIZE))
-                await ctx.open_leg(instrument, "sell", quantity, price)
-                position["legs"][leg_key(new, option_type)] = {
-                    "instrument_id": str(instrument.id), "strike": new, "option_type": option_type, "side": "sell",
-                    "quantity": quantity, "entry_price": price, "opened_at": now_utc.isoformat(),
-                }
-            position["strikes"] = sorted(position["strikes"] + [new])
-            position["strike"] += STEP if up else -STEP
-            reference += STEP if up else -STEP
-            position["reference"] = reference
-            taken.append((far, new))
-        ctx.state["position"] = position
+        shift = int((spot - reference) / STEP) * STEP  # whole steps, toward zero
         ladder = f"{position['strikes'][0]:,.0f}-{position['strikes'][-1]:,.0f} (middle {position['strike']:,.0f})"
-        if taken:
-            moves = ", ".join(f"{far:,.0f} closed / {new:,.0f} opened" for far, new in taken)
-            ctx.note("entered", signal="STRADDLE", reason=(
-                f"ladder stepped {len(taken)}x{STEP} with NIFTY {spot:,.1f}: {moves}; now {ladder}, next step at "
-                f"{reference - STEP:,.1f} / {reference + STEP:,.1f}"
-                + (f"; no live CE and PE price at {waiting:,.0f} for the next step yet" if waiting is not None else "")
+        if shift == 0:
+            ctx.note("hold", reason=(
+                f"{position['side']}-heavy ladder {ladder} open, NIFTY {spot:,.1f} vs reference {reference:,.1f} "
+                f"({spot - reference:+.1f}pt); shifts at {reference - STEP:,.1f} / {reference + STEP:,.1f}"
             ))
             return
-        ctx.note("hold", reason=(
-            f"{position['side']}-heavy ladder {ladder} open, NIFTY {spot:,.1f} vs reference {reference:,.1f} "
-            f"({spot - reference:+.1f}pt); steps at {reference - STEP:,.1f} / {reference + STEP:,.1f}"
-            + (f"; no live CE and PE price at {waiting:,.0f} to step to yet" if waiting is not None else "")
+        middle = position["strike"] + shift
+        expiry = date.fromisoformat(position["expiry"])
+        priced: dict[str, tuple[Instrument, float]] = {}
+        missing = []
+        for strike in ladder_strikes(middle):
+            for option_type in ("CE", "PE"):
+                instrument = await ctx.find_option(underlying.id, expiry, strike, option_type)
+                price = await ctx.get_price(instrument.id) if instrument is not None else None
+                if price is None:
+                    missing.append(strike)
+                    break
+                priced[leg_key(strike, option_type)] = (instrument, price)
+        if missing:
+            ctx.note("hold", reason=(
+                f"{position['side']}-heavy ladder {ladder} open, NIFTY {spot:,.1f} is {shift:+,}pt on: shifting waits for "
+                f"live CE and PE prices at {', '.join(f'{s:,.0f}' for s in missing)}"
+            ))
+            return
+        kept = {key: position[key] for key in ("regime", "side", "pcr_at_entry", "expiry", "roll_trigger", "exit_time")}
+        await close_position("rollover")
+        legs = {}
+        for key, (instrument, price) in priced.items():
+            quantity = float(LOTS_PER_LEG * (instrument.lot_size or DEFAULT_LOT_SIZE))
+            await ctx.open_leg(instrument, "sell", quantity, price)
+            legs[key] = {
+                "instrument_id": str(instrument.id), "strike": instrument.strike, "option_type": instrument.option_type,
+                "side": "sell", "quantity": quantity, "entry_price": price, "opened_at": now_utc.isoformat(),
+            }
+        strikes = ladder_strikes(middle)
+        position = {
+            **kept, "strike": middle, "strikes": strikes, "entry_spot": spot, "reference": reference + shift,
+            "legs": legs, "opened_at": now_utc.isoformat(),
+        }
+        ctx.state["position"] = position
+        ctx.note("entered", signal="STRADDLE", reason=(
+            f"ladder shifted {shift:+,}pt with NIFTY {spot:,.1f}: all 10 legs closed, reopened at {strikes[0]:,.0f}-{strikes[-1]:,.0f} "
+            f"(middle {middle:,.0f}); next shift at {reference + shift - STEP:,.1f} / {reference + shift + STEP:,.1f}"
         ))
         return
 

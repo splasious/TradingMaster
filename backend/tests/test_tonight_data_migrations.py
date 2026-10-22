@@ -890,7 +890,8 @@ async def test_conti_ladder_straddle_is_created_with_its_pool_and_card_for_am_op
 
 async def test_conti_ladder_moves_onto_stepping_with_nifty_keeping_its_open_ladder(db_engine, db_session):
     migration = _load("e5a7c9b1d3f6_conti_ladder_steps_with_nifty")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    assert migration.TO_MD5 == _load("f6b8d0c2e4a7_conti_ladder_shifts_whole").FROM_MD5  # version 3 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 3 now: the mechanics are what's tested here
     v1 = "# Conti Ladder Straddle 15 MIN, version 1: shifts all ten legs on a 15-min close\n"
     migration.FROM_MD5 = _md5_text(v1)
 
@@ -913,3 +914,26 @@ async def test_conti_ladder_moves_onto_stepping_with_nifty_keeping_its_open_ladd
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     for key in ("edited", "other"):
         assert (await db_session.get(PaperNativeDeployment, ids[key])).strategy_version_id == before[key]
+
+
+async def test_conti_ladder_moves_onto_shifting_whole_keeping_its_open_ladder(db_engine, db_session):
+    migration = _load("f6b8d0c2e4a7_conti_ladder_shifts_whole")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v2 = "# Conti Ladder Straddle 15 MIN, version 2: steps the end straddles\n"
+    migration.FROM_MD5 = _md5_text(v2)
+
+    running = await _deployment(db_session, "ladder3_a@tradingmaster.internal", v2)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Ladder Straddle 15 MIN"
+    other = await _deployment(db_session, "ladder3_b@tradingmaster.internal", v2)  # same code, another strategy
+    ids, before = {"running": running.id, "other": other.id}, other.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids["other"])).strategy_version_id == before
