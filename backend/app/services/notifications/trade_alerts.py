@@ -3,7 +3,9 @@ and each one closed with its P&L, for the strategies named in
 Settings.telegram_trade_alert_strategies -- to the private chat and the
 group (telegram_group.py). Sent by the native runner after a check that
 opened legs or closed a trade (NativeContext.opened_legs / closed_trades),
-so the strategies' own code is unchanged. A roll is a close and an entry.
+so the strategies' own code is unchanged. A roll is a close and an entry --
+except Nifty PCR Futures' option shift (22 Oct): one "option shifted" alert,
+text only, for the option bought back and the one sold in its place.
 
 Each alert is a chart picture (trade_chart.py) with the text as its caption,
 and a colour mark in its first line: 📈 / 📉 / ↔️ for the view taken, 🟢 / 🔴
@@ -104,6 +106,37 @@ def exit_message(strategy: str, trade: dict, day_net: float, day_trades: int) ->
         lines.append(f"Net P&L   {net:>+14,.2f}")
     lines.append(f"Today net {day_net:>+14,.2f} ({day_trades})")
     return f"{'🟢' if net >= 0 else '🔴'} {strategy}: trade closed · P&L {net:+,.0f}", "\n".join(lines)
+
+
+def option_shift_message(strategy: str, trade: dict, opened: list[dict], before: dict | None, after: dict | None,
+                         day_net: float, day_trades: int) -> tuple[str, str]:
+    """The option bought back (its P&L) and the one sold in its place;
+    `before` / `after`: the position as the check found and left it."""
+    before, after = before or {}, after or {}
+    view = _view(after) or _view(before)
+    net = _net(trade)
+    sold_at = before.get("option_spot", before.get("spot_at_entry"))
+    nifty = after.get("option_spot")
+    lines = [" · ".join(part for part in (view.title() if view else None, f"NIFTY {nifty:,.0f}" if nifty is not None else None) if part)]
+    if nifty is not None and sold_at is not None:
+        lines.append(f"Moved {nifty - sold_at:+,.0f} from {sold_at:,.0f}")
+    lines.append(f"Time {_ist(trade['closed_at']):%H:%M:%S}")
+    for leg in trade["legs"]:
+        symbol = leg.get("instrument_symbol") or leg.get("instrument_id", "?")
+        lines.append(f"BUY {symbol}")
+        lines.append(f"  {_lots(leg['quantity'], leg.get('lot_size'))} {leg['entry_price']:,.2f} → {leg['exit_price']:,.2f}")
+    for leg in opened:
+        lines.append(f"{'BUY' if leg['side'] == 'buy' else 'SELL'} {leg['symbol']}")
+        lines.append(f"  {_lots(leg['quantity'], leg.get('lot_size'))} @ {leg['price']:,.2f}")
+    lines.append(f"Option P&L{trade['pnl']:>+14,.2f}")
+    if trade.get("charges") is not None:
+        lines.append(f"Charges   {-trade['charges']:>+14,.2f}")
+        lines.append(f"Net P&L   {net:>+14,.2f}")
+    lines.append(f"Today net {day_net:>+14,.2f} ({day_trades})")
+    future = (after.get("legs") or {}).get("future")
+    if future:
+        lines.append(f"Future held: {future['symbol']}")
+    return f"🔁 {strategy}: option shifted · P&L {net:+,.0f}", "\n".join(line[:32] for line in lines)
 
 
 # --- the chart ---------------------------------------------------------------
@@ -270,6 +303,12 @@ async def send_trade_alerts(db, deployment, ctx, position_before: dict | None = 
         strategy = await db.get(Strategy, deployment.strategy_id)
         name = (strategy.name if strategy else "").strip()
         if name.lower() not in alerted_strategies():
+            return
+        shift = next((trade for trade in ctx.closed_trades if trade["exit_reason"] == "option_shift"), None)
+        if shift is not None:  # the old option out, a new one in: one alert, not a close and an entry
+            day_net, day_trades = await _day_net(db, deployment.id, shift["closed_at"])
+            await send_telegram(*option_shift_message(name, shift, ctx.opened_legs, position_before, ctx.state.get("position"),
+                                                      day_net, day_trades), to_group=True)
             return
         try:
             session = await Session().load(db, ctx.now, ctx.get_price)

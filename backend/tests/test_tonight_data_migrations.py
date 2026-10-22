@@ -693,7 +693,9 @@ async def test_the_pcr_futures_hedge_card_moves_to_the_candle_close_stop(db_engi
     await db_session.commit()
 
     migration = _load("c4e6a8b0d2f3_pcr_futures_hedge_stop_on_candle_close")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    option_shift = _load("a7c9e1b3d5f8_pcr_futures_option_shift")
+    assert option_shift.FROM_MD5S == {migration.TO_MD5}  # the built-in has moved on since (a7c9e1b3d5f8)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     migration.FROM_MD5S = {hashlib.md5(intraday.encode()).hexdigest()}
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # a second run changes nothing
@@ -937,3 +939,26 @@ async def test_conti_ladder_moves_onto_shifting_whole_keeping_its_open_ladder(db
     assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids["other"])).strategy_version_id == before
+
+
+async def test_the_pcr_futures_card_moves_onto_the_20_lot_option_that_shifts(db_engine, db_session):
+    migration = _load("a7c9e1b3d5f8_pcr_futures_option_shift")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v5 = "# Nifty PCR Futures Hedge, the candle-close stop of 15 Oct\n"
+    migration.FROM_MD5S = {_md5_text(v5)}
+
+    running = await _deployment(db_session, "shift_a@tradingmaster.internal", v5)
+    edited = await _deployment(db_session, "shift_b@tradingmaster.internal", "# Nifty PCR Futures Hedge, edited by hand\n")
+    ids, before = [running.id, edited.id], {d.id: d.strategy_version_id for d in (running, edited)}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "OPTION_LOTS = 20" in version.python_code and "def option_shift_due(" in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
