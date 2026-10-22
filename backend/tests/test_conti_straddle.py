@@ -1,7 +1,8 @@
 """Conti Straddle 15 MIN (native_strategies/nifty_conti_straddle.py, 21 Oct):
 a NIFTY short straddle held from 09:45 to 15:00 whatever the PCR; the PCR
 picks the strike -- below 1 the CALL premium just above the PUT, 1 or above
-the PUT just above the CALL -- kept until a 100-point roll reads it again."""
+the PUT just above the CALL -- kept until a roll reads it again: since 22
+Oct, on a finished 15-minute close 100 points from entry."""
 
 import uuid
 from datetime import date, datetime, timezone
@@ -11,6 +12,7 @@ from sqlalchemy import select
 
 import app.services.strategy.native_strategies.nifty_conti_straddle as conti
 from app.models.instrument import Instrument
+from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
@@ -99,6 +101,12 @@ class Market:
         await self.db.commit()
         return ctx
 
+    async def candle(self, hh: int, mm: int, close: float) -> None:
+        """NIFTY's finished 15-minute candle opening at hh:mm."""
+        self.db.add(OhlcvCandle(instrument_id=self.nifty.id, timeframe="15m", ts=at(hh, mm).astimezone(timezone.utc), open=close,
+                                high=close + 5, low=close - 5, close=close, volume=None, source="test"))
+        await self.db.commit()
+
     async def trades(self) -> list[PaperNativeTrade]:
         return (await self.db.execute(select(PaperNativeTrade).order_by(PaperNativeTrade.closed_at))).scalars().all()
 
@@ -128,7 +136,8 @@ async def test_the_side_chosen_at_entry_is_kept_until_a_roll_reads_the_pcr_again
     crossed = await market.check(at(10, 30), 23500.0, 1.08)  # PCR over 1, NIFTY 40 points on: held
     assert legs(crossed) == (23450, "call", 650.0) and await market.trades() == []
 
-    rolled = await market.check(at(11, 0), 23561.0, 1.08)  # 101 points: closes and reopens, put-heavy now
+    await market.candle(10, 45, 23561.0)  # a finished close 101 points on: closes and reopens, put-heavy now
+    rolled = await market.check(at(11, 0, 20), 23561.0, 1.08)
     [trade] = await market.trades()
     assert trade.exit_reason == "rollover" and [leg["side"] for leg in trade.legs] == ["short", "short"]
     assert legs(rolled) == (23600, "put", 650.0) and "rolled to 23,600" in rolled._last_reason
@@ -136,7 +145,8 @@ async def test_the_side_chosen_at_entry_is_kept_until_a_roll_reads_the_pcr_again
 
 async def test_a_roll_without_a_pcr_record_keeps_the_previous_side(market):
     await market.check(at(9, 45, 5), 23460.0, 0.92)
-    rolled = await market.check(at(11, 0), 23359.0, None)  # 101 points down
+    await market.candle(10, 45, 23359.0)  # a finished close 101 points down
+    rolled = await market.check(at(11, 0, 20), 23359.0, None)
     assert legs(rolled) == (23350, "call", 650.0)
 
 
@@ -155,3 +165,14 @@ async def test_no_strike_with_live_premiums_on_the_right_side_skips_that_check(m
     assert skipped.state.get("position") is None and "CALL premium above the other" in skipped._last_reason
     market.missing = set()
     assert legs(await market.check(at(9, 45, 15), 23460.0, 0.92)) == (23450, "call", 650.0)
+
+
+async def test_a_live_move_alone_doesnt_roll_it_only_a_finished_close_does(market):
+    await market.check(at(9, 45, 5), 23460.0, 0.92)
+    await market.candle(9, 30, 23600.0)  # finished before the straddle opened: doesn't count
+    jumped = await market.check(at(10, 32), 23580.0, 0.92)  # 120 points live, mid-candle (21 Oct's roll at 10:32)
+    assert legs(jumped) == (23450, "call", 650.0) and await market.trades() == []
+    assert "no 15-min candle closed since it opened" in jumped._last_reason
+    await market.candle(10, 30, 23531.8)  # that candle closed 71.8 points on: still held
+    held = await market.check(at(10, 45, 30), 23560.0, 0.92)
+    assert legs(held) == (23450, "call", 650.0) and "10:45 close 23,531.8 (71.8pt from entry)" in held._last_reason

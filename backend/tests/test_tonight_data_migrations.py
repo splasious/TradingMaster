@@ -884,3 +884,47 @@ async def test_conti_ladder_straddle_is_created_with_its_pool_and_card_for_am_op
     assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
     actions = (await db_session.execute(select(Log.action).where(Log.user_id == amop.user_id))).scalars().all()
     assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
+
+
+# --------------------------------------- rolls on a completed 15-min close --
+
+async def test_am_op_cards_and_conti_move_onto_rolling_on_a_15min_close(db_engine, db_session):
+    migration = _load("d4f6a8b0c2e4_rolls_on_15min_close")
+    built_in = AM_OP.read_text(encoding="utf-8")
+    assert _md5_text(built_in) in migration.AM_OP_FROM_MD5S  # AM OP TRAD 15 MIN H runs the built-in
+    trd_code = _load("f7b9d1e3a5c6_am_op_straddle_50").edited(built_in)  # stands in for AM OP TRD's code (only in its database)
+    migration.AM_OP_FROM_MD5S = migration.AM_OP_FROM_MD5S | {_md5_text(trd_code)}
+    conti_v1 = "# Conti Straddle 15 MIN, version 1: rolls on the live price\n"
+    migration.CONTI_FROM_MD5 = _md5_text(conti_v1)
+    assert _md5(migration.CONTI_BUILT_IN) == migration.CONTI_TO_MD5  # the built-in is the approved code
+
+    cards = {}
+    for key, email, code, name in (
+        ("h", "roll_h@tradingmaster.internal", built_in, "AM OP TRAD 15 MIN H"),
+        ("trd", "roll_trd@tradingmaster.internal", trd_code, "AM OP TRD 15 MIN"),
+        ("conti", "roll_conti@tradingmaster.internal", conti_v1, "Conti Straddle 15 MIN"),
+        ("hand", "roll_hand@tradingmaster.internal", "# AM OP edited by hand since\n", "AM OP TRD 15 MIN"),
+        ("other", "roll_other@tradingmaster.internal", built_in, "Someone's AM OP"),
+    ):
+        cards[key] = await _deployment(db_session, email, code)
+        (await db_session.get(Strategy, cards[key].strategy_id)).name = name
+    before = {k: d.strategy_version_id for k, d in cards.items()}
+    ids = {k: d.id for k, d in cards.items()}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    for key, expected in (("h", migration.edited(built_in)), ("trd", migration.edited(trd_code)),
+                          ("conti", migration.CONTI_BUILT_IN.read_text(encoding="utf-8"))):
+        moved = await db_session.get(PaperNativeDeployment, ids[key])
+        version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+        assert version.version_number == 12 and version.python_code == expected, key
+        assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert "def roll_close(" in migration.edited(trd_code) and "async def _straddle_strike(" in migration.edited(trd_code)
+    for key in ("hand", "other"):
+        assert (await db_session.get(PaperNativeDeployment, ids[key])).strategy_version_id == before[key]
+    reasons = (await db_session.execute(select(AuditLog.action).where(AuditLog.object_id.in_(
+        [str(ids[k]) for k in ("h", "trd", "conti")])))).scalars().all()
+    assert sorted(reasons) == ["PAPER_NATIVE_VERSION_UPDATED"] * 3

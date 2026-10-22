@@ -8,7 +8,6 @@ from datetime import timedelta, timezone
 import pytest
 
 import app.services.strategy.native_strategies.nifty_conti_ladder as ladder
-from app.models.market_data import OhlcvCandle
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import NativeContext
 from tests.test_conti_straddle import Market, at
@@ -24,12 +23,6 @@ class Ladder(Market):
         self.deployment.state = ctx.state
         await self.db.commit()
         return ctx
-
-    async def candle(self, hh: int, mm: int, close: float) -> None:
-        """NIFTY's finished 15-minute candle opening at hh:mm."""
-        self.db.add(OhlcvCandle(instrument_id=self.nifty.id, timeframe="15m", ts=at(hh, mm).astimezone(timezone.utc), open=close,
-                                high=close + 5, low=close - 5, close=close, volume=None, source="test"))
-        await self.db.commit()
 
 
 @pytest.fixture
