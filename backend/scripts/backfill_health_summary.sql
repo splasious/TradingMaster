@@ -1453,6 +1453,27 @@ WHERE lower(s.name) = 'conti straddle 15 min' AND (t.closed_at AT TIME ZONE 'Asi
 GROUP BY t.exit_reason;
 \echo
 
+\echo '== CL0. Conti Ladder Straddle 15 MIN (22 Oct): its card -- status, version, last run, last signal, the ladder open now (middle strike, side, legs, lowest-highest strike), whether its pool is 20 lakh -- and trades closed today by exit reason (counts only)'
+SELECT s.name, d.status, v.version_number, to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist,
+       d.last_signal, d.state::json->'position'->>'strike' AS middle, d.state::json->'position'->>'side' AS side,
+       (SELECT count(*) FROM json_object_keys(d.state::json->'position'->'legs')) AS legs,
+       (d.state::json->'position'->'strikes'->>0) || '-' || (d.state::json->'position'->'strikes'->>4) AS ladder,
+       to_char((d.state::json->'position'->>'opened_at')::timestamptz AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS opened_ist,
+       CASE WHEN p.initial_capital = 2000000 THEN 'yes' ELSE 'no' END AS pool_20_lakh
+FROM strategies s
+JOIN paper_native_deployments d ON d.strategy_id = s.id
+JOIN strategy_versions v ON v.id = d.strategy_version_id
+JOIN paper_portfolios p ON p.id = d.portfolio_id
+WHERE lower(s.name) = 'conti ladder straddle 15 min';
+SELECT t.exit_reason, count(*) AS trades, string_agg(to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI'), ', ' ORDER BY t.closed_at) AS closed_ist,
+       string_agg(json_array_length(t.legs::json)::text, ', ' ORDER BY t.closed_at) AS legs_each
+FROM paper_native_trades t
+JOIN paper_native_deployments d ON d.id = t.deployment_id
+JOIN strategies s ON s.id = d.strategy_id
+WHERE lower(s.name) = 'conti ladder straddle 15 min' AND (t.closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+GROUP BY t.exit_reason;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
