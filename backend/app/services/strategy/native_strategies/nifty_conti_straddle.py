@@ -19,26 +19,22 @@ CANDIDATE_STEPS either side; one whose two premiums aren't both live is
 passed over. None fitting: no straddle that check (a note says why), and the
 next check tries again.
 
-Rolls -- closes and reopens -- on a finished candle, not the live price
-(22 Oct, as AM OP TRD 15 MIN and Conti Ladder Straddle 15 MIN): when a
-15-minute NIFTY candle that closed after the straddle opened (or last
-rolled) closes ROLL_TRIGGER (100) points or more from where NIFTY was
-then; however far NIFTY goes between candle closes, nothing moves. The
-roll reads the PCR afresh for its strike (the previous side if there's no
-PCR record yet). The side chosen at entry is otherwise kept: the
+Kept from AM OP TRD 15 MIN: rolls -- closes and reopens -- once NIFTY has
+moved ROLL_TRIGGER (100) points from where the straddle was opened or last
+rolled; the roll reads the PCR afresh for its strike (the previous side if
+there's no PCR record yet). The side chosen at entry is otherwise kept: the
 PCR crossing 1 doesn't move the straddle. Entries from 09:45; everything
 closes at 15:00, no exceptions; nothing held overnight. Current week's
 weekly expiry, next week's on the expiry day itself. 10 lots per leg
 (Instrument.lot_size; DEFAULT_LOT_SIZE only as a fallback). No PCR exit,
 no MA exit, no spreads.
 
-PCR is ctx.get_pcr(timeframe="15m"), as AM OP TRD 15 MIN reads it; candles
-ctx.get_candles(..., "15m"), finished ones only.
+PCR is ctx.get_pcr(timeframe="15m"), as AM OP TRD 15 MIN reads it.
 Runs through services/paper_trading/native_runner.py.
 """
 
 import uuid
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime
 
 from sqlalchemy import select
 
@@ -47,15 +43,13 @@ from app.services.broker.zerodha_broker import IST
 
 UNDERLYING_SYMBOL = "NIFTY 50"
 PCR_TIMEFRAME = "15m"
-CANDLE_TIMEFRAME = "15m"
-CANDLE = timedelta(minutes=15)
 STRIKE_STEP = 50
 CANDIDATE_STEPS = 3  # strikes looked at either side of the one nearest NIFTY
 LOTS_PER_LEG = 10
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 45)
 EXIT_TIME = dtime(15, 0)
-ROLL_TRIGGER = 100  # points a finished 15-min close is from the straddle's entry NIFTY before it rolls
+ROLL_TRIGGER = 100  # points NIFTY moves from the straddle's entry before it rolls
 PCR_PIVOT = 1.0
 
 
@@ -146,20 +140,11 @@ async def evaluate(ctx) -> None:
             ctx.note("exited", signal="COVER", reason="3:00pm IST cutoff")
             return
         entry_spot = position["entry_spot"]
-        opened_at = datetime.fromisoformat(position["opened_at"])
-        candles = await ctx.get_candles(underlying.id, CANDLE_TIMEFRAME, limit=1)
-        last = candles[-1] if candles else None
-        # Only a candle that finished after the straddle opened can roll it.
-        closed = last if last is not None and last["ts"] + CANDLE > opened_at else None
-        moved = abs(closed["close"] - entry_spot) if closed is not None else 0.0
-        if closed is None or moved < ROLL_TRIGGER:
-            close_text = (
-                f"{closed['ts'].astimezone(IST) + CANDLE:%H:%M} close {closed['close']:,.1f} ({moved:.1f}pt from entry)"
-                if closed is not None else "no 15-min candle closed since it opened"
-            )
+        moved = abs(spot - entry_spot)
+        if moved < ROLL_TRIGGER:
             ctx.note("hold", reason=(
-                f"{position['side']}-heavy straddle {position['strike']:,.0f} open, NIFTY {spot:,.1f}, entry "
-                f"{entry_spot:,.1f}; {close_text}; rolls at {ROLL_TRIGGER}"
+                f"{position['side']}-heavy straddle {position['strike']:,.0f} open, NIFTY {spot:,.1f} vs entry "
+                f"{entry_spot:,.1f} ({moved:.1f}pt moved; rolls at {ROLL_TRIGGER})"
             ))
             return
         previous_side = position["side"]
