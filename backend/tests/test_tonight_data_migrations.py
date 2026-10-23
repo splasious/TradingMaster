@@ -803,6 +803,32 @@ async def test_am_op_trd_15_min_straddle_moves_to_the_50_point_strike_by_its_edi
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
 
 
+
+async def test_am_op_trd_15_min_spreads_get_the_room_to_the_oi_walls_by_its_edits(db_engine, db_session):
+    migration = _load("d1f3a5c7e9b2_am_op_room_to_oi_walls")
+    current = _load("f7b9d1e3a5c6_am_op_straddle_50").edited(AM_OP.read_text(encoding="utf-8"))  # as near the running code as the repo has
+    after = migration.edited(current)
+    assert after is not None and "async def _oi_walls(" in after and migration.edited(after) is None  # never twice
+
+    running = await _deployment(db_session, "amop_wall_a@tradingmaster.internal", current)
+    (await db_session.get(Strategy, running.strategy_id)).name = "AM OP TRD 15 MIN"
+    h = await _deployment(db_session, "amop_wall_b@tradingmaster.internal", current)  # the H card: not asked for
+    (await db_session.get(Strategy, h.strategy_id)).name = "AM OP TRAD 15 MIN H"
+    ids, before = [running.id, h.id], {running.id: running.strategy_version_id, h.id: h.strategy_version_id}
+    await db_session.commit()
+
+    migration.FROM_MD5S = {_md5_text(current)}
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == after
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+
+
 # ------------------------------------------------- AM OP pool to 20 lakh --
 
 async def _amop_pool(db, name: str, strategy_name: str, capital: float, cash: float) -> PaperPortfolio:
