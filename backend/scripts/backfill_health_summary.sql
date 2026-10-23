@@ -1551,6 +1551,53 @@ FROM strategy_versions sv JOIN strategies s ON s.id = sv.strategy_id JOIN paper_
 WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
 ORDER BY d.created_at;
 
+\echo '== PF2. Nifty PCR Futures entries today (the open position, then trades opened today): NIFTY at entry (the position''s own; for a closed trade the NIFTY candle close just before, approximate), the PCR record the entry read, and the 3 biggest-OI strikes on its side of that record (puts below NIFTY for bearish, calls above for bullish) of the option''s expiry, ranked by OI, with each one''s gap from NIFTY -- version 7 (23 Oct 10:50) needs 200 to each. Market levels only: no sizes or P and L'
+WITH card AS (
+  SELECT d.id, d.state::jsonb AS state
+  FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+  WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
+), entries AS (
+  SELECT 'open position' AS what, (c.state -> 'position' ->> 'opened_at')::timestamptz AS opened_at, c.state -> 'position' ->> 'bias' AS bias,
+         (c.state -> 'position' ->> 'spot_at_entry')::float AS spot, (c.state -> 'position' -> 'legs' -> 'option' ->> 'expiry')::date AS expiry
+  FROM card c WHERE jsonb_typeof(c.state -> 'position') = 'object'
+  UNION ALL
+  SELECT 'closed ' || to_char(t.closed_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') || ' ' || t.exit_reason, t.opened_at,
+         CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'instrument_type' = 'future' AND l ->> 'side' = 'short')
+              THEN 'bearish' WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'instrument_type' = 'future')
+              THEN 'bullish' ELSE 'option only' END,
+         NULL, (SELECT (l ->> 'expiry')::date FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'option_type' IN ('CE', 'PE') LIMIT 1)
+  FROM paper_native_trades t JOIN card c ON c.id = t.deployment_id
+  WHERE (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+), rec AS (
+  SELECT e.*, e.spot IS NULL AS from_candle,
+         coalesce(e.spot, (SELECT k.close FROM ohlcv_candles k JOIN instruments i ON i.id = k.instrument_id
+                           WHERE i.symbol = 'NIFTY 50' AND k.timeframe IN ('1m', '5m', '15m') AND k.ts <= e.opened_at
+                           ORDER BY k.ts DESC, k.timeframe LIMIT 1)) AS nifty,
+         (SELECT s.id FROM pcr_snapshots s
+          WHERE s.underlying = 'NIFTY' AND s.ts <= e.opened_at AND s.ts >= e.opened_at - interval '30 minutes'
+            AND s.session_date = (e.opened_at AT TIME ZONE 'Asia/Kolkata')::date AND s.pcr IS NOT NULL
+            AND s.contracts_expected > 0 AND s.contracts_with_oi >= 0.9 * s.contracts_expected
+          ORDER BY s.ts DESC LIMIT 1) AS snap_id
+  FROM entries e
+), v7 AS (
+  SELECT min(created_at) AS at FROM strategy_versions WHERE md5(replace(python_code, E'\r', '')) = '8126ea8a59e8a63ce4a1aa3dcec3477f'
+)
+SELECT r.what, to_char(r.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist, r.opened_at > v7.at AS after_v7_saved, r.bias,
+       round(r.nifty::numeric, 1) AS nifty_at_entry, r.from_candle AS nifty_approx, to_char(s.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS oi_record_ist,
+       r.expiry AS option_expiry, w.oi_rank, w.strike, round((w.oi / 100000.0)::numeric, 2) AS oi_lakh,
+       round(abs(r.nifty - w.strike)::numeric, 1) AS gap_pts, abs(r.nifty - w.strike) >= 200 AS gap_200_ok
+FROM rec r CROSS JOIN v7
+LEFT JOIN pcr_snapshots s ON s.id = r.snap_id
+LEFT JOIN LATERAL (
+  SELECT row_number() OVER (ORDER BY o.oi DESC, abs(o.strike - r.nifty)) AS oi_rank, o.strike, o.oi
+  FROM pcr_strike_oi o
+  WHERE o.snapshot_id = r.snap_id AND o.expiry = r.expiry AND o.oi IS NOT NULL
+    AND o.option_type = CASE WHEN r.bias = 'bearish' THEN 'PE' ELSE 'CE' END
+    AND CASE WHEN r.bias = 'bearish' THEN o.strike < r.nifty ELSE o.strike > r.nifty END
+  ORDER BY o.oi DESC, abs(o.strike - r.nifty) LIMIT 3
+) w ON r.bias IN ('bearish', 'bullish')
+ORDER BY r.opened_at, w.oi_rank;
+
 \echo
 \echo '== NB1. NFO coverage by timeframe and kind, as the Data Backfill page counts it (counts only): expired by its last bar (expiry on or before that bar''s day), past expiry but its last bar earlier (the page counts these as live and behind), still trading; last-bar days'
 WITH c AS (
