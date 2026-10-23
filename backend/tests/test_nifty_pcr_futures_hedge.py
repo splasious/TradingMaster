@@ -5,7 +5,7 @@ long future + short ITM CALL, out below 0.95. The MA -- 8 completed 15-minute
 NIFTY 50 candles' (O+H+L+C)/4 -- trails: NIFTY crossing it closes the trade,
 and that side re-enters after a 15-minute close back across it. Entries
 09:30-15:00, everything closed at 15:00. A future books only its profit or
-loss (native_runner.open_leg/close_leg). Since 23 Oct an entry also needs 150
+loss (native_runner.open_leg/close_leg). Since 23 Oct an entry also needs 200
 points between NIFTY and each of the 3 biggest-OI strikes on its side (puts
 below for bearish, calls above for bullish) in the PCR's 15-minute record."""
 
@@ -33,7 +33,7 @@ QTY = 650.0  # 10 lots x 65
 TIME_VALUE = {date(2026, 10, 6): 60.0, date(2026, 10, 13): 150.0, date(2026, 10, 27): 300.0}
 SOLD = date(2026, 10, 6)  # the expiry the option is sold from (and the walls read from) in the 1 Oct tests
 # The biggest open interest by strike in the 15-minute records: well clear of NIFTY (23,450) both ways.
-WALLS = {"PE": {23100.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}, "CE": {23750.0: 3e6, 23800.0: 2e6, 23850.0: 1e6}}
+WALLS = {"PE": {23100.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}, "CE": {23850.0: 3e6, 23900.0: 2e6, 23950.0: 1e6}}
 
 
 def at(day: int, hh: int, mm: int, ss: int = 0, month: int = 10) -> datetime:
@@ -392,25 +392,25 @@ async def test_stop_and_exit_closes_both_legs(market):
 
 
 def test_the_room_rule():
-    assert hedge.MIN_ROOM == 150 and hedge.TOP_N == 3 and hedge.LOTS == 10
-    assert hedge.too_close([23100.0, 23300.0, 23000.0], 23450.0) is None  # 150 below is room enough
-    assert hedge.too_close([23100.0, 23350.0, 23310.0], 23450.0) == 23350.0  # the nearest of those too close
-    assert hedge.too_close([23600.0, 23590.0], 23450.0) == 23590.0
+    assert hedge.MIN_ROOM == 200 and hedge.TOP_N == 3 and hedge.LOTS == 10
+    assert hedge.too_close([23100.0, 23250.0, 23000.0], 23450.0) is None  # 200 below is room enough
+    assert hedge.too_close([23100.0, 23350.0, 23260.0], 23450.0) == 23350.0  # the nearest of those too close
+    assert hedge.too_close([23660.0, 23640.0], 23450.0) == 23640.0  # 210 is clear, 190 isn't
 
 
-async def test_a_bearish_entry_waits_for_150_points_above_each_of_the_3_biggest_put_walls(market):
+async def test_a_bearish_entry_waits_for_200_points_above_each_of_the_3_biggest_put_walls(market):
     await market.history(23500.0, at(1, 10, 0))  # MA 23500, NIFTY 23450 under it, PCR 0.85: bearish
-    await market.set_walls({**WALLS, "PE": {23350.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # 23,350: 100 below NIFTY
+    await market.set_walls({**WALLS, "PE": {23300.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # 23,300: 150 below NIFTY
     market.prices(at(1, 10, 0, 5))
     waiting = await market.check(at(1, 10, 0, 5), 0.85)
     assert waiting.state.get("position") is None and market.portfolio.cash == CASH
-    assert ("bearish waits -- support 23,350 is 100 pts below NIFTY 23,450.0 (needs 150 to each of the top 3 OI strikes: "
-            "23,000, 23,050, 23,350)") in waiting._last_reason
+    assert ("bearish waits -- support 23,300 is 150 pts below NIFTY 23,450.0 (needs 200 to each of the top 3 OI strikes: "
+            "23,000, 23,050, 23,300)") in waiting._last_reason
 
-    await market.set_walls({**WALLS, "PE": {23300.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # the next record: 150 below
+    await market.set_walls({**WALLS, "PE": {23250.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # the next record: 200 below
     market.prices(at(1, 10, 15, 5))
     entered = await market.check(at(1, 10, 15, 5), 0.85)
-    assert entered.state["position"]["bias"] == "bearish" and "nearest support 23,300 (150 pts)" in entered._last_reason
+    assert entered.state["position"]["bias"] == "bearish" and "nearest support 23,250 (200 pts)" in entered._last_reason
     assert entered.state["position"]["legs"]["option"]["quantity"] == QTY  # 10 lots, as the future
 
 
@@ -424,17 +424,17 @@ async def test_only_the_3_biggest_walls_and_only_the_sold_expirys_count(market):
     assert entered.state["position"]["bias"] == "bearish"
 
 
-async def test_a_bullish_entry_waits_for_150_points_below_each_of_the_3_biggest_call_walls(market):
+async def test_a_bullish_entry_waits_for_200_points_below_each_of_the_3_biggest_call_walls(market):
     await market.history(23400.0, at(1, 11, 0))  # MA 23400, NIFTY 23450 over it, PCR 1.20: bullish
-    await market.set_walls({**WALLS, "CE": {23750.0: 3e6, 23800.0: 2e6, 23550.0: 1e6}})  # the 3rd biggest, 100 above
+    await market.set_walls({**WALLS, "CE": {23850.0: 3e6, 23900.0: 2e6, 23600.0: 1e6}})  # the 3rd biggest, 150 above
     market.prices(at(1, 11, 0, 5))
     waiting = await market.check(at(1, 11, 0, 5), 1.20)
-    assert waiting.state.get("position") is None and "bullish waits -- resistance 23,550 is 100 pts above NIFTY" in waiting._last_reason
+    assert waiting.state.get("position") is None and "bullish waits -- resistance 23,600 is 150 pts above NIFTY" in waiting._last_reason
 
-    market.prices(at(1, 11, 5), spot=23380.0)  # NIFTY down 70: 170 under the wall, but under the MA too
+    market.prices(at(1, 11, 5), spot=23380.0)  # NIFTY down 70: 220 under the wall, but under the MA too
     assert (await market.check(at(1, 11, 5), 1.20)).state.get("position") is None
-    market.prices(at(1, 11, 6), spot=23401.0)  # over the MA, 149 under the wall: still waits
-    assert "resistance 23,550 is 149 pts above" in (await market.check(at(1, 11, 6), 1.20))._last_reason
+    market.prices(at(1, 11, 6), spot=23401.0)  # over the MA, 199 under the wall: still waits
+    assert "resistance 23,600 is 199 pts above" in (await market.check(at(1, 11, 6), 1.20))._last_reason
 
 
 async def test_no_oi_record_no_entry_and_an_open_trade_is_never_closed_by_the_rule(market):

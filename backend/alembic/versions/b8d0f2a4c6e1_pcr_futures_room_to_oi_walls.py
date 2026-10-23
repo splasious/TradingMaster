@@ -1,6 +1,6 @@
-"""Nifty PCR Futures: 150 points of room to the option writers' walls; the option 10 lots again, no shift
+"""Nifty PCR Futures: 200 points of room to the option writers' walls; the option 10 lots again, no shift
 
-Agreed 23 Oct: an entry also needs 150 points between live NIFTY 50 and
+Agreed 23 Oct: an entry also needs 200 points between live NIFTY 50 and
 each of the 3 strikes with the most open interest on its side -- bearish:
 the puts below NIFTY (support); bullish: the calls above it (resistance)
 -- of the expiry the option is sold from, in the 15-minute record the PCR
@@ -37,8 +37,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 BUILT_IN = pathlib.Path(__file__).resolve().parents[2] / "app/services/strategy/native_strategies/nifty_pcr_futures_hedge.py"
 FROM_MD5S = {"60027e5181e4576730d9e0e0ec8d790a"}  # the 20-lot shifting option of 22 Oct (a7c9e1b3d5f8): the card's version 6
-TO_MD5 = "b63673b22a8fb008d4a59dc7b337fa94"
-REASON = "150 points of room to the 3 biggest-OI strikes on the entry's side; the option 10 lots again, no shift (agreed 23 Oct)"
+TO_MD5 = "8126ea8a59e8a63ce4a1aa3dcec3477f"
+REASON = "200 points of room to the 3 biggest-OI strikes on the entry's side; the option 10 lots again, no shift (agreed 23 Oct)"
 
 versions = sa.table(
     "strategy_versions", sa.column("id", sa.Uuid), sa.column("strategy_id", sa.Uuid), sa.column("version_number", sa.Integer),

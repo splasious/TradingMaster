@@ -29,7 +29,7 @@ with room to the option writers' walls asked of each entry on 23-Oct-2026:
             side of the MA (bullish: above it; bearish: below it), with the
             PCR and NIFTY 50 as for any entry (state["_ma_stop"], that day
             only). After a PCR exit there's no such wait.
-  Room:     an entry also needs MIN_ROOM (150) points between live NIFTY 50
+  Room:     an entry also needs MIN_ROOM (200) points between live NIFTY 50
             and each of the TOP_N (3) strikes with the most open interest on
             its side -- bearish: the puts below NIFTY (support); bullish: the
             calls above it (resistance) -- of the expiry the option is sold
@@ -94,7 +94,7 @@ MARKET_OPEN = time(9, 15)
 MA_TIMEFRAME, MA_CANDLES = "15m", 8
 BAR = timedelta(minutes=15)
 MA_STALE_AFTER = timedelta(minutes=30)  # newest candle ended longer ago than this: no MA
-MIN_ROOM = 150.0  # NIFTY points an entry needs to each of the biggest-OI strikes on its side
+MIN_ROOM = 200.0  # NIFTY points an entry needs to each of the biggest-OI strikes on its side
 
 
 def _is_trading_day(d: date) -> bool:

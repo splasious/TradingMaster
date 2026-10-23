@@ -983,6 +983,6 @@ async def test_the_pcr_futures_card_moves_onto_the_room_to_the_oi_walls(db_engin
     moved = await db_session.get(PaperNativeDeployment, ids[0])
     version = await db_session.get(StrategyVersion, moved.strategy_version_id)
     assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
-    assert "MIN_ROOM = 150.0" in version.python_code and "OPTION_LOTS" not in version.python_code
+    assert "MIN_ROOM = 200.0" in version.python_code and "OPTION_LOTS" not in version.python_code
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
