@@ -30,13 +30,16 @@ with room to the option writers' walls asked of each entry on 23-Oct-2026:
             PCR and NIFTY 50 as for any entry (state["_ma_stop"], that day
             only). After a PCR exit there's no such wait.
   Room:     an entry also needs MIN_ROOM (200) points between live NIFTY 50
-            and each of the TOP_N (3) strikes with the most open interest on
-            its side -- bearish: the puts below NIFTY (support); bullish: the
-            calls above it (resistance) -- of the expiry the option is sold
-            from, in the record the PCR is read from (pcr_snapshots.py, the
-            levels the OI alert shows: oi_levels.top_levels). Any of them
-            closer and that side waits, checked again every run; an open
-            trade is never closed by it. No record, no entry.
+            and each of the TOP_N (3) strikes with the most open interest of
+            its option type -- bearish: puts; bullish: calls -- of the expiry
+            the option is sold from, on EITHER side of NIFTY, in the record
+            the PCR is read from (pcr_snapshots.py). A wall NIFTY has just
+            broken still counts until its writers move: it stops counting
+            only when other strikes' OI pushes it out of the top 3 (agreed
+            23-Oct-2026, after an entry 74 points under the 22,500 put wall
+            that held all day). Any of them closer and that side waits,
+            checked again every run; an open trade is never closed by it.
+            No record, no entry.
   Flip:     an exit and the other side's entry can happen on the same check.
   Option:   the nearest weekly expiry after today -- on an expiry day, next
             week's -- and of its in-the-money strikes (a PUT above spot, a
@@ -78,7 +81,7 @@ from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.nse_holidays import is_trading_holiday
-from app.services.options.oi_levels import TOP_N, top_levels
+from app.services.options.oi_levels import TOP_N
 from app.services.options.pcr_snapshots import _strike_map, latest_record
 
 UNDERLYING_SYMBOL = "NIFTY 50"
@@ -171,6 +174,15 @@ def re_armed(stop: dict, newest: dict, ma: float) -> bool:
     return ended > datetime.fromisoformat(stop["at"]) and ma_agrees(stop["bias"], newest["close"], ma)
 
 
+def oi_walls(oi_map: dict, expiry: date, option_type: str, spot: float) -> list[float]:
+    """The TOP_N strikes of `expiry`'s `option_type` with the most OI, on
+    either side of NIFTY -- the nearer one first on a tie. `oi_map`:
+    {(expiry, strike, option type): OI or None}, as a record holds them."""
+    picks = [(k, oi) for (e, k, t), oi in oi_map.items() if e == expiry and t == option_type and oi is not None]
+    picks.sort(key=lambda p: (-p[1], abs(p[0] - spot)))
+    return [k for k, _ in picks[:TOP_N]]
+
+
 def too_close(walls: list[float], spot: float) -> float | None:
     """The wall nearest NIFTY when any is within MIN_ROOM of it, else None."""
     near = [k for k in walls if abs(k - spot) < MIN_ROOM]
@@ -210,12 +222,12 @@ async def _option_expiry(ctx, underlying: Instrument, today: date) -> date | Non
 
 
 async def _walls(ctx, bias: str, spot: float, expiry: date) -> tuple[list[float] | None, str]:
-    """(the TOP_N biggest-OI strikes on the side's side of NIFTY, ""), or (None, why not)."""
+    """(the TOP_N biggest-OI strikes of the side's option type, either side of NIFTY, ""), or (None, why not)."""
     record = await latest_record(ctx.db, OI_UNDERLYING, ctx.now)
     if record is None:
         return None, "no 15-min OI record"
     option_type = "PE" if bias == "bearish" else "CE"
-    walls = [level.strike for level in top_levels(await _strike_map(ctx.db, record.id, {}), expiry, spot, option_type)]
+    walls = oi_walls(await _strike_map(ctx.db, record.id, {}), expiry, option_type, spot)
     if not walls:
         return None, f"no {expiry:%d %b} {option_type} OI in the {as_aware_utc(record.ts).astimezone(IST):%H:%M} record"
     return walls, ""
@@ -425,10 +437,11 @@ async def evaluate(ctx) -> None:
         flat(f"flat | PCR {pcr:.3f}: {bias} waits -- {why}")
         return
     wall, nearest = too_close(walls, spot), min(walls, key=lambda k: abs(k - spot))
+    kind = "put" if bias == "bearish" else "call"
     if wall is not None:
-        name, where = ("support", "below") if bias == "bearish" else ("resistance", "above")
-        flat(f"flat | PCR {pcr:.3f}: {bias} waits -- {name} {wall:,.0f} is {abs(spot - wall):,.0f} pts {where} NIFTY {spot:,.1f} "
-             f"(needs {MIN_ROOM:.0f} to each of the top {TOP_N} OI strikes: {', '.join(f'{k:,.0f}' for k in sorted(walls))})")
+        flat(f"flat | PCR {pcr:.3f}: {bias} waits -- {kind} OI wall {wall:,.0f} is {abs(spot - wall):,.0f} pts "
+             f"{'above' if wall > spot else 'below'} NIFTY {spot:,.1f} (needs {MIN_ROOM:.0f} from each of the top {TOP_N} {kind} "
+             f"OI strikes: {', '.join(f'{k:,.0f}' for k in sorted(walls))})")
         return
     future = await _current_future(ctx, underlying, now_ist)
     if future is None:
@@ -461,7 +474,7 @@ async def evaluate(ctx) -> None:
     opened = (
         f"{bias} (PCR {pcr:.3f}): {'short' if bias == 'bearish' else 'long'} {future.symbol} @ {future_price:.2f}, "
         f"sold {option.symbol} @ {premium:.2f} ({abs(option.strike - spot):.0f} pts ITM) | {_ma_text(spot, ma, ma_why)} | "
-        f"nearest {'support' if bias == 'bearish' else 'resistance'} {nearest:,.0f} ({abs(spot - nearest):,.0f} pts)"
+        f"nearest {kind} OI wall {nearest:,.0f} ({abs(spot - nearest):,.0f} pts {'above' if nearest > spot else 'below'})"
     )
     ctx.note("entered", signal="SHORT_FUT_PE" if bias == "bearish" else "LONG_FUT_CE",
              reason=f"{closed_note} | {opened}" if closed_note else opened)

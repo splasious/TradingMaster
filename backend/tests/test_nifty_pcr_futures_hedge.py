@@ -6,8 +6,9 @@ NIFTY 50 candles' (O+H+L+C)/4 -- trails: NIFTY crossing it closes the trade,
 and that side re-enters after a 15-minute close back across it. Entries
 09:30-15:00, everything closed at 15:00. A future books only its profit or
 loss (native_runner.open_leg/close_leg). Since 23 Oct an entry also needs 200
-points between NIFTY and each of the 3 biggest-OI strikes on its side (puts
-below for bearish, calls above for bullish) in the PCR's 15-minute record."""
+points between NIFTY and each of the 3 biggest-OI strikes of its option type
+(puts for bearish, calls for bullish), on either side of NIFTY, in the PCR's
+15-minute record -- a broken wall counts until its OI leaves the top 3."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -221,7 +222,7 @@ async def test_bearish_enters_below_090_under_the_ma_and_both_legs_exit_above_10
     # 6 Oct weekly, ITM put closest to 150: 23550 (100 in the money + 60 = 160).
     assert (legs["option"]["symbol"], legs["option"]["side"], legs["option"]["entry_price"]) == ("NIFTY26100623550PE", "sell", 160.0)
     assert market.portfolio.cash == CASH + QTY * 160.0  # the premium only -- the future moves no cash
-    assert "NIFTY 23,450.0 vs MA 23,500.0" in ctx._last_reason and "nearest support 23,100 (350 pts)" in ctx._last_reason
+    assert "NIFTY 23,450.0 vs MA 23,500.0" in ctx._last_reason and "nearest put OI wall 23,100 (350 pts below)" in ctx._last_reason
 
     market.prices(at(1, 10, 10))
     held = await market.check(at(1, 10, 10), 1.04)  # PCR up to 1.04, NIFTY still under the MA: held
@@ -404,14 +405,45 @@ async def test_a_bearish_entry_waits_for_200_points_above_each_of_the_3_biggest_
     market.prices(at(1, 10, 0, 5))
     waiting = await market.check(at(1, 10, 0, 5), 0.85)
     assert waiting.state.get("position") is None and market.portfolio.cash == CASH
-    assert ("bearish waits -- support 23,300 is 150 pts below NIFTY 23,450.0 (needs 200 to each of the top 3 OI strikes: "
+    assert ("bearish waits -- put OI wall 23,300 is 150 pts below NIFTY 23,450.0 (needs 200 from each of the top 3 put OI strikes: "
             "23,000, 23,050, 23,300)") in waiting._last_reason
 
     await market.set_walls({**WALLS, "PE": {23250.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # the next record: 200 below
     market.prices(at(1, 10, 15, 5))
     entered = await market.check(at(1, 10, 15, 5), 0.85)
-    assert entered.state["position"]["bias"] == "bearish" and "nearest support 23,250 (200 pts)" in entered._last_reason
+    assert entered.state["position"]["bias"] == "bearish" and "nearest put OI wall 23,250 (200 pts below)" in entered._last_reason
     assert entered.state["position"]["legs"]["option"]["quantity"] == QTY  # 10 lots, as the future
+
+
+def test_the_walls_are_the_3_biggest_oi_strikes_on_either_side_of_nifty():
+    oi = {(SOLD, 23500.0, "PE"): 9e6, (SOLD, 23000.0, "PE"): 5e6, (SOLD, 23400.0, "PE"): 5e6, (SOLD, 23300.0, "PE"): 1e6,
+          (SOLD, 23600.0, "CE"): 8e6, (SOLD, 23350.0, "PE"): None, (date(2026, 10, 13), 23450.0, "PE"): 99e6}
+    # 23,500 is above NIFTY (a broken support) and still counts; on a tie the nearer strike first.
+    assert hedge.oi_walls(oi, SOLD, "PE", 23450.0) == [23500.0, 23400.0, 23000.0]
+    assert hedge.oi_walls(oi, SOLD, "CE", 23450.0) == [23600.0]
+
+
+async def test_a_put_wall_nifty_has_broken_still_blocks_until_its_oi_leaves_the_top_3(market):
+    await market.history(23500.0, at(1, 10, 0))  # MA 23500, NIFTY 23450: bearish
+    await market.set_walls({**WALLS, "PE": {23500.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # NIFTY 50 under the biggest put wall
+    market.prices(at(1, 10, 0, 5))
+    waiting = await market.check(at(1, 10, 0, 5), 0.85)
+    assert waiting.state.get("position") is None
+    assert "bearish waits -- put OI wall 23,500 is 50 pts above NIFTY 23,450.0" in waiting._last_reason
+
+    # The next record: the writers have moved down -- 23,500 is 4th now, behind 23,100, 23,050 and 23,000.
+    await market.set_walls({**WALLS, "PE": {23100.0: 4e6, 23050.0: 3e6, 23000.0: 2e6, 23500.0: 1.5e6}})
+    market.prices(at(1, 10, 15, 5))
+    entered = await market.check(at(1, 10, 15, 5), 0.85)
+    assert entered.state["position"]["bias"] == "bearish" and "nearest put OI wall 23,100 (350 pts below)" in entered._last_reason
+
+
+async def test_a_call_wall_below_nifty_blocks_a_bullish_entry(market):
+    await market.history(23400.0, at(1, 11, 0))  # MA 23400, NIFTY 23450: bullish
+    await market.set_walls({**WALLS, "CE": {23400.0: 3e6, 23900.0: 2e6, 23950.0: 1e6}})  # a broken resistance 50 below
+    market.prices(at(1, 11, 0, 5))
+    waiting = await market.check(at(1, 11, 0, 5), 1.20)
+    assert waiting.state.get("position") is None and "bullish waits -- call OI wall 23,400 is 50 pts below NIFTY" in waiting._last_reason
 
 
 async def test_only_the_3_biggest_walls_and_only_the_sold_expirys_count(market):
@@ -429,12 +461,12 @@ async def test_a_bullish_entry_waits_for_200_points_below_each_of_the_3_biggest_
     await market.set_walls({**WALLS, "CE": {23850.0: 3e6, 23900.0: 2e6, 23600.0: 1e6}})  # the 3rd biggest, 150 above
     market.prices(at(1, 11, 0, 5))
     waiting = await market.check(at(1, 11, 0, 5), 1.20)
-    assert waiting.state.get("position") is None and "bullish waits -- resistance 23,600 is 150 pts above NIFTY" in waiting._last_reason
+    assert waiting.state.get("position") is None and "bullish waits -- call OI wall 23,600 is 150 pts above NIFTY" in waiting._last_reason
 
     market.prices(at(1, 11, 5), spot=23380.0)  # NIFTY down 70: 220 under the wall, but under the MA too
     assert (await market.check(at(1, 11, 5), 1.20)).state.get("position") is None
     market.prices(at(1, 11, 6), spot=23401.0)  # over the MA, 199 under the wall: still waits
-    assert "resistance 23,600 is 199 pts above" in (await market.check(at(1, 11, 6), 1.20))._last_reason
+    assert "call OI wall 23,600 is 199 pts above" in (await market.check(at(1, 11, 6), 1.20))._last_reason
 
 
 async def test_no_oi_record_no_entry_and_an_open_trade_is_never_closed_by_the_rule(market):

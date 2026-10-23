@@ -1599,7 +1599,7 @@ LEFT JOIN LATERAL (
 ) w ON r.bias IN ('bearish', 'bullish')
 ORDER BY r.opened_at, w.oi_rank;
 
-\echo '== PF3. Proposed wall rule (top 3 by OI hold, on either side of NIFTY, until the OI shifts): at each 15-min record today, NIFTY and the 3 biggest-OI puts and calls of the expiry the option is sold from (strike:OI lakh), and those within 200 of NIFTY. Market levels only'
+\echo '== PF3. The wall rule of version 8 (23 Oct; top 3 by OI hold, on either side of NIFTY, until the OI shifts): at each 15-min record today, NIFTY and the 3 biggest-OI puts and calls of the expiry the option is sold from (strike:OI lakh), and those within 200 of NIFTY. Market levels only'
 WITH recs AS (
   SELECT s.id, s.ts, s.spot,
          (SELECT min(e::date) FROM json_array_elements_text(s.expiries::json) e WHERE e::date > s.session_date) AS expiry
@@ -1621,7 +1621,7 @@ SELECT to_char(r.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS record_ist, r.exp
          WHERE k.id = r.id AND k.option_type = 'CE' AND k.rk <= 3 AND abs(k.strike - r.spot) < 200) AS calls_within_200
 FROM recs r ORDER BY r.ts;
 
-\echo '-- PF3b. The proposed rule at each Nifty PCR Futures entry today: the record captured before it, the 3 biggest-OI strikes of its side (puts for bearish, calls for bullish) on either side of NIFTY, each one''s gap, and whether the entry would have been blocked (any within 200)'
+\echo '-- PF3b. The version 8 wall rule at each Nifty PCR Futures entry today: the record captured before it, the 3 biggest-OI strikes of its side (puts for bearish, calls for bullish) on either side of NIFTY, each one''s gap, and whether it blocks the entry (any within 200)'
 WITH card AS (
   SELECT d.id, d.state::jsonb AS state
   FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
@@ -1656,7 +1656,7 @@ SELECT to_char(r.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS entry_i
        to_char(s.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS oi_record_ist,
        string_agg(w.strike::int || ':' || round((w.oi / 100000.0)::numeric, 1) || ' (' || round((w.strike - r.nifty)::numeric) || ')', '  ' ORDER BY w.rk)
          AS top3_strike_oi_lakh_and_gap,
-       bool_or(abs(w.strike - r.nifty) < 200) AS proposed_rule_blocks
+       bool_or(abs(w.strike - r.nifty) < 200) AS v8_rule_blocks
 FROM rec r
 LEFT JOIN pcr_snapshots s ON s.id = r.snap_id
 LEFT JOIN LATERAL (

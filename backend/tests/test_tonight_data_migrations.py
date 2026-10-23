@@ -967,7 +967,9 @@ async def test_the_pcr_futures_card_moves_onto_the_20_lot_option_that_shifts(db_
 
 async def test_the_pcr_futures_card_moves_onto_the_room_to_the_oi_walls(db_engine, db_session):
     migration = _load("b8d0f2a4c6e1_pcr_futures_room_to_oi_walls")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    either_side = _load("c9e1a3b5d7f2_pcr_futures_walls_either_side")
+    assert either_side.FROM_MD5S == {migration.TO_MD5}  # the built-in has moved on since (c9e1a3b5d7f2)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     v6 = "# Nifty PCR Futures Hedge, the 20-lot shifting option of 22 Oct\n"
     migration.FROM_MD5S = {_md5_text(v6)}
 
@@ -984,5 +986,28 @@ async def test_the_pcr_futures_card_moves_onto_the_room_to_the_oi_walls(db_engin
     version = await db_session.get(StrategyVersion, moved.strategy_version_id)
     assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
     assert "MIN_ROOM = 200.0" in version.python_code and "OPTION_LOTS" not in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+
+
+async def test_the_pcr_futures_card_moves_onto_walls_on_either_side(db_engine, db_session):
+    migration = _load("c9e1a3b5d7f2_pcr_futures_walls_either_side")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v7 = "# Nifty PCR Futures Hedge, 200 points of room to the walls on the entry's side\n"
+    migration.FROM_MD5S = {_md5_text(v7)}
+
+    running = await _deployment(db_session, "walls_a@tradingmaster.internal", v7)
+    edited = await _deployment(db_session, "walls_b@tradingmaster.internal", "# Nifty PCR Futures Hedge, edited by hand\n")
+    ids, before = [running.id, edited.id], {d.id: d.strategy_version_id for d in (running, edited)}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "def oi_walls(" in version.python_code and "MIN_ROOM = 200.0" in version.python_code
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
