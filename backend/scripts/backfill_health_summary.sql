@@ -1527,6 +1527,26 @@ GROUP BY s.id, s.name, v.version_number, v.python_code
 ORDER BY 1, 2;
 \echo
 
+\echo '== AW1. AM OP TRD 15 MIN, room to the OI walls (23 Oct, alembic d1f3a5c7e9b2): each recent version (code md5), which one the card runs and its live run, how many places each edit fits (each must be 1; edit0 is optional), and how often the names it adds are already used (must be 0) -- counts only, no code'
+SELECT trim(s.name) AS strategy, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
+       string_agg(DISTINCT d.status, ',') AS card_status, count(DISTINCT ln.id) FILTER (WHERE ln.status IN ('active', 'paused')) AS live_runs_on,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a0$Entry: 9:45 AM IST onward.$a0$, ''))) / length($a0$Entry: 9:45 AM IST onward.$a0$) AS edit0,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a1$def determine_regime(pcr: float) -> str:$a1$, ''))) / length($a1$def determine_regime(pcr: float) -> str:$a1$) AS edit1,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a2$    atm = round_to_nearest_100(spot)
+$a2$, ''))) / length($a2$    atm = round_to_nearest_100(spot)
+$a2$) AS edit2,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a10$_oi_walls$a10$, ''))) / length($a10$_oi_walls$a10$) AS uses__oi_walls,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a11$WALL_ROOM$a11$, ''))) / length($a11$WALL_ROOM$a11$) AS uses_wall_room,
+       (length(replace(v.python_code, E'\r', '')) - length(replace(replace(v.python_code, E'\r', ''), $a12$WALL_COUNT$a12$, ''))) / length($a12$WALL_COUNT$a12$) AS uses_wall_count
+FROM strategies s JOIN strategy_versions v ON v.strategy_id = s.id
+LEFT JOIN paper_native_deployments d ON d.strategy_version_id = v.id AND d.status IN ('active', 'paused')
+LEFT JOIN live_native_deployments ln ON ln.paper_deployment_id = d.id AND ln.strategy_version_id = v.id
+WHERE trim(s.name) = 'AM OP TRD 15 MIN'
+  AND (v.version_number >= (SELECT max(v2.version_number) - 1 FROM strategy_versions v2 WHERE v2.strategy_id = s.id) OR d.id IS NOT NULL)
+GROUP BY s.id, s.name, v.version_number, v.python_code
+ORDER BY 1, 2;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
