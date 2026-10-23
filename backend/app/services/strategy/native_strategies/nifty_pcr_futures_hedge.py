@@ -3,7 +3,7 @@ Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option (nativ
 ================================================================================================
 
 As agreed on 1-Oct-2026, made intraday with an MA trailing stop on 15-Oct-2026,
-and the option 20 lots, shifting on a 150-point move against it, on 22-Oct-2026:
+with room to the option writers' walls asked of each entry on 23-Oct-2026:
 
   PCR:      the Overall OI PCR -- the latest 15-minute record across the 4
             nearest weekly expiries (ctx.get_pcr: same session, at most 30
@@ -12,18 +12,13 @@ and the option 20 lots, shifting on a 150-point move against it, on 22-Oct-2026:
             NIFTY 50 candles, of each candle's (open + high + low + close) / 4
             -- moving up a candle at each close, so it trails the trade.
   Bearish:  flat, PCR below 0.90 and NIFTY 50 below the MA -> short LOTS
-            lots of the current-month NIFTY future and sell OPTION_LOTS lots
-            of a PUT. Both close when the PCR goes above 1.05, or a 15-minute
+            lots of the current-month NIFTY future and sell LOTS lots of a
+            PUT. Both close when the PCR goes above 1.05, or a 15-minute
             NIFTY 50 candle closes above the MA (the trailing stop).
   Bullish:  flat, PCR above 1.10 and NIFTY 50 above the MA -> long LOTS lots
-            of the current-month future and sell OPTION_LOTS lots of a CALL.
-            Both close when the PCR falls below 0.95, or a 15-minute candle
+            of the current-month future and sell LOTS lots of a CALL. Both
+            close when the PCR falls below 0.95, or a 15-minute candle
             closes below the MA (the trailing stop).
-  Shift:    the moment live NIFTY 50 is OPTION_SHIFT (150) points from where
-            the option was sold, the way it loses (a PUT: NIFTY down; a CALL:
-            up), the option alone is bought back -- a trade of its own,
-            "option_shift" -- and a new one sold by the same rule at that
-            NIFTY; the future stays. Each shift measures from its own NIFTY.
   Stop:     on the candle's close, not the live price (15-Oct-2026: a dip
             under the MA mid-candle closed a bullish trade at 14:24): a
             candle that completed after the entry, against the MA that
@@ -34,6 +29,14 @@ and the option 20 lots, shifting on a 150-point move against it, on 22-Oct-2026:
             side of the MA (bullish: above it; bearish: below it), with the
             PCR and NIFTY 50 as for any entry (state["_ma_stop"], that day
             only). After a PCR exit there's no such wait.
+  Room:     an entry also needs MIN_ROOM (150) points between live NIFTY 50
+            and each of the TOP_N (3) strikes with the most open interest on
+            its side -- bearish: the puts below NIFTY (support); bullish: the
+            calls above it (resistance) -- of the expiry the option is sold
+            from, in the record the PCR is read from (pcr_snapshots.py, the
+            levels the OI alert shows: oi_levels.top_levels). Any of them
+            closer and that side waits, checked again every run; an open
+            trade is never closed by it. No record, no entry.
   Flip:     an exit and the other side's entry can happen on the same check.
   Option:   the nearest weekly expiry after today -- on an expiry day, next
             week's -- and of its in-the-money strikes (a PUT above spot, a
@@ -48,21 +51,18 @@ and the option 20 lots, shifting on a 150-point move against it, on 22-Oct-2026:
             NIFTY 50 price. Nothing is held overnight, so there are no
             rolls: the option never reaches its expiry day held, and the
             future is never held into its roll day.
-  Size:     LOTS lots of the future, OPTION_LOTS of the option, at the
-            contract's own lot size. Both legs or neither: no live price for
-            either one, no entry.
-  Risk:     the option is twice the future's lots, so a sharp move either
-            way costs: against the future (bearish: a rally; bullish: a
-            fall) -- limited by the trailing stop and the 15:00 exit -- or
-            against the option, each 150 points of it booked by a shift. With
+  Size:     LOTS lots per leg at the contract's own lot size. Both legs or
+            neither: no live price for either one, no entry.
+  Risk:     short futures with a short ITM put pays at most about the
+            premium and loses in a sharp rally (the bullish side the same in
+            a fall) -- limited by the trailing stop and the 15:00 exit. With
             fewer than 8 candles, or NIFTY 50's candles behind (none newer
             than 30 minutes; at the open, the previous session's last), there
             is no MA: no entry, and only the PCR and 15:00 exits apply.
   Cash:     the future books only its profit or loss (native_runner.open_leg);
             the option's premium is credited when sold, debited when bought back.
 
-Each exit is one closed trade with both legs (the option held then), each
-shift one with the option bought back. Runs through
+Each exit is one closed trade with both legs. Runs through
 services/paper_trading/native_runner.py (ctx.get_pcr, ctx.get_candles,
 ctx.get_price(s), ctx.list_weekly_expiries, ctx.open_leg, ctx.close_leg,
 ctx.record_trade, ctx.note, ctx.wake_at). Stop -> "Exit positions" closes
@@ -78,11 +78,12 @@ from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.nse_holidays import is_trading_holiday
+from app.services.options.oi_levels import TOP_N, top_levels
+from app.services.options.pcr_snapshots import _strike_map, latest_record
 
 UNDERLYING_SYMBOL = "NIFTY 50"
-LOTS = 10  # the future
-OPTION_LOTS = 20
-OPTION_SHIFT = 150.0  # NIFTY points against the short option, from where it was sold, that shift it
+OI_UNDERLYING = "NIFTY"  # the PCR records' name for it
+LOTS = 10
 DEFAULT_LOT_SIZE = 65  # fallback only -- the contract's own lot_size is used when present
 BEARISH_ENTRY, BEARISH_EXIT = 0.90, 1.05
 BULLISH_ENTRY, BULLISH_EXIT = 1.10, 0.95
@@ -93,6 +94,7 @@ MARKET_OPEN = time(9, 15)
 MA_TIMEFRAME, MA_CANDLES = "15m", 8
 BAR = timedelta(minutes=15)
 MA_STALE_AFTER = timedelta(minutes=30)  # newest candle ended longer ago than this: no MA
+MIN_ROOM = 150.0  # NIFTY points an entry needs to each of the biggest-OI strikes on its side
 
 
 def _is_trading_day(d: date) -> bool:
@@ -169,6 +171,12 @@ def re_armed(stop: dict, newest: dict, ma: float) -> bool:
     return ended > datetime.fromisoformat(stop["at"]) and ma_agrees(stop["bias"], newest["close"], ma)
 
 
+def too_close(walls: list[float], spot: float) -> float | None:
+    """The wall nearest NIFTY when any is within MIN_ROOM of it, else None."""
+    near = [k for k in walls if abs(k - spot) < MIN_ROOM]
+    return min(near, key=lambda k: abs(k - spot)) if near else None
+
+
 def pick_strike(candidates: list[tuple[float, float | None]], option_type: str, spot: float) -> tuple[float, float] | None:
     """(strike, premium) of the in-the-money candidate whose premium is
     closest to TARGET_PREMIUM -- the shallower on a tie. `candidates`:
@@ -195,12 +203,26 @@ async def _current_future(ctx, underlying: Instrument, now_ist: datetime) -> Ins
     return next((f for f in futures if now_ist.date() < futures_roll_day(f.expiry)), None)
 
 
-async def _pick_option(ctx, underlying: Instrument, option_type: str, spot: float, today: date):
-    """((instrument, premium), None), or (None, why not)."""
+async def _option_expiry(ctx, underlying: Instrument, today: date) -> date | None:
+    """The nearest weekly expiry after today: on an expiry day, next week's."""
     expiries = await ctx.list_weekly_expiries(underlying.id, today, limit=3)
-    expiry = next((e for e in expiries if e > today), None)
-    if expiry is None:
-        return None, "no NIFTY weekly expiry after today listed"
+    return next((e for e in expiries if e > today), None)
+
+
+async def _walls(ctx, bias: str, spot: float, expiry: date) -> tuple[list[float] | None, str]:
+    """(the TOP_N biggest-OI strikes on the side's side of NIFTY, ""), or (None, why not)."""
+    record = await latest_record(ctx.db, OI_UNDERLYING, ctx.now)
+    if record is None:
+        return None, "no 15-min OI record"
+    option_type = "PE" if bias == "bearish" else "CE"
+    walls = [level.strike for level in top_levels(await _strike_map(ctx.db, record.id, {}), expiry, spot, option_type)]
+    if not walls:
+        return None, f"no {expiry:%d %b} {option_type} OI in the {as_aware_utc(record.ts).astimezone(IST):%H:%M} record"
+    return walls, ""
+
+
+async def _pick_option(ctx, underlying: Instrument, option_type: str, spot: float, expiry: date):
+    """((instrument, premium), None), or (None, why not)."""
     stmt = select(Instrument).where(
         Instrument.underlying_instrument_id == underlying.id, Instrument.instrument_type == "option",
         Instrument.expiry == expiry, Instrument.option_type == option_type, Instrument.strike.is_not(None),
@@ -292,16 +314,6 @@ def _ma_text(spot: float, ma: float | None, why: str) -> str:
     return f"NIFTY {spot:,.1f} vs MA {ma:,.1f}" if ma is not None else f"no MA: {why}"
 
 
-def option_shift_due(bias: str, spot: float, sold_at: float) -> bool:
-    """NIFTY OPTION_SHIFT points the way the short option loses: down for
-    the bearish side's PUT, up for the bullish side's CALL."""
-    return spot <= sold_at - OPTION_SHIFT if bias == "bearish" else spot >= sold_at + OPTION_SHIFT
-
-
-def shift_level(bias: str, sold_at: float) -> float:
-    return sold_at - OPTION_SHIFT if bias == "bearish" else sold_at + OPTION_SHIFT
-
-
 EXIT_TEXT = {"manual": "manual exit", "square_off_1500": "15:00 exit", "carried_overnight": "held from an earlier day", "ma_stop": "trailing stop"}
 
 
@@ -368,38 +380,12 @@ async def evaluate(ctx) -> None:
                 ctx.note("exited", signal="COVER", reason=closed_note)
                 return
         else:
-            # Where the option was sold: a position from before 22 Oct has no option_spot -- its entry's NIFTY.
-            sold_at = position.get("option_spot", position["spot_at_entry"])
-            waiting = ""
-            if option_shift_due(bias, spot, sold_at):
-                old = legs["option"]
-                picked, why = await _pick_option(ctx, underlying, old["option_type"], spot, today)
-                if instruments["option"] is None or prices["option"] is None:
-                    picked, why = None, f"no live price for {old['symbol']}"
-                elif picked is not None and str(picked[0].id) == old["instrument_id"]:
-                    picked, why = None, f"the rule picks {old['symbol']}, the one held"
-                if picked is not None:
-                    option, premium = picked
-                    await _close(ctx, old, instruments["option"], prices["option"])
-                    pnl = await _record(ctx, [(old, prices["option"])], "option_shift")
-                    quantity = float(OPTION_LOTS * (option.lot_size or DEFAULT_LOT_SIZE))
-                    await ctx.open_leg(option, "sell", quantity, premium)
-                    legs["option"] = _leg(option, "sell", quantity, premium, ctx.now)
-                    position["option_spot"] = spot
-                    ctx.note("rolled", signal="OPTION_SHIFT", reason=(
-                        f"{bias}: NIFTY {spot:,.1f}, {abs(spot - sold_at):,.0f} pts from {sold_at:,.1f} -- bought back "
-                        f"{old['symbol']} @ {prices['option']:.2f} (P&L {pnl:+,.0f}), sold {option.symbol} @ {premium:.2f} "
-                        f"({abs(option.strike - spot):.0f} pts ITM) | next shift at NIFTY {shift_level(bias, spot):,.1f}"
-                    ))
-                    return
-                waiting = f" | option shift due, waits: {why}"
             target = f"exit above {BEARISH_EXIT:.2f}" if bias == "bearish" else f"exit below {BULLISH_EXIT:.2f}"
             stop_side = "stop on a 15-min close above it" if bias == "bearish" else "stop on a 15-min close below it"
             last = f" | last {_candle_text(newest, ma)}" if ma is not None else ""
             ctx.note("hold", reason=(
                 f"{bias}: {legs['future']['symbol']} + short {legs['option']['symbol']} | {_pcr_text(pcr)} ({target}) | "
-                f"{_ma_text(spot, ma, ma_why)} ({stop_side}){last} | option shifts at NIFTY {shift_level(bias, sold_at):,.1f}"
-                f"{waiting} | out at {SQUARE_OFF:%H:%M}"
+                f"{_ma_text(spot, ma, ma_why)} ({stop_side}){last} | out at {SQUARE_OFF:%H:%M}"
             ))
             return
 
@@ -430,12 +416,26 @@ async def evaluate(ctx) -> None:
         flat(f"flat | PCR {pcr:.3f}: {bias} stopped out at {stopped:%H:%M} -- waits for a 15-min close {side} the MA | "
              f"{_ma_text(spot, ma, ma_why)}")
         return
+    expiry = await _option_expiry(ctx, underlying, today)
+    if expiry is None:
+        flat(f"{bias} entry: no NIFTY weekly expiry after today listed")
+        return
+    walls, why = await _walls(ctx, bias, spot, expiry)
+    if walls is None:
+        flat(f"flat | PCR {pcr:.3f}: {bias} waits -- {why}")
+        return
+    wall, nearest = too_close(walls, spot), min(walls, key=lambda k: abs(k - spot))
+    if wall is not None:
+        name, where = ("support", "below") if bias == "bearish" else ("resistance", "above")
+        flat(f"flat | PCR {pcr:.3f}: {bias} waits -- {name} {wall:,.0f} is {abs(spot - wall):,.0f} pts {where} NIFTY {spot:,.1f} "
+             f"(needs {MIN_ROOM:.0f} to each of the top {TOP_N} OI strikes: {', '.join(f'{k:,.0f}' for k in sorted(walls))})")
+        return
     future = await _current_future(ctx, underlying, now_ist)
     if future is None:
         flat(f"{bias} entry: no current NIFTY future listed")
         return
     option_type = "PE" if bias == "bearish" else "CE"
-    picked, why = await _pick_option(ctx, underlying, option_type, spot, today)
+    picked, why = await _pick_option(ctx, underlying, option_type, spot, expiry)
     if picked is None:
         flat(f"{bias} entry: {why}")
         return
@@ -447,13 +447,12 @@ async def evaluate(ctx) -> None:
 
     future_side = "sell" if bias == "bearish" else "buy"
     future_qty = float(LOTS * (future.lot_size or DEFAULT_LOT_SIZE))
-    option_qty = float(OPTION_LOTS * (option.lot_size or DEFAULT_LOT_SIZE))
+    option_qty = float(LOTS * (option.lot_size or DEFAULT_LOT_SIZE))
     await ctx.open_leg(future, future_side, future_qty, future_price)
     await ctx.open_leg(option, "sell", option_qty, premium)
     ctx.state.pop("_ma_stop", None)
     ctx.state["position"] = {
         "bias": bias, "opened_at": ctx.now.isoformat(), "pcr_at_entry": pcr, "spot_at_entry": spot, "ma_at_entry": round(ma, 2),
-        "option_spot": spot,
         "legs": {
             "future": _leg(future, future_side, future_qty, future_price, ctx.now),
             "option": _leg(option, "sell", option_qty, premium, ctx.now),
@@ -461,7 +460,8 @@ async def evaluate(ctx) -> None:
     }
     opened = (
         f"{bias} (PCR {pcr:.3f}): {'short' if bias == 'bearish' else 'long'} {future.symbol} @ {future_price:.2f}, "
-        f"sold {option.symbol} @ {premium:.2f} ({abs(option.strike - spot):.0f} pts ITM) | {_ma_text(spot, ma, ma_why)}"
+        f"sold {option.symbol} @ {premium:.2f} ({abs(option.strike - spot):.0f} pts ITM) | {_ma_text(spot, ma, ma_why)} | "
+        f"nearest {'support' if bias == 'bearish' else 'resistance'} {nearest:,.0f} ({abs(spot - nearest):,.0f} pts)"
     )
     ctx.note("entered", signal="SHORT_FUT_PE" if bias == "bearish" else "LONG_FUT_CE",
              reason=f"{closed_note} | {opened}" if closed_note else opened)

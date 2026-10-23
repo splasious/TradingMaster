@@ -5,20 +5,21 @@ long future + short ITM CALL, out below 0.95. The MA -- 8 completed 15-minute
 NIFTY 50 candles' (O+H+L+C)/4 -- trails: NIFTY crossing it closes the trade,
 and that side re-enters after a 15-minute close back across it. Entries
 09:30-15:00, everything closed at 15:00. A future books only its profit or
-loss (native_runner.open_leg/close_leg). Since 22 Oct the option is 20 lots
-(the future 10), and it shifts -- bought back, a new one sold -- when live
-NIFTY is 150 points from where it was sold, the way it loses."""
+loss (native_runner.open_leg/close_leg). Since 23 Oct an entry also needs 150
+points between NIFTY and each of the 3 biggest-OI strikes on its side (puts
+below for bearish, calls above for bullish) in the PCR's 15-minute record."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 import app.services.strategy.native_strategies.nifty_pcr_futures_hedge as hedge
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
 from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
+from app.models.pcr import SOURCE_LIVE, PcrSnapshot, PcrStrikeOi
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.services.broker.zerodha_broker import IST
@@ -27,10 +28,12 @@ from app.services.paper_trading.native_runner import NativeContext
 
 SPOT = 23450.0
 CASH = 1_000_000.0
-QTY = 650.0  # 10 lots x 65: the future
-OPTION_QTY = 1300.0  # 20 lots x 65
+QTY = 650.0  # 10 lots x 65
 # Time value per weekly expiry: ITM premium = intrinsic + this.
 TIME_VALUE = {date(2026, 10, 6): 60.0, date(2026, 10, 13): 150.0, date(2026, 10, 27): 300.0}
+SOLD = date(2026, 10, 6)  # the expiry the option is sold from (and the walls read from) in the 1 Oct tests
+# The biggest open interest by strike in the 15-minute records: well clear of NIFTY (23,450) both ways.
+WALLS = {"PE": {23100.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}, "CE": {23750.0: 3e6, 23800.0: 2e6, 23850.0: 1e6}}
 
 
 def at(day: int, hh: int, mm: int, ss: int = 0, month: int = 10) -> datetime:
@@ -47,6 +50,9 @@ class Market:
 
     def __init__(self, db, monkeypatch):
         self.db, self.monkeypatch, self.pcr = db, monkeypatch, None
+        self.walls: dict | None = WALLS  # None: no OI records at all
+        self.other_expiry_walls: dict = {}
+        self._marks: set[datetime] = set()
 
     async def build(self) -> "Market":
         db = self.db
@@ -104,8 +110,36 @@ class Market:
             tick_engine.set_real_price(instrument.id, price, source="test")
             tick_engine._real_price_at[instrument.id] = now  # fresh as of the check, whatever the wall clock says
 
+    async def set_walls(self, walls: dict | None, other_expiry: dict | None = None) -> None:
+        """The OI from the next check's record on (the records so far dropped)."""
+        await self.db.execute(delete(PcrStrikeOi))
+        await self.db.execute(delete(PcrSnapshot))
+        await self.db.commit()
+        self.walls, self.other_expiry_walls, self._marks = walls, other_expiry or {}, set()
+
+    async def record_oi(self, now: datetime) -> None:
+        """The 15-minute PCR record at `now`'s mark (once a mark): OI 1,000
+        on every strike of each expiry, but the walls (SOLD's) and
+        other_expiry_walls (13 Oct's)."""
+        mark = now.replace(minute=now.minute - now.minute % 15, second=0, microsecond=0)
+        if self.walls is None or mark in self._marks:
+            return
+        self._marks.add(mark)
+        walls = {SOLD: self.walls, date(2026, 10, 13): self.other_expiry_walls}
+        rows = [(e, float(k), t, walls.get(e, {}).get(t, {}).get(float(k), 1000.0))
+                for e in TIME_VALUE for k in range(23000, 24001, 50) for t in ("PE", "CE")]
+        snap = PcrSnapshot(underlying="NIFTY", ts=mark.astimezone(timezone.utc), session_date=mark.date(), captured_at=mark,
+                           source=SOURCE_LIVE, strike_window=40, expiries=[e.isoformat() for e in TIME_VALUE], spot=SPOT,
+                           contracts_expected=len(rows), contracts_with_oi=len(rows), pcr=1.0)
+        self.db.add(snap)
+        await self.db.flush()
+        self.db.add_all([PcrStrikeOi(snapshot_id=snap.id, expiry=e, strike=k, option_type=t, tradingsymbol=f"N{k:.0f}{t}", oi=oi)
+                         for e, k, t, oi in rows])
+        await self.db.commit()
+
     async def check(self, now: datetime, pcr: float | None) -> NativeContext:
         self.pcr = pcr
+        await self.record_oi(now)
         ctx = NativeContext(db=self.db, portfolio=self.portfolio, deployment=self.deployment, state=self.deployment.state or {},
                             now=now.astimezone(timezone.utc))  # as the runner passes it
         await hedge.evaluate(ctx)
@@ -186,21 +220,20 @@ async def test_bearish_enters_below_090_under_the_ma_and_both_legs_exit_above_10
         "NIFTY26OCTFUT", "sell", QTY, SPOT + 30)
     # 6 Oct weekly, ITM put closest to 150: 23550 (100 in the money + 60 = 160).
     assert (legs["option"]["symbol"], legs["option"]["side"], legs["option"]["entry_price"]) == ("NIFTY26100623550PE", "sell", 160.0)
-    assert legs["option"]["quantity"] == OPTION_QTY and ctx.state["position"]["option_spot"] == SPOT
-    assert market.portfolio.cash == CASH + OPTION_QTY * 160.0  # the premium only -- the future moves no cash
-    assert "NIFTY 23,450.0 vs MA 23,500.0" in ctx._last_reason
+    assert market.portfolio.cash == CASH + QTY * 160.0  # the premium only -- the future moves no cash
+    assert "NIFTY 23,450.0 vs MA 23,500.0" in ctx._last_reason and "nearest support 23,100 (350 pts)" in ctx._last_reason
 
     market.prices(at(1, 10, 10))
     held = await market.check(at(1, 10, 10), 1.04)  # PCR up to 1.04, NIFTY still under the MA: held
     assert held.state["position"] is not None and held._last_action == "hold" and "exit above 1.05" in held._last_reason
 
-    # NIFTY falls 100 (short of the 150 that shifts the put): the short future gains 100/unit, the put costs 100 more.
+    # NIFTY falls 100: the short future gains 100/unit, the put costs 100 more.
     market.prices(at(1, 10, 14), spot=SPOT - 100)
     out = await market.check(at(1, 10, 14), 1.06)
     assert out.state["position"] is None and out._last_signal == "COVER"
     [trade] = await market.trades()
     assert trade.exit_reason == "pcr_above_1.05" and len(trade.legs) == 2
-    assert trade.pnl == pytest.approx(QTY * 100 - OPTION_QTY * 100)  # +65,000 future, -130,000 put
+    assert trade.pnl == pytest.approx(QTY * 100 - QTY * 100)  # +65,000 future, -65,000 put
     assert market.portfolio.cash == pytest.approx(CASH + trade.pnl)
 
 
@@ -219,7 +252,7 @@ async def test_bullish_enters_above_110_over_the_ma_and_exits_below_095(market):
     out = await market.check(at(1, 11, 10), 0.94)
     [trade] = await market.trades()
     assert out.state["position"] is None and trade.exit_reason == "pcr_below_0.95"
-    assert trade.pnl == pytest.approx(QTY * 40 - OPTION_QTY * 40)  # long future +40/unit, short call -40/unit
+    assert trade.pnl == pytest.approx(QTY * 40 - QTY * 40)  # long future +40/unit, short call -40/unit
     assert market.portfolio.cash == pytest.approx(CASH + trade.pnl)
 
 
@@ -310,7 +343,7 @@ async def test_the_trailing_stop_closes_a_bearish_trade_on_a_15_min_close_above_
     out = await market.check(at(1, 10, 15, 40), 0.85)
     [trade] = await market.trades()
     assert out.state["position"] is None and trade.exit_reason == "ma_stop"
-    assert trade.pnl == pytest.approx(-QTY * 60 + OPTION_QTY * 60)  # short future -60/unit, the put 60 cheaper
+    assert trade.pnl == pytest.approx(-QTY * 60 + QTY * 60)  # short future -60/unit, the put 60 cheaper
 
 
 async def test_a_jump_from_bearish_to_bullish_exits_and_enters_on_the_same_check(market):
@@ -358,118 +391,66 @@ async def test_stop_and_exit_closes_both_legs(market):
     assert ctx.state["position"] is None and [t.exit_reason for t in await market.trades()] == ["manual"]
 
 
-def test_the_option_shifts_150_points_the_way_it_loses():
-    assert hedge.LOTS == 10 and hedge.OPTION_LOTS == 20
-    assert hedge.option_shift_due("bearish", 23300.0, 23450.0) and not hedge.option_shift_due("bearish", 23301.0, 23450.0)
-    assert not hedge.option_shift_due("bearish", 23600.0, 23450.0)  # up: the short put gains
-    assert hedge.option_shift_due("bullish", 23600.0, 23450.0) and not hedge.option_shift_due("bullish", 23599.0, 23450.0)
-    assert not hedge.option_shift_due("bullish", 23300.0, 23450.0)  # down: the short call gains
-    assert hedge.shift_level("bearish", 23450.0) == 23300.0 and hedge.shift_level("bullish", 23450.0) == 23600.0
+def test_the_room_rule():
+    assert hedge.MIN_ROOM == 150 and hedge.TOP_N == 3 and hedge.LOTS == 10
+    assert hedge.too_close([23100.0, 23300.0, 23000.0], 23450.0) is None  # 150 below is room enough
+    assert hedge.too_close([23100.0, 23350.0, 23310.0], 23450.0) == 23350.0  # the nearest of those too close
+    assert hedge.too_close([23600.0, 23590.0], 23450.0) == 23590.0
 
 
-async def test_a_150_point_fall_shifts_the_bearish_put_alone_and_the_exit_closes_the_future_with_the_new_one(market):
-    await market.history(23500.0, at(1, 10, 0))
+async def test_a_bearish_entry_waits_for_150_points_above_each_of_the_3_biggest_put_walls(market):
+    await market.history(23500.0, at(1, 10, 0))  # MA 23500, NIFTY 23450 under it, PCR 0.85: bearish
+    await market.set_walls({**WALLS, "PE": {23350.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # 23,350: 100 below NIFTY
     market.prices(at(1, 10, 0, 5))
-    await market.check(at(1, 10, 0, 5), 0.85)  # short future @ 23480, sold 23550 PE @ 160 (20 lots)
+    waiting = await market.check(at(1, 10, 0, 5), 0.85)
+    assert waiting.state.get("position") is None and market.portfolio.cash == CASH
+    assert ("bearish waits -- support 23,350 is 100 pts below NIFTY 23,450.0 (needs 150 to each of the top 3 OI strikes: "
+            "23,000, 23,050, 23,350)") in waiting._last_reason
 
-    market.prices(at(1, 10, 5), spot=23301.0)  # 149 down: held
-    held = await market.check(at(1, 10, 5), 0.85)
-    assert held._last_action == "hold" and "option shifts at NIFTY 23,300.0" in held._last_reason and await market.trades() == []
-
-    market.prices(at(1, 10, 6), spot=23300.0)  # 150 down: the put alone is bought back, a new one sold
-    shifted = await market.check(at(1, 10, 6), 0.85)
-    [trade] = await market.trades()
-    assert trade.exit_reason == "option_shift" and len(trade.legs) == 1
-    assert (trade.legs[0]["instrument_symbol"], trade.legs[0]["quantity"], trade.legs[0]["exit_price"]) == ("NIFTY26100623550PE", OPTION_QTY, 310.0)
-    assert trade.pnl == pytest.approx(OPTION_QTY * (160 - 310))
-    position = shifted.state["position"]
-    # 23,400 PE: 100 in the money at 23,300 + 60 = 160, the closest to 150.
-    assert (position["legs"]["option"]["symbol"], position["legs"]["option"]["entry_price"], position["legs"]["option"]["quantity"]) == (
-        "NIFTY26100623400PE", 160.0, OPTION_QTY)
-    assert position["legs"]["future"]["entry_price"] == SPOT + 30 and position["option_spot"] == 23300.0
-    assert position["bias"] == "bearish" and position["opened_at"] == at(1, 10, 0, 5).astimezone(timezone.utc).isoformat()
-    assert shifted._last_action == "rolled" and shifted._last_signal == "OPTION_SHIFT"
-    assert "bought back NIFTY26100623550PE @ 310.00" in shifted._last_reason and "next shift at NIFTY 23,150.0" in shifted._last_reason
-    assert market.portfolio.cash == pytest.approx(CASH + OPTION_QTY * 160 - OPTION_QTY * 310 + OPTION_QTY * 160)
-
-    market.prices(at(1, 10, 10), spot=23200.0)  # 100 on from the shift: held, measured from 23,300
-    again = await market.check(at(1, 10, 10), 0.85)
-    assert again._last_action == "hold" and "option shifts at NIFTY 23,150.0" in again._last_reason
-
-    market.prices(at(1, 10, 12), spot=23250.0)
-    out = await market.check(at(1, 10, 12), 1.06)
-    trades = await market.trades()
-    assert out.state["position"] is None and [t.exit_reason for t in trades] == ["option_shift", "pcr_above_1.05"]
-    assert {leg["instrument_symbol"] for leg in trades[1].legs} == {"NIFTY26OCTFUT", "NIFTY26100623400PE"}
-    assert trades[1].pnl == pytest.approx(QTY * (23480 - 23280) + OPTION_QTY * (160 - 210))
-    assert trades[1].opened_at.replace(tzinfo=timezone.utc) == at(1, 10, 0, 5).astimezone(timezone.utc)
-    assert market.portfolio.cash == pytest.approx(CASH + sum(t.pnl for t in trades))
+    await market.set_walls({**WALLS, "PE": {23300.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # the next record: 150 below
+    market.prices(at(1, 10, 15, 5))
+    entered = await market.check(at(1, 10, 15, 5), 0.85)
+    assert entered.state["position"]["bias"] == "bearish" and "nearest support 23,300 (150 pts)" in entered._last_reason
+    assert entered.state["position"]["legs"]["option"]["quantity"] == QTY  # 10 lots, as the future
 
 
-async def test_a_150_point_rise_shifts_the_bullish_call_and_a_move_its_way_never_does(market):
-    await market.history(23400.0, at(1, 11, 0))
+async def test_only_the_3_biggest_walls_and_only_the_sold_expirys_count(market):
+    await market.history(23500.0, at(1, 10, 0))
+    # 23,400 PE (50 below) is the 4th biggest of the 6 Oct puts, and 13 Oct's walls sit right at NIFTY: neither counts.
+    await market.set_walls({**WALLS, "PE": {**WALLS["PE"], 23400.0: 5e5}},
+                           other_expiry={"PE": {23400.0: 9e6}, "CE": {23500.0: 9e6}})
+    market.prices(at(1, 10, 0, 5))
+    entered = await market.check(at(1, 10, 0, 5), 0.85)
+    assert entered.state["position"]["bias"] == "bearish"
+
+
+async def test_a_bullish_entry_waits_for_150_points_below_each_of_the_3_biggest_call_walls(market):
+    await market.history(23400.0, at(1, 11, 0))  # MA 23400, NIFTY 23450 over it, PCR 1.20: bullish
+    await market.set_walls({**WALLS, "CE": {23750.0: 3e6, 23800.0: 2e6, 23550.0: 1e6}})  # the 3rd biggest, 100 above
     market.prices(at(1, 11, 0, 5))
-    await market.check(at(1, 11, 0, 5), 1.20)  # long future, sold 23350 CE @ 160
-    market.prices(at(1, 11, 1), spot=23300.0)  # 150 down: the call gains -- no shift (the stop is the candle's)
-    down = await market.check(at(1, 11, 1), 1.20)
-    assert down._last_action == "hold" and await market.trades() == []
+    waiting = await market.check(at(1, 11, 0, 5), 1.20)
+    assert waiting.state.get("position") is None and "bullish waits -- resistance 23,550 is 100 pts above NIFTY" in waiting._last_reason
 
-    market.prices(at(1, 11, 2), spot=23600.0)
-    up = await market.check(at(1, 11, 2), 1.20)
-    [trade] = await market.trades()
-    assert trade.exit_reason == "option_shift" and trade.pnl == pytest.approx(OPTION_QTY * (160 - 310))
-    assert up.state["position"]["legs"]["option"]["symbol"] == "NIFTY26100623500CE" and up.state["position"]["option_spot"] == 23600.0
+    market.prices(at(1, 11, 5), spot=23380.0)  # NIFTY down 70: 170 under the wall, but under the MA too
+    assert (await market.check(at(1, 11, 5), 1.20)).state.get("position") is None
+    market.prices(at(1, 11, 6), spot=23401.0)  # over the MA, 149 under the wall: still waits
+    assert "resistance 23,550 is 149 pts above" in (await market.check(at(1, 11, 6), 1.20))._last_reason
 
 
-async def test_a_short_put_never_shifts_on_a_rise(market):
+async def test_no_oi_record_no_entry_and_an_open_trade_is_never_closed_by_the_rule(market):
     await market.history(23500.0, at(1, 10, 0))
+    await market.set_walls(None)
     market.prices(at(1, 10, 0, 5))
-    await market.check(at(1, 10, 0, 5), 0.85)
-    market.prices(at(1, 10, 1), spot=23600.0)  # over the MA mid-candle: the stop waits for a close
-    up = await market.check(at(1, 10, 1), 0.85)
-    assert up._last_action == "hold" and await market.trades() == []
+    none = await market.check(at(1, 10, 0, 5), 0.85)
+    assert none.state.get("position") is None and "bearish waits -- no 15-min OI record" in none._last_reason
 
-
-async def test_an_exit_due_on_the_same_check_wins_over_the_shift(market):
-    await market.history(23500.0, at(1, 10, 0))
-    market.prices(at(1, 10, 0, 5))
-    await market.check(at(1, 10, 0, 5), 0.85)
-    market.prices(at(1, 10, 6), spot=23300.0)
-    out = await market.check(at(1, 10, 6), 1.06)
-    assert out.state["position"] is None and [t.exit_reason for t in await market.trades()] == ["pcr_above_1.05"]
-
-
-async def test_no_live_price_for_the_options_holds_off_the_shift(market):
-    await market.history(23500.0, at(1, 10, 0))
-    market.prices(at(1, 10, 0, 5))
-    await market.check(at(1, 10, 0, 5), 0.85)
-    old = market.option(date(2026, 10, 6), 23550.0, "PE")
-    others = tuple(o for o in market.options if o.expiry == date(2026, 10, 6) and o.option_type == "PE" and o is not old)
-    market.prices(at(1, 10, 6), spot=23300.0, skip=others)  # only the put held is priced: the rule picks it again
-    waiting = await market.check(at(1, 10, 6), 0.85)
-    assert waiting._last_action == "hold" and await market.trades() == []
-    assert "option shift due, waits: the rule picks NIFTY26100623550PE, the one held" in waiting._last_reason
-    market.prices(at(1, 10, 6, 5), spot=23300.0, skip=(old, *others))
-    no_price = await market.check(at(1, 10, 6, 5), 0.85)
-    assert "option shift due, waits: no live price for NIFTY26100623550PE" in no_price._last_reason and await market.trades() == []
-    market.prices(at(1, 10, 6, 10), spot=23300.0)
-    assert (await market.check(at(1, 10, 6, 10), 0.85)).state["position"]["legs"]["option"]["strike"] == 23400.0
-
-
-async def test_a_position_opened_before_the_change_shifts_from_its_entry_and_sells_20_lots(market):
-    await market.history(23500.0, at(1, 10, 0))
-    market.prices(at(1, 10, 0, 5))
-    opened = await market.check(at(1, 10, 0, 5), 0.85)
-    position = opened.state["position"]  # version 5's: 10 option lots, no option_spot
-    position.pop("option_spot")
-    position["legs"]["option"]["quantity"] = QTY
-    market.deployment.state = {"position": position}
-    await market.db.commit()
-    market.prices(at(1, 10, 6), spot=23300.0)
-    shifted = await market.check(at(1, 10, 6), 0.85)
-    [trade] = await market.trades()
-    assert trade.legs[0]["quantity"] == QTY and trade.pnl == pytest.approx(QTY * (160 - 310))
-    assert shifted.state["position"]["legs"]["option"]["quantity"] == OPTION_QTY
+    await market.set_walls(WALLS)
+    market.prices(at(1, 10, 1))
+    assert (await market.check(at(1, 10, 1), 0.85)).state["position"]["bias"] == "bearish"
+    await market.set_walls({**WALLS, "PE": {23400.0: 3e6, 23050.0: 2e6, 23000.0: 1e6}})  # a wall 50 below: held all the same
+    market.prices(at(1, 10, 15, 30))
+    held = await market.check(at(1, 10, 15, 30), 0.85)
+    assert held.state["position"] is not None and held._last_action == "hold" and await market.trades() == []
 
 
 async def test_a_future_books_only_its_profit_or_loss(market):
@@ -494,8 +475,8 @@ async def test_the_card_shows_the_future_as_profit_or_loss(market):
     await market.check(at(1, 10, 0), 0.85)
     market.prices(at(1, 10, 5), spot=SPOT - 100)  # future +100/unit (short), put -100/unit
     out = await _build_position_out(market.db, market.deployment.state)
-    assert out.trade_value == pytest.approx(OPTION_QTY * 160.0) and out.live_value == pytest.approx(OPTION_QTY * 260.0)  # the put only
-    assert out.unrealized_pnl == pytest.approx(QTY * 100 - OPTION_QTY * 100)
+    assert out.trade_value == pytest.approx(QTY * 160.0) and out.live_value == pytest.approx(QTY * 260.0)  # the put only
+    assert out.unrealized_pnl == pytest.approx(QTY * 100 - QTY * 100)
 
 
 async def test_a_backtest_books_a_future_the_same_way(market):

@@ -3,9 +3,8 @@ each trade taken and each one closed, with its P&L, for Nifty PCR Futures and
 AM OP TRD 15 MIN -- sent by the native runner after the check, to the
 private chat and the group, for the administrator's cards only -- each as a
 chart picture (trade_chart.py) with the text as its caption. Nifty PCR
-Futures' option shift (22 Oct) is one "option shifted" alert, text only.
-Nifty PCR Futures was taken off the alerts on 22 Oct; the tests here alert
-on it as well, to try the alerts on both kinds of card."""
+Futures was taken off the alerts on 22 Oct; the tests here alert on it as
+well, to try the alerts on both kinds of card."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -22,9 +21,7 @@ from app.core.config import Settings, get_settings
 from app.models.user import Role, User, UserRole
 from app.services.broker.zerodha_broker import IST
 from app.services.notifications import trade_alerts, trade_chart
-from app.services.notifications.trade_alerts import (
-    Session, entry_chart, entry_message, exit_chart, exit_message, option_shift_message, pcr_levels,
-)
+from app.services.notifications.trade_alerts import Session, entry_chart, entry_message, exit_chart, exit_message, pcr_levels
 from app.services.paper_trading.native_runner import NativeContext, run_native_strategy
 
 WIDTH = 32  # the group's message block (oi_levels.MAX_WIDTH)
@@ -47,23 +44,6 @@ async def evaluate(ctx):
         ctx.state["position"] = {"regime": "bullish", "pcr_at_entry": 1.234}
     ctx.state["open"] = True
     ctx.note("hold")
-"""
-
-SHIFT_CODE = """
-import uuid
-from datetime import timedelta
-from app.models.instrument import Instrument
-
-async def evaluate(ctx):
-    option = await ctx.db.get(Instrument, uuid.UUID(ctx.state["option"]))
-    await ctx.close_leg(option, "buy", 1300, 310.0)
-    await ctx.record_trade(
-        [{"instrument_id": str(option.id), "side": "short", "quantity": 1300, "entry_price": 160.0, "exit_price": 310.0}],
-        -195000.0, -93.75, "option_shift", ctx.now - timedelta(minutes=30),
-    )
-    await ctx.open_leg(option, "sell", 1300, 160.0)
-    ctx.state["position"] = {"bias": "bearish", "option_spot": 23300.0, "legs": {"future": {"symbol": "NIFTY26OCTFUT"}}}
-    ctx.note("rolled", signal="OPTION_SHIFT")
 """
 
 
@@ -118,25 +98,8 @@ def test_an_unknown_exit_reason_reads_as_words_and_missing_charges_drop_their_li
     assert closed[0] == "🔴 AM OP TRD 15 MIN: trade closed · P&L -1,664"
 
 
-def test_the_option_shifted_message():
-    shifted = option_shift_message("Nifty PCR Futures", {
-        "legs": [{"instrument_symbol": "NIFTY2610623550PE", "side": "short", "quantity": 1300, "lot_size": 65,
-                  "entry_price": 160.0, "exit_price": 310.0}],
-        "pnl": -195000.0, "charges": 412.5, "exit_reason": "option_shift", "opened_at": at(10, 0, 5), "closed_at": at(10, 6, 2),
-    }, [{"symbol": "NIFTY2610623400PE", "side": "sell", "quantity": 1300, "price": 160.0, "lot_size": 65}],
-        {"bias": "bearish", "spot_at_entry": 23450.0}, {"bias": "bearish", "option_spot": 23300.0,
-                                                         "legs": {"future": {"symbol": "NIFTY26OCTFUT"}}}, -150000.0, 2)
-    assert shifted[0] == "🔁 Nifty PCR Futures: option shifted · P&L -195,412"
-    assert lines(shifted) == [
-        "Bearish · NIFTY 23,300", "Moved -150 from 23,450", "Time 10:06:02", "BUY NIFTY2610623550PE", "  20 lots 160.00 → 310.00",
-        "SELL NIFTY2610623400PE", "  20 lots @ 160.00", "Option P&L   -195,000.00", "Charges          -412.50",
-        "Net P&L      -195,412.50", "Today net    -150,000.00 (2)", "Future held: NIFTY26OCTFUT",
-    ]
-    assert max(len(line) for line in lines(shifted)) <= WIDTH
-
-
 class Card:
-    async def build(self, db, name: str, admin: bool, code: str = CODE) -> "Card":
+    async def build(self, db, name: str, admin: bool) -> "Card":
         role = (await db.execute(select(Role).where(Role.name == "administrator"))).scalar_one_or_none() if admin else None
         if role is None:
             role = Role(name="administrator" if admin else f"trader_{uuid.uuid4().hex[:6]}", description="x")
@@ -150,7 +113,7 @@ class Card:
         db.add(strategy)
         await db.flush()
         version = StrategyVersion(strategy_id=strategy.id, version_number=1, timeframe="15m", instrument_ids=[], parameters={},
-                                  python_code=code, position_sizing={}, risk_rules={})
+                                  python_code=CODE, position_sizing={}, risk_rules={})
         portfolio = PaperPortfolio(user_id=user.id, cash=1_000_000.0, initial_capital=1_000_000.0)
         option = Instrument(exchange="NFO", symbol=f"NIFTY26O20{uuid.uuid4().int % 10**5}CE", name="opt", instrument_type="option",
                             data_source="zerodha_kite", external_ref=f"ref{uuid.uuid4().hex[:8]}", expiry=date(2026, 10, 20),
@@ -191,17 +154,6 @@ async def test_the_runner_alerts_a_trade_taken_then_a_close_before_the_next_entr
     net = float(next(line for line in closed if line.startswith("Net P&L")).split()[-1].replace(",", ""))
     assert "Gross P&L      +1,300.00" in closed and 0 < net < 1300 and sent[0][0].endswith(f"P&L {net:+,.0f}")  # after charges
     assert closed[-1].startswith("Today net") and closed[-1].endswith("(1)")
-
-
-async def test_an_option_shift_is_one_alert_not_a_close_and_an_entry(db_session, sent):
-    card = await Card().build(db_session, "Nifty PCR Futures", admin=True, code=SHIFT_CODE)
-    card.deployment.state = {"option": str(card.option.id), "position": {"bias": "bearish", "spot_at_entry": 23450.0}}
-    await db_session.commit()
-    await run_native_strategy(db_session, card.deployment)
-    [(subject, body, to_group)] = sent
-    assert subject.startswith("🔁 Nifty PCR Futures: option shifted · P&L -19") and to_group
-    assert body.splitlines()[:2] == ["Bearish · NIFTY 23,300", "Moved -150 from 23,450"]
-    assert f"BUY {card.option.symbol}" in body and f"SELL {card.option.symbol}" in body and "Future held: NIFTY26OCTFUT" in body
 
 
 async def test_a_check_that_trades_nothing_sends_nothing(db_session, sent):
