@@ -1551,7 +1551,7 @@ FROM strategy_versions sv JOIN strategies s ON s.id = sv.strategy_id JOIN paper_
 WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
 ORDER BY d.created_at;
 
-\echo '== PF2. Nifty PCR Futures entries today (the open position, then trades opened today): NIFTY at entry (the position''s own; for a closed trade the NIFTY candle close just before, approximate), the PCR record the entry read, and the 3 biggest-OI strikes on its side of that record (puts below NIFTY for bearish, calls above for bullish) of the option''s expiry, ranked by OI, with each one''s gap from NIFTY -- version 7 (23 Oct 10:50) needs 200 to each. Market levels only: no sizes or P and L'
+\echo '== PF2. Nifty PCR Futures entries today (the open position, then trades opened today): NIFTY at entry (the position''s own; for a closed trade the NIFTY candle close just before, approximate), the PCR record the entry read (captured before it), and the 3 biggest-OI strikes on its side of that record (puts below NIFTY for bearish, calls above for bullish) of the option''s expiry, ranked by OI, with each one''s gap from NIFTY -- version 7 (23 Oct 10:50) needs 200 to each. Market levels only: no sizes or P and L'
 WITH card AS (
   SELECT d.id, d.state::jsonb AS state
   FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
@@ -1574,7 +1574,7 @@ WITH card AS (
                            WHERE i.symbol = 'NIFTY 50' AND k.timeframe IN ('1m', '5m', '15m') AND k.ts <= e.opened_at
                            ORDER BY k.ts DESC, k.timeframe LIMIT 1)) AS nifty,
          (SELECT s.id FROM pcr_snapshots s
-          WHERE s.underlying = 'NIFTY' AND s.ts <= e.opened_at AND s.ts >= e.opened_at - interval '30 minutes'
+          WHERE s.underlying = 'NIFTY' AND s.ts <= e.opened_at AND s.ts >= e.opened_at - interval '30 minutes' AND s.captured_at <= e.opened_at
             AND s.session_date = (e.opened_at AT TIME ZONE 'Asia/Kolkata')::date AND s.pcr IS NOT NULL
             AND s.contracts_expected > 0 AND s.contracts_with_oi >= 0.9 * s.contracts_expected
           ORDER BY s.ts DESC LIMIT 1) AS snap_id
@@ -1584,6 +1584,7 @@ WITH card AS (
 )
 SELECT r.what, to_char(r.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS opened_ist, r.opened_at > v7.at AS after_v7_saved, r.bias,
        round(r.nifty::numeric, 1) AS nifty_at_entry, r.from_candle AS nifty_approx, to_char(s.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS oi_record_ist,
+       to_char(s.captured_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS record_captured_ist,
        r.expiry AS option_expiry, w.oi_rank, w.strike, round((w.oi / 100000.0)::numeric, 2) AS oi_lakh,
        round(abs(r.nifty - w.strike)::numeric, 1) AS gap_pts, abs(r.nifty - w.strike) >= 200 AS gap_200_ok
 FROM rec r CROSS JOIN v7
