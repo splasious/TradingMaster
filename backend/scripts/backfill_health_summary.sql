@@ -1599,6 +1599,76 @@ LEFT JOIN LATERAL (
 ) w ON r.bias IN ('bearish', 'bullish')
 ORDER BY r.opened_at, w.oi_rank;
 
+\echo '== PF3. Proposed wall rule (top 3 by OI hold, on either side of NIFTY, until the OI shifts): at each 15-min record today, NIFTY and the 3 biggest-OI puts and calls of the expiry the option is sold from (strike:OI lakh), and those within 200 of NIFTY. Market levels only'
+WITH recs AS (
+  SELECT s.id, s.ts, s.spot,
+         (SELECT min(e::date) FROM json_array_elements_text(s.expiries::json) e WHERE e::date > s.session_date) AS expiry
+  FROM pcr_snapshots s
+  WHERE s.underlying = 'NIFTY' AND s.session_date = (now() AT TIME ZONE 'Asia/Kolkata')::date AND s.pcr IS NOT NULL
+), ranked AS (
+  SELECT r.id, o.option_type, o.strike, o.oi, row_number() OVER (PARTITION BY r.id, o.option_type ORDER BY o.oi DESC, o.strike) AS rk
+  FROM recs r JOIN pcr_strike_oi o ON o.snapshot_id = r.id AND o.expiry = r.expiry
+  WHERE o.oi IS NOT NULL
+)
+SELECT to_char(r.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS record_ist, r.expiry, round(r.spot::numeric, 1) AS nifty,
+       (SELECT string_agg(k.strike::int || ':' || round((k.oi / 100000.0)::numeric, 1), '  ' ORDER BY k.rk) FROM ranked k
+         WHERE k.id = r.id AND k.option_type = 'PE' AND k.rk <= 3) AS top3_puts,
+       (SELECT string_agg(k.strike::int::text, ',' ORDER BY k.rk) FROM ranked k
+         WHERE k.id = r.id AND k.option_type = 'PE' AND k.rk <= 3 AND abs(k.strike - r.spot) < 200) AS puts_within_200,
+       (SELECT string_agg(k.strike::int || ':' || round((k.oi / 100000.0)::numeric, 1), '  ' ORDER BY k.rk) FROM ranked k
+         WHERE k.id = r.id AND k.option_type = 'CE' AND k.rk <= 3) AS top3_calls,
+       (SELECT string_agg(k.strike::int::text, ',' ORDER BY k.rk) FROM ranked k
+         WHERE k.id = r.id AND k.option_type = 'CE' AND k.rk <= 3 AND abs(k.strike - r.spot) < 200) AS calls_within_200
+FROM recs r ORDER BY r.ts;
+
+\echo '-- PF3b. The proposed rule at each Nifty PCR Futures entry today: the record captured before it, the 3 biggest-OI strikes of its side (puts for bearish, calls for bullish) on either side of NIFTY, each one''s gap, and whether the entry would have been blocked (any within 200)'
+WITH card AS (
+  SELECT d.id, d.state::jsonb AS state
+  FROM paper_native_deployments d JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+  WHERE sv.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%'
+), entries AS (
+  SELECT (c.state -> 'position' ->> 'opened_at')::timestamptz AS opened_at, c.state -> 'position' ->> 'bias' AS bias,
+         (c.state -> 'position' ->> 'spot_at_entry')::float AS spot, (c.state -> 'position' -> 'legs' -> 'option' ->> 'expiry')::date AS expiry
+  FROM card c WHERE jsonb_typeof(c.state -> 'position') = 'object'
+  UNION
+  SELECT t.opened_at,
+         CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'instrument_type' = 'future' AND l ->> 'side' = 'short')
+              THEN 'bearish' ELSE 'bullish' END,
+         NULL, (SELECT (l ->> 'expiry')::date FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'option_type' IN ('CE', 'PE') LIMIT 1)
+  FROM paper_native_trades t JOIN card c ON c.id = t.deployment_id
+  WHERE (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date
+    AND EXISTS (SELECT 1 FROM jsonb_array_elements(t.legs::jsonb) l WHERE l ->> 'instrument_type' = 'future')
+), firsts AS (  -- one row per entry: the open position's exact NIFTY wins over a closed trade's approximation
+  SELECT DISTINCT ON (opened_at) * FROM entries ORDER BY opened_at, spot IS NULL
+), rec AS (
+  SELECT e.*, e.spot IS NULL AS nifty_approx,
+         coalesce(e.spot, (SELECT k.close FROM ohlcv_candles k JOIN instruments i ON i.id = k.instrument_id
+                           WHERE i.symbol = 'NIFTY 50' AND k.timeframe IN ('1m', '5m', '15m') AND k.ts <= e.opened_at
+                           ORDER BY k.ts DESC, k.timeframe LIMIT 1)) AS nifty,
+         (SELECT s.id FROM pcr_snapshots s
+          WHERE s.underlying = 'NIFTY' AND s.ts <= e.opened_at AND s.ts >= e.opened_at - interval '30 minutes' AND s.captured_at <= e.opened_at
+            AND s.session_date = (e.opened_at AT TIME ZONE 'Asia/Kolkata')::date AND s.pcr IS NOT NULL
+            AND s.contracts_expected > 0 AND s.contracts_with_oi >= 0.9 * s.contracts_expected
+          ORDER BY s.ts DESC LIMIT 1) AS snap_id
+  FROM firsts e
+)
+SELECT to_char(r.opened_at AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS entry_ist, r.bias, round(r.nifty::numeric, 1) AS nifty, r.nifty_approx,
+       to_char(s.ts AT TIME ZONE 'Asia/Kolkata', 'HH24:MI') AS oi_record_ist,
+       string_agg(w.strike::int || ':' || round((w.oi / 100000.0)::numeric, 1) || ' (' || round((w.strike - r.nifty)::numeric) || ')', '  ' ORDER BY w.rk)
+         AS top3_strike_oi_lakh_and_gap,
+       bool_or(abs(w.strike - r.nifty) < 200) AS proposed_rule_blocks
+FROM rec r
+LEFT JOIN pcr_snapshots s ON s.id = r.snap_id
+LEFT JOIN LATERAL (
+  SELECT row_number() OVER (ORDER BY o.oi DESC, o.strike) AS rk, o.strike, o.oi
+  FROM pcr_strike_oi o
+  WHERE o.snapshot_id = r.snap_id AND o.expiry = r.expiry AND o.oi IS NOT NULL
+    AND o.option_type = CASE WHEN r.bias = 'bearish' THEN 'PE' ELSE 'CE' END
+  ORDER BY o.oi DESC, o.strike LIMIT 3
+) w ON true
+GROUP BY r.opened_at, r.bias, r.nifty, r.nifty_approx, s.ts
+ORDER BY r.opened_at;
+
 \echo
 \echo '== NB1. NFO coverage by timeframe and kind, as the Data Backfill page counts it (counts only): expired by its last bar (expiry on or before that bar''s day), past expiry but its last bar earlier (the page counts these as live and behind), still trading; last-bar days'
 WITH c AS (
