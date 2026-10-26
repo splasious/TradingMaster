@@ -147,6 +147,13 @@ jobs:
               echo "-- Telegram group for the OI-levels and scanner alerts: found or not, groups the bot has been seen in (no names or IDs), group send failures today (count):"
               compose exec -T backend python -c "import asyncio; from app.services.notifications.telegram_group import group_status; print(asyncio.run(group_status()))" 2>/dev/null || echo "unavailable"
               grep -c 'Telegram group send failed' /tmp/backend-today.log || true
+              echo "-- PCR live row (Options > Change in OI): one reading now -- its time, the record it compares with, contracts compared, PCR, NIFTY, ΔOI in lakh, positioning (market levels only), or why there is none:"
+              compose exec -T backend python -c "
+          import asyncio
+          from app.services.options.pcr_live import live_row
+          r, why = asyncio.run(live_row('NIFTY'))
+          print(f\"yes: {r['ts']:%H:%M:%S} UTC vs record {r['prev_ts']:%H:%M} UTC, {r['oi_change_contracts']} contracts, PCR {r['prev_pcr']:.3f} -> {r['pcr']:.3f}, NIFTY {r['spot']:,.1f}, call {r['call_oi_change'] / 1e5:+.1f} L, put {r['put_oi_change'] / 1e5:+.1f} L, {r['positioning']}\" if r else 'no: ' + str(why))
+          " 2>/dev/null || echo "unavailable"
               echo "-- Telegram trade alerts: the strategies alerted on (names only, as the server reads them):"
               compose exec -T backend python -c "from app.services.notifications.trade_alerts import alerted_strategies as a; print(', '.join(sorted(a())) or 'none')" 2>/dev/null || echo "unavailable"
               echo "-- Kotak Neo broker accounts (numbered): status, when set up, why the last login failed (its kind only), and the SHAPE of what was entered -- never the values:"
