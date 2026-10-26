@@ -141,6 +141,17 @@ class PcrSnapshotsOut(BaseModel):
     capture: PcrCaptureStatusOut
 
 
+class PcrLiveOut(BaseModel):
+    """The Change in OI table's live row (services/options/pcr_live.py):
+    a record's fields as they read right now, against the latest record --
+    status "live", never saved -- or None, with why not."""
+
+    underlying: str
+    row: PcrSnapshotRowOut | None
+    reason: str | None
+    refresh_seconds: int
+
+
 class HistoryDepthOut(BaseModel):
     symbol: str | None
     # What THIS app has already backfilled into ohlcv_candles.

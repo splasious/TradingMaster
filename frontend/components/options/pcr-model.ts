@@ -40,6 +40,8 @@ export interface PcrPoint {
   flags: string[];
   /** The record ΔOI/ΔPCR compare with, when it isn't the mark just before. */
   gapSince: string | null;
+  /** The record ΔOI/ΔPCR compare with (the LIVE row shows it). */
+  sinceTs?: string | null;
 }
 
 export function classify(
@@ -170,7 +172,12 @@ export function daySummary(points: PcrPoint[], latest: PcrPoint | null): DaySumm
 const timeFmt = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false });
 const dayFmt = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "numeric", month: "short" });
 
+const secondsFmt = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+
 export const timeIst = (ts: string) => timeFmt.format(new Date(ts));
+export const secondsIst = (ts: string) => secondsFmt.format(new Date(ts));
 export const dayIst = (ts: string) => dayFmt.format(new Date(ts));
 
 export function num(v: number | null | undefined, digits = 0): string {

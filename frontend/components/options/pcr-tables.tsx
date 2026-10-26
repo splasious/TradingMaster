@@ -12,6 +12,7 @@ import {
   num,
   oiChangePct,
   pctSigned,
+  secondsIst,
   signed,
   timeIst,
   toneOf,
@@ -21,7 +22,9 @@ import { cn } from "@/lib/utils";
 
 /** The Overall OI and Change in OI tables: the same marks, newest first,
  * row-aligned (side by side from 1800px wide), with a divider where the
- * session changes. Hovering a row moves the chart crosshair and back. */
+ * session changes. Hovering a row moves the chart crosshair and back.
+ * Change in OI also pins a LIVE row on top while NSE trades: the same
+ * numbers as they read right now, against the latest record, never saved. */
 
 const TH = "sticky top-0 z-[1] bg-surface px-2.5 py-2 text-right text-[10.5px] font-medium uppercase tracking-wide text-text-muted whitespace-nowrap";
 const TD = "px-2.5 py-1.5 text-right font-financial whitespace-nowrap";
@@ -44,6 +47,69 @@ function coiPcrText(p: PcrPoint) {
     return <span className="text-text-muted" title="Call ΔOI is negative (calls unwinding) -- see Positioning">{signed(p.coiPcr, 2)}*</span>;
   }
   return <>{p.coiPcr.toFixed(2)}</>;
+}
+
+function ChangeCells({ p }: { p: PcrPoint }) {
+  return (
+    <>
+      <td className={cn(TD, toneOf(p.callChg))}>
+        {lakhSigned(p.callChg)}
+        <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(p.callChg, p.callOi))}</span>
+      </td>
+      <td className={cn(TD, toneOf(p.putChg))}>
+        {lakhSigned(p.putChg)}
+        <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(p.putChg, p.putOi))}</span>
+      </td>
+      <td className={TD}>{coiPcrText(p)}</td>
+      <td className={TD}>
+        {p.prevPcr == null ? (
+          "—"
+        ) : (
+          <>
+            {p.prevPcr.toFixed(3)} → <b>{p.pcr?.toFixed(3) ?? "—"}</b>{" "}
+            {arrow(p.pcrChange, 3) ? (
+              <span className={toneOf(p.pcrChange, 3)} title={p.pcrChange! > 0 ? "Expansion" : "Contraction"}>
+                {arrow(p.pcrChange, 3)}
+              </span>
+            ) : null}
+          </>
+        )}
+      </td>
+      <td className={cn(TD, toneOf(p.spotChange))}>{signed(p.spotChange)}</td>
+      <td className="px-2.5 py-1.5 whitespace-nowrap">
+        <div className="flex items-center gap-2">
+          <PositioningChip value={p.positioning} />
+          {p.driver && <span className="text-[11px] text-text-muted">{DRIVERS[p.driver] ?? p.driver}</span>}
+        </div>
+      </td>
+    </>
+  );
+}
+
+function LiveRow({ p }: { p: PcrPoint }) {
+  return (
+    <tr className="border-b-2 border-border bg-active-soft/40" title="Right now, against the latest 15-minute record -- refreshed every 15 s, never saved">
+      <td className="px-2.5 py-1.5 text-left font-financial whitespace-nowrap">
+        <span className="inline-flex items-center gap-1.5 font-semibold text-positive">
+          <span className="relative flex h-2 w-2" aria-hidden>
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-positive opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-positive" />
+          </span>
+          LIVE {secondsIst(p.ts)}
+        </span>
+        {p.sinceTs && <span className="ml-1 text-[10.5px] text-text-muted">since {timeIst(p.sinceTs)}</span>}
+      </td>
+      <ChangeCells p={p} />
+    </tr>
+  );
+}
+
+function LiveNote({ text }: { text: string }) {
+  return (
+    <tr className="border-b-2 border-border">
+      <td colSpan={7} className="px-2.5 py-1.5 text-left text-xs text-text-muted">● LIVE · {text}</td>
+    </tr>
+  );
 }
 
 function rowsWithDividers(points: PcrPoint[]) {
@@ -127,7 +193,11 @@ export function OverallOiTable({ points, hover, onHover }: TableProps) {
   );
 }
 
-export function OiChangeTable({ points, hover, onHover }: TableProps) {
+/** `live`: the LIVE row's point (null: none now), `liveNote`: why there is
+ * none during the session (the row's place shows it instead). */
+export function OiChangeTable({
+  points, hover, onHover, live = null, liveNote = null,
+}: TableProps & { live?: PcrPoint | null; liveNote?: string | null }) {
   return (
     <table className="w-full border-collapse text-[13px]" onMouseLeave={() => onHover(null)}>
       <thead>
@@ -142,6 +212,7 @@ export function OiChangeTable({ points, hover, onHover }: TableProps) {
         </tr>
       </thead>
       <tbody>
+        {live ? <LiveRow p={live} /> : liveNote ? <LiveNote text={liveNote} /> : null}
         {rowsWithDividers(points).map((r) =>
           r.kind === "day" ? (
             <tr key={r.label} className="bg-surface-elevated">
@@ -160,38 +231,7 @@ export function OiChangeTable({ points, hover, onHover }: TableProps) {
               {r.p.status !== "recorded" ? (
                 <NotRecorded p={r.p} span={6} />
               ) : (
-                <>
-                  <td className={cn(TD, toneOf(r.p.callChg))}>
-                    {lakhSigned(r.p.callChg)}
-                    <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.callChg, r.p.callOi))}</span>
-                  </td>
-                  <td className={cn(TD, toneOf(r.p.putChg))}>
-                    {lakhSigned(r.p.putChg)}
-                    <span className="ml-1.5 text-[11px] text-text-muted">{pctSigned(oiChangePct(r.p.putChg, r.p.putOi))}</span>
-                  </td>
-                  <td className={TD}>{coiPcrText(r.p)}</td>
-                  <td className={TD}>
-                    {r.p.prevPcr == null ? (
-                      "—"
-                    ) : (
-                      <>
-                        {r.p.prevPcr.toFixed(3)} → <b>{r.p.pcr?.toFixed(3) ?? "—"}</b>{" "}
-                        {arrow(r.p.pcrChange, 3) ? (
-                          <span className={toneOf(r.p.pcrChange, 3)} title={r.p.pcrChange! > 0 ? "Expansion" : "Contraction"}>
-                            {arrow(r.p.pcrChange, 3)}
-                          </span>
-                        ) : null}
-                      </>
-                    )}
-                  </td>
-                  <td className={cn(TD, toneOf(r.p.spotChange))}>{signed(r.p.spotChange)}</td>
-                  <td className="px-2.5 py-1.5 whitespace-nowrap">
-                    <div className="flex items-center gap-2">
-                      <PositioningChip value={r.p.positioning} />
-                      {r.p.driver && <span className="text-[11px] text-text-muted">{DRIVERS[r.p.driver] ?? r.p.driver}</span>}
-                    </div>
-                  </td>
-                </>
+                <ChangeCells p={r.p} />
               )}
             </tr>
           ),

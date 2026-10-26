@@ -15,6 +15,7 @@ from app.schemas.options import (
     ExpiryOut,
     HistoryDepthOut,
     PcrCaptureStatusOut,
+    PcrLiveOut,
     PcrPointOut,
     PcrSnapshotRowOut,
     PcrSnapshotsOut,
@@ -24,6 +25,7 @@ from app.services.market_data.tick_engine import tick_engine
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
 from app.services.options.pcr import SNAPSHOT_UNDERLYINGS, compute_effective_pcr, compute_pcr_series
+from app.services.options.pcr_live import LIVE_TTL, live_row
 from app.services.options.pcr_snapshot_scheduler import pcr_snapshot_scheduler
 from app.services.options.pcr_snapshots import (
     EXPIRIES, MARKS_PER_SESSION, MAX_ROWS, STRIKE_WINDOW, UNDERLYINGS, latest_record, snapshot_rows,
@@ -139,6 +141,21 @@ async def get_pcr_snapshots(
         underlying=underlying, strike_window=STRIKE_WINDOW, expiries_summed=EXPIRIES,
         marks_per_session=MARKS_PER_SESSION, rows=[PcrSnapshotRowOut(**row) for row in rows],
         capture=PcrCaptureStatusOut(**pcr_snapshot_scheduler.status()),
+    )
+
+
+@router.get("/pcr/live", response_model=PcrLiveOut)
+async def get_pcr_live(underlying: str = Query("NIFTY"), _: User = Depends(get_current_user)) -> PcrLiveOut:
+    """The Change in OI table's live row: a record's fields as they read
+    right now, against the latest record, from a fresh Kite quote shared by
+    every viewer for LIVE_TTL; never saved. None outside 09:15-15:30 IST or
+    without a Zerodha login, with `reason`."""
+    if underlying not in UNDERLYINGS:
+        raise HTTPException(status_code=404, detail=f"No PCR records for '{underlying}' (available: {', '.join(UNDERLYINGS)})")
+    row, reason = await live_row(underlying)
+    return PcrLiveOut(
+        underlying=underlying, row=PcrSnapshotRowOut(**row) if row else None, reason=reason,
+        refresh_seconds=int(LIVE_TTL.total_seconds()),
     )
 
 

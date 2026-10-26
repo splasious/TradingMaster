@@ -442,14 +442,11 @@ def _num(value) -> float | None:
         return None
 
 
-async def capture_live(db: AsyncSession, broker: ZerodhaKiteBroker, underlying: str, mark: datetime) -> PcrSnapshot | None:
-    """Captures `mark` from Kite quotes. None if a record for it already
-    exists. Raises KiteAPIError when Kite can't be read."""
-    if await snapshot_exists(db, underlying, mark):
-        return None
-    index = f"NSE:{UNDERLYINGS[underlying]}"
+async def _quote(broker: ZerodhaKiteBroker, underlying: str, session: date):
+    """(the chain, NIFTY, the contracts quoted, their (OI, price, volume))
+    from Kite, now: the index, then ATM ±CAPTURE_WINDOW of each expiry."""
     nfo_rows = await broker.get_instruments("NFO")
-    chain = chain_for(nfo_rows, underlying, ist_session(mark))
+    chain = chain_for(nfo_rows, underlying, session)
     if len(chain) < EXPIRIES:
         raise KiteAPIError(f"Only {len(chain)} {underlying} expiries in Kite's instrument list")
     spot = (await broker.get_ltp("NSE", UNDERLYINGS[underlying]))["price"]
@@ -463,14 +460,43 @@ async def capture_live(db: AsyncSession, broker: ZerodhaKiteBroker, underlying: 
             q = quotes.get(f"NFO:{c.tradingsymbol}")
             if q:
                 values[c.tradingsymbol] = (_num(q.get("oi")), _num(q.get("last_price")), _num(q.get("volume")))
+    return chain, spot, contracts, values
+
+
+async def capture_live(db: AsyncSession, broker: ZerodhaKiteBroker, underlying: str, mark: datetime) -> PcrSnapshot | None:
+    """Captures `mark` from Kite quotes. None if a record for it already
+    exists. Raises KiteAPIError when Kite can't be read."""
+    if await snapshot_exists(db, underlying, mark):
+        return None
+    chain, spot, contracts, values = await _quote(broker, underlying, ist_session(mark))
     captured_at = datetime.now(timezone.utc)
-    logger.debug("PCR capture %s %s: %d contracts, index %s", underlying, mark, len(contracts), index)
+    logger.debug("PCR capture %s %s: %d contracts, index NSE:%s", underlying, mark, len(contracts), UNDERLYINGS[underlying])
     async with write_lock:
         if await snapshot_exists(db, underlying, mark):
             return None
         snap = await _write(db, underlying, mark, SOURCE_LIVE, captured_at, spot, list(chain), contracts, values)
         await db.commit()
     return snap
+
+
+async def live_reading(db: AsyncSession, broker: ZerodhaKiteBroker, underlying: str, now: datetime) -> dict:
+    """A record's row as it reads right now (status "live"): a fresh quote,
+    every field against the latest record -- ΔOI like-for-like, as any
+    record's -- and per expiry. Written only inside `db`'s transaction, to
+    run the same derive(), then rolled back: nothing is kept, so the
+    records, their charts and the strategies reading them never see it.
+    `db` must have nothing else pending. Raises KiteAPIError when Kite
+    can't be read."""
+    now = as_aware_utc(now)  # the reading's time: the quotes follow within seconds
+    chain, spot, contracts, values = await _quote(broker, underlying, ist_session(now))
+    try:
+        snap = await _write(db, underlying, now, SOURCE_LIVE, now, spot, list(chain), contracts, values)
+        row = {"ts": snap.ts, "session_date": snap.session_date, "status": "live"}
+        row.update({col: getattr(snap, col) for col in SNAPSHOT_COLUMNS})
+        row["expiry_rows"] = [{col: getattr(e, col) for col in EXPIRY_COLUMNS} for e in snap.expiry_rows]
+        return row
+    finally:
+        await db.rollback()
 
 
 # ---------------------------------------------------------------- read

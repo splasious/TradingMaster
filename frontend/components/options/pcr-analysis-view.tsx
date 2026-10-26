@@ -25,7 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/data-state";
 import { Select } from "@/components/ui/select";
-import { usePcrSnapshots } from "@/lib/hooks";
+import { usePcrLive, usePcrSnapshots } from "@/lib/hooks";
 import type { PcrCaptureStatusOut, PcrSnapshotRowOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +74,7 @@ function CaptureStatus({ latest, capture, now }: { latest: PcrSnapshotRowOut | n
 
 export function PcrAnalysisView() {
   const { data, isLoading, isError, dataUpdatedAt } = usePcrSnapshots("NIFTY", FETCH);
+  const { data: live } = usePcrLive("NIFTY");
   const [scope, setScope] = useState(ALL_EXPIRIES);
   const [hover, setHover] = useState<number | null>(null);
   const [table, setTable] = useState<"overall" | "change">("overall");
@@ -85,6 +86,15 @@ export function PcrAnalysisView() {
   const points = useMemo(() => allPoints.slice(-ROWS), [allPoints]);
   const latest = useMemo(() => [...points].reverse().find((p) => p.status === "recorded") ?? null, [points]);
   const day = useMemo(() => daySummary(allPoints, latest), [allPoints, latest]);
+  // The LIVE row: the live reading resolved for this scope like any record --
+  // last in line after the saved ones, so a single expiry's PCR change is
+  // against the latest record too.
+  const livePoint = useMemo(() => {
+    if (!live?.row || !data) return null;
+    const point = buildPoints([{ ...live.row, status: "recorded" }, ...data.rows], effectiveScope).at(-1);
+    return point && point.ts === live.row.ts ? { ...point, status: live.row.status, sinceTs: live.row.prev_ts } : null;
+  }, [live, data, effectiveScope]);
+  const liveNote = live && !live.row && live.reason && !live.reason.startsWith("market closed") ? live.reason : null;
 
   const scopeLabel =
     effectiveScope === ALL_EXPIRIES
@@ -234,7 +244,7 @@ export function PcrAnalysisView() {
                 <span className="text-xs text-text-muted">same contracts at both times</span>
               </CardHeader>
               <CardContent className="overflow-x-auto p-0">
-                <OiChangeTable points={points} hover={hover} onHover={setHover} />
+                <OiChangeTable points={points} hover={hover} onHover={setHover} live={livePoint} liveNote={liveNote} />
               </CardContent>
             </Card>
           </div>

@@ -1165,7 +1165,7 @@ export interface PcrSnapshotExpiryOut {
 export interface PcrSnapshotRowOut {
   ts: string;
   session_date: string;
-  status: "recorded" | "missing" | "pending";
+  status: "recorded" | "missing" | "pending" | "live";
   source: string | null;
   captured_at: string | null;
   expiries: string[];
@@ -1207,6 +1207,16 @@ export interface PcrCaptureStatusOut {
   last_fill_at: string | null;
   last_fill_result: Record<string, { filled: number; unfillable: number; missing: number; waiting_login?: boolean }> | null;
   last_fill_error: string | null;
+}
+
+/** The Change in OI table's live row (backend services/options/pcr_live.py):
+ * a record's fields as they read right now, against the latest record --
+ * status "live", never saved -- or null, with why not. */
+export interface PcrLiveOut {
+  underlying: string;
+  row: PcrSnapshotRowOut | null;
+  reason: string | null;
+  refresh_seconds: number;
 }
 
 export interface PcrSnapshotsOut {

@@ -46,6 +46,7 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   PcrPointOut,
+  PcrLiveOut,
   PcrSnapshotsOut,
   PortfolioBacktestJobOut,
   PortfolioBacktestResultOut,
@@ -859,6 +860,17 @@ export function usePcrSnapshots(underlying = "NIFTY", limit = 60) {
     queryFn: () =>
       apiFetch<PcrSnapshotsOut>(`/api/v1/options/pcr/snapshots?underlying=${underlying}&limit=${limit}&include_expiries=true`),
     refetchInterval: 30_000,
+  });
+}
+
+/** The Change in OI table's live row: every 15 s while NSE trades (the
+ * server shares one Kite reading per 15 s among all viewers), once a
+ * minute otherwise. */
+export function usePcrLive(underlying = "NIFTY") {
+  return useQuery({
+    queryKey: ["pcr-live", underlying],
+    queryFn: () => apiFetch<PcrLiveOut>(`/api/v1/options/pcr/live?underlying=${underlying}`),
+    refetchInterval: (query) => (query.state.data?.reason?.startsWith("market closed") ? 60_000 : 15_000),
   });
 }
 
