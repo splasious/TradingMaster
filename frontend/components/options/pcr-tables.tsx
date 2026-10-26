@@ -24,7 +24,8 @@ import { cn } from "@/lib/utils";
  * row-aligned (side by side from 1800px wide), with a divider where the
  * session changes. Hovering a row moves the chart crosshair and back.
  * Change in OI also pins a LIVE row on top while NSE trades: the same
- * numbers as they read right now, against the latest record, never saved. */
+ * numbers as they read right now, against the latest record, never saved --
+ * and above it a TODAY row: the day's change since the previous close. */
 
 const TH = "sticky top-0 z-[1] bg-surface px-2.5 py-2 text-right text-[10.5px] font-medium uppercase tracking-wide text-text-muted whitespace-nowrap";
 const TD = "px-2.5 py-1.5 text-right font-financial whitespace-nowrap";
@@ -98,6 +99,25 @@ function LiveRow({ p }: { p: PcrPoint }) {
           LIVE {secondsIst(p.ts)}
         </span>
         {p.sinceTs && <span className="ml-1 text-[10.5px] text-text-muted">since {timeIst(p.sinceTs)}</span>}
+      </td>
+      <ChangeCells p={p} />
+    </tr>
+  );
+}
+
+const sessionToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+
+function TodayRow({ p }: { p: PcrPoint & { baseTs: string | null } }) {
+  const label = p.session === sessionToday() ? "TODAY" : `${dayIst(p.ts)} total`;
+  return (
+    <tr className="border-b border-border bg-surface-elevated" title="The day's change since the previous session's last record, up to now">
+      <td className="px-2.5 py-1.5 text-left font-financial whitespace-nowrap">
+        <span className="font-semibold text-text-primary">{label}</span>
+        {p.baseTs && (
+          <span className="ml-1 text-[10.5px] text-text-muted">
+            since {dayIst(p.baseTs)} {timeIst(p.baseTs)} · {p.status === "live" ? "live" : `to ${timeIst(p.ts)}`}
+          </span>
+        )}
       </td>
       <ChangeCells p={p} />
     </tr>
@@ -194,10 +214,11 @@ export function OverallOiTable({ points, hover, onHover }: TableProps) {
 }
 
 /** `live`: the LIVE row's point (null: none now), `liveNote`: why there is
- * none during the session (the row's place shows it instead). */
+ * none during the session (the row's place shows it instead), `today`: the
+ * TODAY row (pcr-model todayPoint). */
 export function OiChangeTable({
-  points, hover, onHover, live = null, liveNote = null,
-}: TableProps & { live?: PcrPoint | null; liveNote?: string | null }) {
+  points, hover, onHover, live = null, liveNote = null, today = null,
+}: TableProps & { live?: PcrPoint | null; liveNote?: string | null; today?: (PcrPoint & { baseTs: string | null }) | null }) {
   return (
     <table className="w-full border-collapse text-[13px]" onMouseLeave={() => onHover(null)}>
       <thead>
@@ -212,6 +233,7 @@ export function OiChangeTable({
         </tr>
       </thead>
       <tbody>
+        {today && <TodayRow p={today} />}
         {live ? <LiveRow p={live} /> : liveNote ? <LiveNote text={liveNote} /> : null}
         {rowsWithDividers(points).map((r) =>
           r.kind === "day" ? (

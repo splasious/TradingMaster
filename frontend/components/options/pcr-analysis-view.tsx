@@ -12,6 +12,7 @@ import {
   lakh,
   dayIst,
   daySummary,
+  todayPoint,
   lakhSigned,
   nextMarkLabel,
   num,
@@ -95,6 +96,8 @@ export function PcrAnalysisView() {
     return point && point.ts === live.row.ts ? { ...point, status: live.row.status, sinceTs: live.row.prev_ts } : null;
   }, [live, data, effectiveScope]);
   const liveNote = live && !live.row && live.reason && !live.reason.startsWith("market closed") ? live.reason : null;
+  // TODAY: the day's change since the previous close -- up to the live reading while there is one.
+  const today = useMemo(() => todayPoint(allPoints, livePoint ?? latest), [allPoints, livePoint, latest]);
 
   const scopeLabel =
     effectiveScope === ALL_EXPIRIES
@@ -244,7 +247,7 @@ export function PcrAnalysisView() {
                 <span className="text-xs text-text-muted">same contracts at both times</span>
               </CardHeader>
               <CardContent className="overflow-x-auto p-0">
-                <OiChangeTable points={points} hover={hover} onHover={setHover} live={livePoint} liveNote={liveNote} />
+                <OiChangeTable points={points} hover={hover} onHover={setHover} live={livePoint} liveNote={liveNote} today={today} />
               </CardContent>
             </Card>
           </div>

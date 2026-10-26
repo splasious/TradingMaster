@@ -167,6 +167,24 @@ export function daySummary(points: PcrPoint[], latest: PcrPoint | null): DaySumm
   };
 }
 
+/** The Change in OI table's TODAY row: the day's change since the previous
+ * session's last record (the ΔOI day baseline) up to `upTo` -- the live
+ * reading while there is one, else the latest record -- drawn like any
+ * row: Call/Put ΔOI and their ΔOI PCR for the day, PCR at that close →
+ * now, NIFTY's move since, and the day's positioning. */
+export function todayPoint(points: PcrPoint[], upTo: PcrPoint | null): (PcrPoint & { baseTs: string | null }) | null {
+  const day = upTo ? daySummary(points, upTo) : null;
+  if (!upTo || !day || (day.callDay == null && day.putDay == null)) return null;
+  const base = [...points].reverse().find((p) => p.status === "recorded" && p.session < upTo.session) ?? null;
+  const coiNm = day.callDay != null && Math.abs(day.callDay) < COI_PCR_FLOOR;
+  return {
+    ...upTo,
+    callChg: day.callDay, putChg: day.putDay, coiPcr: coiNm ? null : ratio(day.putDay, day.callDay), coiNm,
+    prevPcr: base?.pcr ?? null, pcrChange: day.pcrChange, spotChange: day.spotChange,
+    positioning: day.positioning, driver: day.driver, gapSince: null, baseTs: base?.ts ?? null,
+  };
+}
+
 // ------------------------------------------------------------ formatting
 
 const timeFmt = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false });
