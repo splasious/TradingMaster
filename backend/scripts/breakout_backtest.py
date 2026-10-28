@@ -1,18 +1,22 @@
-"""52 Candle Breakout 15 MIN -- backtest on every signal, a fixed size each (28 Oct).
+"""52 Candle Breakout 15 MIN -- backtest, Rs 2 L a trade, at most 10 stocks held (28 Oct).
 
 Read-only. Run inside the backend container (the health check's
-`breakout_backtest` input pipes it to `python -`). For each of the
-strategy's 500 stocks, over every 15-minute candle stored for it:
+`breakout_backtest` input pipes it to `python -`). Over every 15-minute
+candle stored for the strategy's 500 stocks, walked in time order:
 
   In:  a candle closes above the highest high of the BREAKOUT_CANDLES (52)
        before it, while the stock isn't held -- bought at the next candle's
        open (the strategy buys at the live price about 4 minutes after the
-       close). The session's last candle (15:15-15:30) isn't bought.
+       close). The session's last candle (15:15-15:30) isn't bought. At
+       most MAX_POSITIONS (10) stocks are held: a candle's breakouts fill
+       the free slots strongest first (% over the 52-candle high), as the
+       strategy ranks them; the rest are passed over.
   Out: a candle closed after the buy closes below the stock's own MA of
        (O+H+L+C)/4 over MA_CANDLES (10) -- sold at the next candle's open,
-       the next session's first for the day's last candle.
-  Size: TRADE_SIZE (Rs 2,00,000) a trade, whole shares; no cap on how many
-       are held at once -- every signal is taken.
+       the next session's first for the day's last candle. A candle's
+       exits free their slots before its breakouts are ranked.
+  Size: TRADE_SIZE (Rs 2,00,000) a trade, whole shares -- Rs 20 L in all
+       at 10 held, the card's pool.
 
 Charges are the app's own estimate (trade_record.charge_breakdown: delivery,
 or intraday when bought and sold the same day). The results -- a summary,
@@ -41,47 +45,71 @@ from app.services.paper_trading.trade_record import charge_breakdown
 from app.services.strategy.native_strategies import candle_breakout_52_15min as bo
 
 TRADE_SIZE = 200_000.0
+MAX_POSITIONS = bo.MAX_POSITIONS  # 10
 BAR = timedelta(minutes=15)
 FIRST_START, LAST_START = time(9, 15), time(15, 15)  # the session's 25 candles
 
 
-def simulate(symbol: str, bars: list[dict]) -> list[dict]:
-    """Every trade the rules take on one stock's candles (oldest first,
-    session candles only); a trade still open at the end has exit None."""
-    trades: list[dict] = []
+def prepare(bars: list[dict]) -> list[dict]:
+    """Marks each bar (oldest first, session candles only) with what the
+    rules see at its close: "breakout" -- % over the 52-candle high, when
+    it's one that can be bought at the next candle's open -- and
+    "below_ma" -- closed under its 10-candle MA of (O+H+L+C)/4."""
     typical = [bo.typical(b) for b in bars]
-    holding: dict | None = None
-    i = bo.BREAKOUT_CANDLES
-    while i < len(bars):
-        bar = bars[i]
-        if holding is None:
-            prior_high = max(b["high"] for b in bars[i - bo.BREAKOUT_CANDLES:i])
-            last_of_day = bar["start"].time() >= LAST_START
-            if bar["close"] > prior_high > 0 and not last_of_day and i + 1 < len(bars) and bars[i + 1]["start"].date() == bar["start"].date():
-                entry = bars[i + 1]
-                quantity = int(TRADE_SIZE / entry["open"]) if entry["open"] > 0 else 0
-                if quantity > 0:
-                    holding = {
-                        "symbol": symbol, "breakout_at": bar["start"] + BAR, "breakout_pct": (bar["close"] / prior_high - 1) * 100,
-                        "entry_at": entry["start"], "entry_price": entry["open"], "quantity": quantity, "entry_index": i + 1,
-                    }
-                    i += 1
-                    continue
-        else:
-            ma = sum(typical[i - bo.MA_CANDLES + 1:i + 1]) / bo.MA_CANDLES if i + 1 >= bo.MA_CANDLES else None
-            if ma is not None and bar["close"] < ma:
-                if i + 1 < len(bars):
+    for i, bar in enumerate(bars):
+        bar["breakout"], bar["below_ma"] = None, False
+        if i + 1 >= bo.MA_CANDLES:
+            bar["below_ma"] = bar["close"] < sum(typical[i - bo.MA_CANDLES + 1:i + 1]) / bo.MA_CANDLES
+        if i < bo.BREAKOUT_CANDLES or bar["start"].time() >= LAST_START:
+            continue
+        prior_high = max(b["high"] for b in bars[i - bo.BREAKOUT_CANDLES:i])
+        nxt = bars[i + 1] if i + 1 < len(bars) else None
+        if bar["close"] > prior_high > 0 and nxt is not None and nxt["start"].date() == bar["start"].date() and nxt["open"] > 0:
+            bar["breakout"] = (bar["close"] / prior_high - 1) * 100
+    return bars
+
+
+def backtest(stocks: dict[str, list[dict]], max_positions: int = MAX_POSITIONS) -> tuple[list[dict], int]:
+    """(every trade, breakouts passed over for want of a slot). `stocks`:
+    symbol -> its prepared bars. A trade still open at the end has exit_at
+    None and is marked at the stock's last close."""
+    timeline: dict[datetime, list[tuple[str, int]]] = defaultdict(list)
+    for symbol, bars in stocks.items():
+        for i, bar in enumerate(bars):
+            timeline[bar["start"]].append((symbol, i))
+    held: dict[str, dict] = {}
+    trades: list[dict] = []
+    passed = 0
+    for start in sorted(timeline):
+        breakouts = []
+        for symbol, i in timeline[start]:
+            bars = stocks[symbol]
+            bar = bars[i]
+            trade = held.get(symbol)
+            if trade is not None:
+                if i >= trade["entry_index"] and bar["below_ma"] and i + 1 < len(bars):
                     exit_bar = bars[i + 1]
-                    holding.update(exit_at=exit_bar["start"], exit_price=exit_bar["open"], candles_held=i + 1 - holding["entry_index"])
-                    trades.append(holding)
-                    holding = None
-                    i += 1
-                    continue
-                break  # the exit signal is the last candle stored: no price to sell at yet
-        i += 1
-    if holding is not None:
-        holding.update(exit_at=None, exit_price=bars[-1]["close"], candles_held=len(bars) - holding["entry_index"])
-        trades.append(holding)
+                    trade.update(exit_at=exit_bar["start"], exit_price=exit_bar["open"], candles_held=i + 1 - trade["entry_index"])
+                    trades.append(held.pop(symbol))
+            elif bar["breakout"] is not None:
+                breakouts.append((bar["breakout"], symbol, i))
+        breakouts.sort(key=lambda b: (-b[0], b[1]))
+        for pct, symbol, i in breakouts:
+            if len(held) >= max_positions:
+                passed += 1
+                continue
+            entry = stocks[symbol][i + 1]
+            quantity = int(TRADE_SIZE / entry["open"])
+            if quantity <= 0:
+                continue
+            held[symbol] = {
+                "symbol": symbol, "breakout_at": stocks[symbol][i]["start"] + BAR, "breakout_pct": pct,
+                "entry_at": entry["start"], "entry_price": entry["open"], "quantity": quantity, "entry_index": i + 1,
+            }
+    for symbol, trade in held.items():
+        bars = stocks[symbol]
+        trade.update(exit_at=None, exit_price=bars[-1]["close"], candles_held=len(bars) - trade["entry_index"])
+        trades.append(trade)
     for t in trades:
         gross = (t["exit_price"] - t["entry_price"]) * t["quantity"]
         charges = None
@@ -91,10 +119,10 @@ def simulate(symbol: str, bars: list[dict]) -> list[dict]:
             breakdown = charge_breakdown([leg], t["entry_at"], t["exit_at"])
             charges = breakdown["total"] if breakdown else None
         t.update(gross=gross, charges=charges, net=gross - (charges or 0.0), ret_pct=(t["exit_price"] / t["entry_price"] - 1) * 100)
-    return trades
+    return trades, passed
 
 
-def summarize(trades: list[dict], stocks: int, first: datetime, last: datetime) -> str:
+def summarize(trades: list[dict], passed: int, stocks: int, first: datetime, last: datetime) -> str:
     closed = sorted((t for t in trades if t["exit_at"] is not None), key=lambda t: t["exit_at"])
     still_open = [t for t in trades if t["exit_at"] is None]
     if not closed:
@@ -117,9 +145,11 @@ def summarize(trades: list[dict], stocks: int, first: datetime, last: datetime) 
     lines = [
         f"Range     {first:%d %b %Y} - {last:%d %b %Y}",
         f"Stocks    {stocks} with candles",
-        f"Size      Rs {TRADE_SIZE:,.0f} a trade, no cap",
+        f"Size      Rs {TRADE_SIZE / 1e5:,.0f} L a trade, {MAX_POSITIONS} held at most",
+        f"Capital   Rs {MAX_POSITIONS * TRADE_SIZE / 1e5:,.0f} L",
         "",
         f"Trades    {len(closed):,} closed, {len(still_open)} open now",
+        f"Passed    {passed:,} breakouts, no slot free",
         f"Win rate  {len(wins) / len(closed) * 100:.1f}%",
         f"Avg trade {sum(t['ret_pct'] for t in closed) / len(closed):+.2f}%",
         f"Avg win   {sum(t['ret_pct'] for t in wins) / len(wins):+.2f}%" if wins else "Avg win   -",
@@ -129,6 +159,7 @@ def summarize(trades: list[dict], stocks: int, first: datetime, last: datetime) 
         f"Gross P&L {gross:>+15,.0f}",
         f"Charges   {-charges:>+15,.0f}",
         f"Net P&L   {net:>+15,.0f}",
+        f"On capital {net / (MAX_POSITIONS * TRADE_SIZE) * 100:+.1f}%",
         f"Profit factor {sum(t['net'] for t in wins) / loss_sum:.2f}" if loss_sum > 0 else "Profit factor -",
         f"Max drawdown {drawdown:>+12,.0f}",
         f"Most held at once {most} (Rs {most * TRADE_SIZE / 1e5:,.0f} L)",
@@ -165,7 +196,7 @@ def equity_chart(trades: list[dict]) -> bytes | None:
     fig, ax = plt.subplots(figsize=(9, 4.8), dpi=150)
     ax.plot(times, curve, color="#2563eb", linewidth=1.6)
     ax.axhline(0, color="#9ca3af", linewidth=0.8)
-    ax.set_title("52 Candle Breakout 15 MIN - backtest, every signal, Rs 2 L a trade: cumulative net P&L (Rs lakh)", fontsize=9)
+    ax.set_title("52 Candle Breakout 15 MIN - backtest, Rs 2 L a trade, 10 held at most: cumulative net P&L (Rs lakh)", fontsize=9)
     ax.grid(alpha=0.25)
     fig.autofmt_xdate()
     buf = io.BytesIO()
@@ -220,8 +251,8 @@ async def load_bars(db, instrument_id) -> list[dict]:
 
 
 async def main() -> None:
-    trades: list[dict] = []
-    stocks, first, last = 0, None, None
+    prepared: dict[str, list[dict]] = {}
+    first, last = None, None
     async with AsyncSessionLocal() as db:
         universe = (
             await db.execute(select(Instrument).where(Instrument.exchange == "NSE", Instrument.symbol.in_(bo.STOCK_UNIVERSE)))
@@ -230,19 +261,21 @@ async def main() -> None:
             bars = await load_bars(db, instrument.id)
             if len(bars) <= bo.BREAKOUT_CANDLES:
                 continue
-            stocks += 1
             first = min(first or bars[0]["start"], bars[0]["start"])
             last = max(last or bars[-1]["start"], bars[-1]["start"])
-            trades.extend(simulate(instrument.symbol, bars))
+            prepared[instrument.symbol] = prepare(bars)
+    stocks = len(prepared)
+    trades, passed = backtest(prepared)
     if not trades or first is None:
         print(f"breakout backtest: no trades ({stocks} stocks with candles)")
         return
-    summary = summarize(trades, stocks, first, last)
-    await send_telegram("52 Candle Breakout 15 MIN · backtest (every signal, Rs 2 L each)", summary, photo=equity_chart(trades))
+    summary = summarize(trades, passed, stocks, first, last)
+    await send_telegram("52 Candle Breakout 15 MIN · backtest (Rs 2 L each, 10 held at most)", summary, photo=equity_chart(trades))
     sent = await send_csv(trades_csv(trades), f"breakout52_backtest_{datetime.now(timezone.utc):%Y%m%d}.csv",
                           "52 Candle Breakout 15 MIN backtest: every trade")
     closed = sum(1 for t in trades if t["exit_at"] is not None)
-    print(f"breakout backtest: sent to the private chat -- {closed} closed trades, {len(trades) - closed} open, {stocks} stocks, "
+    print(f"breakout backtest: sent to the private chat -- {closed} closed trades, {len(trades) - closed} open, {passed} passed over, "
+          f"{stocks} stocks, "
           f"{first:%d %b %Y} - {last:%d %b %Y}, CSV {'sent' if sent else 'not sent'}")
 
 
