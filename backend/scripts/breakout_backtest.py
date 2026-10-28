@@ -1,13 +1,18 @@
-"""52 Candle Breakout 15 MIN -- backtest, Rs 2 L a trade, at most 10 stocks held (28 Oct).
+"""52 Candle Breakout 15 MIN -- backtest on 15, 30, 45 and 75-minute candles,
+Rs 2 L a trade, at most 10 stocks held (28 Oct).
 
 Read-only. Run inside the backend container (the health check's
-`breakout_backtest` input pipes it to `python -`). Over every 15-minute
-candle stored for the strategy's 500 stocks, walked in time order:
+`breakout_backtest` input pipes it to `python -`). The 30, 45 and 75-minute
+candles are built from the stored 15-minute ones (resample: each session
+from 09:15; at 30 and 45 minutes the session's last candle, 15:15-15:30, is
+a short one, as Kite's own 30-minute candles are). On each timeframe, over
+every candle of the strategy's 500 stocks, walked in time order -- "candle"
+and both counts below in that timeframe's candles:
 
   In:  a candle closes above the highest high of the BREAKOUT_CANDLES (52)
        before it, while the stock isn't held -- bought at the next candle's
        open (the strategy buys at the live price about 4 minutes after the
-       close). The session's last candle (15:15-15:30) isn't bought. At
+       close). The session's last candle (ending 15:30) isn't bought. At
        most MAX_POSITIONS (10) stocks are held: a candle's breakouts fill
        the free slots strongest first (% over the 52-candle high), as the
        strategy ranks them; the rest are passed over.
@@ -46,11 +51,33 @@ from app.services.strategy.native_strategies import candle_breakout_52_15min as 
 
 TRADE_SIZE = 200_000.0
 MAX_POSITIONS = bo.MAX_POSITIONS  # 10
-BAR = timedelta(minutes=15)
-FIRST_START, LAST_START = time(9, 15), time(15, 15)  # the session's 25 candles
+TIMEFRAMES = (15, 30, 45, 75)  # minutes
+FIRST_START, LAST_START = time(9, 15), time(15, 15)  # the session's 25 15-minute candles
+SESSION_END = time(15, 30)
 
 
-def prepare(bars: list[dict]) -> list[dict]:
+def resample(bars: list[dict], minutes: int) -> list[dict]:
+    """15-minute bars (oldest first) into `minutes` bars, each session's
+    from 09:15: open of the first, highest high, lowest low, close of the
+    last. New dicts, so each timeframe's run marks its own."""
+    out: list[dict] = []
+    for bar in bars:
+        opening = datetime.combine(bar["start"].date(), FIRST_START, tzinfo=IST)
+        start = opening + ((bar["start"] - opening) // timedelta(minutes=minutes)) * timedelta(minutes=minutes)
+        if out and out[-1]["start"] == start:
+            last = out[-1]
+            last["high"], last["low"], last["close"] = max(last["high"], bar["high"]), min(last["low"], bar["low"]), bar["close"]
+        else:
+            out.append({"start": start, "open": bar["open"], "high": bar["high"], "low": bar["low"], "close": bar["close"]})
+    return out
+
+
+def last_of_session(start: datetime, minutes: int) -> bool:
+    """The candle that ends with the session (at 15:30, or a short one cut there)."""
+    return (start + timedelta(minutes=minutes)).time() >= SESSION_END or (start + timedelta(minutes=minutes)).date() > start.date()
+
+
+def prepare(bars: list[dict], minutes: int = 15) -> list[dict]:
     """Marks each bar (oldest first, session candles only) with what the
     rules see at its close: "breakout" -- % over the 52-candle high, when
     it's one that can be bought at the next candle's open -- and
@@ -60,7 +87,7 @@ def prepare(bars: list[dict]) -> list[dict]:
         bar["breakout"], bar["below_ma"] = None, False
         if i + 1 >= bo.MA_CANDLES:
             bar["below_ma"] = bar["close"] < sum(typical[i - bo.MA_CANDLES + 1:i + 1]) / bo.MA_CANDLES
-        if i < bo.BREAKOUT_CANDLES or bar["start"].time() >= LAST_START:
+        if i < bo.BREAKOUT_CANDLES or last_of_session(bar["start"], minutes):
             continue
         prior_high = max(b["high"] for b in bars[i - bo.BREAKOUT_CANDLES:i])
         nxt = bars[i + 1] if i + 1 < len(bars) else None
@@ -69,7 +96,7 @@ def prepare(bars: list[dict]) -> list[dict]:
     return bars
 
 
-def backtest(stocks: dict[str, list[dict]], max_positions: int = MAX_POSITIONS) -> tuple[list[dict], int]:
+def backtest(stocks: dict[str, list[dict]], max_positions: int = MAX_POSITIONS, minutes: int = 15) -> tuple[list[dict], int]:
     """(every trade, breakouts passed over for want of a slot). `stocks`:
     symbol -> its prepared bars. A trade still open at the end has exit_at
     None and is marked at the stock's last close."""
@@ -103,7 +130,7 @@ def backtest(stocks: dict[str, list[dict]], max_positions: int = MAX_POSITIONS) 
             if quantity <= 0:
                 continue
             held[symbol] = {
-                "symbol": symbol, "breakout_at": stocks[symbol][i]["start"] + BAR, "breakout_pct": pct,
+                "symbol": symbol, "breakout_at": stocks[symbol][i]["start"] + timedelta(minutes=minutes), "breakout_pct": pct,
                 "entry_at": entry["start"], "entry_price": entry["open"], "quantity": quantity, "entry_index": i + 1,
             }
     for symbol, trade in held.items():
@@ -122,14 +149,10 @@ def backtest(stocks: dict[str, list[dict]], max_positions: int = MAX_POSITIONS) 
     return trades, passed
 
 
-def summarize(trades: list[dict], passed: int, stocks: int, first: datetime, last: datetime) -> str:
+def stats(trades: list[dict], passed: int, minutes: int) -> dict:
     closed = sorted((t for t in trades if t["exit_at"] is not None), key=lambda t: t["exit_at"])
-    still_open = [t for t in trades if t["exit_at"] is None]
-    if not closed:
-        return f"No closed trades in {first:%d %b %Y} - {last:%d %b %Y} ({stocks} stocks)."
     wins = [t for t in closed if t["net"] > 0]
     losses = [t for t in closed if t["net"] <= 0]
-    gross, charges, net = (sum(t[k] or 0.0 for t in closed) for k in ("gross", "charges", "net"))
     peak = running = drawdown = 0.0
     for t in closed:
         running += t["net"]
@@ -142,61 +165,92 @@ def summarize(trades: list[dict], passed: int, stocks: int, first: datetime, las
         most = max(most, held)
     candles = sorted(t["candles_held"] for t in closed)
     loss_sum = -sum(t["net"] for t in losses)
+    net = sum(t["net"] for t in closed)
+    return {
+        "closed": len(closed), "open": len(trades) - len(closed), "passed": passed,
+        "win": len(wins) / len(closed) * 100 if closed else None,
+        "avg": sum(t["ret_pct"] for t in closed) / len(closed) if closed else None,
+        "avg_win": sum(t["ret_pct"] for t in wins) / len(wins) if wins else None,
+        "avg_loss": sum(t["ret_pct"] for t in losses) / len(losses) if losses else None,
+        "held_candles": candles[len(candles) // 2] if candles else None,
+        "held_hours": candles[len(candles) // 2] * minutes / 60 if candles else None,
+        "gross": sum(t["gross"] for t in closed), "charges": sum(t["charges"] or 0.0 for t in closed), "net": net,
+        "on_capital": net / (MAX_POSITIONS * TRADE_SIZE) * 100,
+        "pf": sum(t["net"] for t in wins) / loss_sum if loss_sum > 0 else None,
+        "drawdown": drawdown, "most": most,
+        "months": {m: sum(t["net"] for t in closed if f"{t['exit_at'].astimezone(IST):%Y-%m}" == m)
+                   for m in sorted({f"{t['exit_at'].astimezone(IST):%Y-%m}" for t in closed})},
+    }
+
+
+def compare(results: dict[int, tuple[list[dict], int]], stocks: int, first: datetime, last: datetime) -> str:
+    """The timeframes side by side: one column each."""
+    st = {m: stats(trades, passed, m) for m, (trades, passed) in results.items()}
+    cols = list(st)
+
+    def row(label: str, key: str, fmt) -> str:
+        return f"{label:<12}" + "".join(f"{'-' if st[m][key] is None else fmt(st[m][key]):>11}" for m in cols)
+
     lines = [
-        f"Range     {first:%d %b %Y} - {last:%d %b %Y}",
-        f"Stocks    {stocks} with candles",
-        f"Size      Rs {TRADE_SIZE / 1e5:,.0f} L a trade, {MAX_POSITIONS} held at most",
-        f"Capital   Rs {MAX_POSITIONS * TRADE_SIZE / 1e5:,.0f} L",
+        f"Range  {first:%d %b %Y} - {last:%d %b %Y}",
+        f"Stocks {stocks} with candles",
+        f"Rs {TRADE_SIZE / 1e5:,.0f} L a trade, {MAX_POSITIONS} held at most (Rs {MAX_POSITIONS * TRADE_SIZE / 1e5:,.0f} L)",
         "",
-        f"Trades    {len(closed):,} closed, {len(still_open)} open now",
-        f"Passed    {passed:,} breakouts, no slot free",
-        f"Win rate  {len(wins) / len(closed) * 100:.1f}%",
-        f"Avg trade {sum(t['ret_pct'] for t in closed) / len(closed):+.2f}%",
-        f"Avg win   {sum(t['ret_pct'] for t in wins) / len(wins):+.2f}%" if wins else "Avg win   -",
-        f"Avg loss  {sum(t['ret_pct'] for t in losses) / len(losses):+.2f}%" if losses else "Avg loss  -",
-        f"Held      median {candles[len(candles) // 2]} candles",
+        f"{'Candles':<12}" + "".join(f"{f'{m} min':>11}" for m in cols),
+        row("Trades", "closed", lambda v: f"{v:,}"),
+        row("Open now", "open", lambda v: f"{v:,}"),
+        row("Passed over", "passed", lambda v: f"{v:,}"),
+        row("Win rate", "win", lambda v: f"{v:.1f}%"),
+        row("Avg trade", "avg", lambda v: f"{v:+.2f}%"),
+        row("Avg win", "avg_win", lambda v: f"{v:+.2f}%"),
+        row("Avg loss", "avg_loss", lambda v: f"{v:+.2f}%"),
+        row("Held, candles", "held_candles", lambda v: f"{v}"),
+        row("Held, hours", "held_hours", lambda v: f"{v:.1f}"),
         "",
-        f"Gross P&L {gross:>+15,.0f}",
-        f"Charges   {-charges:>+15,.0f}",
-        f"Net P&L   {net:>+15,.0f}",
-        f"On capital {net / (MAX_POSITIONS * TRADE_SIZE) * 100:+.1f}%",
-        f"Profit factor {sum(t['net'] for t in wins) / loss_sum:.2f}" if loss_sum > 0 else "Profit factor -",
-        f"Max drawdown {drawdown:>+12,.0f}",
-        f"Most held at once {most} (Rs {most * TRADE_SIZE / 1e5:,.0f} L)",
+        row("Gross P&L", "gross", lambda v: f"{v / 1e5:+,.2f} L"),
+        row("Charges", "charges", lambda v: f"{-v / 1e5:+,.2f} L"),
+        row("Net P&L", "net", lambda v: f"{v / 1e5:+,.2f} L"),
+        row("On capital", "on_capital", lambda v: f"{v:+.1f}%"),
+        row("Profit fact.", "pf", lambda v: f"{v:.2f}"),
+        row("Max drawdown", "drawdown", lambda v: f"{v / 1e5:+,.2f} L"),
+        row("Most held", "most", lambda v: f"{v}"),
         "",
-        "Month     trades  win%      net P&L",
+        f"{'Net by month':<12}" + "".join(f"{f'{m} min':>11}" for m in cols),
     ]
-    by_month: dict[str, list[dict]] = defaultdict(list)
-    for t in closed:
-        by_month[f"{t['exit_at'].astimezone(IST):%Y-%m}"].append(t)
-    for month, ts in sorted(by_month.items()):
-        win = sum(1 for t in ts if t["net"] > 0) / len(ts) * 100
-        lines.append(f"{month}  {len(ts):>6}  {win:>4.0f}  {sum(t['net'] for t in ts):>+12,.0f}")
-    best = sorted(closed, key=lambda t: -t["ret_pct"])[:5]
-    worst = sorted(closed, key=lambda t: t["ret_pct"])[:5]
-    lines += ["", "Best"] + [f"  {t['symbol']:<12} {t['ret_pct']:+6.1f}%  {t['entry_at'].astimezone(IST):%d %b %y}" for t in best]
-    lines += ["Worst"] + [f"  {t['symbol']:<12} {t['ret_pct']:+6.1f}%  {t['entry_at'].astimezone(IST):%d %b %y}" for t in worst]
+    months = sorted({month for m in cols for month in st[m]["months"]})
+    for month in months:
+        lines.append(f"{month:<12}" + "".join(f"{st[m]['months'].get(month, 0.0) / 1e5:>+9,.2f} L" for m in cols))
+    lines.append("")
+    lines.append("Held hours are trading time (candles x minutes); a stock")
+    lines.append("still open at the end is valued at its last close and left")
+    lines.append("out of every figure but 'Open now'.")
     return "\n".join(lines)
 
 
-def equity_chart(trades: list[dict]) -> bytes | None:
-    closed = sorted((t for t in trades if t["exit_at"] is not None), key=lambda t: t["exit_at"])
-    if not closed:
-        return None
+def equity_chart(results: dict[int, tuple[list[dict], int]]) -> bytes | None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    times, total, curve = [], 0.0, []
-    for t in closed:
-        total += t["net"]
-        times.append(t["exit_at"].astimezone(IST))
-        curve.append(total / 1e5)
     fig, ax = plt.subplots(figsize=(9, 4.8), dpi=150)
-    ax.plot(times, curve, color="#2563eb", linewidth=1.6)
+    drawn = False
+    for (minutes, (trades, _)), color in zip(results.items(), ("#2563eb", "#16a34a", "#d97706", "#dc2626")):
+        closed = sorted((t for t in trades if t["exit_at"] is not None), key=lambda t: t["exit_at"])
+        if not closed:
+            continue
+        total, curve = 0.0, []
+        for t in closed:
+            total += t["net"]
+            curve.append(total / 1e5)
+        ax.plot([t["exit_at"].astimezone(IST) for t in closed], curve, color=color, linewidth=1.5, label=f"{minutes} min")
+        drawn = True
+    if not drawn:
+        plt.close(fig)
+        return None
     ax.axhline(0, color="#9ca3af", linewidth=0.8)
-    ax.set_title("52 Candle Breakout 15 MIN - backtest, Rs 2 L a trade, 10 held at most: cumulative net P&L (Rs lakh)", fontsize=9)
+    ax.set_title("52 Candle Breakout - backtest, Rs 2 L a trade, 10 held at most: cumulative net P&L (Rs lakh)", fontsize=9)
+    ax.legend(fontsize=8)
     ax.grid(alpha=0.25)
     fig.autofmt_xdate()
     buf = io.BytesIO()
@@ -251,7 +305,7 @@ async def load_bars(db, instrument_id) -> list[dict]:
 
 
 async def main() -> None:
-    prepared: dict[str, list[dict]] = {}
+    by_stock: dict[str, list[dict]] = {}
     first, last = None, None
     async with AsyncSessionLocal() as db:
         universe = (
@@ -263,20 +317,24 @@ async def main() -> None:
                 continue
             first = min(first or bars[0]["start"], bars[0]["start"])
             last = max(last or bars[-1]["start"], bars[-1]["start"])
-            prepared[instrument.symbol] = prepare(bars)
-    stocks = len(prepared)
-    trades, passed = backtest(prepared)
-    if not trades or first is None:
-        print(f"breakout backtest: no trades ({stocks} stocks with candles)")
+            by_stock[instrument.symbol] = bars
+    stocks = len(by_stock)
+    if first is None:
+        print(f"breakout backtest: no candles ({stocks} stocks)")
         return
-    summary = summarize(trades, passed, stocks, first, last)
-    await send_telegram("52 Candle Breakout 15 MIN · backtest (Rs 2 L each, 10 held at most)", summary, photo=equity_chart(trades))
-    sent = await send_csv(trades_csv(trades), f"breakout52_backtest_{datetime.now(timezone.utc):%Y%m%d}.csv",
-                          "52 Candle Breakout 15 MIN backtest: every trade")
-    closed = sum(1 for t in trades if t["exit_at"] is not None)
-    print(f"breakout backtest: sent to the private chat -- {closed} closed trades, {len(trades) - closed} open, {passed} passed over, "
-          f"{stocks} stocks, "
-          f"{first:%d %b %Y} - {last:%d %b %Y}, CSV {'sent' if sent else 'not sent'}")
+    results = {}
+    for minutes in TIMEFRAMES:
+        prepared = {symbol: prepare(resample(bars, minutes), minutes) for symbol, bars in by_stock.items()}
+        results[minutes] = backtest({s: b for s, b in prepared.items() if len(b) > bo.BREAKOUT_CANDLES}, minutes=minutes)
+    await send_telegram("52 Candle Breakout · backtest on 15 / 30 / 45 / 75 min (Rs 2 L each, 10 held at most)",
+                        compare(results, stocks, first, last), photo=equity_chart(results))
+    sent = 0
+    for minutes, (trades, _) in results.items():
+        sent += await send_csv(trades_csv(trades), f"breakout52_{minutes}min_backtest_{datetime.now(timezone.utc):%Y%m%d}.csv",
+                               f"52 Candle Breakout backtest on {minutes}-minute candles: every trade")
+    counts = ", ".join(f"{m} min {sum(1 for t in tr if t['exit_at'] is not None)} closed" for m, (tr, _) in results.items())
+    print(f"breakout backtest: sent to the private chat -- {counts}; {stocks} stocks, {first:%d %b %Y} - {last:%d %b %Y}, "
+          f"CSV {sent}/{len(results)} sent")
 
 
 if __name__ == "__main__":

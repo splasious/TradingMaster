@@ -57,14 +57,44 @@ def test_the_days_last_candle_is_not_bought_and_an_open_trade_is_marked_at_the_l
     assert still_open["exit_at"] is None and still_open["exit_price"] == 105 and still_open["charges"] is None
 
 
-def test_the_summary_and_csv():
+def test_the_comparison_and_csv():
     starts = list(sessions((26, 27, 28)))
     rows = [(s, 99, 100, 98, 99) for s in starts[:60]] + [
         (starts[60], 99, 104, 99, 103), (starts[61], 103.5, 105, 103, 104), (starts[62], 100, 100.2, 96, 96.5), (starts[63], 96, 97, 95, 96)]
     trades, passed = bt.backtest({"ABB": bt.prepare(bars_from(rows))})
-    text = bt.summarize(trades, passed, 1, starts[0], starts[-1])
-    assert "Trades    1 closed, 0 open now" in text and "Win rate  0.0%" in text and "ABB" in text
+    text = bt.compare({15: (trades, passed), 30: ([], 0)}, 1, starts[0], starts[-1])
+    lines = text.splitlines()
+    assert any(line.startswith("Trades") and line.split()[1:] == ["1", "0"] for line in lines)
+    assert any(line.startswith("Win rate") and line.split()[2:] == ["0.0%", "-"] for line in lines)
+    assert "15 min" in text and "30 min" in text and "2026-10" in text
     assert bt.trades_csv(trades).decode().splitlines()[1].startswith("ABB,2026-10-28 ")
+    assert bt.equity_chart({15: (trades, passed)})[:4] == b"\x89PNG"
+
+
+def test_30_45_and_75_minute_candles_are_built_from_15_each_session_from_0915():
+    rows = [(s, 100 + k, 101 + k, 99 + k, 100.5 + k) for k, s in enumerate(sessions((27,)))]  # 25 candles
+    bars = bars_from(rows)
+    thirty, fortyfive, seventyfive = bt.resample(bars, 30), bt.resample(bars, 45), bt.resample(bars, 75)
+    assert [len(x) for x in (thirty, fortyfive, seventyfive)] == [13, 9, 5]
+    assert [f"{b['start']:%H:%M}" for b in seventyfive] == ["09:15", "10:30", "11:45", "13:00", "14:15"]
+    assert (thirty[0]["open"], thirty[0]["high"], thirty[0]["low"], thirty[0]["close"]) == (100, 102, 99, 101.5)
+    assert f"{thirty[-1]['start']:%H:%M}" == f"{fortyfive[-1]['start']:%H:%M}" == "15:15"  # the short last candle
+    assert thirty[-1]["open"] == 124 and thirty[-1]["close"] == 124.5
+    assert [bt.last_of_session(b["start"], 75) for b in seventyfive] == [False] * 4 + [True]
+    assert [bt.last_of_session(b["start"], 45) for b in fortyfive][-2:] == [False, True]
+    assert bt.last_of_session(bars[-2]["start"], 15) is False and bt.last_of_session(bars[-1]["start"], 15) is True
+    assert bt.resample(bars, 15) == bars and bt.resample(bars, 15)[0] is not bars[0]  # copies
+
+
+def test_a_75_minute_breakout_on_the_days_last_candle_is_not_bought():
+    days = (14, 15, 16, 19, 20, 21, 22, 23, 26, 27, 28, 29)  # 12 sessions: 60 candles of 75 minutes
+    rows = [(s, 99, 100, 98, 99) for s in sessions(days)]
+    rows[-1] = (rows[-1][0], 99, 104, 99, 103)  # 29 Oct 15:15: a breakout in the 14:15-15:30 candle
+    bars = bt.prepare(bt.resample(bars_from(rows), 75), 75)
+    assert len(bars) == 60 and bars[-1]["breakout"] is None
+    rows[-6] = (rows[-6][0], 99, 104, 99, 103)  # 29 Oct 14:00 instead: in the 13:00-14:15 candle
+    bars = bt.prepare(bt.resample(bars_from([r if k != len(rows) - 1 else (r[0], 99, 100, 98, 99) for k, r in enumerate(rows)]), 75), 75)
+    assert bars[-2]["breakout"] == pytest.approx(3.0)
 
 
 def test_at_most_10_held_strongest_breakouts_first_and_an_exit_frees_its_slot_for_the_same_candle():
