@@ -1037,3 +1037,26 @@ async def test_the_pcr_futures_card_moves_onto_walls_on_either_side(db_engine, d
     assert "def oi_walls(" in version.python_code and "MIN_ROOM = 200.0" in version.python_code
     assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
     assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
+
+
+# ------------------------------------------- 52 Candle Breakout 15 MIN --
+
+async def test_52_candle_breakout_is_created_with_its_pool_and_card_for_am_ops_owner(db_engine, db_session):
+    from app.models.audit import AuditLog as Log
+
+    amop = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_137_897.50)
+    migration = _load("e3a5c7d9f1b4_candle_breakout_52_15min")
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all: it's there the second time
+
+    [strategy] = (await db_session.execute(select(Strategy).where(Strategy.name == "52 Candle Breakout 15 MIN"))).scalars().all()
+    assert (strategy.owner_id, strategy.code_type, strategy.status) == (amop.user_id, "native", "paper_trading")
+    [version] = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))).scalars().all()
+    built_in = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/candle_breakout_52_15min.py").read_text(encoding="utf-8")
+    assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", built_in)
+    [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == "52 Candle Breakout 15 MIN"))).scalars().all()
+    assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (amop.user_id, "INR", 2_000_000.0, 2_000_000.0)
+    [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
+    assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
+    actions = (await db_session.execute(select(Log.action).where(Log.user_id == amop.user_id))).scalars().all()
+    assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]

@@ -1568,6 +1568,18 @@ SELECT count(*) AS stocks, count(id) AS in_catalog, count(*) FILTER (WHERE data_
 FROM c, t GROUP BY t.today;
 \echo
 
+\echo '== BO2. 52 Candle Breakout 15 MIN: the card -- status, version and code md5, last run and signal, how many stocks it holds, trades by exit reason, and bought or sold today (counts only: no names, sizes or P and L)'
+SELECT trim(s.name) AS strategy, sv.version_number, md5(replace(sv.python_code, E'\r', '')) AS code_md5, d.status,
+       to_char(d.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS card_created_ist,
+       to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS stocks_held,
+       (SELECT string_agg(t.exit_reason || ' x' || t.n, ', ') FROM (SELECT exit_reason, count(*) AS n FROM paper_native_trades WHERE deployment_id = d.id GROUP BY 1) t) AS trades,
+       (SELECT count(*) FROM paper_native_trades WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS sold_today
+FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id JOIN strategy_versions sv ON sv.id = d.strategy_version_id
+WHERE trim(s.name) = '52 Candle Breakout 15 MIN'
+ORDER BY d.created_at;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,

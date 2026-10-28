@@ -117,6 +117,15 @@ def _native_pairs(now: datetime) -> set[tuple[uuid.UUID, str]]:
     return set(_native_demand)
 
 
+def _sync_order(instrument: Instrument | None, timeframe: str) -> tuple:
+    """Indices and F&O first, NSE stocks after (28 Oct): with a strategy
+    reading 500 stocks' 15m candles, a pass takes Kite about 3 minutes, and
+    NIFTY's own candle -- the PCR strategies' MA exits -- mustn't wait behind
+    them."""
+    is_stock = instrument is not None and instrument.exchange == "NSE" and instrument.instrument_type == "equity"
+    return (is_stock, instrument.symbol if instrument is not None else "", timeframe)
+
+
 async def _active_pairs_with_instruments(db: AsyncSession, now: datetime | None = None) -> tuple[set[tuple], dict]:
     """Every (instrument_id, timeframe) an ACTIVE paper or live deployment
     currently uses, or a native strategy has recently read, plus the
@@ -268,7 +277,7 @@ class ActiveTimeframeSyncScheduler:
         synced = 0
         skipped_zerodha = 0
         seen_zerodha_fetches: set[tuple] = set()
-        for instrument_id, timeframe in pairs:
+        for instrument_id, timeframe in sorted(pairs, key=lambda pair: _sync_order(instruments.get(pair[0]), pair[1])):
             instrument = instruments.get(instrument_id)
             if instrument is None:
                 continue
