@@ -1556,13 +1556,16 @@ c AS (
          (SELECT count(*) FROM ohlcv_candles k WHERE k.instrument_id = i.id AND k.timeframe = '15m' AND k.ts > now() - interval '7 days') AS recent_15m,
          (SELECT max(k.ts) FROM ohlcv_candles k WHERE k.instrument_id = i.id AND k.timeframe = '15m') AS newest_15m
   FROM i
-)
+), t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today)
 SELECT count(*) AS stocks, count(id) AS in_catalog, count(*) FILTER (WHERE data_source = 'zerodha_kite') AS zerodha_source,
        string_agg(DISTINCT coalesce(data_source, '(none)'), ', ') AS sources,
        count(*) FILTER (WHERE any_15m) AS with_any_15m, count(*) FILTER (WHERE recent_15m > 0) AS with_15m_last_7_days,
        count(*) FILTER (WHERE recent_15m >= 60) AS with_60_plus_last_7_days,
-       to_char(max(newest_15m) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS newest_15m_ist
-FROM c;
+       to_char(max(newest_15m) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS newest_15m_ist,
+       count(*) FILTER (WHERE (newest_15m AT TIME ZONE 'Asia/Kolkata')::date = t.today) AS with_15m_today,
+       count(*) FILTER (WHERE newest_15m > now() - interval '35 minutes') AS newest_within_35_min,
+       to_char(percentile_disc(0.5) WITHIN GROUP (ORDER BY newest_15m) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS median_newest_ist
+FROM c, t GROUP BY t.today;
 \echo
 
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
