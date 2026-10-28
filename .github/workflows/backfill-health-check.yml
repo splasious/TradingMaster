@@ -18,6 +18,10 @@ on:
         description: "Instead of the check: read-only comparison of Kotak Neo's market data with Zerodha's (backend/scripts/kotak_data_check.py)"
         type: boolean
         default: false
+      breakout_backtest:
+        description: "Instead of the check: backtest 52 Candle Breakout 15 MIN on every stored 15m candle; results to the private Telegram chat only (backend/scripts/breakout_backtest.py)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -44,6 +48,7 @@ jobs:
           # past its 21,000-character limit.
           OI_PREVIEW: ${{ inputs.oi_preview }}
           KOTAK_DATA_CHECK: ${{ inputs.kotak_data_check }}
+          BREAKOUT_BACKTEST: ${{ inputs.breakout_backtest }}
         run: |
           set -euo pipefail
           umask 077
@@ -373,6 +378,13 @@ jobs:
           if [ "${KOTAK_DATA_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo market data against Zerodha's (read-only)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_data_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${BREAKOUT_BACKTEST:-false}" = "true" ]; then
+            echo "== 52 Candle Breakout 15 MIN backtest (results to the private Telegram chat only; counts and dates here)"
+            py_file=$(vps 'f=$(mktemp /tmp/breakout-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/breakout_backtest.py)
             remote py "$py_file"
             exit 0
           fi
