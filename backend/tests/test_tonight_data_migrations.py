@@ -1060,3 +1060,38 @@ async def test_52_candle_breakout_is_created_with_its_pool_and_card_for_am_ops_o
     assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
     actions = (await db_session.execute(select(Log.action).where(Log.user_id == amop.user_id))).scalars().all()
     assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
+
+
+async def test_52_candle_breakout_moves_onto_weekly_candles_as_52_week_high_breakout(db_engine, db_session):
+    from app.models.audit import AuditLog as Log
+
+    amop = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_137_897.50)
+    await _run(db_engine, _load("e3a5c7d9f1b4_candle_breakout_52_15min"))
+    migration = _load("f5b7d9e1a3c6_week_high_breakout_52")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    assert migration.FROM_MD5S == {_md5(VERSIONS.parent.parent / "app/services/strategy/native_strategies/candle_breakout_52_15min.py")}
+
+    [strategy] = (await db_session.execute(select(Strategy).where(Strategy.owner_id == amop.user_id, Strategy.name == "52 Candle Breakout 15 MIN"))).scalars().all()
+    [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
+    holdings = {"SBIN": {"instrument_id": "x", "quantity": 10.0, "entry_price": 800.0, "opened_at": "2026-10-28T05:00:00+00:00"}}
+    card.state = {"holdings": holdings}
+    edited = await _deployment(db_session, "wk_b@tradingmaster.internal", "# 52 Candle Breakout 15 MIN, edited by hand\n")
+    edited_id, edited_version = edited.id, edited.strategy_version_id
+    await db_session.commit()
+    strategy_id, card_id, pool_id = strategy.id, card.id, card.portfolio_id
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, card_id)
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert (version.version_number, version.timeframe) == (2, "1wk")
+    assert version.python_code == migration.BUILT_IN.read_text(encoding="utf-8") and moved.state["holdings"] == holdings
+    renamed = await db_session.get(Strategy, strategy_id)
+    assert renamed.name == "52 Week High Breakout" and renamed.description.startswith("500 NSE stocks, weekly")
+    assert (await db_session.get(PaperPortfolio, pool_id)).name == "52 Week High Breakout"
+    assert (await db_session.get(PaperNativeDeployment, edited_id)).strategy_version_id == edited_version
+    actions = (await db_session.execute(select(Log.action).where(Log.object_id.in_([str(strategy_id), str(card_id), str(pool_id)])))).scalars().all()
+    assert sorted(a for a in actions if a != "PAPER_NATIVE_TRADING_STARTED" and a != "STRATEGY_CREATED" and a != "PAPER_PORTFOLIO_CREATED") == [
+        "PAPER_NATIVE_VERSION_UPDATED", "PAPER_PORTFOLIO_RENAMED", "STRATEGY_RENAMED", "STRATEGY_VERSION_CREATED"]
