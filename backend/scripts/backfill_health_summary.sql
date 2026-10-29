@@ -1605,6 +1605,8 @@ SELECT trim(s.name) AS strategy, sv.version_number, md5(replace(sv.python_code, 
         WHERE h.value ? 'breakout_week') AS weekly_held
 FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id JOIN strategy_versions sv ON sv.id = d.strategy_version_id
 WHERE trim(s.name) IN ('52 Candle Breakout 15 MIN', '52 Week High Breakout')
+   OR sv.python_code LIKE '%52 Week High Breakout -- 500 NSE stocks on weekly candles%'
+   OR sv.python_code LIKE '%52 Candle Breakout 15 MIN -- 500 NSE stocks on 15-minute candles%'
 ORDER BY d.created_at;
 \echo
 
