@@ -6,8 +6,10 @@ ones -- a finished week closing above the highest high of the 52 before it
 is bought at 09:16 on the next week's first trading day (strongest first,
 up to 10), and sold at 09:16 on the trading day after a finished week
 closes below its own 10-week MA of (O+H+L+C)/4. The stocks version 1
-bought on 15-minute candles are sold at the first 09:16 after the switch
-(native_strategies/week_high_breakout_52.py; TO_MD5).
+bought on 15-minute candles are sold at the first 09:16 after the switch,
+and that first run also ranks the last finished week's breakouts -- on
+Thu 29 Oct, deployed before the open: the week ending Fri 23 Oct, bought
+at 09:16 that day (native_strategies/week_high_breakout_52.py; TO_MD5).
 
 Each strategy whose latest version is exactly version 1's code (FROM_MD5S)
 gets the new code as its next version (timeframe "1wk"), and its active or
@@ -19,7 +21,7 @@ happens if the built-in isn't this code. Recorded in audit_logs.
 
 Revision ID: f5b7d9e1a3c6
 Revises: e3a5c7d9f1b4
-Create Date: 2026-10-29 15:30:00.000000
+Create Date: 2026-10-29 08:45:00.000000
 
 """
 import hashlib
@@ -37,7 +39,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 BUILT_IN = pathlib.Path(__file__).resolve().parents[2] / "app/services/strategy/native_strategies/week_high_breakout_52.py"
 FROM_MD5S = {"4f45f84aff0e9f0b4eb15d02d8245cbe"}  # 52 Candle Breakout 15 MIN, 28 Oct (e3a5c7d9f1b4): version 1
-TO_MD5 = "1a9d221baf195b9753d22219745a677b"
+TO_MD5 = "1ff9f26da9ac7f736c6e4c115cbf168c"
 OLD_NAME, NEW_NAME = "52 Candle Breakout 15 MIN", "52 Week High Breakout"
 DESCRIPTION = ("500 NSE stocks, weekly: buy a week's close above the 52-week high at the next week's open (strongest first, "
                "up to 10), sell after a week's close below its 10-week MA of OHLC/4 (29 Oct)")

@@ -157,9 +157,36 @@ async def test_a_weekly_breakout_is_bought_at_0916_on_the_next_weeks_first_tradi
 async def test_a_breakout_not_bought_on_the_weeks_first_trading_day_is_passed_over(market):
     a = STOCKS[0]
     await market.history()
+    await market.check(at(10, 30, 16, 0))  # the card has run before
     await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)
     ctx = await market.check(at(11, 3, 9, 20), **{a: 103.5})
     assert ctx.state["holdings"] == {} and ctx._last_action == "skipped"
+
+
+async def test_a_cards_first_run_ranks_last_weeks_breakouts_that_day_the_switch(market):
+    a, b, c = STOCKS[:3]
+    await market.history(last=date(2026, 10, 22))
+    for symbol in STOCKS:
+        if symbol not in (a, b):
+            await market.day(symbol, date(2026, 10, 23), 99, 100, 98, 99)
+    await market.day(a, date(2026, 10, 23), 99, 103, 99, 102)  # the week ending Fri 23 Oct: 2% over the 52-week high
+    await market.day(b, date(2026, 10, 23), 99, 106, 99, 105)  # 5%
+    market.deployment.state = {"holdings": {  # version 1's, bought on a 15-minute breakout
+        c: {"instrument_id": str(market.stocks[c].id), "quantity": 100.0, "entry_price": 100.0,
+            "opened_at": "2026-10-28T05:00:00+00:00", "breakout_pct": 1.0, "breakout_candle": "2026-10-28T04:45:00+00:00"}}}
+    early = await market.check(at(10, 29, 8, 50), **{a: 102.5, b: 105.5, c: 101.0})
+    assert early.state["ranking"]["day"] == "2026-10-29" and "next ranking Thu 29-Oct 09:16" in early._last_reason
+    assert f"{c} sells at 09:16 today" in early._last_reason
+
+    ctx = await market.check(at(10, 29, 9, 16, 5), **{a: 102.5, b: 105.5, c: 101.0})
+    [trade] = await market.trades()
+    assert trade.exit_reason == "switch_to_weekly" and trade.pnl == pytest.approx(100.0)
+    assert set(ctx.state["holdings"]) == {a, b} and ctx.state["holdings"][b]["breakout_week"] == "2026-10-19"
+    assert ctx._last_reason.index(f"bought {b} @ 105.50 (+5.00%") < ctx._last_reason.index(f"{a} @ 102.50 (+2.00%")
+    assert "next ranking Mon 02-Nov 09:16" in ctx._last_reason
+
+    later = await market.check(at(10, 30, 9, 16, 5), **{a: 102.5, b: 105.5, c: 101.0})  # once: not again the next day
+    assert set(later.state["holdings"]) == {a, b} and later.state["ranking"]["day"] == "2026-10-29"
 
 
 async def test_the_strongest_breakouts_fill_the_10_slots(market):
@@ -246,7 +273,7 @@ async def test_version_1s_15_minute_holdings_are_sold_at_the_first_0916_after_th
     trades = await market.trades()
     assert out.state["holdings"] == {} and {t.exit_reason for t in trades} == {"switch_to_weekly"}
     assert sorted(t.pnl for t in trades) == pytest.approx([-200.0, 100.0])
-    assert out.state["ranking"]["decided"] == []  # a Friday: no ranking
+    assert out.state["ranking"]["day"] == "2026-10-30" and len(out.state["ranking"]["decided"]) == 12  # the first run's: no breakouts
 
 
 async def test_stop_and_exit_sells_every_holding(market):

@@ -18,7 +18,11 @@ to weekly candles and renamed.
             above that high (%), strongest first, and bought at the live
             price while a slot is free; the rest are passed over. A stock
             whose week isn't in yet is looked at again every SCAN_EVERY that
-            day; a breakout not bought that day is passed over.
+            day; a breakout not bought that day is passed over. A card's
+            first run ranks the last finished week the same way on its first
+            trading day from then (the switch, Thu 29 Oct: the week ending
+            Fri 23 Oct, bought at 09:16 that day) -- after that, only on a
+            week's first trading day.
   Exit:     a finished week, closed after the buy, closes below the stock's
             own MA -- the average over its last MA_CANDLES (10) weeks of
             (open + high + low + close) / 4, that week included -- sold at
@@ -302,11 +306,18 @@ async def evaluate(ctx) -> None:
 
     # --- Entries: last week's breakouts, on this week's first trading day, strongest first.
     bought, passed = [], []
+    first_run = "ranking" not in ctx.state
     ranking = ctx.state.get("ranking") or {}
     if ranking.get("week") != this_week.isoformat():
-        ranking = {"week": this_week.isoformat(), "decided": [], "waiting": None, "scanned_at": None}
+        day = first_trading_day(this_week)
+        if first_run:  # the card's first trading day from now ranks last week too
+            day = next((d for d in (this_week + timedelta(days=k) for k in range(5)) if _is_trading_day(d)
+                        and (d > today or (d == today and now_ist.time() < SESSION_CLOSE))), day)
+        ranking = {"week": this_week.isoformat(), "day": day.isoformat() if day else None, "decided": [], "waiting": None,
+                   "scanned_at": None}
+    ranking_day = ranking.get("day") == today.isoformat()
     scan_due = (
-        trading and today == first_trading_day(this_week) and len(holdings) < MAX_POSITIONS and ranking["waiting"] != 0
+        trading and ranking_day and len(holdings) < MAX_POSITIONS and ranking["waiting"] != 0
         and (ranking["scanned_at"] is None or ctx.now - datetime.fromisoformat(ranking["scanned_at"]) >= SCAN_EVERY)
     )
     if scan_due:
@@ -358,7 +369,7 @@ async def evaluate(ctx) -> None:
         if waiting:
             ctx.wake_at(ctx.now + SCAN_EVERY)
     ctx.state["ranking"] = ranking
-    if ranking["waiting"] and today == first_trading_day(this_week) and is_open:
+    if ranking["waiting"] and ranking_day and is_open:
         notes.append(f"{ranking['waiting']} stock(s)' last week not in yet: looked at again every {SCAN_EVERY.seconds // 60} min today")
 
     ctx.state["holdings"] = holdings
@@ -370,7 +381,10 @@ async def evaluate(ctx) -> None:
     if passed:
         text.append(f"no slot for {len(passed)} more breakout(s): {', '.join(passed[:5])}{'...' if len(passed) > 5 else ''}")
     text.extend(notes)
-    text.append(f"holding {len(holdings)}/{MAX_POSITIONS} | {len(universe)} stocks watched | next ranking {_next_ranking(now_ist)}")
+    day = date.fromisoformat(ranking["day"]) if ranking.get("day") else None
+    upcoming = (f"{day:%a %d-%b} {RANK_AT:%H:%M}" if day is not None and (day > today or (day == today and now_ist.time() < RANK_AT))
+                else _next_ranking(now_ist))
+    text.append(f"holding {len(holdings)}/{MAX_POSITIONS} | {len(universe)} stocks watched | next ranking {upcoming}")
     action = "entered" if bought else "exited" if sold else "hold" if holdings else "skipped"
     signal = "BUY" if bought else "SELL" if sold else None
     ctx.note(action, signal=signal, reason=" | ".join(text))
