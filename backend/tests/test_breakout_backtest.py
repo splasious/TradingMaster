@@ -6,7 +6,7 @@ first, after its exits have freed theirs."""
 
 import importlib.util
 import pathlib
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -115,3 +115,56 @@ def test_at_most_10_held_strongest_breakouts_first_and_an_exit_frees_its_slot_fo
     two = [(s, 99, 100, 98, 99) for s in starts[:62]] + [(starts[62], 99, 106, 99, 105), (starts[63], 105, 106, 104, 105)]
     trades, passed = bt.backtest({"ONE": bt.prepare(bars_from(one)), "TWO": bt.prepare(bars_from(two))}, max_positions=1)
     assert passed == 0 and [t["symbol"] for t in sorted(trades, key=lambda t: t["entry_at"])] == ["ONE", "TWO"]
+
+
+def trading_days(first, count):
+    """`count` weekdays from `first` on, as daily bars' starts (09:15 IST)."""
+    day, out = first, []
+    while len(out) < count:
+        if day.weekday() < 5:
+            out.append(datetime.combine(day, bt.FIRST_START, tzinfo=IST))
+        day += timedelta(days=1)
+    return out
+
+
+def test_weekly_and_monthly_candles_are_built_from_daily_ones_and_the_running_one_is_left_out():
+    starts = trading_days(date(2026, 9, 2), 41)  # Wed 2 Sep .. Wed 28 Oct
+    days = bars_from([(s, 100 + k, 101 + k, 99 + k, 100.5 + k) for k, s in enumerate(starts)])
+    weeks = bt.to_period(days, "Weekly", date(2026, 10, 29))
+    assert len(weeks) == 8 and f"{weeks[0]['start']:%a %d %b %H:%M}" == "Mon 31 Aug 09:15"  # this week's (26 Oct) left out
+    assert weeks[0]["opened"] == starts[0] and (weeks[0]["open"], weeks[0]["high"], weeks[0]["low"], weeks[0]["close"]) == (100, 103, 99, 102.5)  # Wed-Fri
+    assert weeks[-1]["start"].date() == date(2026, 10, 19) and weeks[-1]["close"] == days[-4]["close"]
+    months = bt.to_period(days, "Monthly", date(2026, 10, 29))
+    assert [(m["start"].date(), m["opened"].date()) for m in months] == [(date(2026, 9, 1), date(2026, 9, 2))]  # October left out
+    assert months[0]["close"] == days[20]["close"]  # 30 Sep, its 21st trading day
+    daily = bt.to_period(days, "Daily", date(2026, 10, 29))
+    assert [{k: v for k, v in b.items() if k not in ("opened", "closed")} for b in daily] == days
+    assert all(b["opened"] == b["start"] and f"{b['closed']:%d %H:%M}" == f"{b['start']:%d} 15:30" for b in daily)
+    assert f"{weeks[0]['closed']:%a %d %b %H:%M}" == "Fri 04 Sep 15:30"
+    assert len(bt.to_period(days, "Daily", date(2026, 10, 28))) == 40  # 28 Oct's candle still running
+
+
+def test_a_daily_breakout_is_bought_at_the_next_days_open_even_on_a_friday():
+    starts = trading_days(date(2026, 6, 1), 70)
+    rows = [(s, 99, 100, 98, 99) for s in starts[:60]]
+    assert starts[59].weekday() == 4  # a Friday
+    rows[59] = (starts[59], 99, 104, 99, 103)  # breakout on the Friday
+    rows.append((starts[60], 103.5, 105, 103, 104))  # bought Monday at 103.50
+    rows.append((starts[61], 100, 100.2, 96, 96.5))  # closes under the MA
+    rows.append((starts[62], 96, 97, 95, 96))  # sold at its open
+    bars = bt.prepare(bt.to_period(bars_from(rows), "Daily", date(2026, 12, 31)), None)
+    [trade], _ = bt.backtest({"ABB": bars}, minutes=None)
+    assert (trade["entry_at"], trade["entry_price"], trade["exit_at"], trade["exit_price"]) == (starts[60], 103.5, starts[62], 96.0)
+    assert f"{trade['breakout_at']:%a %H:%M}" == "Fri 15:30"
+    text = bt.compare({"Daily": ([trade], 0), "Weekly": ([], 0)}, 1, starts[0], starts[-1])
+    assert "Held, days" in text and "Held, hours" not in text and "Daily" in text and "Weekly" in text
+    assert any(line.startswith("Held, days") and line.split()[2:] == ["2", "-"] for line in text.splitlines())
+    assert any(line.startswith("First buy") and line.split()[2:] == ["Aug", "2026", "-"] for line in text.splitlines())
+
+
+def test_years_of_trades_are_netted_by_year():
+    trade = {"entry_at": datetime(2021, 1, 4, 9, 15, tzinfo=IST), "net": 1e5, "gross": 1e5, "charges": 0.0, "ret_pct": 1.0, "candles_held": 1}
+    trades = [{**trade, "exit_at": datetime(2021 + k // 12, 1 + k % 12, 5, 9, 15, tzinfo=IST)} for k in range(30)]
+    lines = bt.compare({"Daily": (trades, 0)}, 1, trades[0]["entry_at"], trades[-1]["exit_at"]).splitlines()
+    assert "Net by year" in "\n".join(lines) and [ln.split()[:2] for ln in lines if ln[:4] in ("2021", "2022", "2023")] == [
+        ["2021", "+12.00"], ["2022", "+12.00"], ["2023", "+6.00"]]

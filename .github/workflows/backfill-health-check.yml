@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       breakout_backtest:
-        description: "Instead of the check: backtest 52 Candle Breakout on 15/30/45/75-min candles (built from the stored 15m ones); results to the private Telegram chat only (backend/scripts/breakout_backtest.py)"
+        description: "Instead of the check: backtest 52 Candle Breakout (the candles: RUN in the script -- 15/30/45/75-min built from the stored 15m ones, or daily/weekly/monthly from the stored daily ones); results to the private Telegram chat only (backend/scripts/breakout_backtest.py)"
         type: boolean
         default: false
 
