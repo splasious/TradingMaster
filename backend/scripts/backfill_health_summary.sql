@@ -1597,7 +1597,12 @@ SELECT trim(s.name) AS strategy, sv.version_number, md5(replace(sv.python_code, 
        to_char(d.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, d.last_signal,
        (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS stocks_held,
        (SELECT string_agg(t.exit_reason || ' x' || t.n, ', ') FROM (SELECT exit_reason, count(*) AS n FROM paper_native_trades WHERE deployment_id = d.id GROUP BY 1) t) AS trades,
-       (SELECT count(*) FROM paper_native_trades WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS sold_today
+       (SELECT count(*) FROM paper_native_trades WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS sold_today,
+       d.state::jsonb -> 'ranking' ->> 'day' AS ranking_day,
+       jsonb_array_length(coalesce(d.state::jsonb -> 'ranking' -> 'decided', '[]'::jsonb)) AS ranked_decided,
+       d.state::jsonb -> 'ranking' ->> 'waiting' AS ranking_waiting,
+       (SELECT count(*) FROM jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END) h
+        WHERE h.value ? 'breakout_week') AS weekly_held
 FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id JOIN strategy_versions sv ON sv.id = d.strategy_version_id
 WHERE trim(s.name) IN ('52 Candle Breakout 15 MIN', '52 Week High Breakout')
 ORDER BY d.created_at;
