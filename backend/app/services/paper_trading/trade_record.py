@@ -174,6 +174,27 @@ def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime)
     return out
 
 
+def order_charges(leg: dict, price: float, buying: bool, intraday: bool) -> float | None:
+    """One executed order's share of charge_breakdown(): `leg`'s quantity
+    bought (`buying`) or sold at `price` -- a trade's opening and closing
+    orders add up to its estimate, so each can be booked on the day it
+    happened (services/paper_trading/day_pnl.py). None when the schedule
+    doesn't cover the contract."""
+    schedule = _schedule_for(leg, intraday)
+    if schedule is None:
+        return None
+    turnover = float(price) * abs(float(leg["quantity"]))
+    if schedule.brokerage_pct is None:
+        brokerage = schedule.brokerage_flat
+    else:
+        brokerage = min(schedule.brokerage_flat, turnover * schedule.brokerage_pct / 100)
+    exchange = turnover * schedule.exchange_pct / 100
+    sebi = turnover * _SEBI_FEE_PCT / 100
+    stt = turnover * (schedule.stt_buy_pct if buying else schedule.stt_sell_pct) / 100
+    stamp = turnover * schedule.stamp_buy_pct / 100 if buying else 0.0
+    return brokerage + stt + exchange + sebi + stamp + (brokerage + exchange + sebi) * _GST_PCT / 100
+
+
 def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime) -> float | None:
     """Brokerage + STT + exchange + SEBI + stamp duty + GST for opening
     and closing every leg (two executed orders per leg). None when any leg

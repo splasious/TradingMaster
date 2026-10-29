@@ -13,7 +13,9 @@ from app.models.paper_trading import DeploymentStatus, PaperNativeDeployment, Pa
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.schemas.paper_trading import (
+    CardPnlOut,
     ClosePriceOut,
+    DayPnlOut,
     NativeDeploymentCreate,
     NativeDeploymentOrderIn,
     NativeDeploymentOut,
@@ -26,6 +28,7 @@ from app.schemas.paper_trading import (
 from app.services.audit import write_audit_log
 from app.services.market_data.closing_price import SessionClose, display_prices
 from app.services.live_trading.live_runs import linked_run
+from app.services.paper_trading.day_pnl import CardPnl, card_pnl
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
 from app.services.paper_trading.scheduler import paper_trading_scheduler
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
@@ -218,6 +221,13 @@ def _public_state(state: dict | None) -> dict | None:
     return {k: v for k, v in state.items() if not k.startswith("_")}
 
 
+def _pnl_out(pnl: CardPnl | None) -> CardPnlOut | None:
+    if pnl is None:
+        return None
+    return CardPnlOut(today=DayPnlOut(**vars(pnl.today)), previous=DayPnlOut(**vars(pnl.previous)),
+                      realized_charges=pnl.realized_charges, open_charges=pnl.open_charges)
+
+
 async def _deployment_out(db: AsyncSession, deployment: PaperNativeDeployment) -> NativeDeploymentOut:
     return (await _deployment_outs_batch(db, [deployment]))[0]
 
@@ -250,13 +260,14 @@ async def _deployment_outs_batch(db: AsyncSession, deployments: list[PaperNative
     for d in deployments:
         position = await _build_position_out(db, d.state)
         holdings = await _build_holdings_out(db, d.state)
+        pnl = await card_pnl(db, d) if holdings is not None else None
         out.append(
             NativeDeploymentOut(
                 id=str(d.id), strategy_id=str(d.strategy_id), strategy_name=strategies[d.strategy_id].name,
                 portfolio_id=str(d.portfolio_id), portfolio_name=portfolios[d.portfolio_id].name,
                 currency=portfolios[d.portfolio_id].currency, status=d.status, last_evaluated_at=d.last_evaluated_at,
                 last_signal=d.last_signal, last_signal_reason=d.last_signal_reason, state=_public_state(d.state),
-                position=position, holdings=holdings, version_number=running_versions.get(d.strategy_version_id),
+                position=position, holdings=holdings, pnl=_pnl_out(pnl), version_number=running_versions.get(d.strategy_version_id),
                 latest_version_number=latest_versions.get(d.strategy_id), can_exit=can_exit.get(d.strategy_version_id, False),
                 reads_pcr=reads_pcr.get(d.strategy_version_id, False),
                 next_check_at=paper_trading_scheduler.next_wakeup(d.id) if d.status == DeploymentStatus.ACTIVE.value else None,

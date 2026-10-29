@@ -178,6 +178,24 @@ class NativePositionOut(BaseModel):
     underlying_close: ClosePriceOut | None = None
 
 
+class DayPnlOut(BaseModel):
+    """One trading day's P&L of a stock-holding card, after charges
+    (services/paper_trading/day_pnl.py)."""
+
+    session: date
+    gross: float
+    charges: float
+    net: float
+    missing: int  # positions with no close to measure from, left out
+
+
+class CardPnlOut(BaseModel):
+    today: DayPnlOut  # the newest session: today on a trading day, else the last one
+    previous: DayPnlOut  # the session before it
+    realized_charges: float  # estimated charges of the pool's closed trades
+    open_charges: float  # the buy charges of what it holds now
+
+
 class NativeDeploymentOut(BaseModel):
     id: str
     strategy_id: str
@@ -201,6 +219,8 @@ class NativeDeploymentOut(BaseModel):
     # its own opened_at and strategy metrics; side is always "long" here,
     # strike/option_type stay None -- equities have neither).
     holdings: list[NativeHoldingOut] | None = None
+    # A stock-holding card's P&L by day and its charges; None for the rest.
+    pnl: CardPnlOut | None = None
     # The strategy version this deployment runs, and the strategy's newest
     # saved one -- saving in the Strategy Builder adds a version without
     # changing what a running deployment executes.

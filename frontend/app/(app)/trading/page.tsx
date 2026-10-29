@@ -40,6 +40,7 @@ import { MEANINGFUL_DAYS, cagrPct, daysBetween, formatPct, roiPct, xirrPct } fro
 import { istDateTime, istShortDateTime, istShortTime } from "@/lib/time";
 import { CloseFootnote, CloseMark, priceHeading, sessionDay, valueHeading } from "@/components/trading/close-price";
 import type {
+  DayPnlOut,
   InstrumentOut,
   LiveNativeTradeOut,
   LiveRunOut,
@@ -1837,6 +1838,43 @@ function cardStatus(d: NativeDeploymentOut): { headline: string; rest: string[] 
   return { headline, rest };
 }
 
+/** "Today" (or the newest session's date when NSE didn't trade today) and
+ * "Previous day · 28 Oct". */
+function dayLabel(day: DayPnlOut, newest: boolean): string {
+  if (newest) return day.session === istDay(new Date().toISOString()) ? "Today" : sessionDay(day.session);
+  return `Previous day · ${sessionDay(day.session)}`;
+}
+
+function PoolFigure({ label, value, sub, plain = false }: { label: string; value: number; sub?: string; plain?: boolean }) {
+  return (
+    <div>
+      <div className="text-xs text-text-muted">{label}</div>
+      <div className={`font-financial text-lg font-semibold ${plain ? "text-text-primary" : toneFor(value)}`}>
+        {!plain && value >= 0 ? "+" : ""}
+        {value.toFixed(2)}
+      </div>
+      {sub && <div className="text-[11px] text-text-muted">{sub}</div>}
+    </div>
+  );
+}
+
+/** A day's P&L after charges, with its gross and charges beneath. */
+function DayFigure({ label, day }: { label: string; day: DayPnlOut }) {
+  return (
+    <div>
+      <div className="text-xs text-text-muted">{label}</div>
+      <div className={`font-financial text-lg font-semibold ${toneFor(day.net)}`}>
+        {day.net >= 0 ? "+" : ""}
+        {day.net.toFixed(2)}
+      </div>
+      <div className="text-[11px] text-text-muted">
+        {rupees(day.gross, true)} less {rupees(day.charges)} charges
+        {day.missing > 0 && ` · ${day.missing} without a close`}
+      </div>
+    </div>
+  );
+}
+
 function NativeDeploymentCard({
   deployment, soloPortfolio, onMoveUp, onMoveDown, liveRun, canGoLive,
 }: {
@@ -1875,6 +1913,13 @@ function NativeDeploymentCard({
     .filter((t) => new Date(t.closed_at).toDateString() === today)
     .reduce((sum, t) => sum + t.pnl, 0);
   const todayGain = realizedToday + unrealizedForEquity;
+  // A stock-holding card's figures after estimated charges, and its P&L by
+  // day from each day's close (services/paper_trading/day_pnl.py).
+  const pnl = deployment.pnl ?? null;
+  const realizedNet = soloPortfolio && pnl ? soloPortfolio.realized_pnl_total - pnl.realized_charges : null;
+  const unrealizedNet = pnl ? unrealizedForEquity - pnl.open_charges : unrealizedForEquity;
+  const equityNet = pnl ? poolEquity - pnl.realized_charges - pnl.open_charges : poolEquity;
+  const holdingsPnlNet = holdingsPnl != null && pnl ? holdingsPnl - pnl.open_charges : holdingsPnl;
 
   const evaluateMutation = useMutation({
     mutationFn: () => apiFetch<NativeEvaluationOut>(`/api/v1/paper-trading/native-deployments/${deployment.id}/evaluate`, { method: "POST" }),
@@ -2108,35 +2153,46 @@ function NativeDeploymentCard({
           // This pool backs no other deployment, so its equity/cash/P&L IS
           // this strategy's own -- folded in here instead of a separate
           // PortfolioCard elsewhere on the page (see soloNativePortfolioIds).
-          <div className="grid grid-cols-2 gap-4 border-b border-border pb-4 md:grid-cols-5">
-            <div>
-              <div className="text-xs text-text-muted">Equity</div>
-              <div className="font-financial text-lg font-semibold text-text-primary">{poolEquity.toFixed(2)}</div>
+          pnl && realizedNet != null ? (
+            <div className="grid grid-cols-2 gap-4 border-b border-border pb-4 md:grid-cols-6">
+              <PoolFigure label="Equity" value={equityNet} sub="after charges" plain />
+              <PoolFigure label="Cash" value={soloPortfolio.cash} plain />
+              <PoolFigure label="Unrealized P&amp;L" value={unrealizedNet} sub={`after ${rupees(pnl.open_charges)} buy charges`} />
+              <PoolFigure label="Realized P&amp;L" value={realizedNet} sub={`after ${rupees(pnl.realized_charges)} charges`} />
+              <DayFigure label={dayLabel(pnl.today, true)} day={pnl.today} />
+              <DayFigure label={dayLabel(pnl.previous, false)} day={pnl.previous} />
             </div>
-            <div>
-              <div className="text-xs text-text-muted">Cash</div>
-              <div className="font-financial text-lg font-semibold text-text-primary">{soloPortfolio.cash.toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
-              <div className={`font-financial text-lg font-semibold ${unrealizedForEquity >= 0 ? "text-positive" : "text-negative"}`}>
-                {unrealizedForEquity.toFixed(2)}
+          ) : (
+            <div className="grid grid-cols-2 gap-4 border-b border-border pb-4 md:grid-cols-5">
+              <div>
+                <div className="text-xs text-text-muted">Equity</div>
+                <div className="font-financial text-lg font-semibold text-text-primary">{poolEquity.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-text-muted">Cash</div>
+                <div className="font-financial text-lg font-semibold text-text-primary">{soloPortfolio.cash.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-text-muted">Unrealized P&amp;L</div>
+                <div className={`font-financial text-lg font-semibold ${unrealizedForEquity >= 0 ? "text-positive" : "text-negative"}`}>
+                  {unrealizedForEquity.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-text-muted">Realized P&amp;L</div>
+                <div className={`font-financial text-lg font-semibold ${soloPortfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
+                  {soloPortfolio.realized_pnl_total.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-text-muted">Today&apos;s Gain</div>
+                <div className={`font-financial text-lg font-semibold ${todayGain >= 0 ? "text-positive" : "text-negative"}`}>
+                  {todayGain >= 0 ? "+" : ""}
+                  {todayGain.toFixed(2)}
+                </div>
               </div>
             </div>
-            <div>
-              <div className="text-xs text-text-muted">Realized P&amp;L</div>
-              <div className={`font-financial text-lg font-semibold ${soloPortfolio.realized_pnl_total >= 0 ? "text-positive" : "text-negative"}`}>
-                {soloPortfolio.realized_pnl_total.toFixed(2)}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs text-text-muted">Today&apos;s Gain</div>
-              <div className={`font-financial text-lg font-semibold ${todayGain >= 0 ? "text-positive" : "text-negative"}`}>
-                {todayGain >= 0 ? "+" : ""}
-                {todayGain.toFixed(2)}
-              </div>
-            </div>
-          </div>
+          )
         )}
         {position ? (
           <PositionView deployment={deployment} position={position} />
@@ -2153,11 +2209,11 @@ function NativeDeploymentCard({
               <SummaryField label={valueHeading(holdings)}>
                 {holdingsLive != null ? formatMoney(holdingsLive, deployment.currency) : <span className="text-text-muted">--</span>}
               </SummaryField>
-              <SummaryField label="Total P&amp;L">
-                {holdingsPnl != null ? (
-                  <span className={holdingsPnl >= 0 ? "text-positive" : "text-negative"}>
-                    {formatMoney(holdingsPnl, deployment.currency, true)}
-                    {holdingsInvested ? ` (${holdingsPnl >= 0 ? "+" : ""}${((holdingsPnl / holdingsInvested) * 100).toFixed(2)}%)` : ""}
+              <SummaryField label={pnl ? "Total P&L, after charges" : "Total P&L"}>
+                {holdingsPnlNet != null ? (
+                  <span className={holdingsPnlNet >= 0 ? "text-positive" : "text-negative"}>
+                    {formatMoney(holdingsPnlNet, deployment.currency, true)}
+                    {holdingsInvested ? ` (${holdingsPnlNet >= 0 ? "+" : ""}${((holdingsPnlNet / holdingsInvested) * 100).toFixed(2)}%)` : ""}
                   </span>
                 ) : (
                   <span className="text-text-muted">--</span>
@@ -2404,12 +2460,23 @@ function TodayStrip({
   const { data: classicTrades } = useAllPaperTrades();
   const { data: accounts } = useBrokerAccounts();
   const today = istDay(new Date().toISOString());
+  // A stock-holding card counts its own day: from yesterday's close, after
+  // charges (its pnl); the rest, what they closed today plus what's open.
+  const byDay = new Set(nativeDeployments.filter((d) => d.pnl).map((d) => d.id));
   const realised =
-    (nativeTrades ?? []).filter((t) => istDay(t.closed_at) === today).reduce((sum, t) => sum + t.pnl, 0) +
+    (nativeTrades ?? []).filter((t) => istDay(t.closed_at) === today && !byDay.has(t.deployment_id)).reduce((sum, t) => sum + t.pnl, 0) +
     (classicTrades ?? []).filter((t) => istDay(t.exit_ts) === today).reduce((sum, t) => sum + t.pnl, 0);
   const open =
-    nativeDeployments.reduce((sum, d) => sum + (d.position?.unrealized_pnl ?? (d.holdings ?? []).reduce((h, l) => h + (legPnl(l) ?? 0), 0)), 0) +
-    regularDeployments.reduce((sum, d) => sum + (d.open_position?.unrealized_pnl ?? 0), 0);
+    nativeDeployments.reduce(
+      (sum, d) =>
+        sum +
+        (d.pnl
+          ? d.pnl.today.session === today
+            ? d.pnl.today.net
+            : 0
+          : (d.position?.unrealized_pnl ?? (d.holdings ?? []).reduce((h, l) => h + (legPnl(l) ?? 0), 0))),
+      0,
+    ) + regularDeployments.reduce((sum, d) => sum + (d.open_position?.unrealized_pnl ?? 0), 0);
   const paperToday = realised + open;
   const paperRunning = nativeDeployments.filter((d) => d.status === "active").length + regularDeployments.filter((d) => d.status === "active").length;
   const liveToday = liveRuns.reduce((sum, r) => sum + r.day_pnl, 0);

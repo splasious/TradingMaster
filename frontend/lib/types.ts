@@ -342,6 +342,24 @@ export interface EffectivePcrOut {
   pcr_at?: string | null; // the mark of the 15-minute PCR record
 }
 
+/** One trading day's P&L of a stock-holding card: each position from the
+ * previous close (or its buy) to the day's close (or its sale; live today),
+ * less the estimated charges of that day's buys and sales. */
+export interface DayPnlOut {
+  session: string; // YYYY-MM-DD
+  gross: number;
+  charges: number;
+  net: number;
+  missing: number; // positions with no close to measure from, left out
+}
+
+export interface CardPnlOut {
+  today: DayPnlOut; // the newest session: today on a trading day, else the last one
+  previous: DayPnlOut; // the session before it
+  realized_charges: number; // estimated charges of the pool's closed trades
+  open_charges: number; // the buy charges of what it holds now
+}
+
 export interface NativeDeploymentOut {
   id: string;
   strategy_id: string;
@@ -356,6 +374,8 @@ export interface NativeDeploymentOut {
   state: Record<string, unknown> | null;
   position: NativePositionOut | null;
   holdings: NativeHoldingOut[] | null;
+  /** A stock-holding card's P&L by day and its charges; null for the rest. */
+  pnl?: CardPnlOut | null;
   /** The strategy version this deployment runs, and the newest saved one --
    * saving new code doesn't change what a running deployment executes. */
   version_number: number | null;
