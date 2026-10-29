@@ -161,6 +161,28 @@ jobs:
           " 2>/dev/null || echo "unavailable"
               echo "-- Telegram trade alerts: the strategies alerted on (names only, as the server reads them):"
               compose exec -T backend python -c "from app.services.notifications.trade_alerts import alerted_strategies as a; print(', '.join(sorted(a())) or 'none')" 2>/dev/null || echo "unavailable"
+              echo "-- Stock-holding cards' day P&L (Trading page, 29 Oct): each active card -- worked out or not, its two sessions, positions without a close (no P and L):"
+              compose exec -T backend python -c "
+          import asyncio
+          from sqlalchemy import select
+          from app.db.session import AsyncSessionLocal
+          from app.models.paper_trading import PaperNativeDeployment
+          from app.models.strategy import Strategy
+          from app.services.paper_trading.day_pnl import card_pnl
+          async def main():
+              async with AsyncSessionLocal() as db:
+                  rows = (await db.execute(select(PaperNativeDeployment, Strategy.name).join(Strategy, Strategy.id == PaperNativeDeployment.strategy_id)
+                                           .where(PaperNativeDeployment.status == 'active'))).all()
+                  for d, name in rows:
+                      if not isinstance((d.state or {}).get('holdings'), dict):
+                          continue
+                      try:
+                          p = await card_pnl(db, d)
+                          print(name.strip() + ': ' + ('none' if p is None else f'{p.today.session} / {p.previous.session}, without a close {p.today.missing} / {p.previous.missing}'))
+                      except Exception as e:
+                          print(name.strip() + ': error ' + type(e).__name__)
+          asyncio.run(main())
+          " 2>/dev/null || echo "unavailable"
               echo "-- Kotak Neo broker accounts (numbered): status, when set up, why the last login failed (its kind only), and the SHAPE of what was entered -- never the values:"
               compose exec -T backend python -c "
           import asyncio, base64, binascii, json, re
