@@ -44,6 +44,10 @@ strategies on that account hold (paused ones included) plus what you
 already held of it yourself when a strategy first traded it there
 (record_baselines, LiveAccountBaseline); any difference pauses every
 running strategy holding that instrument, and alerts you with both sides.
+A read that fails (a broker timeout, say) is tried again at the next
+minute's; only READ_FAILURES_BEFORE_PAUSE failures in a row pause the
+strategies holding something there (30 Oct: Kotak Neo's positions call
+timing out had paused a run twice in a morning).
 A strategy only runs on a broker account that passed the broker test
 (broker_test.py). The account-wide stop happens once a day: after it, with
 nothing of the user's running, it isn't checked again.
@@ -85,6 +89,9 @@ from app.services.paper_trading.native_runner import NativeContext
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
 logger = logging.getLogger(__name__)
+
+READ_FAILURES_BEFORE_PAUSE = 3  # reconcile_account: failed positions reads in a row, a minute apart, before pausing
+_read_failures: dict[uuid.UUID, int] = {}  # broker account -> failed reads in a row
 
 DEFAULT_DAILY_LOSS_PCT = 3.0
 DEFAULT_ACCOUNT_LOSS_PCT = 5.0
@@ -698,12 +705,19 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
     try:
         actual = await gateway.net_positions()
     except Exception as exc:
-        reason = f"Couldn't read positions from the broker ({exc}) -- paused until it can be checked"
+        failures = _read_failures[broker_account_id] = _read_failures.get(broker_account_id, 0) + 1
+        if failures < READ_FAILURES_BEFORE_PAUSE:
+            logger.warning("Reading positions of broker account %s failed (%d in a row, pausing at %d): %s",
+                           broker_account_id, failures, READ_FAILURES_BEFORE_PAUSE, exc)
+            return []
+        _read_failures.pop(broker_account_id, None)  # resumed, it gets as many tries again
+        reason = f"Couldn't read positions from the broker {failures} times in a row ({exc}) -- paused until it can be checked"
         for deployment in deployments:
             if deployment.status == LIVE_NATIVE_ACTIVE and any(deployment in holders[k] for k in holders):
                 await pause(db, deployment, reason[:500], now)
         await db.commit()
         return [reason]
+    _read_failures.pop(broker_account_id, None)
     yours = {row.contract_key: row.quantity for row in (await db.execute(
         select(LiveAccountBaseline).where(LiveAccountBaseline.broker_account_id == broker_account_id)
     )).scalars()}
