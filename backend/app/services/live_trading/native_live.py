@@ -47,7 +47,10 @@ running strategy holding that instrument, and alerts you with both sides.
 A read that fails (a broker timeout, say) is tried again at the next
 minute's; only READ_FAILURES_BEFORE_PAUSE failures in a row pause the
 strategies holding something there (30 Oct: Kotak Neo's positions call
-timing out had paused a run twice in a morning).
+timing out had paused a run twice in a morning). A strategy paused that
+way -- for a read, not a difference -- is checked every minute still, and
+resumes by itself (alerting you) once a read succeeds and every quantity
+it holds matches.
 A strategy only runs on a broker account that passed the broker test
 (broker_test.py). The account-wide stop happens once a day: after it, with
 nothing of the user's running, it isn't checked again.
@@ -90,6 +93,7 @@ from app.services.paper_trading.trade_record import estimate_charges, resolve_le
 
 logger = logging.getLogger(__name__)
 
+READ_FAILED = "Couldn't read positions from the broker"  # the pause reason's start: resumed by itself once a read matches
 READ_FAILURES_BEFORE_PAUSE = 3  # reconcile_account: failed positions reads in a row, a minute apart, before pausing
 _read_failures: dict[uuid.UUID, int] = {}  # broker account -> failed reads in a row
 
@@ -683,7 +687,7 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
             LiveNativeDeployment.status.in_((LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED)),  # a paused one's holdings are at the broker too
         )
     )).scalars().all()
-    if not any(d.status == LIVE_NATIVE_ACTIVE for d in deployments):
+    if not any(d.status == LIVE_NATIVE_ACTIVE or read_paused(d) for d in deployments):
         return []
     expected: dict[tuple[str, str], float] = defaultdict(float)
     holders: dict[tuple[str, str], list[LiveNativeDeployment]] = defaultdict(list)
@@ -711,7 +715,7 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
                            broker_account_id, failures, READ_FAILURES_BEFORE_PAUSE, exc)
             return []
         _read_failures.pop(broker_account_id, None)  # resumed, it gets as many tries again
-        reason = f"Couldn't read positions from the broker {failures} times in a row ({exc}) -- paused until it can be checked"
+        reason = f"{READ_FAILED} {failures} times in a row ({exc}) -- paused until a read matches again"
         for deployment in deployments:
             if deployment.status == LIVE_NATIVE_ACTIVE and any(deployment in holders[k] for k in holders):
                 await pause(db, deployment, reason[:500], now)
@@ -722,9 +726,11 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
         select(LiveAccountBaseline).where(LiveAccountBaseline.broker_account_id == broker_account_id)
     )).scalars()}
     differences = []
+    differing: set[uuid.UUID] = set()
     for text, deployment in unmatched:
         differences.append(text)
-        if deployment.status == LIVE_NATIVE_ACTIVE:
+        differing.add(deployment.id)
+        if deployment.status == LIVE_NATIVE_ACTIVE or read_paused(deployment):
             await pause(db, deployment, f"{text}. Check it there, then resume.", now)
     for key, quantity in expected.items():
         broker_quantity = actual.get(key, 0.0)
@@ -734,14 +740,35 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
                 f" and you {own:g} of your own -- if you traded it yourself, that's the difference" if own else "")
             differences.append(text)
             for deployment in holders[key]:
-                if deployment.status == LIVE_NATIVE_ACTIVE:
+                differing.add(deployment.id)
+                if deployment.status == LIVE_NATIVE_ACTIVE or read_paused(deployment):
                     await pause(db, deployment, f"Doesn't match the broker -- {text}. Check it there, then resume.", now)
+    # Paused only for a read: the broker answered and all it holds matches -- back on.
+    kill_on = None
+    for deployment in deployments:
+        if not read_paused(deployment) or deployment.id in differing:
+            continue
+        kill_on = (await kill_switch.get_kill_switch(db)).active if kill_on is None else kill_on
+        account = await db.get(BrokerAccount, broker_account_id)
+        if kill_on or account is None or account.live_verified_at is None:
+            continue
+        held = sum(1 for key in holders if deployment in holders[key])
+        deployment.status = LIVE_NATIVE_ACTIVE
+        deployment.pause_reason = deployment.paused_at = deployment.resume_at = None
+        await _alert(db, deployment, AlertSeverity.WARNING, AlertType.BROKER_DISCONNECTED, "Live strategy resumed",
+                     f"The broker answered again and the {held} position(s) it holds match -- resumed by itself")
     await db.commit()
     return differences
 
 
+def read_paused(deployment: LiveNativeDeployment) -> bool:
+    """Paused because the broker couldn't be read -- not for a difference."""
+    return deployment.status == LIVE_NATIVE_PAUSED and (deployment.pause_reason or "").startswith(READ_FAILED)
+
+
 __all__ = [
     "LiveNativeContext", "LiveOrderError", "LiveOutcome", "LivePool", "account_limit", "check_account_limits", "day_pnl",
-    "execute_batch", "load_positions", "loss_limit", "pause", "pool_cash", "reconcile_account", "record_baselines", "run_live_native",
+    "execute_batch", "load_positions", "loss_limit", "pause", "pool_cash", "read_paused", "reconcile_account", "record_baselines",
+    "run_live_native",
     "square_off",
 ]

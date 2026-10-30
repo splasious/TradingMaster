@@ -22,7 +22,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.broker import Broker, BrokerAccount
 from app.models.live_native import LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED, LiveNativeDeployment
 from app.services.live_trading.native_gateway import BrokerGateway
-from app.services.live_trading.native_live import check_account_limits, pause, reconcile_account, run_live_native
+from app.services.live_trading.native_live import READ_FAILED, check_account_limits, pause, reconcile_account, run_live_native
 from app.services.market_data.hours import nse_market_open
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,12 @@ class LiveNativeScheduler:
 
             if self._last_reconcile is None or now - self._last_reconcile >= RECONCILE_INTERVAL:
                 self._last_reconcile = now
-                for account_id in {d.broker_account_id for d in deployments}:
+                # A run paused only because its broker couldn't be read is checked too: it resumes once a read matches.
+                read_paused = (await db.execute(
+                    select(LiveNativeDeployment.broker_account_id).where(
+                        LiveNativeDeployment.status == LIVE_NATIVE_PAUSED, LiveNativeDeployment.pause_reason.like(f"{READ_FAILED}%"))
+                )).scalars().all()
+                for account_id in {d.broker_account_id for d in deployments} | set(read_paused):
                     try:
                         gateway = await self.gateway(db, account_id, now)
                         await reconcile_account(db, account_id, gateway, now)

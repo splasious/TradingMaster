@@ -354,6 +354,67 @@ async def test_a_failed_positions_read_pauses_only_the_third_time_in_a_row(db_se
     assert deployment.broker_account_id not in native_live._read_failures  # resumed, it gets 3 tries again
 
 
+async def test_paused_for_a_read_it_resumes_by_itself_once_a_read_matches(db_session):
+    from app.models.alert import Alert
+
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    read = gateway.net_positions
+
+    async def timeout():
+        raise RuntimeError("Request timeout after 30 seconds")
+
+    gateway.net_positions = timeout
+    for minute in (1, 2, 3):
+        await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=minute))
+    assert deployment.status == LIVE_NATIVE_PAUSED and native_live.read_paused(deployment)
+    await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=4))  # still down
+    assert deployment.status == LIVE_NATIVE_PAUSED
+
+    gateway.net_positions = read  # Kotak answers, and it all matches
+    assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=5)) == []
+    assert deployment.status == LIVE_NATIVE_ACTIVE and deployment.pause_reason is None and deployment.paused_at is None
+    titles = (await db_session.execute(select(Alert.title).where(Alert.object_id == str(deployment.id)))).scalars().all()
+    assert titles.count("Live strategy resumed") == 1
+
+
+async def test_paused_for_a_read_it_stays_paused_on_a_difference_or_the_kill_switch(db_session):
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    await native_live.pause(db_session, deployment, f"{native_live.READ_FAILED} (Request timeout) -- paused until it can be checked", NOW)
+    await db_session.commit()
+
+    await kill_switch.activate(db_session, None, "test")
+    await db_session.commit()
+    await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=1))
+    assert deployment.status == LIVE_NATIVE_PAUSED  # the kill switch is on: left for you
+    await kill_switch.deactivate(db_session)
+    await db_session.commit()
+
+    gateway.held[("NFO", "NIFTYT22700CE")] = 0.0  # closed in the broker's own app meanwhile
+    [difference] = await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=2))
+    assert deployment.status == LIVE_NATIVE_PAUSED and deployment.pause_reason.startswith("Doesn't match the broker")
+    assert not native_live.read_paused(deployment)
+
+
+async def test_the_scheduler_checks_a_run_paused_for_a_read_and_it_resumes(db_session):
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+
+    async def factory(db, account_id):
+        return gateway
+
+    scheduler = LiveNativeScheduler(gateway_factory=factory)
+    assert await scheduler.tick(db_session, NOW) == 1
+    await native_live.pause(db_session, deployment, f"{native_live.READ_FAILED} 3 times in a row (timeout) -- paused", NOW)
+    await db_session.commit()
+    scheduler._last_reconcile = None
+    await scheduler.tick(db_session, NOW + timedelta(minutes=2))
+    assert deployment.status == LIVE_NATIVE_ACTIVE
+
+
 async def test_closing_something_not_held_live_pauses_it(db_session):
     deployment, _ = await _setup(db_session, state={"want": "close", "open": True})
     gateway = FakeGateway()
