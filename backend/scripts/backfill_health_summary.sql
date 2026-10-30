@@ -1639,6 +1639,26 @@ SELECT j.strategy, to_char(j.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH2
 FROM j ORDER BY j.created_at;
 \echo
 
+\echo '== BO5. Paper cards that opened or closed stock legs since 28 Oct (30 Oct): each card -- its strategy (or deleted), legs opened and closed per day, first and last (counts and times only)'
+SELECT coalesce(trim(s.name), 'deleted card') AS strategy, left(a.object_id, 8) AS card,
+       to_char(a.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon') AS day,
+       count(*) FILTER (WHERE a.action = 'PAPER_NATIVE_LEG_OPENED') AS opened,
+       count(*) FILTER (WHERE a.action = 'PAPER_NATIVE_LEG_CLOSED') AS closed,
+       to_char(min(a.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS first_ist,
+       to_char(max(a.created_at) AT TIME ZONE 'Asia/Kolkata', 'HH24:MI:SS') AS last_ist
+FROM audit_logs a
+LEFT JOIN paper_native_deployments d ON d.id::text = a.object_id
+LEFT JOIN strategies s ON s.id = d.strategy_id
+WHERE a.action IN ('PAPER_NATIVE_LEG_OPENED', 'PAPER_NATIVE_LEG_CLOSED') AND a.created_at >= '2026-10-28 00:00+05:30'
+  AND (s.id IS NULL OR s.name ILIKE '%breakout%' OR s.name ILIKE '%52%')
+GROUP BY 1, 2, 3 ORDER BY min(a.created_at);
+\echo '-- deletions and stops since 28 Oct (counts by action and object type):'
+SELECT a.action, a.object_type, count(*) AS n, to_char(max(a.created_at) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS last_ist
+FROM audit_logs a
+WHERE a.created_at >= '2026-10-28 00:00+05:30' AND (a.action ILIKE '%DELET%' OR a.action ILIKE '%STOP%' OR a.action ILIKE '%CREATED%' OR a.action ILIKE '%STARTED%')
+GROUP BY 1, 2 ORDER BY max(a.created_at);
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
