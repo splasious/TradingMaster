@@ -18,7 +18,7 @@ hand since is left alone, and nothing happens if the built-in isn't this
 code. Recorded in audit_logs.
 
 Revision ID: a8c0e2f4b6d9
-Revises: f5b7d9e1a3c6
+Revises: c2e4a6b8d0f1
 Create Date: 2026-10-30 15:30:00.000000
 
 """
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a8c0e2f4b6d9"
-down_revision: Union[str, None] = "f5b7d9e1a3c6"
+down_revision: Union[str, None] = "c2e4a6b8d0f1"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

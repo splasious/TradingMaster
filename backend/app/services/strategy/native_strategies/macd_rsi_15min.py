@@ -32,6 +32,15 @@ comment, just using live portfolio equity instead of a fixed simulated
 CAPITAL constant. A fresh up-cross that finds no free slot is passed over
 for good; it's listed in the Last Signal reason.
 
+Revised 30-Oct-2026 -- a live run's one-off copy of its paper card:
+  - state["adopt"] -- the paper card's holdings, written once into a live
+    run's state when it copied them (alembic c2e4a6b8d0f1) -- is bought at
+    the next check ahead of any fresh up-cross, at the live price, sized
+    as any buy (1/MAX_POSITIONS of equity), then held and sold by the usual
+    rules. Not while out on PCR (kept for when it's back in). One with no
+    live price yet waits for the next check; one already held, off the
+    watchlist, too dear for a slot or without a free slot is dropped.
+
 Revised 6-Oct-2026 -- PCR filter (pcr_filter below):
   - Each time it runs, NIFTY's PCR (the 15-minute record over its next 4
     expiries -- the Options page's PCR -- the latest one, same session, at
@@ -279,17 +288,23 @@ async def evaluate(ctx) -> None:
         if s not in holdings and sig["buy"] and ctx.now < sig["closed_at"] + BAR_LENGTH and sig["rsi"] is not None
     ]
     eligible.sort(key=lambda s: (-signals[s]["rsi"], s))
+    # A live run's one-off copy of its paper card's holdings, ahead of them.
+    adopt = [s for s in ctx.state.get("adopt", []) if s in universe and s not in holdings]
+    adopt_left = []
 
     bought = []
     no_slot = []
     out_on_pcr = eligible if risk_off else []
-    for symbol in [] if risk_off else eligible:
+    for symbol in [] if risk_off else adopt + [s for s in eligible if s not in adopt]:
         if len(holdings) >= MAX_POSITIONS:
-            no_slot.append(symbol)
+            if symbol not in adopt:
+                no_slot.append(symbol)
             continue
         instrument = universe[symbol]
         price = await ctx.get_price(instrument.id)
         if price is None or price <= 0:
+            if symbol in adopt:
+                adopt_left.append(symbol)
             continue
         # ctx.portfolio.cash here reflects every fill already made this
         # tick (ctx.open_leg mutates it in place) -- correctly shrinks the
@@ -302,11 +317,17 @@ async def evaluate(ctx) -> None:
         await ctx.open_leg(instrument, "buy", quantity, price)
         holdings[symbol] = {
             "instrument_id": str(instrument.id), "quantity": quantity, "entry_price": price,
-            "opened_at": ctx.now.isoformat(), "rsi_at_entry": signals[symbol]["rsi"],
+            "opened_at": ctx.now.isoformat(), "rsi_at_entry": (signals.get(symbol) or {}).get("rsi"),
         }
-        bought.append(f"{symbol} (MACD > 0 at {signals[symbol]['closed_at'].astimezone(IST):%d-%b %H:%M})")
+        bought.append(f"{symbol} (copied from the paper card)" if symbol in adopt
+                      else f"{symbol} (MACD > 0 at {signals[symbol]['closed_at'].astimezone(IST):%d-%b %H:%M})")
 
     ctx.state["holdings"] = holdings
+    if "adopt" in ctx.state and not risk_off:
+        if adopt_left:
+            ctx.state["adopt"] = adopt_left
+        else:
+            ctx.state.pop("adopt")
 
     note_bits = [pcr_note]  # first: the reason is cut at 500 characters
     if bought:

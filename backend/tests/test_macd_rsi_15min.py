@@ -431,3 +431,49 @@ async def test_back_in_on_pcr_a_stale_up_cross_is_not_bought(db_session: AsyncSe
     await evaluate(ctx)
 
     assert ctx.state["holdings"] == {} and ctx.state["pcr_risk_off"] is False  # in again, but no fresh cross to buy
+
+
+async def test_a_live_runs_copy_of_its_paper_card_is_bought_first_then_held_as_usual(db_session: AsyncSession):
+    """state["adopt"] (30 Oct): the paper card's holdings, bought at the next
+    check ahead of any up-cross, at 1/5 of equity each, then cleared."""
+    length = len(_solarinds_closes()[0])
+    ctx, _, instruments = await _setup(db_session, START, sbin_closes=_stale(_sbin_closes(length), 2))
+    ctx.state = {"adopt": ["SOLARINDS", "SBIN", "GONE"]}  # GONE: off the watchlist here, dropped
+    prices = {instruments["SOLARINDS"].id: 500.0, instruments["SBIN"].id: 800.0}
+
+    async def price(instrument_id):
+        return prices.get(instrument_id)
+
+    ctx.get_price = price
+    cash = ctx.portfolio.cash
+    await evaluate(ctx)
+
+    held = ctx.state["holdings"]
+    assert set(held) == {"SOLARINDS", "SBIN"} and "adopt" not in ctx.state
+    assert held["SBIN"]["quantity"] == float(int(cash / 5 / 800.0)) and held["SBIN"]["entry_price"] == 800.0
+    assert "SBIN (copied from the paper card)" in ctx._last_reason and ctx._last_signal == "REBALANCE"
+
+
+async def test_a_copied_stock_without_a_price_waits_and_out_on_pcr_the_copy_waits(db_session: AsyncSession):
+    length = len(_solarinds_closes()[0])
+    ctx, _, instruments = await _setup(db_session, START, sbin_closes=_stale(_sbin_closes(length), 2))
+    ctx.state = {"adopt": ["SBIN"]}
+
+    async def no_price(instrument_id):
+        return None
+
+    ctx.get_price = no_price
+    await evaluate(ctx)
+    assert ctx.state["adopt"] == ["SBIN"] and ctx.state["holdings"] == {}
+
+    async def a_price(instrument_id):
+        return 800.0
+
+    ctx.get_price = a_price
+    ctx.state["pcr_risk_off"] = True
+    await _pcr(db_session, ctx.now - timedelta(minutes=10), 0.85)  # out until over 0.90: the copy waits
+    await evaluate(ctx)
+    assert ctx.state["adopt"] == ["SBIN"] and ctx.state["holdings"] == {}
+    await _pcr(db_session, ctx.now - timedelta(minutes=1), 0.95)
+    await evaluate(ctx)
+    assert set(ctx.state["holdings"]) == {"SBIN"} and "adopt" not in ctx.state
