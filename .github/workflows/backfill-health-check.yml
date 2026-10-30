@@ -18,6 +18,10 @@ on:
         description: "Instead of the check: read-only comparison of Kotak Neo's market data with Zerodha's (backend/scripts/kotak_data_check.py)"
         type: boolean
         default: false
+      friday_check:
+        description: "Instead of the check: 52 Week High Breakout's open positions at last Friday's 3 PM against their 10-week MA, no trades; names and prices to the private Telegram chat only (backend/scripts/week_high_friday_check.py)"
+        type: boolean
+        default: false
       breakout_backtest:
         description: "Instead of the check: backtest 52 Candle Breakout (the candles: RUN in the script -- 15/30/45/75-min built from the stored 15m ones, or daily/weekly/monthly from the stored daily ones); results to the private Telegram chat only (backend/scripts/breakout_backtest.py)"
         type: boolean
@@ -49,6 +53,7 @@ jobs:
           OI_PREVIEW: ${{ inputs.oi_preview }}
           KOTAK_DATA_CHECK: ${{ inputs.kotak_data_check }}
           BREAKOUT_BACKTEST: ${{ inputs.breakout_backtest }}
+          FRIDAY_CHECK: ${{ inputs.friday_check }}
         run: |
           set -euo pipefail
           umask 077
@@ -400,6 +405,13 @@ jobs:
           if [ "${KOTAK_DATA_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo market data against Zerodha's (read-only)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_data_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${FRIDAY_CHECK:-false}" = "true" ]; then
+            echo "== 52 Week High Breakout: open positions at last Friday's 3 PM (names and prices to the private Telegram chat only; counts here)"
+            py_file=$(vps 'f=$(mktemp /tmp/friday-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/week_high_friday_check.py)
             remote py "$py_file"
             exit 0
           fi
