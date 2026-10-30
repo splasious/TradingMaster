@@ -330,6 +330,30 @@ async def test_reconciliation_pauses_on_a_mismatch_only(db_session):
     assert deployment.status == LIVE_NATIVE_PAUSED and "Doesn't match the broker" in deployment.pause_reason
 
 
+async def test_a_failed_positions_read_pauses_only_the_third_time_in_a_row(db_session):
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    read = gateway.net_positions
+
+    async def timeout():
+        raise RuntimeError("Request timeout after 30 seconds")
+
+    gateway.net_positions = timeout
+    for minute in (1, 2):  # tried again a minute later, still running
+        assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=minute)) == []
+        assert deployment.status == LIVE_NATIVE_ACTIVE
+    gateway.net_positions = read  # a good read in between starts the count again
+    assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=3)) == []
+    gateway.net_positions = timeout
+    for minute in (4, 5):
+        assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=minute)) == []
+    [reason] = await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=6))
+    assert deployment.status == LIVE_NATIVE_PAUSED and "Couldn't read positions from the broker 3 times in a row" in deployment.pause_reason
+    assert "Request timeout after 30 seconds" in reason
+    assert deployment.broker_account_id not in native_live._read_failures  # resumed, it gets 3 tries again
+
+
 async def test_closing_something_not_held_live_pauses_it(db_session):
     deployment, _ = await _setup(db_session, state={"want": "close", "open": True})
     gateway = FakeGateway()
