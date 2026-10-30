@@ -139,7 +139,9 @@ def test_the_built_ins_are_the_approved_code():
     assert seven.CHANGES["nifty_rs_rotation_15min.py"][1] in carry.CHANGES["nifty_rs_rotation_15min.py"][0]
     assert pcr.CHANGES["macd_rsi_15min.py"][0] == {seven.CHANGES["macd_rsi_15min.py"][1]}
     assert pcr.CHANGES["nifty_rs_rotation_15min.py"][0] == {carry.CHANGES["nifty_rs_rotation_15min.py"][1]}
-    assert _md5(BUILTIN) == pcr.CHANGES["macd_rsi_15min.py"][1]
+    copy = _load("c2e4a6b8d0f1_macd_live_copies_paper")
+    assert copy.FROM_MD5S == {pcr.CHANGES["macd_rsi_15min.py"][1]}  # the MACD built-in has moved on since (c2e4a6b8d0f1)
+    assert _md5(BUILTIN) == copy.TO_MD5
     own_close = _load("f1b3d5e7a9c2_rs_15min_decides_on_its_close_pcr")
     assert own_close.FROM_MD5S == {pcr.CHANGES["nifty_rs_rotation_15min.py"][1]}
     assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == own_close.TO_MD5
@@ -472,7 +474,8 @@ async def test_the_15min_cash_strategies_get_the_pcr_filter_as_their_next_versio
 
     migration = _load("c5d7e9f1a3b4_pcr_filter_for_the_15min_cash_strategies")
     migration.CHANGES = {
-        "macd_rsi_15min.py": ({hashlib.md5(macd_old.encode()).hexdigest()}, migration.CHANGES["macd_rsi_15min.py"][1]),
+        # the MACD built-in has moved on since too (c2e4a6b8d0f1)
+        "macd_rsi_15min.py": ({hashlib.md5(macd_old.encode()).hexdigest()}, _md5(BUILTIN)),
         # the RS built-in has moved on since (f1b3d5e7a9c2)
         "nifty_rs_rotation_15min.py": ({hashlib.md5(rs_old.encode()).hexdigest()}, _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py")),
     }
@@ -1095,3 +1098,42 @@ async def test_52_candle_breakout_moves_onto_weekly_candles_as_52_week_high_brea
     actions = (await db_session.execute(select(Log.action).where(Log.object_id.in_([str(strategy_id), str(card_id), str(pool_id)])))).scalars().all()
     assert sorted(a for a in actions if a != "PAPER_NATIVE_TRADING_STARTED" and a != "STRATEGY_CREATED" and a != "PAPER_PORTFOLIO_CREATED") == [
         "PAPER_NATIVE_VERSION_UPDATED", "PAPER_PORTFOLIO_RENAMED", "STRATEGY_RENAMED", "STRATEGY_VERSION_CREATED"]
+
+
+async def test_macd_moves_on_and_its_flat_live_run_gets_the_paper_cards_holdings_to_copy(db_engine, db_session):
+    from app.models.broker import Broker, BrokerAccount, Environment
+    from app.models.live_native import LiveNativeDeployment
+
+    migration = _load("c2e4a6b8d0f1_macd_live_copies_paper")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v18 = "# MACD - RSI - 15 MIN, version 18\n"
+    migration.FROM_MD5S = {_md5_text(v18)}
+
+    running = await _deployment(db_session, "copy_a@tradingmaster.internal", v18)
+    running.state = {"holdings": {"SBIN": {"quantity": 10.0}, "INFY": {"quantity": 5.0}}}
+    broker = Broker(code=f"kotak_{uuid.uuid4().hex[:6]}", name="Kotak Neo")
+    db_session.add(broker)
+    await db_session.flush()
+    owner = (await db_session.execute(select(PaperPortfolio.user_id).where(PaperPortfolio.id == running.portfolio_id))).scalar_one()
+    account = BrokerAccount(user_id=owner, broker_id=broker.id, environment=Environment.LIVE.value, account_label="K")
+    db_session.add(account)
+    await db_session.flush()
+    live = LiveNativeDeployment(owner_id=owner, strategy_id=running.strategy_id, strategy_version_id=running.strategy_version_id,
+                                broker_account_id=account.id, paper_deployment_id=running.id, status="active", state=None, capital=100000.0)
+    db_session.add(live)
+    edited = await _deployment(db_session, "copy_b@tradingmaster.internal", "# MACD - RSI - 15 MIN, edited by hand\n")
+    ids = [running.id, live.id, edited.id]
+    edited_version = edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert set(moved.state["holdings"]) == {"SBIN", "INFY"}  # the paper card keeps its own
+    copied = await db_session.get(LiveNativeDeployment, ids[1])
+    assert copied.strategy_version_id == version.id and copied.state == {"adopt": ["SBIN", "INFY"]}
+    assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == edited_version
