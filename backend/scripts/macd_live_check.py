@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
+from app.models.alert import Alert
 from app.models.audit import AuditLog
 from app.models.instrument import Instrument
 from app.models.live_native import LiveNativeDeployment, LiveNativePosition
@@ -34,6 +35,7 @@ from app.services.notifications.telegram import send_telegram
 from app.services.strategy.native_strategies import macd_rsi_15min as m
 
 NAME = "MACD - RSI - 15 MIN"
+READ_FAILED = "Couldn't read positions"
 
 
 def up_crosses(bars: list[dict], since: datetime) -> list[tuple[datetime, float, float | None]]:
@@ -93,6 +95,19 @@ async def main() -> None:
                        f"in its state {len(state.get('holdings') or {})}; PCR filter out: {bool(state.get('pcr_risk_off'))}")
             log.append(f"  last reason: {pcr_part} | {' | '.join(counted)}")
             log.append(f"  orders today: {', '.join(f'{s} x{n}' for s, n in orders) or 'none'}")
+            kinds = {"Couldn't read positions from the broker": "broker positions read failed", "Doesn't match the broker": "differs from the broker",
+                     "Daily loss limit": "loss limit", "Day P&L": "loss limit"}
+            kind = next((k for t, k in kinds.items() if (r.pause_reason or "").startswith(t)), "other") if r.pause_reason else "-"
+            paused = (
+                await db.execute(
+                    select(Alert.created_at, Alert.message).where(Alert.object_id == str(r.id), Alert.title == "Live strategy paused",
+                                                                  Alert.created_at >= datetime.combine(today, datetime.min.time(), tzinfo=IST))
+                    .order_by(Alert.created_at)
+                )
+            ).all()
+            log.append(f"  paused now: {'yes, ' + kind + ' at ' + as_aware_utc(r.paused_at).astimezone(IST).strftime('%H:%M:%S') if r.pause_reason and r.paused_at else 'no'}; "
+                       f"pauses today: {len(paused)} ({', '.join(as_aware_utc(t).astimezone(IST).strftime('%H:%M:%S') for t, _ in paused) or '-'}), "
+                       f"of them broker reads failing: {sum(1 for _, m in paused if (m or '').startswith(READ_FAILED))}")
             paper = await db.get(PaperNativeDeployment, r.paper_deployment_id) if r.paper_deployment_id else None
             paper_held = set(((paper.state or {}).get("holdings") or {}) if paper else {})
             live_held = set(state.get("holdings") or {})
