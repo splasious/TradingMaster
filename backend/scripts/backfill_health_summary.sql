@@ -1618,6 +1618,27 @@ WHERE trim(s.name) IN ('52 Candle Breakout 15 MIN', '52 Week High Breakout') OR 
 ORDER BY d.created_at;
 \echo
 
+\echo '== BO4. Backtests of the breakout strategies in the last 3 days (30 Oct): when, status, the range, trades, how many were bought on the first day, the most held at once, the first 3 buying days with counts, exit reasons (counts and dates only: no names or P and L)'
+WITH j AS (
+  SELECT b.id, trim(s.name) AS strategy, b.status, b.start_date, b.end_date, b.created_at, b.error_message IS NOT NULL AS errored,
+         md5(replace(sv.python_code, E'\r', '')) AS code_md5
+  FROM native_backtest_jobs b JOIN strategies s ON s.id = b.strategy_id JOIN strategy_versions sv ON sv.id = b.strategy_version_id
+  WHERE (s.name ILIKE '%breakout%' OR s.name ILIKE '%52%') AND b.created_at > now() - interval '3 days'
+)
+SELECT j.strategy, to_char(j.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS run_ist, j.status, j.errored, j.code_md5,
+       j.start_date, j.end_date,
+       (SELECT count(*) FROM native_backtest_trades t WHERE t.job_id = j.id) AS trades,
+       (SELECT count(*) FROM native_backtest_trades t WHERE t.job_id = j.id
+          AND (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date = (SELECT min((t2.opened_at AT TIME ZONE 'Asia/Kolkata')::date) FROM native_backtest_trades t2 WHERE t2.job_id = j.id)) AS bought_first_day,
+       (SELECT max((SELECT count(*) FROM native_backtest_trades o WHERE o.job_id = j.id AND o.opened_at <= t.opened_at AND o.closed_at > t.opened_at))
+          FROM native_backtest_trades t WHERE t.job_id = j.id) AS most_held,
+       (SELECT string_agg(to_char(d, 'DD Mon YY') || ' x' || n, ', ') FROM (
+          SELECT (t.opened_at AT TIME ZONE 'Asia/Kolkata')::date AS d, count(*) AS n FROM native_backtest_trades t WHERE t.job_id = j.id
+          GROUP BY 1 ORDER BY 1 LIMIT 3) x) AS first_buy_days,
+       (SELECT string_agg(r || ' x' || n, ', ') FROM (SELECT exit_reason AS r, count(*) AS n FROM native_backtest_trades t WHERE t.job_id = j.id GROUP BY 1) x) AS exits
+FROM j ORDER BY j.created_at;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
