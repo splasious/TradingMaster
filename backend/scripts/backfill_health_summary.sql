@@ -1674,6 +1674,20 @@ WHERE l.created_at >= '2026-10-28 00:00+05:30'
 ORDER BY l.created_at;
 \echo
 
+\echo '== MR1. MACD - RSI - 15 MIN (30 Oct): the strategy versions its paper cards and live runs are on -- status, version, code md5, holdings counted (no names or sizes)'
+SELECT 'paper' AS kind, trim(s.name) AS strategy, d.status, v.version_number,
+       (SELECT max(v2.version_number) FROM strategy_versions v2 WHERE v2.strategy_id = s.id) AS latest_version,
+       md5(replace(v.python_code, E'\r', '')) AS code_md5,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS held
+FROM paper_native_deployments d JOIN strategies s ON s.id = d.strategy_id JOIN strategy_versions v ON v.id = d.strategy_version_id
+WHERE trim(s.name) = 'MACD - RSI - 15 MIN' AND d.status IN ('active', 'paused')
+UNION ALL
+SELECT 'live', trim(s.name), l.status, v.version_number, NULL, md5(replace(v.python_code, E'\r', '')),
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(l.state::jsonb -> 'holdings') = 'object' THEN l.state::jsonb -> 'holdings' ELSE '{}'::jsonb END))
+FROM live_native_deployments l JOIN strategies s ON s.id = l.strategy_id JOIN strategy_versions v ON v.id = l.strategy_version_id
+WHERE trim(s.name) = 'MACD - RSI - 15 MIN' AND l.status IN ('active', 'paused');
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
