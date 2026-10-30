@@ -1659,6 +1659,21 @@ WHERE a.created_at >= '2026-10-28 00:00+05:30' AND (a.action ILIKE '%DELET%' OR 
 GROUP BY 1, 2 ORDER BY max(a.created_at);
 \echo
 
+\echo '== BO6. Live runs started since 28 Oct (30 Oct): strategy, status, started, last run and signal, the paper card it follows, stocks held at the broker, held in its state, its ranking day, orders today by side and status (counts and times only: no names, sizes or P and L)'
+SELECT trim(s.name) AS strategy, l.status, to_char(l.created_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') AS started_ist,
+       to_char(l.last_evaluated_at AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI:SS') AS last_run_ist, l.last_signal,
+       left(l.paper_deployment_id::text, 8) AS paper_card, l.pause_reason IS NOT NULL AS paused_with_reason,
+       (SELECT count(*) FROM live_native_positions p WHERE p.deployment_id = l.id) AS broker_positions,
+       (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(l.state::jsonb -> 'holdings') = 'object' THEN l.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS state_holdings,
+       l.state::jsonb -> 'ranking' ->> 'day' AS ranking_day,
+       (SELECT string_agg(o.side || ' ' || o.status || ' x' || o.n, ', ') FROM (
+          SELECT side, status, count(*) AS n FROM live_orders WHERE native_deployment_id = l.id
+            AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date GROUP BY 1, 2) o) AS orders_today
+FROM live_native_deployments l JOIN strategies s ON s.id = l.strategy_id
+WHERE l.created_at >= '2026-10-28 00:00+05:30'
+ORDER BY l.created_at;
+\echo
+
 \echo '== PF0. Strategies named like PCR Futures (any code): each version, its code md5 and whether it is the built-in, and the paper runs on it (status, created, last run, position bias)'
 SELECT trim(s.name) AS strategy, s.code_type, v.version_number, md5(replace(v.python_code, E'\r', '')) AS code_md5,
        v.python_code LIKE '%Nifty PCR Futures Hedge -- NIFTY futures with a short in-the-money option%' AS is_the_built_in,
