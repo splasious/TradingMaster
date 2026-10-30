@@ -1602,9 +1602,17 @@ SELECT trim(s.name) AS strategy, sv.version_number, md5(replace(sv.python_code, 
        jsonb_array_length(coalesce(d.state::jsonb -> 'ranking' -> 'decided', '[]'::jsonb)) AS ranked_decided,
        d.state::jsonb -> 'ranking' ->> 'waiting' AS ranking_waiting,
        (SELECT count(*) FROM jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END) h
-        WHERE h.value ? 'breakout_week') AS weekly_held
+        WHERE h.value ? 'breakout_week') AS weekly_held,
+       (SELECT string_agg(w || ' x' || n, ', ') FROM (
+          SELECT coalesce(h.value ->> 'breakout_week', 'none') AS w, count(*) AS n
+          FROM jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END) h GROUP BY 1) x) AS held_by_breakout_week,
+       (SELECT to_char(min((h.value ->> 'opened_at')::timestamptz) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI') || ' - ' ||
+               to_char(max((h.value ->> 'opened_at')::timestamptz) AT TIME ZONE 'Asia/Kolkata', 'DD Mon HH24:MI')
+        FROM jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END) h) AS bought_ist,
+       s.id = (SELECT s2.id FROM strategies s2 WHERE s2.id = s.id) AS strategy_exists,
+       (SELECT count(*) FROM strategy_versions v2 WHERE v2.strategy_id = s.id) AS versions
 FROM strategies s JOIN paper_native_deployments d ON d.strategy_id = s.id JOIN strategy_versions sv ON sv.id = d.strategy_version_id
-WHERE trim(s.name) IN ('52 Candle Breakout 15 MIN', '52 Week High Breakout')
+WHERE trim(s.name) IN ('52 Candle Breakout 15 MIN', '52 Week High Breakout') OR s.name ILIKE '%breakout%' OR s.name ILIKE '%52%'
    OR sv.python_code LIKE '%52 Week High Breakout -- 500 NSE stocks on weekly candles%'
    OR sv.python_code LIKE '%52 Candle Breakout 15 MIN -- 500 NSE stocks on 15-minute candles%'
 ORDER BY d.created_at;
