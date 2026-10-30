@@ -21,9 +21,11 @@ from sqlalchemy import func, select
 
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
+from app.models.audit import AuditLog
 from app.models.instrument import Instrument
 from app.models.live_native import LiveNativeDeployment, LiveNativePosition
 from app.models.live_trading import LiveOrder
+from app.models.paper_trading import PaperNativeDeployment
 from app.models.pcr import PcrSnapshot
 from app.models.strategy import Strategy
 from app.services.broker.zerodha_broker import IST
@@ -91,6 +93,21 @@ async def main() -> None:
                        f"in its state {len(state.get('holdings') or {})}; PCR filter out: {bool(state.get('pcr_risk_off'))}")
             log.append(f"  last reason: {pcr_part} | {' | '.join(counted)}")
             log.append(f"  orders today: {', '.join(f'{s} x{n}' for s, n in orders) or 'none'}")
+            paper = await db.get(PaperNativeDeployment, r.paper_deployment_id) if r.paper_deployment_id else None
+            paper_held = set(((paper.state or {}).get("holdings") or {}) if paper else {})
+            live_held = set(state.get("holdings") or {})
+            copy_audit = (
+                await db.execute(
+                    select(AuditLog.new_value).where(AuditLog.object_id == str(r.id), AuditLog.action == "LIVE_NATIVE_VERSION_UPDATED")
+                    .order_by(AuditLog.created_at.desc()).limit(1)
+                )
+            ).scalar()
+            copies = (copy_audit or {}).get("copies") or []
+            log.append(f"  copy: {len(copies)} queued from the paper card at the switch; still waiting {len(state.get('adopt') or [])}; "
+                       f"paper card holds {len(paper_held)} now, {len(paper_held & live_held)} of them held live too, "
+                       f"{len(set(copies) - live_held)} queued but not held live")
+            private.append(f"Copy for live run {str(r.id)[:8]}: queued {', '.join(copies) or '-'}; waiting {', '.join(state.get('adopt') or []) or '-'}; "
+                           f"paper holds {', '.join(sorted(paper_held)) or '-'}; live holds {', '.join(sorted(live_held)) or '-'}")
             private.append(f"Live run {str(r.id)[:8]} ({r.status}) last reason:\n{r.last_signal_reason or '-'}")
 
         start = min((as_aware_utc(r.created_at) for r in runs), default=now - timedelta(hours=8))
