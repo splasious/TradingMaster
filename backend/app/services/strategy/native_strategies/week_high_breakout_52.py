@@ -2,46 +2,41 @@
 52 Week High Breakout -- 500 NSE stocks on weekly candles (native, unsandboxed)
 ================================================================================
 
-As agreed on 29-Oct-2026, after the daily / weekly / monthly backtests: the
-52 Candle Breakout 15 MIN card (version 1, 28 Oct, 15-minute candles) moved
-to weekly candles and renamed.
+As agreed on 29-Oct-2026 (weekly candles, after the daily / weekly / monthly
+backtests) and 30-Oct-2026 (the week's check on Friday at 3 PM).
 
   Universe: STOCK_UNIVERSE, the weekly Nifty RS Rotation's 500 stocks. Long
             only, bought in cash.
-  Candles:  weekly, Monday-Friday, built from the stored daily candles. Only
-            finished weeks count -- the week still running never does -- and
-            a stock's week counts once its last trading day's candle is in.
-  Entry:    a finished week closes above the highest high of the
-            BREAKOUT_CANDLES (52) weeks before it -- a breakout. On the next
-            week's first trading day, from RANK_AT (09:16, a minute after
-            the open), the breakouts are ranked by how far the close is
-            above that high (%), strongest first, and bought at the live
-            price while a slot is free; the rest are passed over. A stock
-            whose week isn't in yet is looked at again every SCAN_EVERY that
-            day; a breakout not bought that day is passed over. A card's
-            first run ranks the last finished week the same way on its first
-            trading day from then (the switch, Thu 29 Oct: the week ending
-            Fri 23 Oct, bought at 09:16 that day) -- after that, only on a
-            week's first trading day.
-  Exit:     a finished week, closed after the buy, closes below the stock's
-            own MA -- the average over its last MA_CANDLES (10) weeks of
-            (open + high + low + close) / 4, that week included -- sold at
-            the live price from RANK_AT on the next trading day, before that
-            day's buys, so the slot is free for them.
+  Candles:  weekly, Monday-Friday, built from the stored daily candles. The
+            week's check is on its CHECK day -- Friday, or the nearest
+            trading day before it in the week when Friday is an NSE holiday
+            -- at DECIDE_AT (15:00): this week's candle is then its days so
+            far, today's from Kite's live quote (today's open, high and low
+            so far), its close the live price at 15:00.
+  Exit:     first, each stock held whose week at 15:00 closes below its own
+            MA -- the average over its last MA_CANDLES (10) weeks of (open +
+            high + low + close) / 4, this week included -- is sold at the
+            live price. A stock is checked from the check day after the one
+            it was bought on.
+  Entry:    then each stock whose live price at 15:00 is above the highest
+            high of the BREAKOUT_CANDLES (52) weeks before this week -- a
+            breakout -- ranked by how far above (%), strongest first, is
+            bought at the live price while a slot is free; the rest are
+            passed over until next week's check.
   Holding:  until that exit. No stop-loss.
   Size:     up to MAX_POSITIONS (10) stocks, each 1/MAX_POSITIONS of the
             pool's equity (cash + holdings at market) when bought, never
             more than the cash left.
-  Switch:   a stock version 1 bought on a 15-minute breakout (a holding with
-            no "breakout_week") is sold at the live price from RANK_AT on
-            the first trading day after the switch: the weekly rules start
-            with their slots free.
 
-Candles: the stored daily ones, read for all the stocks in one query (_weeks)
--- once on the ranking morning, then only the stocks whose week wasn't in
-yet. No candle sync is asked for: the daily top-up (backfill_platform/
-topup.py, after the close) stores the 500 stocks' days, as the RS Rotation
-reads them.
+A stock without a quote yet, or whose earlier days aren't all stored, is
+looked at again every RETRY_EVERY until the close; the check isn't made up
+on another day. Nothing trades outside the check.
+
+Candles: the stored daily ones, read for every stock in one query (_days) --
+the daily top-up (backfill_platform/topup.py, after the close) stores the
+500 stocks' days, as the RS Rotation reads them -- and one Kite quote call
+for today's (kite_quotes, 500 a request). In a backtest the stored day
+stands in for the quote.
 
 Runs through services/paper_trading/native_runner.py (ctx.get_price,
 ctx.open_leg, ctx.close_leg, ctx.record_trade, ctx.note, ctx.wake_at). Stop
@@ -56,15 +51,17 @@ from sqlalchemy import select
 from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.market_data import OhlcvCandle
-from app.services.broker.zerodha_broker import IST
+from app.services.broker.kite_ticker_service import find_connected_zerodha_credentials
+from app.services.broker.zerodha_broker import IST, ZerodhaKiteBroker
+from app.services.fo_scan.pacing import kite_quotes
 from app.services.market_data.nse_holidays import is_trading_holiday
 
 STORED = "1d"  # the weekly candles are built from these
 BREAKOUT_CANDLES = 52
 MA_CANDLES = 10
 MAX_POSITIONS = 10
-RANK_AT = time(9, 16)  # the week's sells and buys, at live prices, a minute after the open
-SCAN_EVERY = timedelta(minutes=5)  # a stock whose week isn't in yet is looked at again this often
+DECIDE_AT = time(15, 0)  # the week's check: its close is the live price then
+RETRY_EVERY = timedelta(minutes=1)  # a stock without a quote yet is looked at again this often, until the close
 HISTORY_WEEKS = 56  # weeks of daily candles read: 53 finished weeks and slack for a week without trading
 SESSION_OPEN, SESSION_CLOSE = time(9, 15), time(15, 30)
 
@@ -156,18 +153,11 @@ def monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
-def first_trading_day(week: date) -> date | None:
-    """The first trading day of the week starting Monday `week`, or None."""
-    return next((day for day in (week + timedelta(days=k) for k in range(5)) if _is_trading_day(day)), None)
-
-
-def finished_before(now_ist: datetime) -> date:
-    """The Monday every week before which has finished by `now_ist`: next
-    week's once this week's last session has closed, else this week's."""
-    week = monday(now_ist.date())
-    days = [week + timedelta(days=k) for k in range(5)]
-    left = [d for d in days if _is_trading_day(d) and (d > now_ist.date() or (d == now_ist.date() and now_ist.time() < SESSION_CLOSE))]
-    return week + timedelta(weeks=1) if not left else week
+def check_day(week: date) -> date | None:
+    """The check day of the week starting Monday `week`: its Friday, or the
+    nearest trading day before it in the week (an NSE holiday); None for a
+    week without trading."""
+    return next((day for day in (week + timedelta(days=k) for k in (4, 3, 2, 1, 0)) if _is_trading_day(day)), None)
 
 
 def last_trading_day_before(d: date) -> date:
@@ -197,15 +187,15 @@ def _midnight(d: date) -> datetime:
     return datetime.combine(d, time(0), tzinfo=IST).astimezone(timezone.utc)
 
 
-async def _weeks(ctx, ids: list[uuid.UUID], this_week: date) -> dict[uuid.UUID, list[dict]]:
-    """Each instrument's weekly bars before the week starting `this_week`,
-    oldest first, from its stored daily candles -- one query for all."""
+async def _days(ctx, ids: list[uuid.UUID], start: date, end: date) -> dict[uuid.UUID, list[dict]]:
+    """Each instrument's stored daily bars from `start` to before `end`,
+    oldest first -- one query for all."""
     if not ids:
         return {}
     rows = await ctx.db.execute(
         select(OhlcvCandle.instrument_id, OhlcvCandle.ts, OhlcvCandle.open, OhlcvCandle.high, OhlcvCandle.low, OhlcvCandle.close)
         .where(OhlcvCandle.instrument_id.in_(ids), OhlcvCandle.timeframe == STORED,
-               OhlcvCandle.ts >= _midnight(this_week - timedelta(weeks=HISTORY_WEEKS)), OhlcvCandle.ts < _midnight(this_week))
+               OhlcvCandle.ts >= _midnight(start), OhlcvCandle.ts < _midnight(end))
         .order_by(OhlcvCandle.instrument_id, OhlcvCandle.ts)
     )
     days: dict[uuid.UUID, list[dict]] = {}
@@ -215,24 +205,57 @@ async def _weeks(ctx, ids: list[uuid.UUID], this_week: date) -> dict[uuid.UUID, 
         if None in (o, h, lo, c) or (bars and bars[-1]["day"] == day):
             continue  # one candle a day
         bars.append({"day": day, "open": float(o), "high": float(h), "low": float(lo), "close": float(c)})
-    return {instrument_id: weeks(bars) for instrument_id, bars in days.items()}
+    return days
 
 
-def _finished(bars: list[dict], this_week: date) -> bool:
-    """The newest bar is last week's, its last trading day included."""
-    return bool(bars) and bars[-1]["week"] == this_week - timedelta(weeks=1) and bars[-1]["last_day"] == last_trading_day_before(this_week)
+async def _today(ctx, instruments: list[Instrument], today: date) -> tuple[dict[uuid.UUID, dict], str | None]:
+    """Today's bar so far by instrument -- Kite's quote: today's open, high
+    and low, the last price as its close -- and why there are none. In a
+    backtest, the stored day."""
+    if ctx.is_backtest:
+        stored = await _days(ctx, [i.id for i in instruments], today, today + timedelta(days=1))
+        return {i: bars[-1] for i, bars in stored.items() if bars}, None
+    creds = await find_connected_zerodha_credentials(ctx.db)
+    if creds is None:
+        return {}, "Zerodha isn't logged in"
+    broker = ZerodhaKiteBroker()
+    broker._api_key, broker._access_token = creds["api_key"], creds["access_token"]
+    keys = {f"{i.exchange}:{i.external_ref}": i.id for i in instruments}
+    quotes, error = await kite_quotes(broker, list(keys))
+    out: dict[uuid.UUID, dict] = {}
+    for key, instrument_id in keys.items():
+        q = quotes.get(key) or {}
+        ohlc = q.get("ohlc") or {}
+        price, o, h, lo = q.get("last_price"), ohlc.get("open"), ohlc.get("high"), ohlc.get("low")
+        if not price or not o or not h or not lo:
+            continue
+        price = float(price)
+        out[instrument_id] = {"day": today, "open": float(o), "high": max(float(h), price), "low": min(float(lo), price), "close": price}
+    return out, (None if out else f"no Kite quotes ({error or 'none returned'})")
 
 
-def _next_ranking(now_ist: datetime) -> str:
-    """When the next week's breakouts are ranked, for the card."""
+def week_so_far(days: list[dict], today_bar: dict | None, this_week: date, today: date) -> list[dict] | None:
+    """The stock's weekly bars with this week's as of now last; None when
+    a day is missing: last week's last trading day, one of this week's
+    before today, or today's quote."""
+    before = [d for d in days if d["day"] < this_week]
+    during = [d for d in days if this_week <= d["day"] < today]
+    finished = weeks(before)
+    if not finished or finished[-1]["week"] != this_week - timedelta(weeks=1) or finished[-1]["last_day"] != last_trading_day_before(this_week):
+        return None
+    expected = [this_week + timedelta(days=k) for k in range((today - this_week).days) if _is_trading_day(this_week + timedelta(days=k))]
+    if [d["day"] for d in during] != expected or today_bar is None:
+        return None
+    return finished + weeks(during + [today_bar])
+
+
+def _next_check(now_ist: datetime) -> str:
     week = monday(now_ist.date())
-    day = first_trading_day(week)
-    if day is None or now_ist.date() > day or (now_ist.date() == day and now_ist.time() >= RANK_AT):
-        day = None
-        while day is None:
-            week += timedelta(weeks=1)
-            day = first_trading_day(week)
-    return f"{day:%a %d-%b} {RANK_AT:%H:%M}"
+    while True:
+        day = check_day(week)
+        if day is not None and (day > now_ist.date() or (day == now_ist.date() and now_ist.time() < DECIDE_AT)):
+            return f"{day:%a %d-%b} {DECIDE_AT:%H:%M}"
+        week += timedelta(weeks=1)
 
 
 async def _sell(ctx, symbol: str, leg: dict, price: float, exit_reason: str) -> float:
@@ -256,44 +279,19 @@ async def evaluate(ctx) -> None:
     this_week = monday(today)
     holdings: dict = ctx.state.setdefault("holdings", {})  # {symbol: {instrument_id, quantity, entry_price, opened_at, ...}}
     force_exit = ctx.state.pop("force_exit", False)
-    is_open = market_open(now_ist)
-    trading = is_open and now_ist.time() >= RANK_AT  # this morning's sells and buys are on
-    if _is_trading_day(today) and now_ist.time() < RANK_AT:
-        ctx.wake_at(datetime.combine(today, RANK_AT, tzinfo=IST))
     notes: list[str] = []
 
-    # --- Exits: stop -> "Exit positions"; a version-1 holding (the switch);
-    # or a finished week, closed after the buy, below the MA.
-    sold = []
-    finished = finished_before(now_ist)
-    held_weeks = await _weeks(ctx, [uuid.UUID(leg["instrument_id"]) for leg in holdings.values() if "breakout_week" in leg], finished)
-    for symbol, leg in list(holdings.items()):
-        reason = "manual" if force_exit else None
-        if reason is None and "breakout_week" not in leg:
-            reason = "switch_to_weekly"
-            leg["exit_due"] = "bought on 15-min candles, the strategy now on weekly ones"
-        if reason is None:
-            bars = held_weeks.get(uuid.UUID(leg["instrument_id"]), [])
-            ma = moving_average(bars)
-            week_closed = datetime.combine(bars[-1]["last_day"], SESSION_CLOSE, tzinfo=IST) if bars else None
-            if (ma is not None and _finished(bars, finished) and week_closed > datetime.fromisoformat(leg["opened_at"])
-                    and bars[-1]["close"] < ma):
-                reason = "ma_exit"
-                leg["exit_due"] = f"week of {bars[-1]['week']:%d-%b} closed {bars[-1]['close']:,.2f} < its 10-week MA {ma:,.2f}"
-        if reason is None:
-            continue
-        if not trading and not force_exit:
-            when = "today" if _is_trading_day(today) and now_ist.time() < RANK_AT else "on the next trading day"
-            notes.append(f"{symbol} sells at {RANK_AT:%H:%M} {when} ({leg['exit_due']})")
-            continue
-        price = await ctx.get_price(uuid.UUID(leg["instrument_id"]))
-        if price is None:
-            notes.append(f"{symbol}: exit due, no live price yet")
-            continue
-        holdings.pop(symbol)
-        pnl = await _sell(ctx, symbol, leg, price, reason)
-        sold.append(f"{symbol} @ {price:,.2f} ({'stop' if reason == 'manual' else leg['exit_due']}, P&L {pnl:+,.0f})")
+    # --- Stop -> "Exit positions": every holding, at live prices.
     if force_exit:
+        sold = []
+        for symbol, leg in list(holdings.items()):
+            price = await ctx.get_price(uuid.UUID(leg["instrument_id"]))
+            if price is None:
+                notes.append(f"{symbol}: no live price yet")
+                continue
+            holdings.pop(symbol)
+            pnl = await _sell(ctx, symbol, leg, price, "manual")
+            sold.append(f"{symbol} @ {price:,.2f} (P&L {pnl:+,.0f})")
         ctx.state["holdings"] = holdings
         ctx.note("exited", signal="COVER", reason=f"manual exit: sold {len(sold)}" + (f" | {'; '.join(notes)}" if notes else ""))
         return
@@ -303,74 +301,97 @@ async def evaluate(ctx) -> None:
             await ctx.db.execute(select(Instrument).where(Instrument.exchange == "NSE", Instrument.symbol.in_(STOCK_UNIVERSE)))
         ).scalars().all()
     }
+    held = {symbol: await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"])) for symbol, leg in holdings.items()}
 
-    # --- Entries: last week's breakouts, on this week's first trading day, strongest first.
-    bought, passed = [], []
-    first_run = "ranking" not in ctx.state
-    ranking = ctx.state.get("ranking") or {}
-    if ranking.get("week") != this_week.isoformat():
-        day = first_trading_day(this_week)
-        if first_run:  # the card's first trading day from now ranks last week too
-            day = next((d for d in (this_week + timedelta(days=k) for k in range(5)) if _is_trading_day(d)
-                        and (d > today or (d == today and now_ist.time() < SESSION_CLOSE))), day)
-        ranking = {"week": this_week.isoformat(), "day": day.isoformat() if day else None, "decided": [], "waiting": None,
-                   "scanned_at": None}
-    ranking_day = ranking.get("day") == today.isoformat()
-    scan_due = (
-        trading and ranking_day and len(holdings) < MAX_POSITIONS and ranking["waiting"] != 0
-        and (ranking["scanned_at"] is None or ctx.now - datetime.fromisoformat(ranking["scanned_at"]) >= SCAN_EVERY)
+    # --- The week's check: Friday (or the day before an NSE holiday) at 15:00.
+    day = check_day(this_week)
+    decide_at = datetime.combine(today, DECIDE_AT, tzinfo=IST)
+    if day == today and now_ist < decide_at:
+        ctx.wake_at(decide_at)
+    check = ctx.state.get("check") or {}
+    if check.get("day") != today.isoformat():
+        check = {"day": today.isoformat(), "decided": [], "waiting": None, "at": None}
+    due = (
+        day == today and market_open(now_ist) and now_ist >= decide_at and check["waiting"] != 0
+        and (check["at"] is None or ctx.now - datetime.fromisoformat(check["at"]) >= RETRY_EVERY)
     )
-    if scan_due:
-        ranking["scanned_at"] = ctx.now.isoformat()
-        decided = set(ranking["decided"])
-        look = {s: i for s, i in universe.items() if s not in holdings and s not in decided}
-        bars_by_id = await _weeks(ctx, [i.id for i in look.values()], this_week)
-        found, waiting = [], 0
-        for symbol, instrument in look.items():
-            bars = bars_by_id.get(instrument.id, [])
-            if not _finished(bars, this_week):
-                if len(bars) < BREAKOUT_CANDLES:
-                    decided.add(symbol)  # too few weeks to break out, whatever comes in
+    sold, bought, passed = [], [], []
+    if due:
+        check["at"] = ctx.now.isoformat()
+        decided = set(check["decided"])
+        look = {s: i for s, i in {**universe, **{s: i for s, i in held.items() if i is not None}}.items() if s not in decided}
+        days = await _days(ctx, [i.id for i in look.values()], this_week - timedelta(weeks=HISTORY_WEEKS), today)
+        today_bars, why_none = await _today(ctx, list(look.values()), today)
+        if why_none:
+            notes.append(why_none)
+        bars_of = {s: week_so_far(days.get(i.id, []), today_bars.get(i.id), this_week, today) for s, i in look.items()}
+        waiting = 0
+
+        # Exits first: a holding bought before this check, its week closing under its 10-week MA.
+        for symbol, leg in list(holdings.items()):
+            if symbol in decided or held.get(symbol) is None:
+                continue
+            if datetime.fromisoformat(leg["opened_at"]) >= decide_at:
+                decided.add(symbol)  # bought at this check: from the next one
+                continue
+            bars = bars_of.get(symbol)
+            if bars is None:
+                waiting += 1
+                continue
+            ma = moving_average(bars)
+            decided.add(symbol)
+            if ma is None or bars[-1]["close"] >= ma:
+                continue
+            price = bars[-1]["close"]
+            holdings.pop(symbol)
+            pnl = await _sell(ctx, symbol, leg, price, "ma_exit")
+            sold.append(f"{symbol} @ {price:,.2f} (week to {today:%d-%b} at {DECIDE_AT:%H:%M}: {price:,.2f} < its 10-week MA {ma:,.2f}, "
+                        f"P&L {pnl:+,.0f})")
+
+        # Then this week's breakouts, strongest first, while a slot is free.
+        found = []
+        for symbol, instrument in universe.items():
+            if symbol in holdings or symbol in decided:
+                continue
+            bars = bars_of.get(symbol)
+            if bars is None:
+                if len(weeks([d for d in days.get(instrument.id, []) if d["day"] < this_week])) < BREAKOUT_CANDLES:
+                    decided.add(symbol)  # too few weeks to break out
                 else:
-                    waiting += 1  # last week's candles not (all) in yet
+                    waiting += 1
                 continue
             strength = breakout(bars)
             if strength is None:
                 decided.add(symbol)
             else:
-                found.append((strength, symbol))
+                found.append((strength, symbol, bars[-1]["close"]))
         found.sort(key=lambda x: (-x[0], x[1]))
         equity = ctx.portfolio.cash
-        for leg in holdings.values() if found else []:
-            equity += ((await ctx.get_price(uuid.UUID(leg["instrument_id"]))) or leg["entry_price"]) * leg["quantity"]
-        for strength, symbol in found:
+        for symbol, leg in holdings.items() if found else []:
+            price = (bars_of.get(symbol) or [{}])[-1].get("close") or await ctx.get_price(uuid.UUID(leg["instrument_id"]))
+            equity += (price or leg["entry_price"]) * leg["quantity"]
+        for strength, symbol, price in found:
+            decided.add(symbol)
             if len(holdings) >= MAX_POSITIONS:
                 passed.append(symbol)
-                decided.add(symbol)
-                continue
-            instrument = universe[symbol]
-            price = await ctx.get_price(instrument.id)
-            if price is None or price <= 0:
-                waiting += 1
                 continue
             quantity = float(int(min(equity / MAX_POSITIONS, ctx.portfolio.cash) / price))
-            decided.add(symbol)
             if quantity <= 0:
                 passed.append(symbol)
                 continue
+            instrument = universe[symbol]
             await ctx.open_leg(instrument, "buy", quantity, price)
             holdings[symbol] = {
                 "instrument_id": str(instrument.id), "quantity": quantity, "entry_price": price,
-                "opened_at": ctx.now.isoformat(), "breakout_pct": round(strength, 2),
-                "breakout_week": (this_week - timedelta(weeks=1)).isoformat(),
+                "opened_at": ctx.now.isoformat(), "breakout_pct": round(strength, 2), "breakout_week": this_week.isoformat(),
             }
             bought.append(f"{symbol} @ {price:,.2f} (+{strength:.2f}% over its 52-week high)")
-        ranking["decided"], ranking["waiting"] = sorted(decided), waiting
+        check["decided"], check["waiting"] = sorted(decided), waiting
         if waiting:
-            ctx.wake_at(ctx.now + SCAN_EVERY)
-    ctx.state["ranking"] = ranking
-    if ranking["waiting"] and ranking_day and is_open:
-        notes.append(f"{ranking['waiting']} stock(s)' last week not in yet: looked at again every {SCAN_EVERY.seconds // 60} min today")
+            ctx.wake_at(ctx.now + RETRY_EVERY)
+    ctx.state["check"] = check
+    if check["waiting"] and check["day"] == today.isoformat() and market_open(now_ist):
+        notes.append(f"{check['waiting']} stock(s) without today's quote or a stored day: looked at again every minute until the close")
 
     ctx.state["holdings"] = holdings
     text = []
@@ -381,10 +402,7 @@ async def evaluate(ctx) -> None:
     if passed:
         text.append(f"no slot for {len(passed)} more breakout(s): {', '.join(passed[:5])}{'...' if len(passed) > 5 else ''}")
     text.extend(notes)
-    day = date.fromisoformat(ranking["day"]) if ranking.get("day") else None
-    upcoming = (f"{day:%a %d-%b} {RANK_AT:%H:%M}" if day is not None and (day > today or (day == today and now_ist.time() < RANK_AT))
-                else _next_ranking(now_ist))
-    text.append(f"holding {len(holdings)}/{MAX_POSITIONS} | {len(universe)} stocks watched | next ranking {upcoming}")
+    text.append(f"holding {len(holdings)}/{MAX_POSITIONS} | {len(universe)} stocks watched | next check {_next_check(now_ist)}")
     action = "entered" if bought else "exited" if sold else "hold" if holdings else "skipped"
     signal = "BUY" if bought else "SELL" if sold else None
     ctx.note(action, signal=signal, reason=" | ".join(text))

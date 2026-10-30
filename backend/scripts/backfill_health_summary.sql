@@ -1598,9 +1598,9 @@ SELECT trim(s.name) AS strategy, sv.version_number, md5(replace(sv.python_code, 
        (SELECT count(*) FROM jsonb_object_keys(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END)) AS stocks_held,
        (SELECT string_agg(t.exit_reason || ' x' || t.n, ', ') FROM (SELECT exit_reason, count(*) AS n FROM paper_native_trades WHERE deployment_id = d.id GROUP BY 1) t) AS trades,
        (SELECT count(*) FROM paper_native_trades WHERE deployment_id = d.id AND (closed_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date) AS sold_today,
-       d.state::jsonb -> 'ranking' ->> 'day' AS ranking_day,
-       jsonb_array_length(coalesce(d.state::jsonb -> 'ranking' -> 'decided', '[]'::jsonb)) AS ranked_decided,
-       d.state::jsonb -> 'ranking' ->> 'waiting' AS ranking_waiting,
+       coalesce(d.state::jsonb -> 'check' ->> 'day', d.state::jsonb -> 'ranking' ->> 'day') AS ranking_day,
+       jsonb_array_length(coalesce(d.state::jsonb -> 'check' -> 'decided', d.state::jsonb -> 'ranking' -> 'decided', '[]'::jsonb)) AS ranked_decided,
+       coalesce(d.state::jsonb -> 'check' ->> 'waiting', d.state::jsonb -> 'ranking' ->> 'waiting') AS ranking_waiting,
        (SELECT count(*) FROM jsonb_each(CASE WHEN jsonb_typeof(d.state::jsonb -> 'holdings') = 'object' THEN d.state::jsonb -> 'holdings' ELSE '{}'::jsonb END) h
         WHERE h.value ? 'breakout_week') AS weekly_held,
        (SELECT string_agg(w || ' x' || n, ', ') FROM (

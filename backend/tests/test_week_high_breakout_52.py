@@ -1,10 +1,11 @@
-"""52 Week High Breakout (native_strategies/week_high_breakout_52.py, 29 Oct):
-the 52 Candle Breakout card moved to weekly candles -- 500 NSE stocks, a
-finished week closing above the highest high of the 52 before it is bought
-at 09:16 on the next week's first trading day (strongest first, up to 10
-stocks), and sold at 09:16 on the trading day after a finished week closes
-below the stock's own 10-week MA of (O+H+L+C)/4. Version 1's 15-minute
-holdings are sold at the first 09:16 after the switch."""
+"""52 Week High Breakout (native_strategies/week_high_breakout_52.py; weekly
+29 Oct, the Friday 3 PM check 30 Oct): 500 NSE stocks on weekly candles,
+checked once a week -- Friday, or the trading day before when Friday is an
+NSE holiday -- at 15:00, this week's candle its stored days plus today's
+from Kite's quote, its close the live price. First the stocks held whose
+week closes below their 10-week MA of (O+H+L+C)/4 are sold, then the stocks
+whose price is above the highest high of the 52 weeks before are bought,
+strongest first, up to 10."""
 
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
@@ -29,11 +30,12 @@ from app.services.paper_trading.native_runner import NativeContext
 
 STOCKS = wk.STOCK_UNIVERSE[:12]
 CASH = 2_000_000.0
-FIRST = date(2026, 10, 26) - timedelta(weeks=60)  # a Monday: 60 weeks of daily candles before the week of 26 Oct
+FRI = date(2026, 11, 6)  # the check day of the week of 2 Nov
+FIRST = date(2026, 11, 2) - timedelta(weeks=60)  # a Monday: 60 weeks of daily candles before it
 
 
-def at(month: int, day: int, hh: int, mm: int, ss: int = 0) -> datetime:
-    return datetime(2026, month, day, hh, mm, ss, tzinfo=IST)
+def at(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
+    return datetime.combine(d, time(hh, mm, ss), tzinfo=IST)
 
 
 def trading_days(first: date, last: date):
@@ -45,8 +47,10 @@ def trading_days(first: date, last: date):
 
 
 class Market:
-    def __init__(self, db):
-        self.db = db
+    def __init__(self, db, monkeypatch):
+        self.db, self.monkeypatch = db, monkeypatch
+        self.quotes: dict[str, tuple[float, float, float, float]] = {}  # symbol -> today's open, high, low, last price
+        self.logged_in = True
 
     async def build(self) -> "Market":
         db = self.db
@@ -56,7 +60,7 @@ class Market:
         strategy = Strategy(name="52 Week High Breakout", owner_id=user.id, code_type="native")
         db.add(strategy)
         await db.flush()
-        version = StrategyVersion(strategy_id=strategy.id, version_number=2, timeframe="1wk", instrument_ids=[], parameters={},
+        version = StrategyVersion(strategy_id=strategy.id, version_number=3, timeframe="1wk", instrument_ids=[], parameters={},
                                   python_code="#", position_sizing={}, risk_rules={})
         self.portfolio = PaperPortfolio(user_id=user.id, name="WK", cash=CASH, initial_capital=CASH)
         db.add_all([version, self.portfolio])
@@ -70,6 +74,20 @@ class Market:
         db.add_all([self.deployment, *self.stocks.values()])
         await db.commit()
         await db.refresh(self.deployment)
+
+        async def creds(db):
+            return {"api_key": "k", "access_token": "t"} if self.logged_in else None
+
+        async def quotes(broker, keys):
+            out = {}
+            for key in keys:
+                q = self.quotes.get(key.split(":", 1)[1])
+                if q is not None:
+                    out[key] = {"last_price": q[3], "ohlc": {"open": q[0], "high": q[1], "low": q[2], "close": 99.0}}
+            return out, None
+
+        self.monkeypatch.setattr(wk, "find_connected_zerodha_credentials", creds)
+        self.monkeypatch.setattr(wk, "kite_quotes", quotes)
         return self
 
     async def day(self, symbol: str, d: date, o: float, h: float, lo: float, c: float) -> None:
@@ -79,24 +97,24 @@ class Market:
                                 open=o, high=h, low=lo, close=c, volume=1000, source="test"))
         await self.db.commit()
 
-    async def history(self, last: date = date(2026, 10, 29), symbols=STOCKS) -> None:
-        """Flat days from FIRST to `last`: open 99, high 100, low 98, close 99 -- (O+H+L+C)/4 = 99."""
+    async def history(self, last: date = date(2026, 11, 5), symbols=STOCKS, first: date = FIRST) -> None:
+        """Flat days from `first` to `last`: open 99, high 100, low 98, close 99 -- (O+H+L+C)/4 = 99."""
         for symbol in symbols:
             self.db.add_all([
                 OhlcvCandle(instrument_id=self.stocks[symbol].id, timeframe="1d",
                             ts=datetime.combine(d, time(0), tzinfo=IST).astimezone(timezone.utc),
                             open=99.0, high=100.0, low=98.0, close=99.0, volume=1000, source="test")
-                for d in trading_days(FIRST, last)
+                for d in trading_days(first, last)
             ])
         await self.db.commit()
 
-    def prices(self, now: datetime, **by_symbol: float) -> None:
-        for symbol, instrument in self.stocks.items():
-            tick_engine.set_real_price(instrument.id, by_symbol.get(symbol, 99.0), source="test")
-            tick_engine._real_price_at[instrument.id] = now
+    def flat_quotes(self, **by_symbol: tuple[float, float, float, float]) -> None:
+        self.quotes = {s: by_symbol.get(s, (99.0, 100.0, 98.0, 99.0)) for s in STOCKS}
 
     async def check(self, now: datetime, **prices: float) -> NativeContext:
-        self.prices(now, **prices)
+        for symbol, instrument in self.stocks.items():
+            tick_engine.set_real_price(instrument.id, prices.get(symbol, 99.0), source="test")
+            tick_engine._real_price_at[instrument.id] = now
         ctx = NativeContext(db=self.db, portfolio=self.portfolio, deployment=self.deployment, state=self.deployment.state or {},
                             now=now.astimezone(timezone.utc))
         await wk.evaluate(ctx)
@@ -104,183 +122,140 @@ class Market:
         await self.db.commit()
         return ctx
 
+    def hold(self, symbol: str, entry: float, opened: datetime, quantity: float = 100.0) -> dict:
+        return {"instrument_id": str(self.stocks[symbol].id), "quantity": quantity, "entry_price": entry,
+                "opened_at": opened.astimezone(timezone.utc).isoformat(), "breakout_pct": 3.0, "breakout_week": "2026-10-26"}
+
     async def trades(self) -> list[PaperNativeTrade]:
         return (await self.db.execute(select(PaperNativeTrade).order_by(PaperNativeTrade.closed_at))).scalars().all()
 
 
 @pytest.fixture
-async def market(db_session):
-    m = await Market(db_session).build()
+async def market(db_session, monkeypatch):
+    m = await Market(db_session, monkeypatch).build()
     yield m
     tick_engine.forget([i.id for i in m.stocks.values()])
 
 
 def test_the_rules():
-    days = [{"day": d, "open": 100 + k, "high": 101 + k, "low": 99 + k, "close": 100.5 + k}
-            for k, d in enumerate(trading_days(date(2026, 9, 30), date(2026, 10, 9)))]  # Wed 30 Sep .. Fri 9 Oct, 2 Oct a holiday
-    w = wk.weeks(days)
-    assert [(b["week"], b["last_day"]) for b in w] == [(date(2026, 9, 28), date(2026, 10, 1)), (date(2026, 10, 5), date(2026, 10, 9))]
-    assert (w[0]["open"], w[0]["high"], w[0]["low"], w[0]["close"]) == (100, 102, 99, 101.5)
-    assert wk._finished(w, date(2026, 10, 12)) and not wk._finished(w[:1], date(2026, 10, 12))
-    assert wk._finished(w[:1], date(2026, 10, 5))  # Thu 1 Oct closed the week: Fri 2 Oct was a holiday
-    assert not wk._finished(w[:1] + [{**w[1], "last_day": date(2026, 10, 8)}], date(2026, 10, 12))  # Friday's candle not in
-    assert wk.first_trading_day(date(2026, 1, 26)) == date(2026, 1, 27)  # Republic Day Monday
-    assert wk.last_trading_day_before(date(2026, 10, 5)) == date(2026, 10, 1)
-    assert wk.finished_before(at(10, 30, 15, 29)) == date(2026, 10, 26) and wk.finished_before(at(10, 30, 15, 30)) == date(2026, 11, 2)
-    assert wk.finished_before(at(10, 1, 15, 30)) == date(2026, 10, 5)  # Thu 1 Oct: Friday a holiday
-    assert wk.finished_before(at(11, 1, 12, 0)) == date(2026, 11, 2)  # a Sunday
-    assert wk._next_ranking(at(10, 29, 10, 0)) == "Mon 02-Nov 09:16" and wk._next_ranking(at(11, 2, 9, 15)) == "Mon 02-Nov 09:16"
-    assert wk._next_ranking(at(11, 2, 9, 16)) == "Mon 09-Nov 09:16" and wk._next_ranking(at(1, 24, 12, 0)) == "Tue 27-Jan 09:16"
+    assert wk.check_day(date(2026, 11, 2)) == FRI
+    assert wk.check_day(date(2026, 9, 28)) == date(2026, 10, 1)  # Fri 2 Oct, Gandhi Jayanti: Thursday
+    assert wk.check_day(date(2026, 12, 21)) == date(2026, 12, 24)  # Christmas Friday
+    assert wk._next_check(at(FRI, 14, 59)) == "Fri 06-Nov 15:00" and wk._next_check(at(FRI, 15, 0)) == "Fri 13-Nov 15:00"
+    assert wk._next_check(at(date(2026, 9, 30), 10, 0)) == "Thu 01-Oct 15:00"
+    days = [{"day": d, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for d in trading_days(date(2026, 10, 26), date(2026, 11, 5))]
+    today = {"day": FRI, "open": 100.0, "high": 106.0, "low": 95.0, "close": 104.0}
+    w = wk.week_so_far(days, today, date(2026, 11, 2), FRI)
+    assert [(b["week"], b["last_day"]) for b in w] == [(date(2026, 10, 26), date(2026, 10, 30)), (date(2026, 11, 2), FRI)]
+    assert (w[-1]["open"], w[-1]["high"], w[-1]["low"], w[-1]["close"]) == (100.0, 106.0, 95.0, 104.0)
+    assert wk.week_so_far(days, None, date(2026, 11, 2), FRI) is None  # no quote
+    assert wk.week_so_far([d for d in days if d["day"] != date(2026, 11, 4)], today, date(2026, 11, 2), FRI) is None  # Wednesday not stored
+    assert wk.week_so_far([d for d in days if d["day"] != date(2026, 10, 30)], today, date(2026, 11, 2), FRI) is None  # last Friday not stored
     flat = [{"open": 99.0, "high": 100.0, "low": 98.0, "close": 99.0}] * 52
     assert wk.breakout(flat + [{"open": 99, "high": 104, "low": 99, "close": 103}]) == pytest.approx(3.0)
     assert wk.breakout(flat[1:] + [{"open": 99, "high": 104, "low": 99, "close": 103}]) is None  # 52 weeks needed before it
     assert len(wk.STOCK_UNIVERSE) == len(set(wk.STOCK_UNIVERSE)) == 500
 
 
-async def test_a_weekly_breakout_is_bought_at_0916_on_the_next_weeks_first_trading_day(market):
+async def test_nothing_trades_before_fridays_3pm(market):
     a = STOCKS[0]
     await market.history()
-    await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)  # the week of 26 Oct closes 3% over its 52-week high
-    await market.day(a, date(2026, 11, 2), 103, 120, 103, 119)  # this week's own candle never counts
-    early = await market.check(at(11, 2, 9, 15, 30), **{a: 103.5})
-    assert early.state["holdings"] == {} and early._wake_at == at(11, 2, 9, 16).astimezone(timezone.utc)
-    assert "next ranking Mon 02-Nov 09:16" in early._last_reason
+    market.flat_quotes(**{a: (99.0, 104.0, 99.0, 103.0)})
+    thursday = await market.check(at(date(2026, 11, 5), 15, 0, 5))
+    assert thursday.state["holdings"] == {} and "next check Fri 06-Nov 15:00" in thursday._last_reason
+    early = await market.check(at(FRI, 14, 59))
+    assert early.state["holdings"] == {} and early._wake_at == at(FRI, 15, 0).astimezone(timezone.utc)
 
-    ctx = await market.check(at(11, 2, 9, 16, 5), **{a: 103.5})
+
+async def test_a_52_week_high_at_3pm_is_bought_at_the_live_price(market):
+    a = STOCKS[0]
+    await market.history()
+    market.flat_quotes(**{a: (99.0, 104.0, 99.0, 103.0)})  # 3% over the 52-week high of 100
+    ctx = await market.check(at(FRI, 15, 0, 5))
     leg = ctx.state["holdings"][a]
-    assert leg["quantity"] == float(int(CASH / 10 / 103.5)) and leg["entry_price"] == 103.5 and leg["breakout_pct"] == 3.0
-    assert leg["breakout_week"] == "2026-10-26" and ctx._last_signal == "BUY"
-    assert f"{a} @ 103.50 (+3.00% over its 52-week high)" in ctx._last_reason and "next ranking Mon 09-Nov 09:16" in ctx._last_reason
-    assert market.portfolio.cash == pytest.approx(CASH - leg["quantity"] * 103.5)
-
-
-async def test_a_breakout_not_bought_on_the_weeks_first_trading_day_is_passed_over(market):
-    a = STOCKS[0]
-    await market.history()
-    await market.check(at(10, 30, 16, 0))  # the card has run before
-    await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)
-    ctx = await market.check(at(11, 3, 9, 20), **{a: 103.5})
-    assert ctx.state["holdings"] == {} and ctx._last_action == "skipped"
-
-
-async def test_a_cards_first_run_ranks_last_weeks_breakouts_that_day_the_switch(market):
-    a, b, c = STOCKS[:3]
-    await market.history(last=date(2026, 10, 22))
-    for symbol in STOCKS:
-        if symbol not in (a, b):
-            await market.day(symbol, date(2026, 10, 23), 99, 100, 98, 99)
-    await market.day(a, date(2026, 10, 23), 99, 103, 99, 102)  # the week ending Fri 23 Oct: 2% over the 52-week high
-    await market.day(b, date(2026, 10, 23), 99, 106, 99, 105)  # 5%
-    market.deployment.state = {"holdings": {  # version 1's, bought on a 15-minute breakout
-        c: {"instrument_id": str(market.stocks[c].id), "quantity": 100.0, "entry_price": 100.0,
-            "opened_at": "2026-10-28T05:00:00+00:00", "breakout_pct": 1.0, "breakout_candle": "2026-10-28T04:45:00+00:00"}}}
-    early = await market.check(at(10, 29, 8, 50), **{a: 102.5, b: 105.5, c: 101.0})
-    assert early.state["ranking"]["day"] == "2026-10-29" and "next ranking Thu 29-Oct 09:16" in early._last_reason
-    assert f"{c} sells at 09:16 today" in early._last_reason
-
-    ctx = await market.check(at(10, 29, 9, 16, 5), **{a: 102.5, b: 105.5, c: 101.0})
-    [trade] = await market.trades()
-    assert trade.exit_reason == "switch_to_weekly" and trade.pnl == pytest.approx(100.0)
-    assert set(ctx.state["holdings"]) == {a, b} and ctx.state["holdings"][b]["breakout_week"] == "2026-10-19"
-    assert ctx._last_reason.index(f"bought {b} @ 105.50 (+5.00%") < ctx._last_reason.index(f"{a} @ 102.50 (+2.00%")
-    assert "next ranking Mon 02-Nov 09:16" in ctx._last_reason
-
-    later = await market.check(at(10, 30, 9, 16, 5), **{a: 102.5, b: 105.5, c: 101.0})  # once: not again the next day
-    assert set(later.state["holdings"]) == {a, b} and later.state["ranking"]["day"] == "2026-10-29"
+    assert leg["quantity"] == float(int(CASH / 10 / 103.0)) and leg["entry_price"] == 103.0 and leg["breakout_pct"] == 3.0
+    assert leg["breakout_week"] == "2026-11-02" and ctx._last_signal == "BUY"
+    assert f"{a} @ 103.00 (+3.00% over its 52-week high)" in ctx._last_reason and "next check Fri 13-Nov 15:00" in ctx._last_reason
+    assert ctx.state["check"]["waiting"] == 0 and len(ctx.state["check"]["decided"]) == 12
+    again = await market.check(at(FRI, 15, 10))  # once a week
+    assert set(again.state["holdings"]) == {a} and again._last_action == "hold"
 
 
 async def test_the_strongest_breakouts_fill_the_10_slots(market):
     await market.history()
-    for k, symbol in enumerate(STOCKS):  # closes 1% .. 12% over the high
-        close = 100 * (1 + (k + 1) / 100)
-        await market.day(symbol, date(2026, 10, 30), 99, close + 1, 99, close)
-    ctx = await market.check(at(11, 2, 9, 16, 5))
+    market.flat_quotes(**{s: (99.0, 100 * (1 + (k + 1) / 100) + 1, 99.0, 100 * (1 + (k + 1) / 100)) for k, s in enumerate(STOCKS)})
+    ctx = await market.check(at(FRI, 15, 0, 5))
     assert set(ctx.state["holdings"]) == set(STOCKS[2:])  # the 10 strongest
     assert f"no slot for 2 more breakout(s): {STOCKS[1]}, {STOCKS[0]}" in ctx._last_reason
-    again = await market.check(at(11, 2, 9, 30))  # the week is ranked once
-    assert set(again.state["holdings"]) == set(STOCKS[2:]) and "no slot" not in again._last_reason
 
 
-async def test_a_stock_whose_week_is_not_in_yet_is_looked_at_again_5_minutes_later(market):
-    a, b = STOCKS[:2]
-    await market.history(symbols=[a])
-    await market.history(last=date(2026, 10, 29), symbols=[b])
-    await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)
-    first = await market.check(at(11, 2, 9, 16, 5), **{a: 103.5, b: 106.0})
-    assert set(first.state["holdings"]) == {a} and "1 stock(s)' last week not in yet" in first._last_reason
-    assert first._wake_at == at(11, 2, 9, 21, 5).astimezone(timezone.utc)
-
-    await market.day(b, date(2026, 10, 30), 99, 106, 99, 105)  # Friday's candle comes in
-    soon = await market.check(at(11, 2, 9, 18), **{a: 103.5, b: 106.0})
-    assert set(soon.state["holdings"]) == {a}  # not looked at again yet
-    later = await market.check(at(11, 2, 9, 21, 10), **{a: 103.5, b: 106.0})
-    assert set(later.state["holdings"]) == {a, b} and later.state["holdings"][b]["breakout_pct"] == 5.0
-    assert "not in yet" not in later._last_reason
-
-
-async def test_a_finished_week_below_its_10_week_ma_sells_it_at_0916_the_next_trading_day(market):
-    a = STOCKS[0]
-    await market.history()
-    await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)
-    bought = await market.check(at(11, 2, 9, 16, 5), **{a: 103.5})
-    quantity = bought.state["holdings"][a]["quantity"]
-
-    for d, close in ((date(2026, 11, 2), 100.0), (date(2026, 11, 3), 98.0), (date(2026, 11, 4), 97.0), (date(2026, 11, 5), 96.5)):
-        await market.day(a, d, 103.5, 104, 95, close)
-    midweek = await market.check(at(11, 6, 10, 0), **{a: 96.0})  # under the MA, but the week is still running
-    assert a in midweek.state["holdings"] and await market.trades() == []
-
-    # The week of 2 Nov: open 103.5, high 104, low 95, close 96 -- (O+H+L+C)/4 = 99.625;
-    # its 10-week MA (8 flat weeks at 99, the breakout week at 101, this one) = 99.2625.
-    await market.day(a, date(2026, 11, 6), 96.5, 97, 95, 96.0)
-    evening = await market.check(at(11, 6, 15, 40), **{a: 96.0})
-    assert a in evening.state["holdings"]
-    assert f"{a} sells at 09:16 on the next trading day (week of 02-Nov closed 96.00 < its 10-week MA 99.26)" in evening._last_reason
-    before = await market.check(at(11, 9, 9, 15, 30), **{a: 95.0})
-    assert a in before.state["holdings"] and f"{a} sells at 09:16 today" in before._last_reason
-
-    out = await market.check(at(11, 9, 9, 16, 5), **{a: 95.5})
+async def test_a_holding_whose_week_closes_under_its_10_week_ma_at_3pm_is_sold_first(market):
+    a, b, c = STOCKS[:3]
+    await market.history(last=date(2026, 11, 1))
+    for d in trading_days(date(2026, 11, 2), date(2026, 11, 5)):
+        await market.day(a, d, 99, 100, 95, 96)
+        for symbol in STOCKS[1:]:
+            await market.day(symbol, d, 99, 100, 98, 99)
+    market.deployment.state = {"holdings": {a: market.hold(a, 103.0, at(date(2026, 10, 30), 15, 0)),
+                                            b: market.hold(b, 99.0, at(date(2026, 10, 30), 15, 0))}}
+    # The week of 2 Nov at 15:00 for a: open 99, high 100, low 95, close 96 -- (O+H+L+C)/4 = 97.5;
+    # its 10-week MA (9 flat weeks at 99 and this one) = 98.85. b: flat, at its MA -- held.
+    market.flat_quotes(**{a: (96.0, 97.0, 95.5, 96.0), c: (99.0, 104.0, 99.0, 103.0)})
+    ctx = await market.check(at(FRI, 15, 0, 5))
     [trade] = await market.trades()
-    assert out.state["holdings"] == {} and trade.exit_reason == "ma_exit" and out._last_signal == "SELL"
-    assert trade.pnl == pytest.approx((95.5 - 103.5) * quantity)
-    assert market.portfolio.cash == pytest.approx(CASH + trade.pnl)
+    assert trade.exit_reason == "ma_exit" and trade.pnl == pytest.approx((96.0 - 103.0) * 100)
+    assert f"sold {a} @ 96.00 (week to 06-Nov at 15:00: 96.00 < its 10-week MA 98.85" in ctx._last_reason
+    assert set(ctx.state["holdings"]) == {b, c}  # b held; c bought after the sale
 
 
-async def test_a_week_still_over_its_ma_is_held(market):
+async def test_a_stock_bought_at_this_check_is_checked_from_the_next(market):
     a = STOCKS[0]
     await market.history()
-    await market.day(a, date(2026, 10, 30), 99, 104, 99, 103)
-    await market.check(at(11, 2, 9, 16, 5), **{a: 103.5})
-    for d in trading_days(date(2026, 11, 2), date(2026, 11, 6)):
-        await market.day(a, d, 103.5, 106, 103, 105)
-    ctx = await market.check(at(11, 9, 9, 16, 5), **{a: 105.0})
-    assert a in ctx.state["holdings"] and ctx._last_action == "hold" and await market.trades() == []
+    market.deployment.state = {"holdings": {a: market.hold(a, 103.0, at(FRI, 15, 0, 2))}}
+    market.flat_quotes(**{a: (99.0, 100.0, 90.0, 91.0)})  # under its MA, but bought at 15:00:02 today
+    ctx = await market.check(at(FRI, 15, 1, 5))
+    assert a in ctx.state["holdings"] and await market.trades() == []
 
 
-async def test_version_1s_15_minute_holdings_are_sold_at_the_first_0916_after_the_switch(market):
+async def test_a_stock_without_a_quote_or_a_day_is_looked_at_again_a_minute_later(market):
     a, b = STOCKS[:2]
-    await market.history()
-    market.deployment.state = {"holdings": {
-        s: {"instrument_id": str(market.stocks[s].id), "quantity": 100.0, "entry_price": 100.0,
-            "opened_at": "2026-10-28T05:00:00+00:00", "breakout_pct": 1.0, "breakout_candle": "2026-10-28T04:45:00+00:00"}
-        for s in (a, b)
-    }}
-    evening = await market.check(at(10, 29, 16, 0), **{a: 101.0, b: 98.0})
-    assert set(evening.state["holdings"]) == {a, b}
-    assert f"{a} sells at 09:16 on the next trading day (bought on 15-min candles, the strategy now on weekly ones)" in evening._last_reason
+    await market.history(symbols=STOCKS[1:])
+    await market.history(last=date(2026, 11, 3), symbols=[a])  # Wednesday 4 Nov not in yet
+    market.flat_quotes(**{a: (99.0, 106.0, 99.0, 105.0)})
+    del market.quotes[b]
+    first = await market.check(at(FRI, 15, 0, 5))
+    assert first.state["holdings"] == {} and first.state["check"]["waiting"] == 2
+    assert "2 stock(s) without today's quote or a stored day" in first._last_reason
+    assert first._wake_at == at(FRI, 15, 1, 5).astimezone(timezone.utc)
 
-    out = await market.check(at(10, 30, 9, 16, 5), **{a: 101.0, b: 98.0})
-    trades = await market.trades()
-    assert out.state["holdings"] == {} and {t.exit_reason for t in trades} == {"switch_to_weekly"}
-    assert sorted(t.pnl for t in trades) == pytest.approx([-200.0, 100.0])
-    assert out.state["ranking"]["day"] == "2026-10-30" and len(out.state["ranking"]["decided"]) == 12  # the first run's: no breakouts
+    await market.day(a, date(2026, 11, 4), 99, 100, 98, 99)
+    await market.day(a, date(2026, 11, 5), 99, 100, 98, 99)
+    market.quotes[b] = (99.0, 104.0, 99.0, 103.0)
+    soon = await market.check(at(FRI, 15, 0, 40))
+    assert soon.state["holdings"] == {}  # not looked at again yet
+    later = await market.check(at(FRI, 15, 1, 10))
+    assert set(later.state["holdings"]) == {a, b} and later.state["check"]["waiting"] == 0
+
+
+async def test_a_friday_holiday_moves_the_check_to_thursday(market):
+    a = STOCKS[0]
+    await market.history(last=date(2026, 9, 30), first=date(2026, 9, 28) - timedelta(weeks=60))
+    market.flat_quotes(**{a: (99.0, 104.0, 99.0, 103.0)})
+    ctx = await market.check(at(date(2026, 10, 1), 15, 0, 5))  # Thu 1 Oct: Fri 2 Oct is Gandhi Jayanti
+    assert set(ctx.state["holdings"]) == {a} and ctx.state["holdings"][a]["breakout_week"] == "2026-09-28"
+    assert "next check Fri 09-Oct 15:00" in ctx._last_reason
+
+
+async def test_without_a_kite_login_nothing_trades_and_it_says_why(market):
+    await market.history()
+    market.logged_in = False
+    ctx = await market.check(at(FRI, 15, 0, 5))
+    assert ctx.state["holdings"] == {} and "Zerodha isn't logged in" in ctx._last_reason and ctx.state["check"]["waiting"] == 12
 
 
 async def test_stop_and_exit_sells_every_holding(market):
     await market.history()
-    for symbol in STOCKS[:3]:
-        await market.day(symbol, date(2026, 10, 30), 99, 104, 99, 103)
-    await market.check(at(11, 2, 9, 16, 5))
-    market.deployment.state = {**market.deployment.state, "force_exit": True}
-    out = await market.check(at(11, 2, 18, 0))
+    market.deployment.state = {"holdings": {s: market.hold(s, 100.0, at(date(2026, 10, 30), 15, 0)) for s in STOCKS[:3]},
+                               "force_exit": True}
+    out = await market.check(at(FRI, 18, 0))
     assert out.state["holdings"] == {} and [t.exit_reason for t in await market.trades()] == ["manual"] * 3

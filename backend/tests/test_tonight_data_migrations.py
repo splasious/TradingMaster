@@ -1068,7 +1068,9 @@ async def test_52_candle_breakout_moves_onto_weekly_candles_as_52_week_high_brea
     amop = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_137_897.50)
     await _run(db_engine, _load("e3a5c7d9f1b4_candle_breakout_52_15min"))
     migration = _load("f5b7d9e1a3c6_week_high_breakout_52")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    friday = _load("a8c0e2f4b6d9_week_high_breakout_friday_3pm")
+    assert friday.FROM_MD5S == {migration.TO_MD5}  # the built-in has moved on since (a8c0e2f4b6d9)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     assert migration.FROM_MD5S == {_md5(VERSIONS.parent.parent / "app/services/strategy/native_strategies/candle_breakout_52_15min.py")}
 
     [strategy] = (await db_session.execute(select(Strategy).where(Strategy.owner_id == amop.user_id, Strategy.name == "52 Candle Breakout 15 MIN"))).scalars().all()
@@ -1095,3 +1097,26 @@ async def test_52_candle_breakout_moves_onto_weekly_candles_as_52_week_high_brea
     actions = (await db_session.execute(select(Log.action).where(Log.object_id.in_([str(strategy_id), str(card_id), str(pool_id)])))).scalars().all()
     assert sorted(a for a in actions if a != "PAPER_NATIVE_TRADING_STARTED" and a != "STRATEGY_CREATED" and a != "PAPER_PORTFOLIO_CREATED") == [
         "PAPER_NATIVE_VERSION_UPDATED", "PAPER_PORTFOLIO_RENAMED", "STRATEGY_RENAMED", "STRATEGY_VERSION_CREATED"]
+
+
+async def test_52_week_high_breakout_moves_onto_the_friday_3pm_check_keeping_its_holdings(db_engine, db_session):
+    migration = _load("a8c0e2f4b6d9_week_high_breakout_friday_3pm")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v2 = "# 52 Week High Breakout, ranked at 09:16 on a week's first trading day\n"
+    migration.FROM_MD5S = {_md5_text(v2)}
+
+    running = await _deployment(db_session, "fri_a@tradingmaster.internal", v2)
+    edited = await _deployment(db_session, "fri_b@tradingmaster.internal", "# 52 Week High Breakout, edited by hand\n")
+    ids, before = [running.id, edited.id], {d.id: d.strategy_version_id for d in (running, edited)}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "DECIDE_AT = time(15, 0)" in version.python_code and "def check_day(" in version.python_code
+    assert moved.state["holdings"]["SBIN"]["quantity"] == 10.0  # its state kept
+    assert (await db_session.get(PaperNativeDeployment, ids[1])).strategy_version_id == before[ids[1]]
