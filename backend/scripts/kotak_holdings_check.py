@@ -28,6 +28,13 @@ from app.services.live_trading.oms import get_authenticated_broker
 from app.services.notifications.telegram import send_telegram
 
 
+def _num(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fields(rows: list[dict]) -> list[str]:
     return sorted({k for row in rows if isinstance(row, dict) for k in row})
 
@@ -66,6 +73,13 @@ async def main() -> None:
                     if isinstance(row, dict) and (instrument.symbol in json.dumps(row) or str(key[1]) in json.dumps(row))
                 ]
                 found = (in_pos or 0.0) + (in_hold or 0.0)
+                for row in (r for r in matching if r in raw_holdings):
+                    same_token = sorted(f for f, v in row.items() if str(v) == str(key[1]))
+                    same_qty = sorted(f for f, v in row.items() if _num(v) == position.quantity)
+                    log.append(f"  stock {k + 1} holdings row: the app's segment {key[0]!r} vs exchangeSegment {row.get('exchangeSegment')!r}; "
+                               f"fields equal to the app's token: {', '.join(same_token) or 'none'}; "
+                               f"instrumentToken digits {len(str(row.get('instrumentToken') or ''))} vs the app's {len(str(key[1]))}; "
+                               f"fields equal to the live quantity: {', '.join(same_qty) or 'none'}")
                 log.append(f"  stock {k + 1}: key found in positions {in_pos is not None}, in holdings {in_hold is not None}; "
                            f"the app reads {'the same quantity' if abs(found - position.quantity) < 1e-6 else 'a different quantity'}; "
                            f"Kotak rows naming it: {len(matching)}")
