@@ -15,14 +15,21 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models.broker import Broker, BrokerAccount
 from app.models.live_native import LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED, LiveNativeDeployment
 from app.services.live_trading.native_gateway import BrokerGateway
-from app.services.live_trading.native_live import READ_FAILED, check_account_limits, pause, reconcile_account, run_live_native
+from app.services.live_trading.native_live import (
+    MISMATCH,
+    READ_FAILED,
+    check_account_limits,
+    pause,
+    reconcile_account,
+    run_live_native,
+)
 from app.services.market_data.hours import nse_market_open
 
 logger = logging.getLogger(__name__)
@@ -122,10 +129,12 @@ class LiveNativeScheduler:
 
             if self._last_reconcile is None or now - self._last_reconcile >= RECONCILE_INTERVAL:
                 self._last_reconcile = now
-                # A run paused only because its broker couldn't be read is checked too: it resumes once a read matches.
+                # A run paused for a broker read or a difference is checked too: it resumes once a read matches.
                 read_paused = (await db.execute(
                     select(LiveNativeDeployment.broker_account_id).where(
-                        LiveNativeDeployment.status == LIVE_NATIVE_PAUSED, LiveNativeDeployment.pause_reason.like(f"{READ_FAILED}%"))
+                        LiveNativeDeployment.status == LIVE_NATIVE_PAUSED,
+                        or_(LiveNativeDeployment.pause_reason.like(f"{READ_FAILED}%"), LiveNativeDeployment.pause_reason.like(f"{MISMATCH}%")),
+                    )
                 )).scalars().all()
                 for account_id in {d.broker_account_id for d in deployments} | set(read_paused):
                     try:

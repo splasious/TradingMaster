@@ -233,3 +233,16 @@ async def test_kotak_positions_net_todays_and_carried_quantities():
         [{"exchangeSegment": "nse_cm", "instrumentToken": 3045, "quantity": 12}],
     ))
     assert await kotak.net_positions() == {("nse_fo", "40001"): 65.0, ("nse_cm", "3045"): 12.0}
+
+
+async def test_kotak_holdings_are_keyed_by_their_exchange_identifier():
+    """Seen live 2 Nov: a stock bought on Friday is a holding on Monday, its
+    exchange token in exchangeIdentifier -- instrumentToken is Kotak's own
+    number for it and read first had every holding at 0."""
+    from app.services.live_trading.native_gateway import BrokerGateway
+
+    kotak = BrokerGateway("kotak_neo", _Holder([], [
+        {"exchangeSegment": "nse_cm", "instrumentToken": 61, "exchangeIdentifier": "3063", "quantity": 80, "sellableQuantity": 80},
+        {"exchangeSegment": "nse_cm", "instrumentToken": 7, "exchangeIdentifier": "19234", "quantity": 8, "sellableQuantity": 8},
+    ]))
+    assert await kotak.net_positions() == {("nse_cm", "3063"): 80.0, ("nse_cm", "19234"): 8.0}

@@ -399,6 +399,42 @@ async def test_paused_for_a_read_it_stays_paused_on_a_difference_or_the_kill_swi
     assert not native_live.read_paused(deployment)
 
 
+async def test_paused_for_a_difference_it_resumes_once_the_broker_matches_and_alerts_once_meanwhile(db_session):
+    from app.models.alert import Alert
+
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+    await native_live.run_live_native(db_session, deployment, gateway, NOW)
+    held = gateway.held[("NFO", "NIFTYT22700CE")]
+    gateway.held[("NFO", "NIFTYT22700CE")] = 0.0  # read as 0 (2 Nov: Kotak's holdings misread)
+    for minute in (1, 2, 3):  # the difference lasts: paused, one alert
+        await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=minute))
+    assert deployment.status == LIVE_NATIVE_PAUSED and native_live.resumes_on_match(deployment)
+    assert "resumes by itself once it matches" in deployment.pause_reason
+
+    gateway.held[("NFO", "NIFTYT22700CE")] = held  # read right again
+    assert await native_live.reconcile_account(db_session, deployment.broker_account_id, gateway, NOW + timedelta(minutes=4)) == []
+    assert deployment.status == LIVE_NATIVE_ACTIVE and deployment.pause_reason is None
+    titles = (await db_session.execute(select(Alert.title).where(Alert.object_id == str(deployment.id)))).scalars().all()
+    assert titles.count("Live strategy paused") == 1 and titles.count("Live strategy resumed") == 1
+
+
+async def test_the_scheduler_checks_a_run_paused_for_a_difference_and_it_resumes(db_session):
+    deployment, _ = await _setup(db_session)
+    gateway = FakeGateway()
+
+    async def factory(db, account_id):
+        return gateway
+
+    scheduler = LiveNativeScheduler(gateway_factory=factory)
+    assert await scheduler.tick(db_session, NOW) == 1
+    await native_live.pause(db_session, deployment, f"{native_live.MISMATCH} -- X: the broker holds 0, the live strategies 80.", NOW)
+    await db_session.commit()
+    scheduler._last_reconcile = None
+    await scheduler.tick(db_session, NOW + timedelta(minutes=2))
+    assert deployment.status == LIVE_NATIVE_ACTIVE
+
+
 async def test_the_scheduler_checks_a_run_paused_for_a_read_and_it_resumes(db_session):
     deployment, _ = await _setup(db_session)
     gateway = FakeGateway()

@@ -47,10 +47,11 @@ running strategy holding that instrument, and alerts you with both sides.
 A read that fails (a broker timeout, say) is tried again at the next
 minute's; only READ_FAILURES_BEFORE_PAUSE failures in a row pause the
 strategies holding something there (30 Oct: Kotak Neo's positions call
-timing out had paused a run twice in a morning). A strategy paused that
-way -- for a read, not a difference -- is checked every minute still, and
-resumes by itself (alerting you) once a read succeeds and every quantity
-it holds matches.
+timing out had paused a run twice in a morning). A strategy paused for a
+read, or for a difference (2 Nov: Kotak's holdings misread as 0), is still
+checked every minute, and resumes by itself (alerting you) once a read
+succeeds and every quantity it holds matches; a difference that lasts
+keeps it paused, without a new alert each minute.
 A strategy only runs on a broker account that passed the broker test
 (broker_test.py). The account-wide stop happens once a day: after it, with
 nothing of the user's running, it isn't checked again.
@@ -93,7 +94,8 @@ from app.services.paper_trading.trade_record import estimate_charges, resolve_le
 
 logger = logging.getLogger(__name__)
 
-READ_FAILED = "Couldn't read positions from the broker"  # the pause reason's start: resumed by itself once a read matches
+READ_FAILED = "Couldn't read positions from the broker"  # pause reasons resumed by themselves once a read matches
+MISMATCH = "Doesn't match the broker"
 READ_FAILURES_BEFORE_PAUSE = 3  # reconcile_account: failed positions reads in a row, a minute apart, before pausing
 _read_failures: dict[uuid.UUID, int] = {}  # broker account -> failed reads in a row
 
@@ -687,7 +689,7 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
             LiveNativeDeployment.status.in_((LIVE_NATIVE_ACTIVE, LIVE_NATIVE_PAUSED)),  # a paused one's holdings are at the broker too
         )
     )).scalars().all()
-    if not any(d.status == LIVE_NATIVE_ACTIVE or read_paused(d) for d in deployments):
+    if not any(d.status == LIVE_NATIVE_ACTIVE or resumes_on_match(d) for d in deployments):
         return []
     expected: dict[tuple[str, str], float] = defaultdict(float)
     holders: dict[tuple[str, str], list[LiveNativeDeployment]] = defaultdict(list)
@@ -742,11 +744,11 @@ async def reconcile_account(db: AsyncSession, broker_account_id: uuid.UUID, gate
             for deployment in holders[key]:
                 differing.add(deployment.id)
                 if deployment.status == LIVE_NATIVE_ACTIVE or read_paused(deployment):
-                    await pause(db, deployment, f"Doesn't match the broker -- {text}. Check it there, then resume.", now)
-    # Paused only for a read: the broker answered and all it holds matches -- back on.
+                    await pause(db, deployment, f"{MISMATCH} -- {text}. Check it there; it resumes by itself once it matches.", now)
+    # Paused for a read or a difference: the broker answered and all it holds matches -- back on.
     kill_on = None
     for deployment in deployments:
-        if not read_paused(deployment) or deployment.id in differing:
+        if not resumes_on_match(deployment) or deployment.id in differing:
             continue
         kill_on = (await kill_switch.get_kill_switch(db)).active if kill_on is None else kill_on
         account = await db.get(BrokerAccount, broker_account_id)
@@ -766,9 +768,15 @@ def read_paused(deployment: LiveNativeDeployment) -> bool:
     return deployment.status == LIVE_NATIVE_PAUSED and (deployment.pause_reason or "").startswith(READ_FAILED)
 
 
+def resumes_on_match(deployment: LiveNativeDeployment) -> bool:
+    """Paused for a read or a difference: back on once a read matches."""
+    return deployment.status == LIVE_NATIVE_PAUSED and (deployment.pause_reason or "").startswith((READ_FAILED, MISMATCH))
+
+
 __all__ = [
     "LiveNativeContext", "LiveOrderError", "LiveOutcome", "LivePool", "account_limit", "check_account_limits", "day_pnl",
     "execute_batch", "load_positions", "loss_limit", "pause", "pool_cash", "read_paused", "reconcile_account", "record_baselines",
+    "resumes_on_match",
     "run_live_native",
     "square_off",
 ]

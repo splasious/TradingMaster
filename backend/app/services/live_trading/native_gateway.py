@@ -162,8 +162,10 @@ def _holdings(broker_code: str, rows: list[dict]) -> dict:
         elif broker_code == "angel_one":
             key = (str(row.get("exchange") or "NSE"), str(row.get("symboltoken") or ""))
             quantity = float(row.get("quantity") or 0) + float(row.get("t1quantity") or 0)
-        elif broker_code == "kotak_neo":  # not modelled by Kotak's SDK: read defensively
-            token = row.get("instrumentToken") or row.get("exchangeIdentifier") or ""
+        elif broker_code == "kotak_neo":
+            # Seen live 2 Nov: the exchange token (the contract list's, as positions' "tok") is
+            # exchangeIdentifier; instrumentToken is Kotak's own number for the scrip.
+            token = row.get("exchangeIdentifier") or row.get("instrumentToken") or ""
             key, quantity = (str(row.get("exchangeSegment") or "nse_cm"), str(token)), float(row.get("quantity") or 0)
         else:
             continue
