@@ -477,3 +477,51 @@ async def test_a_copied_stock_without_a_price_waits_and_out_on_pcr_the_copy_wait
     await _pcr(db_session, ctx.now - timedelta(minutes=1), 0.95)
     await evaluate(ctx)
     assert set(ctx.state["holdings"]) == {"SBIN"} and "adopt" not in ctx.state
+
+
+async def test_live_a_check_that_sells_buys_at_the_next_check(db_session: AsyncSession):
+    """2 Nov: live, a sale and the buy it pays for don't go in one batch --
+    the MACD exit is sold, and the freed slot's up-cross is bought at the
+    next check, seconds later. Paper keeps doing both at once."""
+    _, cross = _solarinds_closes()
+    ctx, _, _ = await _setup(db_session, START + (cross - 20) * BAR_LENGTH)
+    ctx.is_live = True
+
+    await evaluate(ctx)
+    assert "SOLARINDS" not in ctx.state["holdings"] and "SBIN" not in ctx.state["holdings"]
+    assert "sold: SOLARINDS" in ctx._last_reason and "buying at the next check, with the sale's money: SBIN" in ctx._last_reason
+
+    ctx.now += timedelta(seconds=10)
+    await evaluate(ctx)
+    assert "SBIN" in ctx.state["holdings"] and "bought: SBIN" in ctx._last_reason
+
+
+async def test_aligning_a_live_run_with_its_paper_card_sells_then_buys(db_session: AsyncSession):
+    """state["release"] / state["adopt"] (2 Nov): the stock the paper card
+    doesn't hold is sold at the next check, the one it holds and the live
+    run doesn't is bought at the check after."""
+    length = len(_solarinds_closes()[0])
+    ctx, deployment, instruments = await _setup(db_session, START, sbin_closes=_stale(_sbin_closes(length), 2))
+    held = {f"HELD{i}": ctx.state["holdings"][f"HELD{i}"] for i in range(4)}
+    ctx.state = {"holdings": {**held, "SBIN": {"instrument_id": str(instruments["SBIN"].id), "quantity": 20.0, "entry_price": 790.0,
+                                                "opened_at": ctx.now.isoformat()}},
+                 "release": ["SBIN"], "adopt": ["SOLARINDS"]}
+    prices = {instruments["SOLARINDS"].id: 500.0, instruments["SBIN"].id: 800.0}
+
+    async def price(instrument_id):
+        return prices.get(instrument_id, 100.0)
+
+    ctx.get_price = price
+    ctx.is_live = True
+    await evaluate(ctx)
+    assert "SBIN" not in ctx.state["holdings"] and "SOLARINDS" not in ctx.state["holdings"]
+    assert ctx.state["adopt"] == ["SOLARINDS"] and "release" not in ctx.state
+    assert "SBIN (not on the paper card)" in ctx._last_reason
+    await db_session.commit()
+    [trade] = (await db_session.execute(select(PaperNativeTrade).where(PaperNativeTrade.deployment_id == deployment.id))).scalars().all()
+    assert trade.exit_reason == "aligned_to_paper" and trade.pnl == (800.0 - 790.0) * 20
+
+    ctx.now += timedelta(seconds=10)
+    await evaluate(ctx)
+    assert set(ctx.state["holdings"]) == {*held, "SOLARINDS"} and "adopt" not in ctx.state
+    assert "SOLARINDS (copied from the paper card)" in ctx._last_reason

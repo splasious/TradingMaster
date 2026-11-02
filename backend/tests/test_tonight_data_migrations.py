@@ -141,7 +141,9 @@ def test_the_built_ins_are_the_approved_code():
     assert pcr.CHANGES["nifty_rs_rotation_15min.py"][0] == {carry.CHANGES["nifty_rs_rotation_15min.py"][1]}
     copy = _load("c2e4a6b8d0f1_macd_live_copies_paper")
     assert copy.FROM_MD5S == {pcr.CHANGES["macd_rsi_15min.py"][1]}  # the MACD built-in has moved on since (c2e4a6b8d0f1)
-    assert _md5(BUILTIN) == copy.TO_MD5
+    align = _load("e6a8c0d2f4b7_macd_live_aligns_with_paper")
+    assert align.FROM_MD5S == {copy.TO_MD5}  # and again (e6a8c0d2f4b7)
+    assert _md5(BUILTIN) == align.TO_MD5
     own_close = _load("f1b3d5e7a9c2_rs_15min_decides_on_its_close_pcr")
     assert own_close.FROM_MD5S == {pcr.CHANGES["nifty_rs_rotation_15min.py"][1]}
     assert _md5(BUILTIN.parent / "nifty_rs_rotation_15min.py") == own_close.TO_MD5
@@ -1132,7 +1134,8 @@ async def test_macd_moves_on_and_its_flat_live_run_gets_the_paper_cards_holdings
     migration = _load("c2e4a6b8d0f1_macd_live_copies_paper")
     friday = _load("a8c0e2f4b6d9_week_high_breakout_friday_3pm")
     assert friday.down_revision == migration.revision  # one chain: the Friday check deploys after it
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    assert _load("e6a8c0d2f4b7_macd_live_aligns_with_paper").FROM_MD5S == {migration.TO_MD5}  # moved on since
+    migration.TO_MD5 = _md5(migration.BUILT_IN)
     v18 = "# MACD - RSI - 15 MIN, version 18\n"
     migration.FROM_MD5S = {_md5_text(v18)}
 
@@ -1164,3 +1167,42 @@ async def test_macd_moves_on_and_its_flat_live_run_gets_the_paper_cards_holdings
     copied = await db_session.get(LiveNativeDeployment, ids[1])
     assert copied.strategy_version_id == version.id and copied.state == {"adopt": ["SBIN", "INFY"]}
     assert (await db_session.get(PaperNativeDeployment, ids[2])).strategy_version_id == edited_version
+
+
+async def test_macd_live_run_gets_what_to_sell_and_buy_to_match_its_paper_card(db_engine, db_session):
+    from app.models.broker import Broker, BrokerAccount, Environment
+    from app.models.live_native import LiveNativeDeployment
+
+    migration = _load("e6a8c0d2f4b7_macd_live_aligns_with_paper")
+    assert migration.down_revision == "a8c0e2f4b6d9"
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5  # the built-in is the approved code
+    v19 = "# MACD - RSI - 15 MIN, version 19\n"
+    migration.FROM_MD5S = {_md5_text(v19)}
+
+    running = await _deployment(db_session, "align_a@tradingmaster.internal", v19)
+    running.state = {"holdings": {"ADANIPOWER": {}, "VEDL": {}, "FORTIS": {}}}
+    broker = Broker(code=f"kotak_{uuid.uuid4().hex[:6]}", name="Kotak Neo")
+    db_session.add(broker)
+    await db_session.flush()
+    owner = (await db_session.execute(select(PaperPortfolio.user_id).where(PaperPortfolio.id == running.portfolio_id))).scalar_one()
+    account = BrokerAccount(user_id=owner, broker_id=broker.id, environment=Environment.LIVE.value, account_label="K")
+    db_session.add(account)
+    await db_session.flush()
+    live = LiveNativeDeployment(owner_id=owner, strategy_id=running.strategy_id, strategy_version_id=running.strategy_version_id,
+                                broker_account_id=account.id, paper_deployment_id=running.id, status="active",
+                                state={"holdings": {"VEDL": {}, "SBIN": {}, "FORTIS": {}}}, capital=95000.0)
+    db_session.add(live)
+    await db_session.commit()
+    ids = [running.id, live.id]
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # a second run changes nothing
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids[0])
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.version_number == 12 and version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    aligned = await db_session.get(LiveNativeDeployment, ids[1])
+    assert aligned.strategy_version_id == version.id
+    assert aligned.state["release"] == ["SBIN"] and aligned.state["adopt"] == ["ADANIPOWER"]
+    assert set(aligned.state["holdings"]) == {"VEDL", "SBIN", "FORTIS"}  # sold at its next check, not here

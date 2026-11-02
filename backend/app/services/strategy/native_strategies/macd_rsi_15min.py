@@ -32,6 +32,17 @@ comment, just using live portfolio equity instead of a fixed simulated
 CAPITAL constant. A fresh up-cross that finds no free slot is passed over
 for good; it's listed in the Last Signal reason.
 
+Revised 2-Nov-2026 -- live: sells before buys; aligning with the paper card:
+  - Live, a check that sells anything buys nothing: its buys go at the next
+    check, seconds later (an up-cross stays buyable until the next candle
+    closes), when the sale's money is at the broker -- with the capital
+    fully invested, a buy sent alongside the sale that pays for it was
+    rejected. Paper is unchanged.
+  - state["release"] -- set once with state["adopt"] when a live run is
+    aligned with its paper card (alembic e6a8c0d2f4b7) -- is sold at the
+    next check at the live price (exit "aligned_to_paper"); the adopt
+    buys follow at the check after.
+
 Revised 30-Oct-2026 -- a live run's one-off copy of its paper card:
   - state["adopt"] -- the paper card's holdings, written once into a live
     run's state when it copied them (alembic c2e4a6b8d0f1) -- is bought at
@@ -273,6 +284,29 @@ async def evaluate(ctx) -> None:
         )
         sold.append(f"{symbol} (MACD < 0 at {sig['last_sell_at'].astimezone(IST):%d-%b %H:%M})")
 
+    # --- A live run's one-off alignment with its paper card: what the card doesn't hold, sold now.
+    for symbol in [s for s in ctx.state.pop("release", []) if s in holdings]:
+        leg = holdings[symbol]
+        instrument = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+        price = (await ctx.get_price(instrument.id)) if instrument else None
+        if instrument is None or price is None:
+            ctx.state.setdefault("release", []).append(symbol)  # no price yet: the next check
+            continue
+        holdings.pop(symbol)
+        await ctx.close_leg(instrument, "sell", leg["quantity"], price)
+        pnl = (price - leg["entry_price"]) * leg["quantity"]
+        await ctx.record_trade(
+            legs=[{
+                "instrument_id": leg["instrument_id"], "side": "long", "quantity": leg["quantity"],
+                "entry_price": leg["entry_price"], "exit_price": price,
+            }],
+            pnl=pnl, pnl_pct=(pnl / (leg["entry_price"] * leg["quantity"]) * 100) if leg["entry_price"] else 0.0,
+            exit_reason="aligned_to_paper", opened_at=datetime.fromisoformat(leg["opened_at"]),
+        )
+        sold.append(f"{symbol} (not on the paper card)")
+    # Live, a check that sold buys nothing: the buys go at the next check with the sale's money.
+    buys_next_check = getattr(ctx, "is_live", False) and bool(sold)
+
     # --- Fixed decision-time equity: cash plus mark-to-market of whatever
     # is still held after the exits above -- same convention the original
     # run()'s per-slot sizing used, just against real portfolio equity.
@@ -295,7 +329,7 @@ async def evaluate(ctx) -> None:
     bought = []
     no_slot = []
     out_on_pcr = eligible if risk_off else []
-    for symbol in [] if risk_off else adopt + [s for s in eligible if s not in adopt]:
+    for symbol in [] if risk_off or buys_next_check else adopt + [s for s in eligible if s not in adopt]:
         if len(holdings) >= MAX_POSITIONS:
             if symbol not in adopt:
                 no_slot.append(symbol)
@@ -323,7 +357,7 @@ async def evaluate(ctx) -> None:
                       else f"{symbol} (MACD > 0 at {signals[symbol]['closed_at'].astimezone(IST):%d-%b %H:%M})")
 
     ctx.state["holdings"] = holdings
-    if "adopt" in ctx.state and not risk_off:
+    if "adopt" in ctx.state and not risk_off and not buys_next_check:
         if adopt_left:
             ctx.state["adopt"] = adopt_left
         else:
@@ -338,6 +372,8 @@ async def evaluate(ctx) -> None:
         note_bits.append(f"up-cross, no free slot: {', '.join(no_slot)}")
     if out_on_pcr:
         note_bits.append(f"up-cross, not bought (out on PCR): {', '.join(out_on_pcr)}")
+    if buys_next_check and (adopt or eligible):
+        note_bits.append(f"buying at the next check, with the sale's money: {', '.join(adopt + [s for s in eligible if s not in adopt])}")
     if missing:
         note_bits.append(f"not found: {', '.join(missing)}")
     if skipped:
