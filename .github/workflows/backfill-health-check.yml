@@ -18,6 +18,10 @@ on:
         description: "Instead of the check: read-only comparison of Kotak Neo's market data with Zerodha's (backend/scripts/kotak_data_check.py)"
         type: boolean
         default: false
+      kotak_holdings_check:
+        description: "Instead of the check: read-only -- Kotak Neo's positions and holdings against what the live runs hold; field names and match results here, the rows to the private Telegram chat only (backend/scripts/kotak_holdings_check.py)"
+        type: boolean
+        default: false
       macd_live_check:
         description: "Instead of the check: why MACD - RSI - 15 MIN's live run hasn't traded -- its state, the PCR today, fresh up-crosses since it started and whether they fit a slot; names and prices to the private Telegram chat only (backend/scripts/macd_live_check.py)"
         type: boolean
@@ -59,6 +63,7 @@ jobs:
           BREAKOUT_BACKTEST: ${{ inputs.breakout_backtest }}
           FRIDAY_CHECK: ${{ inputs.friday_check }}
           MACD_LIVE_CHECK: ${{ inputs.macd_live_check }}
+          KOTAK_HOLDINGS_CHECK: ${{ inputs.kotak_holdings_check }}
         run: |
           set -euo pipefail
           umask 077
@@ -410,6 +415,13 @@ jobs:
           if [ "${KOTAK_DATA_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo market data against Zerodha's (read-only)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_data_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${KOTAK_HOLDINGS_CHECK:-false}" = "true" ]; then
+            echo "== Kotak Neo holdings check (read-only; rows to the private Telegram chat only; field names and match results here)"
+            py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_holdings_check.py)
             remote py "$py_file"
             exit 0
           fi
