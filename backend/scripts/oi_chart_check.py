@@ -23,8 +23,11 @@ import websockets
 from sqlalchemy import func, select
 
 from app.core.security import create_access_token
+from app.core.time import as_aware_utc
+from app.models.audit import AuditLog
 from app.db.session import AsyncSessionLocal
-from app.models.live_native import LiveNativeDeployment
+from app.models.live_native import LiveNativeDeployment, LiveNativePosition
+from app.models.strategy import Strategy
 from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 
@@ -59,7 +62,24 @@ async def main() -> None:
             select(func.count()).select_from(LiveNativeDeployment).where(LiveNativeDeployment.pause_reason.is_not(None),
                                                                           LiveNativeDeployment.status == "paused")
         )).scalar()
-    print(f"live runs by status: {', '.join(f'{s} {n}' for s, n in runs) or 'none'}; paused with a reason: {paused}")
+        print(f"live runs by status: {', '.join(f'{s} {n}' for s, n in runs) or 'none'}; paused with a reason: {paused}")
+        # Each run: when it started, stopped and last ran; the Stop button's audit record (no user shown).
+        for run, name in (await db.execute(
+            select(LiveNativeDeployment, Strategy.name).join(Strategy, Strategy.id == LiveNativeDeployment.strategy_id)
+            .order_by(LiveNativeDeployment.created_at)
+        )).all():
+            audits = (await db.execute(
+                select(AuditLog.action, AuditLog.created_at, AuditLog.new_value).where(AuditLog.object_id == str(run.id))
+                .order_by(AuditLog.created_at)
+            )).all()
+            stop = next(((t, v) for a, t, v in reversed(audits) if a == "LIVE_NATIVE_STOPPED"), None)
+            held = (await db.execute(select(func.count()).select_from(LiveNativePosition).where(LiveNativePosition.deployment_id == run.id))).scalar()
+            when = lambda t: as_aware_utc(t).astimezone(IST).strftime("%d-%b %H:%M:%S") if t else "-"  # noqa: E731
+            print(f"  run {str(run.id)[:8]} ({name.strip()}): {run.status}; started {when(run.created_at)}; stopped {when(run.stopped_at)}; "
+                  f"last ran {when(run.last_evaluated_at)}; positions held {held}; Stop-button record: "
+                  + (f"{when(stop[0])}, closed positions: {(stop[1] or {}).get('closed_positions')}, "
+                     f"left in the account: {len((stop[1] or {}).get('left_in_account') or [])}" if stop else "none"))
+            print(f"    audit actions: {', '.join(f'{a} {when(t)}' for a, t, _ in audits[-6:]) or '-'}")
     if user is None:
         print("no active user to ask the app as")
         return
