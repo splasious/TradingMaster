@@ -22,6 +22,10 @@ on:
         description: "Instead of the check: read-only -- Kotak Neo's positions and holdings against what the live runs hold; field names and match results here, the rows to the private Telegram chat only (backend/scripts/kotak_holdings_check.py)"
         type: boolean
         default: false
+      oi_chart_check:
+        description: "Instead of the check: read-only -- the PCR Analysis tab's live NIFTY 50 chart as the app serves it (candles, record, contracts) and how many contracts tick live OI over the WebSocket; counts and NIFTY market data only (backend/scripts/oi_chart_check.py)"
+        type: boolean
+        default: false
       macd_live_check:
         description: "Instead of the check: why MACD - RSI - 15 MIN's live run hasn't traded -- its state, the PCR today, fresh up-crosses since it started and whether they fit a slot; names and prices to the private Telegram chat only (backend/scripts/macd_live_check.py)"
         type: boolean
@@ -63,6 +67,7 @@ jobs:
           BREAKOUT_BACKTEST: ${{ inputs.breakout_backtest }}
           FRIDAY_CHECK: ${{ inputs.friday_check }}
           MACD_LIVE_CHECK: ${{ inputs.macd_live_check }}
+          OI_CHART_CHECK: ${{ inputs.oi_chart_check }}
           KOTAK_HOLDINGS_CHECK: ${{ inputs.kotak_holdings_check }}
         run: |
           set -euo pipefail
@@ -422,6 +427,13 @@ jobs:
           if [ "${KOTAK_HOLDINGS_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo holdings check (read-only; rows to the private Telegram chat only; field names and match results here)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_holdings_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${OI_CHART_CHECK:-false}" = "true" ]; then
+            echo "== Live NIFTY 50 OI chart (read-only; counts and NIFTY market data only)"
+            py_file=$(vps 'f=$(mktemp /tmp/oichart-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/oi_chart_check.py)
             remote py "$py_file"
             exit 0
           fi
