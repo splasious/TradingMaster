@@ -29,10 +29,16 @@ interface MarketDataSocketState {
  * latency). Each price carries a `source` -- "delta" for a real poll,
  * "simulated" as a random-walk fallback where no real source is mapped
  * for that instrument yet -- see tick_engine.py. */
-export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketState {
+export function useMarketDataSocket(instrumentIds: string[], { flushMs = 0 }: { flushMs?: number } = {}): MarketDataSocketState {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [prices, setPrices] = useState<Record<string, PriceState>>({});
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  // flushMs > 0: ticks are held and applied together every flushMs -- for a
+  // page streaming hundreds of instruments (each sends a tick every 1.5 s),
+  // one render per flush instead of one per tick.
+  const flushMsRef = useRef(flushMs);
+  const pendingRef = useRef<Record<string, PriceState>>({});
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const subscribedRef = useRef<Set<string>>(new Set());
@@ -69,10 +75,18 @@ export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketSt
         const message = JSON.parse(event.data);
         if (message.type === "tick") {
           const tick = message as MarketTick;
-          setPrices((prev) => ({
-            ...prev,
-            [tick.instrument_id]: { price: tick.price, open_interest: tick.open_interest, ts: tick.ts, source: tick.source },
-          }));
+          const price = { price: tick.price, open_interest: tick.open_interest, ts: tick.ts, source: tick.source };
+          if (flushMsRef.current <= 0) {
+            setPrices((prev) => ({ ...prev, [tick.instrument_id]: price }));
+          } else {
+            pendingRef.current[tick.instrument_id] = price;
+            flushTimerRef.current ??= setTimeout(() => {
+              const batch = pendingRef.current;
+              pendingRef.current = {};
+              flushTimerRef.current = null;
+              setPrices((prev) => ({ ...prev, ...batch }));
+            }, flushMsRef.current);
+          }
         } else if (message.type === "heartbeat") {
           setLatencyMs(Math.max(0, Date.now() - new Date(message.ts).getTime()));
         }
@@ -94,6 +108,8 @@ export function useMarketDataSocket(instrumentIds: string[]): MarketDataSocketSt
     return () => {
       closedByUsRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
       wsRef.current?.close();
       wsRef.current = null;
     };

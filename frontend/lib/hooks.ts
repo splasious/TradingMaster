@@ -46,6 +46,7 @@ import type {
   PaperPortfolioOut,
   PaperTradeOut,
   PcrPointOut,
+  OiChartOut,
   PcrLiveOut,
   PcrSnapshotsOut,
   PortfolioBacktestJobOut,
@@ -871,6 +872,18 @@ export function usePcrLive(underlying = "NIFTY") {
     queryKey: ["pcr-live", underlying],
     queryFn: () => apiFetch<PcrLiveOut>(`/api/v1/options/pcr/live?underlying=${underlying}`),
     refetchInterval: (query) => (query.state.data?.reason?.startsWith("market closed") ? 60_000 : 15_000),
+  });
+}
+
+/** The live NIFTY 50 chart's starting point -- candles, the latest record and
+ * its contracts' OI; ticks move it in between (every 30 s while NSE trades,
+ * so a new record or finished candle shows soon after it's saved). */
+export function useOiChart(underlying = "NIFTY", expiry: string | null = null) {
+  return useQuery({
+    queryKey: ["oi-chart", underlying, expiry],
+    queryFn: () =>
+      apiFetch<OiChartOut>(`/api/v1/options/oi-chart?underlying=${underlying}${expiry ? `&expiry=${expiry}` : ""}`),
+    refetchInterval: (query) => (query.state.data?.market_open === false ? 120_000 : 30_000),
   });
 }
 

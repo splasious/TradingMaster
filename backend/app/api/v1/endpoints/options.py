@@ -14,6 +14,7 @@ from app.schemas.options import (
     EffectivePcrOut,
     ExpiryOut,
     HistoryDepthOut,
+    OiChartOut,
     PcrCaptureStatusOut,
     PcrLiveOut,
     PcrPointOut,
@@ -24,6 +25,7 @@ from app.schemas.options import (
 from app.services.market_data.tick_engine import tick_engine
 from app.services.options.chain import get_option_chain_snapshot
 from app.services.options.history_depth import get_history_depth
+from app.services.options.oi_chart import oi_chart
 from app.services.options.pcr import SNAPSHOT_UNDERLYINGS, compute_effective_pcr, compute_pcr_series
 from app.services.options.pcr_live import LIVE_TTL, live_row
 from app.services.options.pcr_snapshot_scheduler import pcr_snapshot_scheduler
@@ -157,6 +159,22 @@ async def get_pcr_live(underlying: str = Query("NIFTY"), _: User = Depends(get_c
         underlying=underlying, row=PcrSnapshotRowOut(**row) if row else None, reason=reason,
         refresh_seconds=int(LIVE_TTL.total_seconds()),
     )
+
+
+@router.get("/oi-chart", response_model=OiChartOut)
+async def get_oi_chart(
+    underlying: str = Query("NIFTY"),
+    expiry: date | None = Query(None, description="One of the latest record's expiries; the nearest when left out"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> OiChartOut:
+    """The live NIFTY 50 chart's starting point: the 15-minute candles and
+    the one forming, the latest PCR record, and each contract of the expiry
+    it captured with its OI there and the app's instrument id for live OI
+    ticks. Database and tick engine only -- no Kite call."""
+    if underlying not in UNDERLYINGS:
+        raise HTTPException(status_code=404, detail=f"No PCR records for '{underlying}' (available: {', '.join(UNDERLYINGS)})")
+    return OiChartOut(**await oi_chart(db, underlying, expiry))
 
 
 @router.get("/{underlying_instrument_id}/pcr", response_model=list[PcrPointOut])

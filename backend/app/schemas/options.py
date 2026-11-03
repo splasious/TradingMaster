@@ -152,6 +152,43 @@ class PcrLiveOut(BaseModel):
     refresh_seconds: int
 
 
+class OiChartCandleOut(BaseModel):
+    ts: datetime  # the candle's start
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+class OiChartContractOut(BaseModel):
+    strike: float
+    option_type: str  # CE / PE
+    instrument_id: str | None  # what the page subscribes to for live OI; None: record OI only
+    oi: float | None  # at the record
+    prev_oi: float | None  # at the record before it
+    day_oi: float | None  # at the previous session's last record
+
+
+class OiChartOut(BaseModel):
+    """The PCR Analysis tab's live NIFTY 50 chart (services/options/oi_chart.py):
+    what the page starts from before the ticks move it."""
+
+    underlying: str
+    nifty_instrument_id: str | None
+    market_open: bool
+    live_price: float | None
+    candles: list[OiChartCandleOut]  # finished 15-minute candles, oldest first
+    forming: OiChartCandleOut | None
+    record_ts: datetime | None
+    record_spot: float | None
+    record_pcr: float | None
+    prev_ts: datetime | None
+    strike_step: float | None
+    expiry: date | None
+    expiries: list[date]
+    contracts: list[OiChartContractOut]
+
+
 class HistoryDepthOut(BaseModel):
     symbol: str | None
     # What THIS app has already backfilled into ohlcv_candles.

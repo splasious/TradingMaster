@@ -36,6 +36,14 @@
   --series-put: #2a78d6;
   --series-call: #eb6834;
   --series-pcr: #4a3aa7;
+
+  /* The live NIFTY 50 chart's OI levels -- the Telegram OI picture's colours
+     (call OI red above NIFTY, put OI green below it, NIFTY orange); never
+     colour alone: R/S tags and their side of NIFTY say which is which. */
+  --oi-call: #c42f2f;
+  --oi-put: #0a8a0a;
+  --oi-spot: #c27c00;
+  --oi-ma: #2a78d6;
 }
 
 .dark {
@@ -70,6 +78,11 @@
   --series-put: #3987e5;
   --series-call: #d95926;
   --series-pcr: #9085e9;
+
+  --oi-call: #d03b3b;
+  --oi-put: #0ca30c;
+  --oi-spot: #eda100;
+  --oi-ma: #3987e5;
 }
 
 @theme inline {
@@ -107,6 +120,9 @@
   --color-series-put: var(--series-put);
   --color-series-call: var(--series-call);
   --color-series-pcr: var(--series-pcr);
+  --color-oi-call: var(--oi-call);
+  --color-oi-put: var(--oi-put);
+  --color-oi-spot: var(--oi-spot);
 }
 
 body {

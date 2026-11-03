@@ -3,6 +3,7 @@
 import { Download } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { NiftyOiChart } from "@/components/options/nifty-oi-chart";
 import { PcrChartStack } from "@/components/options/pcr-chart-stack";
 import {
   ALL_EXPIRIES,
@@ -195,6 +196,8 @@ export function PcrAnalysisView() {
               sub={day?.driver ? DRIVERS[day.driver] : "—"}
             />
           </div>
+
+          <NiftyOiChart />
 
           <Card>
             <CardHeader className="flex-wrap gap-2">

@@ -1445,3 +1445,39 @@ export interface NativeBuiltin {
   title: string;
   version: number | null;
 }
+
+/** The PCR Analysis tab's live NIFTY 50 chart (GET /options/oi-chart): what it
+ * starts from before the market-data ticks move it. */
+export interface OiChartCandleOut {
+  ts: string; // the candle's start
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface OiChartContractOut {
+  strike: number;
+  option_type: "CE" | "PE";
+  instrument_id: string | null; // subscribed for live OI; null: record OI only
+  oi: number | null; // at the record
+  prev_oi: number | null; // at the record before it
+  day_oi: number | null; // at the previous session's last record
+}
+
+export interface OiChartOut {
+  underlying: string;
+  nifty_instrument_id: string | null;
+  market_open: boolean;
+  live_price: number | null;
+  candles: OiChartCandleOut[]; // finished 15-minute candles, oldest first
+  forming: OiChartCandleOut | null;
+  record_ts: string | null;
+  record_spot: number | null;
+  record_pcr: number | null;
+  prev_ts: string | null;
+  strike_step: number | null;
+  expiry: string | null;
+  expiries: string[];
+  contracts: OiChartContractOut[];
+}
