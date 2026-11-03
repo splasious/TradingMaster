@@ -199,25 +199,6 @@ export function PcrAnalysisView() {
 
           <NiftyOiChart />
 
-          <Card>
-            <CardHeader className="flex-wrap gap-2">
-              <CardTitle>Every 15 minutes · {scopeLabel}</CardTitle>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary">
-                <Legend color="var(--series-put)" label="Put" />
-                <Legend color="var(--series-call)" label="Call" />
-                <Legend color="var(--series-pcr)" label="PCR" />
-                <Legend color="var(--text-primary)" label="NIFTY" />
-                <span className="text-text-muted">▲▼ ATM shift · ┆ new session</span>
-              </div>
-            </CardHeader>
-            <CardContent className="px-2 pt-1 sm:px-4">
-              <PcrChartStack points={points} hover={hover} onHover={setHover} />
-              <p className="mt-1 px-2 text-[11px] text-text-muted">
-                ΔOI PCR: dotted line = 1.0 (equal build-up) · faded = calls unwinding · clipped at ±3 (▲▼ beyond) · gap = n/m (Call ΔOI under {COI_PCR_FLOOR / 1e5} L)
-              </p>
-            </CardContent>
-          </Card>
-
           <div className="flex gap-1 min-[1800px]:hidden" role="tablist" aria-label="Table">
             {(["overall", "change"] as const).map((t) => (
               <button
@@ -254,6 +235,25 @@ export function PcrAnalysisView() {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader className="flex-wrap gap-2">
+              <CardTitle>Every 15 minutes · {scopeLabel}</CardTitle>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary">
+                <Legend color="var(--series-put)" label="Put" />
+                <Legend color="var(--series-call)" label="Call" />
+                <Legend color="var(--series-pcr)" label="PCR" />
+                <Legend color="var(--text-primary)" label="NIFTY" />
+                <span className="text-text-muted">▲▼ ATM shift · ┆ new session</span>
+              </div>
+            </CardHeader>
+            <CardContent className="px-2 pt-1 sm:px-4">
+              <PcrChartStack points={points} hover={hover} onHover={setHover} />
+              <p className="mt-1 px-2 text-[11px] text-text-muted">
+                ΔOI PCR: dotted line = 1.0 (equal build-up) · faded = calls unwinding · clipped at ±3 (▲▼ beyond) · gap = n/m (Call ΔOI under {COI_PCR_FLOOR / 1e5} L)
+              </p>
+            </CardContent>
+          </Card>
 
           <Definitions />
         </>
