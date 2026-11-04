@@ -233,6 +233,27 @@ async def _kite_rows_by_token(api_key: str) -> dict[int, dict]:
     return rows
 
 
+def best_bid_ask(depth) -> tuple[float, float] | None:
+    """(best bid, best ask) from a Kite tick's or /quote's `depth` --
+    {"buy": [{"price", "quantity", "orders"}, ...5], "sell": [...]}, best
+    first -- or None unless both sides have a real order (Kite pads an
+    empty book with zero rows)."""
+    if not isinstance(depth, dict):
+        return None
+
+    def best(side: str) -> float | None:
+        rows = depth.get(side) or []
+        row = rows[0] if rows and isinstance(rows[0], dict) else None
+        if row is None or not row.get("price") or not row.get("quantity"):
+            return None
+        return float(row["price"])
+
+    bid, ask = best("buy"), best("sell")
+    if bid is None or ask is None or ask < bid:
+        return None
+    return bid, ask
+
+
 def _select_tokens(
     token_maps: dict[str, dict[int, uuid.UUID]], subscriber_counts: dict[uuid.UUID, int], rows: dict[int, dict], today: str,
 ) -> dict[int, str]:
@@ -474,6 +495,9 @@ class KiteTickerService:
             oi = tick.get("oi")
             if oi is not None:
                 self._engine.set_real_oi(instrument_id, oi)
+            best = best_bid_ask(tick.get("depth"))
+            if best is not None:
+                self._engine.set_real_bid_ask(instrument_id, *best)
 
     def _on_close(self, ws, code, reason) -> None:
         logger.warning("Kite ticker connection closed: %s %s", code, reason)

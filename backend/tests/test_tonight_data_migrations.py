@@ -919,6 +919,34 @@ async def test_conti_ladder_straddle_is_created_with_its_pool_and_card_for_am_op
     assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
 
 
+# ----------------------------------------------- Conti Calendar 15 MIN --
+
+async def test_conti_calendar_is_created_with_its_pool_and_card_for_conti_straddles_owner(db_engine, db_session):
+    from app.models.audit import AuditLog as Log
+
+    conti = await _amop_pool(db_session, "Conti Straddle 15 MIN", "Conti Straddle 15 MIN", 2_000_000.0, 2_013_500.0)
+    stranger = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_000_000.0)  # no Conti Straddle
+    migration = _load("f8b0d2e4a6c9_conti_calendar_15min")
+    assert migration.down_revision == "e6a8c0d2f4b7"
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all: it's there the second time
+
+    [strategy] = (await db_session.execute(select(Strategy).where(Strategy.name == "Conti Calendar 15 MIN"))).scalars().all()
+    assert (strategy.owner_id, strategy.code_type, strategy.status) == (conti.user_id, "native", "paper_trading")
+    [version] = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))).scalars().all()
+    built_in = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_conti_calendar.py").read_text(encoding="utf-8")
+    assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", built_in)
+    [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == "Conti Calendar 15 MIN"))).scalars().all()
+    assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (conti.user_id, "INR", 2_000_000.0, 2_000_000.0)
+    [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
+    assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
+    actions = (await db_session.execute(select(Log.action).where(Log.user_id == conti.user_id))).scalars().all()
+    assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
+    assert not (await db_session.execute(select(Log.action).where(Log.user_id == stranger.user_id))).scalars().all()
+    await db_session.refresh(conti)
+    assert conti.cash == 2_013_500.0  # Conti Straddle's own pool untouched
+
+
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --
 
 async def test_conti_ladder_moves_onto_stepping_with_nifty_keeping_its_open_ladder(db_engine, db_session):

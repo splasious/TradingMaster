@@ -710,3 +710,28 @@ async def test_once_the_reactor_runs_connect_and_close_are_handed_to_its_thread(
     fn, args, kwargs = handed_over.pop()
     fn(*args, **kwargs)
     assert ticker.closed is True and service._ticker is None
+
+
+def test_on_ticks_keeps_the_best_bid_and_ask_from_the_order_book():
+    """MODE_FULL ticks carry five levels of depth; the best of each side is
+    kept (4 Nov, for fills and take-profits at bid / ask)."""
+    from datetime import datetime, timedelta, timezone
+
+    engine = TickEngine()
+    service = svc.KiteTickerService(engine)
+    iid, thin = uuid.uuid4(), uuid.uuid4()
+    service._token_map = {1: iid, 2: thin}
+    depth = {"buy": [{"price": 101.5, "quantity": 650, "orders": 3}, {"price": 101.0, "quantity": 65, "orders": 1}],
+             "sell": [{"price": 102.0, "quantity": 130, "orders": 2}, {"price": 102.5, "quantity": 65, "orders": 1}]}
+    empty_bid = {"buy": [{"price": 0, "quantity": 0, "orders": 0}], "sell": [{"price": 5.0, "quantity": 65, "orders": 1}]}
+
+    service._on_ticks(None, [{"instrument_token": 1, "last_price": 101.8, "depth": depth},
+                             {"instrument_token": 2, "last_price": 5.0, "depth": empty_bid}])
+
+    now = datetime.now(timezone.utc)
+    assert engine.get_fresh_bid_ask(iid, timedelta(seconds=60), now) == (101.5, 102.0)
+    assert engine.get_fresh_bid_ask(thin, timedelta(seconds=60), now) is None  # no bid: no book to trade at
+    assert engine.get_fresh_bid_ask(iid, timedelta(seconds=60), now + timedelta(minutes=5)) is None  # too old
+    assert svc.best_bid_ask(None) is None and svc.best_bid_ask({"buy": [{"price": 10, "quantity": 1}], "sell": [{"price": 9, "quantity": 1}]}) is None
+    engine.forget([iid])
+    assert engine.get_fresh_bid_ask(iid, timedelta(seconds=60), now) is None

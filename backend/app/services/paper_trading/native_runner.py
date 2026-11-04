@@ -40,7 +40,7 @@ from app.services.alerts.service import create_alert
 from app.services.audit import write_audit_log
 from app.services.market_data.active_timeframe_sync_scheduler import note_native_candle_demand
 from app.services.market_data.bar_periods import load_closed_candles
-from app.services.market_data.live_price import live_price, live_prices, needs_live_price
+from app.services.market_data.live_price import live_bid_ask, live_price, live_prices, needs_live_price
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.telegram import telegram_allowed
 from app.services.notifications.telegram_group import sends_to_group, telegram_to_group
@@ -153,6 +153,20 @@ class NativeContext:
             price = await self._stored_close(instrument_id)
         tick_engine.subscribe(instrument_id, seed_price=price or 0.0)
         return price
+
+    async def get_bid_ask(self, instrument_id: uuid.UUID) -> tuple[float, float] | None:
+        """(best bid, best ask) while NSE is open -- what a sell and a buy of
+        it would really fill at now (market_data/live_price.live_bid_ask):
+        the Kite ticker's order book, else a /quote read. None outside market
+        hours, or when the book has no bid or no ask. Keeps the contract on
+        the live feeds, as get_price does. A backtest has no order book
+        (BacktestNativeContext has no get_bid_ask)."""
+        instrument = await self.db.get(Instrument, instrument_id)
+        if instrument is None or not needs_live_price(instrument, self.now):
+            return None
+        quote = await live_bid_ask(self.db, instrument, self.now)
+        tick_engine.subscribe(instrument_id, seed_price=tick_engine.get_current_price(instrument_id) or 0.0)
+        return quote
 
     async def get_prices(self, instrument_ids) -> dict[uuid.UUID, float]:
         """get_price() for many instruments at once -- {instrument_id:

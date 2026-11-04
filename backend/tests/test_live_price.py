@@ -162,3 +162,42 @@ async def test_a_stock_moved_to_the_be_series_is_priced_from_its_be_quote(db_ses
     finally:
         _forget(stock.id)
         _forget(plain.id)
+
+
+class FakeKiteQuote:
+    def __init__(self, quotes: dict[str, dict]) -> None:
+        self.quotes, self.calls = quotes, []
+
+    async def get_quote_batch(self, keys: list[str]) -> dict[str, dict]:
+        self.calls.append(keys)
+        return {k: self.quotes[k] for k in keys if k in self.quotes}
+
+
+async def test_the_bid_and_ask_come_from_the_ticker_else_kites_quote(db_session, market_open, monkeypatch):
+    """ctx.get_bid_ask (4 Nov): the order book the ticker last saw, if fresh;
+    else Kite's /quote depth, read now and kept; None without both sides."""
+    inst = await _option(db_session)
+    depth = {"buy": [{"price": 130.9, "quantity": 650, "orders": 4}], "sell": [{"price": 131.4, "quantity": 325, "orders": 2}]}
+    kite = FakeKiteQuote({"NFO:NIFTY26O0622800CE": {"last_price": 131.25, "depth": depth}})
+    _kite(monkeypatch, kite)
+    try:
+        assert await _ctx(db_session).get_bid_ask(inst.id) == (130.9, 131.4)
+        assert kite.calls == [["NFO:NIFTY26O0622800CE"]] and tick_engine.get_current_price(inst.id) == 131.25
+        tick_engine.set_real_bid_ask(inst.id, 131.0, 131.5, at=NOW - timedelta(seconds=5))  # the ticker's, fresh
+        assert await _ctx(db_session).get_bid_ask(inst.id) == (131.0, 131.5) and len(kite.calls) == 1
+
+        tick_engine.set_real_bid_ask(inst.id, 131.0, 131.5, at=NOW - timedelta(minutes=5))  # stale, and Kite's book is one-sided
+        kite.quotes["NFO:NIFTY26O0622800CE"]["depth"] = {"buy": [], "sell": [{"price": 131.4, "quantity": 65, "orders": 1}]}
+        assert await _ctx(db_session).get_bid_ask(inst.id) is None
+    finally:
+        _forget(inst.id)
+        tick_engine._real_bid_ask.pop(inst.id, None)
+
+
+async def test_outside_market_hours_there_is_no_bid_or_ask(db_session):
+    inst = await _option(db_session)
+    tick_engine.set_real_bid_ask(inst.id, 1.0, 2.0, at=NOW)
+    try:
+        assert await _ctx(db_session).get_bid_ask(inst.id) is None
+    finally:
+        tick_engine._real_bid_ask.pop(inst.id, None)

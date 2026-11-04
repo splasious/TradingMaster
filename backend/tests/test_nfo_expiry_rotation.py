@@ -380,3 +380,18 @@ async def test_no_tracked_futures_means_nothing_to_roll(db_session: AsyncSession
 
     monkeypatch.setattr(ZerodhaKiteBroker, "get_instruments", fail)
     assert await rotation._ensure_futures(db_session, ZerodhaKiteBroker(), account_user_id=uuid.uuid4()) == 0
+
+
+def test_target_expiries_add_the_next_monthlies_beyond_the_nearest_ones():
+    """4 Nov: the nearest `count` and the next `monthlies` monthly expiries (a
+    month's last in Kite's dump) -- in November's last week December's
+    monthly is beyond the nearest four weeklies."""
+    rows = []
+    for i, day in enumerate(["2026-11-23", "2026-12-01", "2026-12-08", "2026-12-15", "2026-12-22", "2026-12-29", "2027-01-27",
+                             "2027-03-30"], start=1):
+        rows += _option_rows("NIFTY", day, [23000], i * 100)
+    result = rotation._target_expiries(rows, "NIFTY", today=date(2026, 11, 18), count=4, monthlies=2)
+    assert result == [date(2026, 11, 23), date(2026, 12, 1), date(2026, 12, 8), date(2026, 12, 15), date(2026, 12, 29)]
+    assert rotation._target_expiries(rows, "NIFTY", today=date(2026, 11, 18), count=4) == result[:4]  # none asked for: as before
+    assert rotation._target_expiries(rows, "NIFTY", today=date(2026, 11, 24), count=4, monthlies=2) == [
+        date(2026, 12, 1), date(2026, 12, 8), date(2026, 12, 15), date(2026, 12, 22), date(2026, 12, 29), date(2027, 1, 27)]

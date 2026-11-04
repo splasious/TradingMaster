@@ -80,6 +80,11 @@ logger = logging.getLogger(__name__)
 # the near-term weeklies (and whichever of them is also the month's
 # monthly expiry) a realistic market-wide PCR would be built from.
 EXPIRIES_TO_MAINTAIN = 4
+# And each underlying's next monthly expiries (a month's last expiry in
+# Kite's dump), wherever they fall (4 Nov): Conti Calendar 15 MIN buys a
+# monthly at its short strike, and in a month's last week that's next
+# month's -- beyond the nearest four weeklies.
+MONTHLIES_TO_MAINTAIN = 2
 # Same ±20-around-ATM convention as the original manual backfill.
 STRIKE_WINDOW = 20
 # Matches the PCR endpoint's own default timeframe -- one bounded pass per
@@ -130,9 +135,11 @@ def _select_strike_window(available_strikes: list[float], spot: float, window: i
     return strikes[max(0, atm_idx - window) : atm_idx + window + 1]
 
 
-def _target_expiries(nfo_rows: list[dict], kite_name: str, today: date, count: int) -> list[date]:
+def _target_expiries(nfo_rows: list[dict], kite_name: str, today: date, count: int, monthlies: int = 0) -> list[date]:
     """Distinct, still-upcoming expiries for one underlying, straight out
-    of Kite's live NFO dump -- sorted ascending, capped at `count`."""
+    of Kite's live NFO dump -- the nearest `count`, plus the nearest
+    `monthlies` monthly expiries (a month's last expiry in the dump) when
+    they're further out; sorted ascending."""
     expiries: set[date] = set()
     for row in nfo_rows:
         if row.get("name") != kite_name:
@@ -145,7 +152,12 @@ def _target_expiries(nfo_rows: list[dict], kite_name: str, today: date, count: i
         expiry = expiry_str if isinstance(expiry_str, date) else date.fromisoformat(expiry_str)
         if expiry >= today:
             expiries.add(expiry)
-    return sorted(expiries)[:count]
+    nearest = sorted(expiries)[:count]
+    last_in_month: dict[tuple[int, int], date] = {}
+    for expiry in expiries:
+        key = (expiry.year, expiry.month)
+        last_in_month[key] = max(last_in_month.get(key, expiry), expiry)
+    return sorted(set(nearest) | set(sorted(last_in_month.values())[:monthlies]))
 
 
 async def _tracked_underlyings(db: AsyncSession) -> list[Instrument]:
@@ -175,7 +187,7 @@ async def _ensure_underlying_expiries(
     # an IST concept, and the server's UTC "today" runs ~5.5h behind IST
     # every day between UTC 18:30 and 24:00 (00:00-05:30 IST).
     today_ist = datetime.now(timezone.utc).astimezone(IST).date()
-    targets = _target_expiries(nfo_rows, kite_name, today_ist, EXPIRIES_TO_MAINTAIN)
+    targets = _target_expiries(nfo_rows, kite_name, today_ist, EXPIRIES_TO_MAINTAIN, MONTHLIES_TO_MAINTAIN)
     if not targets:
         return 0
 

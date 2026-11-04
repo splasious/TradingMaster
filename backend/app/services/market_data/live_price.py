@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
+from app.services.broker.kite_ticker_service import best_bid_ask
 from app.services.broker.zerodha_broker import KiteAPIError, ltp_with_be_fallback
 from app.services.fo_scan.pacing import quote_pacer
 from app.services.market_data.hours import nse_market_open
@@ -54,6 +55,32 @@ async def live_price(db: AsyncSession, instrument: Instrument, now: datetime) ->
         return None
     tick_engine.set_real_price(instrument.id, float(price), source="kite_quote")
     return float(price)
+
+
+async def live_bid_ask(db: AsyncSession, instrument: Instrument, now: datetime) -> tuple[float, float] | None:
+    """(best bid, best ask) of a Kite-priced contract while NSE is open (4
+    Nov, for Conti Calendar 15 MIN's fills and take-profit): the ticker's
+    order-book depth from the last LIVE_PRICE_MAX_AGE, else Kite's /quote
+    read right now. None when neither has both a bid and an ask."""
+    held = tick_engine.get_fresh_bid_ask(instrument.id, LIVE_PRICE_MAX_AGE, now)
+    if held is not None:
+        return held
+    broker = await kite_broker(db)
+    if broker is None:
+        return None
+    key = f"{instrument.exchange}:{instrument.external_ref}"
+    try:
+        await quote_pacer.wait()
+        quote = (await broker.get_quote_batch([key])).get(key) or {}
+    except KiteAPIError:
+        return None
+    best = best_bid_ask(quote.get("depth"))
+    if best is None:
+        return None
+    tick_engine.set_real_bid_ask(instrument.id, *best)
+    if quote.get("last_price"):
+        tick_engine.set_real_price(instrument.id, float(quote["last_price"]), source="kite_quote")
+    return best
 
 
 # Kite's /quote/ltp takes at most this many instruments a request.

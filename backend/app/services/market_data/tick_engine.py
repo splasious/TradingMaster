@@ -52,6 +52,10 @@ class TickEngine:
         # Open interest -- F&O only, no simulated fallback (unlike price,
         # an instrument with no real OI on file just has none, ever).
         self._real_oi: dict[uuid.UUID, float] = {}
+        # Best bid and ask from the order book (Kite's MODE_FULL depth, or a
+        # /quote read), and when they arrived -- for a strategy that prices
+        # its fills and its take-profit at what it could really trade at.
+        self._real_bid_ask: dict[uuid.UUID, tuple[float, float, datetime]] = {}
         self._subscriber_counts: dict[uuid.UUID, int] = {}
         self._queues: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
@@ -90,7 +94,7 @@ class TickEngine:
         for instrument_id in instrument_ids:
             for table in (
                 self._last_price, self._real_price, self._real_price_source, self._real_price_at, self._real_oi,
-                self._subscriber_counts,
+                self._real_bid_ask, self._subscriber_counts,
             ):
                 table.pop(instrument_id, None)
 
@@ -131,6 +135,18 @@ class TickEngine:
         an instrument with nothing on file here just has no OI, not a
         faked one, unlike price's random-walk placeholder."""
         self._real_oi[instrument_id] = open_interest
+
+    def set_real_bid_ask(self, instrument_id: uuid.UUID, bid: float, ask: float, at: datetime | None = None) -> None:
+        """The best bid and ask of `instrument_id`'s order book, from the Kite
+        ticker's depth or a /quote read (market_data/live_price.py)."""
+        self._real_bid_ask[instrument_id] = (bid, ask, at or datetime.now(timezone.utc))
+
+    def get_fresh_bid_ask(self, instrument_id: uuid.UUID, max_age: timedelta, now: datetime) -> tuple[float, float] | None:
+        """(bid, ask), only if they arrived within `max_age` of `now`."""
+        held = self._real_bid_ask.get(instrument_id)
+        if held is None or now - held[2] > max_age:
+            return None
+        return held[0], held[1]
 
     def get_current_oi(self, instrument_id: uuid.UUID) -> float | None:
         return self._real_oi.get(instrument_id)
