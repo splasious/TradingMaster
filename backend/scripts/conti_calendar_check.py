@@ -25,14 +25,13 @@ from sqlalchemy import func, select
 from app.core.security import create_access_token
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
-from app.models.paper_trading import PaperNativeDeployment
+from app.models.paper_trading import PaperNativeDeployment, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAME = "Conti Straddle 15 MIN"
-FILE_MD5 = "03536e1f5a51afd155c25f286b3da832"
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "b4044a52c90e5206558251ec17b9c409"}
 LISTEN_SECONDS = 6
 
 
@@ -40,24 +39,37 @@ def md5(code: str | None) -> str:
     return hashlib.md5((code or "").replace("\r", "").encode()).hexdigest()
 
 
+async def describe(db, NAME: str, FILE_MD5: str) -> None:
+    strategies = (await db.execute(select(Strategy).where(func.trim(Strategy.name) == NAME))).scalars().all()
+    print(f"strategies named {NAME!r}: {len(strategies)}")
+    for s in strategies:
+        versions = (await db.execute(
+            select(StrategyVersion).where(StrategyVersion.strategy_id == s.id).order_by(StrategyVersion.version_number)
+        )).scalars().all()
+        cards = (await db.execute(
+            select(PaperNativeDeployment.status, PaperNativeDeployment.strategy_version_id, func.count())
+            .where(PaperNativeDeployment.strategy_id == s.id).group_by(PaperNativeDeployment.status, PaperNativeDeployment.strategy_version_id)
+        )).all()
+        by_id = {v.id: v.version_number for v in versions}
+        print(f"  versions: {', '.join(f'v{v.version_number} {md5(v.python_code)[:8]} {v.timeframe}' for v in versions)}")
+        newest = versions[-1] if versions else None
+        print(f"  newest is the built-in file: {newest is not None and md5(newest.python_code) == FILE_MD5}")
+        print(f"  paper cards: {', '.join(f'{st} on v{by_id.get(vid)} x{n}' for st, vid, n in cards) or 'none'}")
+        runs = (await db.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == s.id))).scalars().all()
+        for card in runs:
+            ran = card.last_evaluated_at.astimezone(IST).strftime("%d-%b %H:%M:%S") if card.last_evaluated_at else "never"
+            print(f"  card {str(card.id)[:8]}: last run {ran}, last signal {card.last_signal or '-'}, "
+                  f"position open: {bool((card.state or {}).get('position'))}")
+    pools = (await db.execute(select(func.count()).select_from(PaperPortfolio).where(func.trim(PaperPortfolio.name) == NAME))).scalar()
+    print(f"  pools named {NAME!r}: {pools}")
+
+
+
 async def main() -> None:
     today = datetime.now(timezone.utc).astimezone(IST).date()
     async with AsyncSessionLocal() as db:
-        strategies = (await db.execute(select(Strategy).where(func.trim(Strategy.name) == NAME))).scalars().all()
-        print(f"strategies named {NAME!r}: {len(strategies)}")
-        for s in strategies:
-            versions = (await db.execute(
-                select(StrategyVersion).where(StrategyVersion.strategy_id == s.id).order_by(StrategyVersion.version_number)
-            )).scalars().all()
-            cards = (await db.execute(
-                select(PaperNativeDeployment.status, PaperNativeDeployment.strategy_version_id, func.count())
-                .where(PaperNativeDeployment.strategy_id == s.id).group_by(PaperNativeDeployment.status, PaperNativeDeployment.strategy_version_id)
-            )).all()
-            by_id = {v.id: v.version_number for v in versions}
-            print(f"  versions: {', '.join(f'v{v.version_number} {md5(v.python_code)[:8]} {v.timeframe}' for v in versions)}")
-            newest = versions[-1] if versions else None
-            print(f"  newest is the built-in file: {newest is not None and md5(newest.python_code) == FILE_MD5}")
-            print(f"  paper cards: {', '.join(f'{st} on v{by_id.get(vid)} x{n}' for st, vid, n in cards) or 'none'}")
+        for NAME, FILE_MD5 in NAMES.items():
+            await describe(db, NAME, FILE_MD5)
 
         nifty = (await db.execute(select(Instrument).where(Instrument.symbol == "NIFTY 50", Instrument.exchange == "NSE"))).scalars().first()
         rows = (await db.execute(
