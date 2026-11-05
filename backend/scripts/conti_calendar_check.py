@@ -32,7 +32,7 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "b4044a52c90e5206558251ec17b9c409"}
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "f2c9c3d70a4b4458814a2200dd84c7a6"}
 LISTEN_SECONDS = 6
 
 
@@ -74,7 +74,16 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 trades = (await db.execute(select(func.count()).select_from(PaperNativeTrade).where(PaperNativeTrade.deployment_id == card.id))).scalar()
                 print(f"    closed trades so far: {trades}; take-profit last checked {position.get('checked_at', '-')}")
             elif card.last_signal != "HOLD":
-                print(f"    last reason: {card.last_signal_reason or '-'}")
+                reason = (card.last_signal_reason or "-").split(", P&L")[0]  # no P&L in this public log
+                print(f"    last reason: {reason}")
+            last = (await db.execute(
+                select(PaperNativeTrade.exit_reason, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
+                .where(PaperNativeTrade.deployment_id == card.id).order_by(PaperNativeTrade.closed_at.desc()).limit(1)
+            )).first()
+            if last is not None:
+                closed = last.closed_at.astimezone(IST).strftime("%d-%b %H:%M:%S") if last.closed_at.tzinfo else f"{last.closed_at:%d-%b %H:%M:%S} UTC"
+                print(f"    last closed trade: {last.exit_reason} at {closed}, {len(last.legs)} legs, exits "
+                      + ", ".join(f"{leg['side']} {leg['exit_price']:,.2f}" for leg in last.legs))
     pools = (await db.execute(select(func.count()).select_from(PaperPortfolio).where(func.trim(PaperPortfolio.name) == NAME))).scalar()
     print(f"  pools named {NAME!r}: {pools}")
 
