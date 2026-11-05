@@ -2,7 +2,8 @@
 Conti Calendar 15 MIN -- Conti Straddle's short straddle with the same strike bought monthly (native)
 ====================================================================================================
 
-Conti Straddle 15 MIN with a monthly hedge (agreed 4 Nov): four legs at one
+Conti Straddle 15 MIN with a monthly hedge (agreed 4 Nov; version 2, 5 Nov:
+take-profit Rs 14,000 and a 15:00 close every day): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -25,15 +26,18 @@ At bid and ask: every fill is at the order book's best price -- a sell at
 the bid, a buy at the ask -- and the take-profit reads what closing all four
 right now would really give: the sold legs bought back at the ask, the
 bought legs sold at the bid, less the estimated charges of all eight orders
-(trade_record.order_charges). At TAKE_PROFIT (Rs 50,000) or more, all four
-close at those prices. Checked on every run (about every 10 seconds) while
+(trade_record.order_charges). At TAKE_PROFIT (Rs 14,000; Rs 50,000 in
+version 1) or more, all four close at those prices. Checked on every run (about every 10 seconds) while
 NSE trades; a leg with no bid or no ask waits for one.
 
-No daily close and no rolls: the position is carried overnight at its first
-strike however far NIFTY goes. Only the weekly's expiry ends it otherwise:
-on that day, all four legs close at 15:00 (EXPIRY_DAY_CLOSE) whatever the
-profit, and the next one opens from 09:30 the next trading day. After a
-take-profit the next one opens at the next check before 15:00. No stop-loss.
+Closed at 15:00 every day (version 2; version 1 carried it overnight and
+closed it at 15:00 only on the weekly's expiry day): when the take-profit
+hasn't come by DAILY_CLOSE, all four legs close then at bid / ask whatever
+the profit -- nothing is held overnight -- and the next one opens from 09:30
+the next trading day. One still open from an earlier day (the app was down
+at 15:00) closes at its first check. No rolls: a position keeps its strike
+however far NIFTY goes. After a take-profit the next one opens at the next
+check before 15:00. No stop-loss.
 
 A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a month's
 three letters) against a weekly's NIFTY26N1723700CE. In a backtest there is
@@ -62,9 +66,8 @@ LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
-MARKET_OPEN, MARKET_CLOSE = dtime(9, 15), dtime(15, 30)
-EXPIRY_DAY_CLOSE = dtime(15, 0)  # on the weekly's expiry day, everything closes at this time
-TAKE_PROFIT = 50_000.0  # rupees, after charges, at bid / ask
+DAILY_CLOSE = dtime(15, 0)  # every day, whatever's open closes at this time
+TAKE_PROFIT = 14_000.0  # rupees, after charges, at bid / ask
 PCR_PIVOT = 1.0
 MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
 LEGS = (  # name, option type, side at entry, which expiry
@@ -206,10 +209,12 @@ async def evaluate(ctx) -> None:
             await close_all("manual", await forced_prices())
             ctx.note("exited", signal="COVER", reason="manual exit")
             return
-        if today > weekly or (today == weekly and now_ist.time() >= EXPIRY_DAY_CLOSE):
-            pnl = await close_all("weekly_expiry_3pm", await forced_prices())
+        opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date()
+        if opened_day < today or now_ist.time() >= DAILY_CLOSE:
+            pnl = await close_all("time_cutoff_3pm", await forced_prices())
             ctx.note("exited", signal="COVER", reason=(
-                f"weekly {weekly:%d %b} expiry, {EXPIRY_DAY_CLOSE:%H:%M}: all four legs closed, P&L {pnl:+,.0f} before charges"
+                f"{DAILY_CLOSE:%H:%M} close: all four legs closed at bid/ask, P&L {pnl:+,.0f} before charges" if opened_day == today
+                else f"open since {opened_day:%d %b}, past its {DAILY_CLOSE:%H:%M} close: all four legs closed, P&L {pnl:+,.0f} before charges"
             ))
             return
         quotes, missing = {}, []
@@ -219,13 +224,6 @@ async def evaluate(ctx) -> None:
                 missing.append(name)
             else:
                 quotes[name] = quote
-        if missing and not MARKET_OPEN <= now_ist.time() < MARKET_CLOSE:
-            ctx.note("hold", reason=(
-                f"calendar {position['strike']:,.0f} held overnight (sold {weekly:%d %b}, bought "
-                f"{date.fromisoformat(position['monthly_expiry']):%d %b}); take-profit checked at bid/ask from "
-                f"{MARKET_OPEN:%H:%M}; last read Rs {position.get('net_if_closed_now', 0):,.0f}"
-            ))
-            return
         if missing:
             ctx.note("hold", reason=(
                 f"calendar {position['strike']:,.0f} open; no bid/ask for {', '.join(missing)} -- "
@@ -245,7 +243,7 @@ async def evaluate(ctx) -> None:
         ctx.note("hold", reason=(
             f"calendar {position['strike']:,.0f} (sold {weekly:%d %b}, bought {date.fromisoformat(position['monthly_expiry']):%d %b}): "
             f"Rs {net:,.0f} if closed now at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; "
-            f"closes {weekly:%d %b} {EXPIRY_DAY_CLOSE:%H:%M} otherwise"
+            f"closes at {DAILY_CLOSE:%H:%M} otherwise"
         ))
         return
 

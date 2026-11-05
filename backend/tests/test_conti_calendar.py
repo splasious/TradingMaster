@@ -1,8 +1,8 @@
-"""Conti Calendar 15 MIN (native_strategies/nifty_conti_calendar.py, 4 Nov):
-Conti Straddle's short weekly straddle with the same strike's monthly CE and
-PE bought, 16 lots a leg, every fill at bid / ask; held overnight with no
-rolls until Rs 50,000 after charges at bid / ask, or 15:00 on the weekly's
-expiry day."""
+"""Conti Calendar 15 MIN (native_strategies/nifty_conti_calendar.py, 4 Nov;
+version 2, 5 Nov): Conti Straddle's short weekly straddle with the same
+strike's monthly CE and PE bought, 16 lots a leg, every fill at bid / ask;
+held with no rolls until Rs 14,000 after charges at bid / ask, or 15:00 --
+every day, nothing overnight."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -150,44 +150,58 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
     assert p["entry_charges"] > 0 and "16 lots a leg" in ctx._last_reason and ctx._last_signal == "CALENDAR"
 
 
-async def test_it_is_held_overnight_and_past_1500_on_a_day_that_isnt_the_weeklys_expiry(market):
+async def test_if_the_take_profit_hasnt_come_all_four_close_at_1500_every_day_and_the_next_opens_at_0930(market):
     await market.check(at(4, 9, 30))
-    for now in (at(4, 15, 0), at(4, 15, 29), at(4, 20, 0), at(5, 9, 0), at(5, 15, 5), at(6, 11, 0)):
-        ctx = await market.check(now)
-        assert ctx.state["position"] is not None, now
-    assert not await market.trades()
-    night = await market.check(at(5, 21, 0))
-    assert "held overnight" in night._last_reason and "from 09:15" in night._last_reason
-    day = await market.check(at(6, 11, 0))
-    assert "if closed now at bid/ask after charges" in day._last_reason
-    assert day.state["position"]["net_if_closed_now"] < 0  # the spreads and charges paid, nothing earned yet
+    held = await market.check(at(4, 14, 59, 50))
+    assert held.state["position"] is not None and "closes at 15:00 otherwise" in held._last_reason
+    assert held.state["position"]["net_if_closed_now"] < 0  # the spreads and charges paid, nothing earned yet
+    closed = await market.check(at(4, 15, 0))
+    assert closed.state["position"] is None and closed._last_reason.startswith("15:00 close: all four legs closed at bid/ask")
+    [trade] = await market.trades()
+    assert trade.exit_reason == "time_cutoff_3pm" and len(trade.legs) == 4
+    exits = {leg["side"]: leg for leg in trade.legs}
+    short_ltp = tick_engine.get_current_price(uuid.UUID(exits["short"]["instrument_id"]))
+    assert exits["short"]["exit_price"] == short_ltp + SPREAD  # bought back at the ask
+    later = await market.check(at(4, 15, 10))
+    assert later.state.get("position") is None and "outside entry window" in later._last_reason
+    nxt = await market.check(at(5, 9, 30))
+    assert nxt.state["position"] is not None and nxt.state["position"]["weekly_expiry"] == "2026-11-09"
 
 
-async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_50000_after_charges(market):
+async def test_one_left_open_from_an_earlier_day_closes_at_its_first_check(market):
+    await market.check(at(4, 9, 30))  # and the app is down from before 15:00 until the next morning
+    ctx = await market.check(at(5, 9, 15))
+    assert ctx.state["position"] is None and "open since 04 Nov, past its 15:00 close" in ctx._last_reason
+    [trade] = await market.trades()
+    assert trade.exit_reason == "time_cutoff_3pm"
+
+
+async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14000_after_charges(market):
+    assert cal.TAKE_PROFIT == 14_000.0
     held = (await market.check(at(4, 9, 30))).state["position"]
 
     def decay_to(each: float) -> None:  # the weekly's two premiums fall; the monthly's are as the day prices them
         market.premium[(W1, 23450.0, "CE")] = market.premium[(W1, 23450.0, "PE")] = each
 
-    market.prices(at(5, 11, 0), 23460.0)  # the next day's book
-    longs = {n: tick_engine.get_fresh_bid_ask(uuid.UUID(held["legs"][n]["instrument_id"]), timedelta(minutes=1), at(5, 11, 0))
+    market.prices(at(4, 11, 0), 23460.0)  # the book later that day
+    longs = {n: tick_engine.get_fresh_bid_ask(uuid.UUID(held["legs"][n]["instrument_id"]), timedelta(minutes=1), at(4, 11, 0))
              for n in ("long_ce", "long_pe")}
 
     def net(each: float) -> float:
         return cal.if_closed_now(held, {"short_ce": (each - SPREAD, each + SPREAD), "short_pe": (each - SPREAD, each + SPREAD), **longs})[0]
 
-    lo, hi = 0.0, 300.0  # the weekly premium where closing now gives exactly Rs 50,000 lies between
+    lo, hi = 0.0, 300.0  # the weekly premium where closing now gives exactly Rs 14,000 lies between
     for _ in range(60):
         mid = (lo + hi) / 2
         lo, hi = (mid, hi) if net(mid) >= cal.TAKE_PROFIT else (lo, mid)
 
-    decay_to(hi + 0.05)  # just short of Rs 50,000: held
-    under = await market.check(at(5, 11, 0))
+    decay_to(hi + 0.05)  # just short of Rs 14,000: held
+    under = await market.check(at(4, 11, 0))
     assert under.state["position"] is not None and under.state["position"]["net_if_closed_now"] == pytest.approx(net(hi + 0.05), abs=0.01)
     assert under.state["position"]["net_if_closed_now"] < cal.TAKE_PROFIT
 
     decay_to(lo - 0.05)  # just past it: all four close at bid / ask
-    done = await market.check(at(5, 11, 0, 10))
+    done = await market.check(at(4, 11, 0, 10))
     assert done.state["position"] is None and done._last_signal == "COVER" and "take-profit" in done._last_reason
     [trade] = await market.trades()
     assert trade.exit_reason == "take_profit"
@@ -195,27 +209,14 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_50
     assert ("short", lo - 0.05 + SPREAD) in exits  # bought back at the ask
     assert ("long", longs["long_ce"][0]) in exits and ("long", longs["long_pe"][0]) in exits  # sold at the bid
 
-    again = await market.check(at(5, 11, 0, 20))  # the next check opens the next one
+    again = await market.check(at(4, 11, 0, 20))  # the next check opens the next one
     assert again.state["position"] is not None and again._last_signal == "CALENDAR"
-
-
-async def test_on_the_weeklys_expiry_day_all_four_close_at_1500_and_the_next_opens_the_next_day_at_0930(market):
-    await market.check(at(6, 9, 30))
-    held = await market.check(at(9, 14, 59))
-    assert held.state["position"] is not None
-    closed = await market.check(at(9, 15, 0))
-    assert closed.state["position"] is None and "weekly 09 Nov expiry, 15:00: all four legs closed" in closed._last_reason
-    [trade] = await market.trades()
-    assert trade.exit_reason == "weekly_expiry_3pm" and len(trade.legs) == 4
-    later = await market.check(at(9, 15, 10))
-    assert later.state.get("position") is None and "outside entry window" in later._last_reason
-    nxt = await market.check(at(11, 9, 30))  # 10 Nov is a holiday
-    assert (nxt.state["position"]["weekly_expiry"], nxt.state["position"]["monthly_expiry"]) == ("2026-11-17", "2026-11-23")
 
 
 async def test_on_an_expiry_day_it_opens_on_next_weeks_and_in_the_months_last_week_buys_next_months(market):
     expiry_day = await market.check(at(9, 9, 30))
     assert expiry_day.state["position"]["weekly_expiry"] == "2026-11-17"
+    assert (await market.check(at(9, 15, 0))).state["position"] is None  # closed at 15:00 like any day
     market.deployment.state = None
     market.weeklies = [W3, DEC]
     last_week = await market.check(at(18, 9, 30))

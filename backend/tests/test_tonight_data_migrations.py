@@ -947,6 +947,45 @@ async def test_conti_calendar_is_created_with_its_pool_and_card_for_conti_stradd
     assert conti.cash == 2_013_500.0  # Conti Straddle's own pool untouched
 
 
+async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_open_position(db_engine, db_session):
+    migration = _load("c4e6a8b0d2f5_conti_calendar_14000_daily_close")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f8b0d2e4a6c9"
+    v1 = "# Conti Calendar 15 MIN, version 1: Rs 50,000, held overnight\n"
+    migration.FROM_MD5S = {_md5_text(v1)}
+
+    running = await _deployment(db_session, "cal_a@tradingmaster.internal", v1)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    position = {"strike": 24300, "take_profit": 50_000.0, "net_if_closed_now": 1234.5, "opened_at": "2026-11-05T04:00:08+00:00",
+                "legs": {"short_ce": {"side": "sell", "entry_price": 163.45, "quantity": 1040.0}}}
+    running.state = {"position": position}
+    flat = await _deployment(db_session, "cal_b@tradingmaster.internal", v1)
+    (await db_session.get(Strategy, flat.strategy_id)).name = "Conti Calendar 15 MIN"
+    flat.state = {"position": None}
+    edited = await _deployment(db_session, "cal_c@tradingmaster.internal", "# Conti Calendar 15 MIN, edited by hand\n")
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all: version 2 isn't version 1's code
+
+    built_in = migration.BUILT_IN.read_text(encoding="utf-8")
+    for card in (running, flat):
+        await db_session.refresh(card)
+        numbers = (await db_session.execute(
+            select(StrategyVersion.version_number, StrategyVersion.id, StrategyVersion.python_code)
+            .where(StrategyVersion.strategy_id == card.strategy_id).order_by(StrategyVersion.version_number)
+        )).all()
+        assert [n for n, _, _ in numbers] == [11, 12] and numbers[-1][2] == built_in
+        assert card.strategy_version_id == numbers[-1][1]
+    assert running.state["position"] == {**position, "take_profit": 14_000.0}  # still open, under the new rules
+    assert flat.state == {"position": None}
+    await db_session.refresh(edited)
+    assert len((await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == edited.strategy_id))).all()) == 1
+    reasons = (await db_session.execute(
+        select(AuditLog.new_value).where(AuditLog.action == "PAPER_NATIVE_VERSION_UPDATED", AuditLog.object_id == str(running.id))
+    )).scalars().all()
+    assert [r["open_position_kept"] for r in reasons] == [True] and "Rs 14,000" in reasons[0]["reason"]
+
+
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --
 
 async def test_conti_ladder_moves_onto_stepping_with_nifty_keeping_its_open_ladder(db_engine, db_session):
