@@ -22,6 +22,10 @@ on:
         description: "Instead of the check: read-only -- Kotak Neo's positions and holdings against what the live runs hold; field names and match results here, the rows to the private Telegram chat only (backend/scripts/kotak_holdings_check.py)"
         type: boolean
         default: false
+      telegram_alert_check:
+        description: "Instead of the check: read-only -- which strategies' trades go to Telegram (the setting and whether the server overrides it), and whether AM OP TRD 15 MIN's / Conti Calendar's own code calls Telegram; names and yes/no only (backend/scripts/telegram_alert_check.py)"
+        type: boolean
+        default: false
       conti_calendar_check:
         description: "Instead of the check: read-only -- Conti Straddle 15 MIN's versions (md5) and cards, the NIFTY option expiries the app holds and streams; counts, dates and yes/no only (backend/scripts/conti_calendar_check.py)"
         type: boolean
@@ -73,6 +77,7 @@ jobs:
           MACD_LIVE_CHECK: ${{ inputs.macd_live_check }}
           OI_CHART_CHECK: ${{ inputs.oi_chart_check }}
           CONTI_CALENDAR_CHECK: ${{ inputs.conti_calendar_check }}
+          TELEGRAM_ALERT_CHECK: ${{ inputs.telegram_alert_check }}
           KOTAK_HOLDINGS_CHECK: ${{ inputs.kotak_holdings_check }}
         run: |
           set -euo pipefail
@@ -432,6 +437,13 @@ jobs:
           if [ "${KOTAK_HOLDINGS_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo holdings check (read-only; rows to the private Telegram chat only; field names and match results here)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_holdings_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${TELEGRAM_ALERT_CHECK:-false}" = "true" ]; then
+            echo "== Telegram trade alerts: which strategies (read-only; names and yes/no only)"
+            py_file=$(vps 'f=$(mktemp /tmp/tg-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/telegram_alert_check.py)
             remote py "$py_file"
             exit 0
           fi
