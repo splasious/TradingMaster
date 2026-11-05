@@ -151,6 +151,32 @@ class NativeHoldingOut(NativeLegOut):
     metrics: dict[str, float | int | str | bool | None] = Field(default_factory=dict)
 
 
+class PayoffPointOut(BaseModel):
+    spot: float
+    pnl: float
+
+
+class PayoffOut(BaseModel):
+    """A calendar's profit at its exit -- today's 15:00 -- across NIFTY levels
+    (services/options/calendar_payoff.py): each leg repriced at its implied
+    volatility now, closed at bid/ask, after every charge."""
+
+    horizon: datetime
+    spot: float
+    points: list[PayoffPointOut]
+    max_profit: float
+    max_profit_at: float
+    max_loss: float  # the worst within the points
+    max_loss_at: float
+    loss_cap: float | None  # the net debit and the charges: a calendar can't lose more
+    breakeven_low: float | None  # None: past the points, or (max_profit < 0) no profit anywhere
+    breakeven_high: float | None
+    target: float | None
+    target_low: float | None
+    target_high: float | None
+    implied_vols: dict[str, float]
+
+
 class NativePositionOut(BaseModel):
     """Display-only summary of deployment.state["position"] for the
     short/long-leg credit-spread convention native_strategies/
@@ -176,6 +202,8 @@ class NativePositionOut(BaseModel):
     underlying_symbol: str | None = None
     underlying_price: float | None = None
     underlying_close: ClosePriceOut | None = None
+    # A calendar's profit at today's 15:00 across NIFTY levels, while it can still get there.
+    payoff: PayoffOut | None = None
 
 
 class DayPnlOut(BaseModel):

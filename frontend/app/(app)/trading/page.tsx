@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { PaperTradingBanner } from "@/components/layout/environment-mode-banner";
+import { CalendarPayoff } from "@/components/trading/calendar-payoff";
 import { GoLiveModal, LiveBar, LiveOffModal, LiveRunSection, LiveSwitch, brokerText, rupees } from "@/components/trading/live-run";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
 import { StrategyInstrumentPicker } from "@/components/trading/strategy-instrument-picker";
@@ -1458,6 +1459,8 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
           ))}
         </div>
       )}
+
+      {position.payoff && <CalendarPayoff payoff={position.payoff} />}
 
       <div className="rounded-md border border-border">
         <PositionLegsTable legs={position.legs} currency={currency} />

@@ -329,6 +329,27 @@ export interface NativePositionOut {
   underlying_symbol: string | null;
   underlying_price: number | null;
   underlying_close?: ClosePriceOut | null;
+  /** A calendar's profit at today's 15:00 across NIFTY levels, while 15:00 is ahead. */
+  payoff?: PayoffOut | null;
+}
+
+/** services/options/calendar_payoff.py: each leg repriced at its implied
+ * volatility now, closed at bid/ask, after every charge. */
+export interface PayoffOut {
+  horizon: string;
+  spot: number;
+  points: { spot: number; pnl: number }[];
+  max_profit: number;
+  max_profit_at: number;
+  max_loss: number; // the worst within the points
+  max_loss_at: number;
+  loss_cap: number | null; // net debit + charges: a calendar can't lose more
+  breakeven_low: number | null; // null: past the points, or no profit anywhere (max_profit < 0)
+  breakeven_high: number | null;
+  target: number | null;
+  target_low: number | null;
+  target_high: number | null;
+  implied_vols: Record<string, number>;
 }
 
 export interface EffectivePcrOut {

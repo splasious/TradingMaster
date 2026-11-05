@@ -250,3 +250,22 @@ async def test_in_a_backtest_the_last_price_stands_for_bid_and_ask(market, monke
     ctx = await market.check(at(4, 9, 30))
     legs = ctx.state["position"]["legs"]
     assert legs["short_ce"]["entry_price"] == tick_engine.get_current_price(uuid.UUID(legs["short_ce"]["instrument_id"]))
+
+
+async def test_the_card_shows_the_profit_at_1500_across_nifty_levels(market):
+    """5 Nov: the card's payoff (services/options/calendar_payoff.py) -- built
+    from the position and the live book, while 15:00 is still ahead."""
+    from app.api.v1.endpoints import paper_native_trading as ep
+
+    await market.check(at(4, 9, 30))
+    market.prices(at(4, 11, 0), 23480.0)
+    out = await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))
+    payoff = out.payoff
+    assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.spot == 23480.0
+    assert payoff.points[0].spot == 22480.0 and payoff.points[-1].spot == 24480.0
+    assert payoff.target == cal.TAKE_PROFIT and set(payoff.implied_vols) == {"short_ce", "short_pe", "long_ce", "long_pe"}
+    assert payoff.max_loss <= payoff.max_profit and payoff.loss_cap is not None and payoff.loss_cap > 0
+
+    market.prices(at(4, 15, 0), 23480.0)
+    late = await ep._build_position_out(market.db, market.deployment.state, at(4, 15, 0, 5).astimezone(timezone.utc))
+    assert late.payoff is None  # 15:00 has come: it's closing
