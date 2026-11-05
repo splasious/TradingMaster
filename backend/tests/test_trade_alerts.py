@@ -52,8 +52,9 @@ def alerted(monkeypatch):
     monkeypatch.setattr(get_settings(), "telegram_trade_alert_strategies", "Nifty PCR Futures,AM OP TRD 15 MIN")
 
 
-def test_only_am_op_trd_15_min_is_alerted_on_by_default():
-    assert Settings.model_fields["telegram_trade_alert_strategies"].default == "AM OP TRD 15 MIN"
+def test_only_conti_calendar_15_min_is_alerted_on_by_default():
+    # 5 Nov: AM OP TRD 15 MIN's trade calls taken off, Conti Calendar 15 MIN's put on.
+    assert Settings.model_fields["telegram_trade_alert_strategies"].default == "Conti Calendar 15 MIN"
 
 
 def at(hh: int, mm: int, ss: int = 0) -> datetime:
@@ -86,6 +87,49 @@ def test_the_messages_fit_the_groups_width():
     assert lines(closed)[-1] == "Today net    +128,698.67 (3)"
     for message in (taken, closed):
         assert max(len(line) for line in lines(message)) <= WIDTH
+
+
+def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
+    """5 Nov: the strike and lots, the net debit, the take-profit and the 15:00
+    exit, then where it stands at 15:00 if volatility holds."""
+    from app.services.options.calendar_payoff import Payoff
+
+    legs = [
+        {"symbol": "NIFTY26N0924300CE", "side": "sell", "quantity": 1040, "price": 163.45, "lot_size": 65},
+        {"symbol": "NIFTY26N0924300PE", "side": "sell", "quantity": 1040, "price": 138.15, "lot_size": 65},
+        {"symbol": "NIFTY26NOV24300CE", "side": "buy", "quantity": 1040, "price": 320.0, "lot_size": 65},
+        {"symbol": "NIFTY26NOV24300PE", "side": "buy", "quantity": 1040, "price": 253.3, "lot_size": 65},
+    ]
+    position = {"regime": "calendar", "pcr_at_entry": 0.85, "strike": 24300, "take_profit": 14000.0}
+    payoff = Payoff(horizon=at(15, 0), spot=24310.0, points=[], max_profit=2818.9, max_profit_at=24300.0, max_loss=-274390.04,
+                    max_loss_at=25300.0, loss_cap=290000.0, breakeven_low=24243.2, breakeven_high=24366.5, target=14000.0,
+                    target_low=None, target_high=None)
+    taken = entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8), payoff)
+    assert taken[0] == "📅 Conti Calendar 15 MIN: trade taken"
+    assert lines(taken) == [
+        "Calendar · PCR 0.850", "Time 09:30:08", "Strike 24,300 · 16 lots a leg",
+        "SELL NIFTY26N0924300CE", "  16 lots @ 163.45", "SELL NIFTY26N0924300PE", "  16 lots @ 138.15",
+        "BUY NIFTY26NOV24300CE", "  16 lots @ 320.00", "BUY NIFTY26NOV24300PE", "  16 lots @ 253.30",
+        "Net debit 282,568", "Target +14,000 after costs", "Exit 15:00 if not hit",
+        "At 15:00, IV as now:", " Breakeven 24,243-24,366", " Max profit +2,819 @24,300", " Max loss -274,390 (±1,000)",
+        " 14,000 not reached by 15:00",
+    ]
+    assert max(len(line) for line in lines(taken)) <= WIDTH
+
+    flat = Payoff(**{**payoff.__dict__, "max_profit": -1200.0, "breakeven_low": None, "breakeven_high": None})
+    assert {" No profit at any level", " Best case -1,200 @24,300"} <= set(lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8), flat)))
+    without = lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8)))  # figures not worked out
+    assert without[-1] == "Exit 15:00 if not hit"
+
+    closed = exit_message("Conti Calendar 15 MIN", {
+        "legs": [{"instrument_symbol": "NIFTY26N0924300CE", "side": "short", "quantity": 1040, "lot_size": 65,
+                  "entry_price": 163.45, "exit_price": 150.0}],
+        "pnl": 13988.0, "charges": 1500.0, "exit_reason": "take_profit", "opened_at": at(9, 30), "closed_at": at(13, 5),
+    }, 12488.0, 1)
+    assert lines(closed)[0] == "Exit: take-profit hit"
+    assert lines(exit_message("Conti Calendar 15 MIN", {
+        "legs": [], "pnl": -100.0, "charges": 10.0, "exit_reason": "time_cutoff_3pm", "opened_at": at(9, 30), "closed_at": at(15, 0),
+    }, -110.0, 1))[0] == "Exit: 15:00 close"
 
 
 def test_an_unknown_exit_reason_reads_as_words_and_missing_charges_drop_their_lines():

@@ -28,16 +28,13 @@ from app.schemas.paper_trading import (
     PayoffPointOut,
 )
 from app.services.audit import write_audit_log
-from app.services.broker.zerodha_broker import IST
-from app.services.market_data.live_price import LIVE_PRICE_MAX_AGE
-from app.services.market_data.tick_engine import tick_engine
-from app.services.options.calendar_payoff import EXIT_TIME, PayoffLeg, calendar_payoff
+from app.services.options.calendar_payoff import position_payoff
 from app.services.market_data.closing_price import SessionClose, display_prices
 from app.services.live_trading.live_runs import linked_run
 from app.services.paper_trading.day_pnl import CardPnl, card_pnl
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
 from app.services.paper_trading.scheduler import paper_trading_scheduler
-from app.services.paper_trading.trade_record import estimate_charges, order_charges, resolve_leg_details, summarize_trade
+from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
 router = APIRouter()
@@ -144,39 +141,21 @@ async def _build_position_out(db: AsyncSession, state: dict | None, now: datetim
         metrics=_scalar_metrics(position, _POSITION_CORE_KEYS),
         underlying_symbol=underlying.symbol if underlying else None,
         underlying_price=underlying_price, underlying_close=_close_out(underlying_close),
-        payoff=_payoff_out(position, raw_legs, leg_instruments, prices, underlying_price, underlying_close, now),
+        payoff=_payoff_out(position, leg_instruments, prices, underlying_price, underlying_close, now),
     )
 
 
 def _payoff_out(
-    position: dict, raw_legs: list[tuple[str, dict]], instruments: list[Instrument], prices: list[float | None],
-    spot: float | None, spot_close: SessionClose | None, now: datetime | None,
+    position: dict, instruments: list[Instrument], prices: list[float | None], spot: float | None, spot_close: SessionClose | None,
+    now: datetime | None,
 ) -> PayoffOut | None:
     """A calendar's profit at today's 15:00 across NIFTY levels
     (options/calendar_payoff.py) -- while the market is open (live NIFTY,
     live option prices) and 15:00 is still ahead."""
-    if position.get("regime") != "calendar" or spot is None or spot_close is not None or any(p is None for p in prices):
+    if position.get("regime") != "calendar" or spot_close is not None:
         return None
-    at = as_aware_utc(now or datetime.now(timezone.utc))
-    horizon = datetime.combine(at.astimezone(IST).date(), EXIT_TIME, tzinfo=IST)
-    legs = []
-    for (side, leg), instrument, price in zip(raw_legs, instruments, prices):
-        if instrument.expiry is None or instrument.strike is None or instrument.option_type is None:
-            return None
-        book = tick_engine.get_fresh_bid_ask(instrument.id, LIVE_PRICE_MAX_AGE, at)
-        mid, half = ((book[0] + book[1]) / 2, (book[1] - book[0]) / 2) if book else (price, 0.0)
-        legs.append(PayoffLeg(
-            name=next(name for name, value in position["legs"].items() if value is leg), option_type=instrument.option_type,
-            strike=float(instrument.strike), expiry=instrument.expiry, side=side, quantity=float(leg["quantity"]),
-            entry_price=float(leg["entry_price"]), mid=mid, half_spread=half,
-        ))
-
-    def charges(leg: PayoffLeg, price: float, buying: bool) -> float:
-        return order_charges({"option_type": leg.option_type, "quantity": leg.quantity}, price, buying, False) or 0.0
-
-    target = position.get("take_profit")
-    payoff = calendar_payoff(legs, spot, at, horizon, float(position.get("entry_charges") or 0.0), charges,
-                             float(target) if isinstance(target, (int, float)) else None)
+    names = list(position["legs"])
+    payoff = position_payoff(position, dict(zip(names, instruments)), dict(zip(names, prices)), spot, now or datetime.now(timezone.utc))
     if payoff is None:
         return None
     return PayoffOut(

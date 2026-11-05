@@ -269,3 +269,18 @@ async def test_the_card_shows_the_profit_at_1500_across_nifty_levels(market):
     market.prices(at(4, 15, 0), 23480.0)
     late = await ep._build_position_out(market.db, market.deployment.state, at(4, 15, 0, 5).astimezone(timezone.utc))
     assert late.payoff is None  # 15:00 has come: it's closing
+
+
+async def test_the_telegram_entry_alert_carries_the_setup_with_its_1500_figures(market):
+    """5 Nov: the entry alert (notifications/trade_alerts.py) works out the
+    same 15:00 figures as the card, from the position just opened."""
+    from app.services.notifications import trade_alerts
+
+    ctx = await market.check(at(4, 9, 30))
+    position = ctx.state["position"]
+    payoff = await trade_alerts._entry_payoff(market.db, position, ctx, 23460.0)
+    assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.target == cal.TAKE_PROFIT
+    title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
+    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
+    assert "Target +14,000 after costs" in body and "At 15:00, IV as now:" in body and " Max loss " in body
+    assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None

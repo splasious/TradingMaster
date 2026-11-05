@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from typing import Callable
 
+from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
 
 EXPIRY_TIME = time(15, 30)  # IST: when an NSE option expires
@@ -166,3 +167,39 @@ def calendar_payoff(
         target=target, target_low=zone[0] if zone else None, target_high=zone[1] if zone else None,
         vols=vols,
     )
+
+
+def position_payoff(position: dict, instruments: dict, prices: dict[str, float | None], spot: float | None, now: datetime) -> Payoff | None:
+    """A calendar position's (native_strategies/nifty_conti_calendar.py's
+    state["position"]) profit at today's EXIT_TIME -- each leg off the order
+    book the ticker last saw, else its price in `prices` (leg name -> price)
+    with no spread. `instruments`: leg name -> its Instrument. None for any
+    other position, without NIFTY or a leg's price, or once 15:00 has come.
+    Shared by the card (endpoints/paper_native_trading.py) and the Telegram
+    entry alert (notifications/trade_alerts.py)."""
+    from app.services.market_data.live_price import LIVE_PRICE_MAX_AGE
+    from app.services.market_data.tick_engine import tick_engine
+    from app.services.paper_trading.trade_record import order_charges
+
+    if position.get("regime") != "calendar" or spot is None or not isinstance(position.get("legs"), dict):
+        return None
+    at = as_aware_utc(now)
+    horizon = datetime.combine(at.astimezone(IST).date(), EXIT_TIME, tzinfo=IST)
+    legs = []
+    for name, leg in position["legs"].items():
+        instrument, price = instruments.get(name), prices.get(name)
+        if instrument is None or price is None or None in (instrument.expiry, instrument.strike, instrument.option_type):
+            return None
+        book = tick_engine.get_fresh_bid_ask(instrument.id, LIVE_PRICE_MAX_AGE, at)
+        mid, half = ((book[0] + book[1]) / 2, (book[1] - book[0]) / 2) if book else (price, 0.0)
+        legs.append(PayoffLeg(
+            name=name, option_type=instrument.option_type, strike=float(instrument.strike), expiry=instrument.expiry,
+            side=leg["side"], quantity=float(leg["quantity"]), entry_price=float(leg["entry_price"]), mid=mid, half_spread=half,
+        ))
+
+    def charges(leg: PayoffLeg, price: float, buying: bool) -> float:
+        return order_charges({"option_type": leg.option_type, "quantity": leg.quantity}, price, buying, False) or 0.0
+
+    target = position.get("take_profit")
+    return calendar_payoff(legs, spot, at, horizon, float(position.get("entry_charges") or 0.0), charges,
+                           float(target) if isinstance(target, (int, float)) else None)

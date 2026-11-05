@@ -10,12 +10,18 @@ and a colour mark in its first line: 📈 / 📉 / ↔️ for the view taken, �
 for a profit or a loss. A chart that can't be drawn (no candles yet this
 session, say) leaves the text alert alone, as before.
 
+A calendar's entry (Conti Calendar 15 MIN, 5 Nov) carries its whole setup:
+the strike and lots, the net debit, the take-profit and the 15:00 exit, and
+where it stands at 15:00 if volatility holds -- the breakeven range, the
+most it can make and lose (options/calendar_payoff.py, as on its card).
+
 Text lines stay within 32 characters: the group's message block is narrower
 than the private chat's (see oi_levels.MAX_WIDTH).
 """
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, time, timezone
 
 from sqlalchemy import func, select
@@ -30,6 +36,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.notifications import candle_panel, trade_chart
 from app.services.notifications.telegram import send_telegram
 from app.services.notifications.trade_chart import ChartSpec, Mark
+from app.services.options.calendar_payoff import EXIT_TIME, GRID_POINTS, Payoff, position_payoff
 from app.services.strategy.native_strategies import nifty_pcr_futures_hedge as futures_hedge
 from app.services.strategy.native_strategies import nifty_pcr_multi_regime as multi_regime
 
@@ -43,9 +50,12 @@ EXIT_REASONS = {
     "pcr_below_0.95": "PCR below 0.95",
     "carried_overnight": "carried overnight",
     "manual": "manual exit",
+    "take_profit": "take-profit hit",
+    "time_cutoff_3pm": "15:00 close",
+    "weekly_expiry_3pm": "weekly expiry, 15:00",
 }
 MA_EXITS = {"ma_stop": "MA stop", "ma_exit": "MA exit"}
-VIEW_MARKS = {"bullish": "📈", "bearish": "📉", "sideways": "↔️"}
+VIEW_MARKS = {"bullish": "📈", "bearish": "📉", "sideways": "↔️", "calendar": "📅"}
 VIEW_ARROWS = {"bullish": ("▲", "good"), "bearish": ("▼", "bad"), "sideways": ("↔", "neutral")}
 NIFTY = "NIFTY 50"
 
@@ -73,17 +83,69 @@ def _net(trade: dict) -> float:
     return trade["pnl"] - trade["charges"] if trade.get("charges") is not None else trade["pnl"]
 
 
-def entry_message(strategy: str, legs: list[dict], position: dict | None, at: datetime) -> tuple[str, str]:
+def entry_message(
+    strategy: str, legs: list[dict], position: dict | None, at: datetime, payoff: Payoff | None = None,
+) -> tuple[str, str]:
     position = position or {}
     view = _view(position)
     pcr = position.get("pcr_at_entry")
     head = " · ".join(part for part in (view.title() if view else None, f"PCR {pcr:.3f}" if pcr is not None else None) if part)
     lines = [head] if head else []
     lines.append(f"Time {_ist(at):%H:%M:%S}")
+    calendar = view == "calendar"
+    lots = {_lots(leg["quantity"], leg.get("lot_size")) for leg in legs}
+    if calendar and position.get("strike") is not None:
+        lines.append(f"Strike {position['strike']:,.0f}" + (f" · {lots.pop()} a leg" if len(lots) == 1 else ""))
     for leg in legs:
         lines.append(f"{'BUY' if leg['side'] == 'buy' else 'SELL'} {leg['symbol']}")
         lines.append(f"  {_lots(leg['quantity'], leg.get('lot_size'))} @ {leg['price']:,.2f}")
+    if calendar:
+        lines += _calendar_setup(legs, position, payoff)
     return f"{VIEW_MARKS.get(view or '', '🔔')} {strategy}: trade taken", "\n".join(lines)
+
+
+def _calendar_setup(legs: list[dict], position: dict, payoff: Payoff | None) -> list[str]:
+    """The plan under a calendar's legs: what it cost, when it closes, and --
+    `payoff`, today's 15:00 at volatility as now -- where it breaks even and
+    the most it can make and lose."""
+    debit = sum(leg["price"] * leg["quantity"] * (1 if leg["side"] == "buy" else -1) for leg in legs)
+    lines = [f"Net {'debit' if debit >= 0 else 'credit'} {abs(debit):,.0f}"]
+    target = position.get("take_profit")
+    if isinstance(target, (int, float)):
+        lines.append(f"Target +{target:,.0f} after costs")
+    lines.append(f"Exit {EXIT_TIME:%H:%M} if not hit")
+    if payoff is None:
+        return lines
+    lines.append(f"At {EXIT_TIME:%H:%M}, IV as now:")
+    if payoff.max_profit < 0:
+        lines.append(" No profit at any level")
+    else:
+        low = f"{payoff.breakeven_low:,.0f}" if payoff.breakeven_low is not None else "below"
+        high = f"{payoff.breakeven_high:,.0f}" if payoff.breakeven_high is not None else "above"
+        lines.append(f" Breakeven {low}-{high}")
+    best = "Max profit" if payoff.max_profit >= 0 else "Best case"
+    lines.append(f" {best} {payoff.max_profit:+,.0f} @{payoff.max_profit_at:,.0f}")
+    lines.append(f" Max loss {payoff.max_loss:+,.0f} (±{GRID_POINTS:,})")
+    if payoff.target is not None and payoff.max_profit < payoff.target:
+        lines.append(f" {payoff.target:,.0f} not reached by {EXIT_TIME:%H:%M}")
+    return lines
+
+
+async def _entry_payoff(db, position: dict | None, ctx, spot: float | None) -> Payoff | None:
+    """A calendar entry's 15:00 figures, as its card shows them; None for
+    any other entry, or when they can't be worked out (logged)."""
+    if not isinstance(position, dict) or position.get("regime") != "calendar":
+        return None
+    try:
+        instruments, prices = {}, {}
+        for name, leg in position["legs"].items():
+            instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+            instruments[name] = instrument
+            prices[name] = await ctx.get_price(instrument.id) if instrument is not None else None
+        return position_payoff(position, instruments, prices, spot if spot is not None else position.get("entry_spot"), ctx.now)
+    except Exception:
+        logger.exception("The calendar's 15:00 figures for its Telegram entry alert weren't worked out")
+        return None
 
 
 def exit_message(strategy: str, trade: dict, day_net: float, day_trades: int) -> tuple[str, str]:
@@ -185,6 +247,19 @@ def _legs_text(legs: list[dict]) -> str:
     return text[:1].upper() + text[1:]
 
 
+def _calendar_text(legs: list[dict], position: dict | None) -> str:
+    """"Sell 09 Nov + buy 23 Nov 23,450 CE+PE · 16 lots each"."""
+    position = position or {}
+    try:
+        weekly = datetime.fromisoformat(position["weekly_expiry"])
+        monthly = datetime.fromisoformat(position["monthly_expiry"])
+    except (KeyError, TypeError, ValueError):
+        return _legs_text(legs)
+    lots = {_lots(leg["quantity"], leg.get("lot_size")) for leg in legs}
+    return (f"Sell {weekly:%d %b} + buy {monthly:%d %b} {position.get('strike', 0):,.0f} CE+PE"
+            + (f" · {lots.pop()} each" if len(lots) == 1 else ""))
+
+
 def _entry_mark(session: Session, view: str | None, position: dict | None, at: datetime) -> Mark:
     position = position or {}
     spot = position.get("spot_at_entry") or position.get("entry_spot")
@@ -202,7 +277,8 @@ def entry_chart(strategy: str, session: Session, legs: list[dict], position: dic
     headline = " · ".join(part for part in (f"{arrow} {(view or 'Entry').title()}", f"PCR {pcr:.3f}" if pcr is not None else None) if part)
     return ChartSpec(
         title=f"{strategy} · trade taken", day=session.day, recent=session.recent, headline=headline,
-        tone=tone, subtitle=_legs_text(legs), view=view, entry=_entry_mark(session, view, position, at), pcr=session.pcr,
+        tone=tone, subtitle=_calendar_text(legs, position) if view == "calendar" else _legs_text(legs), view=view,
+        entry=_entry_mark(session, view, position, at), pcr=session.pcr,
         levels=pcr_levels(strategy, view, position),
     )
 
@@ -287,6 +363,7 @@ async def send_trade_alerts(db, deployment, ctx, position_before: dict | None = 
         if ctx.opened_legs:
             position = ctx.state.get("position")
             photo = await _picture(lambda: entry_chart(name, session, ctx.opened_legs, position, ctx.now)) if session else None
-            await send_telegram(*entry_message(name, ctx.opened_legs, position, ctx.now), to_group=True, photo=photo)
+            payoff = await _entry_payoff(db, position, ctx, nifty_now)
+            await send_telegram(*entry_message(name, ctx.opened_legs, position, ctx.now, payoff), to_group=True, photo=photo)
     except Exception:
         logger.exception("Trade alerts failed for deployment %s", deployment.id)
