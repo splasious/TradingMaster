@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from datetime import datetime, timezone
 
 import websockets
@@ -25,7 +26,7 @@ from sqlalchemy import func, select
 from app.core.security import create_access_token
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
-from app.models.paper_trading import PaperNativeDeployment, PaperPortfolio
+from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
 from app.models.strategy import Strategy, StrategyVersion
 from app.models.user import User
 from app.services.broker.zerodha_broker import IST
@@ -60,6 +61,20 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
             ran = card.last_evaluated_at.astimezone(IST).strftime("%d-%b %H:%M:%S") if card.last_evaluated_at else "never"
             print(f"  card {str(card.id)[:8]}: last run {ran}, last signal {card.last_signal or '-'}, "
                   f"position open: {bool((card.state or {}).get('position'))}")
+            position = (card.state or {}).get("position")
+            if NAME != "Conti Calendar 15 MIN":
+                continue
+            if position:
+                opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
+                print(f"    opened {opened}: strike {position['strike']:,.0f} ({position['side']}-heavy, PCR {position['pcr_at_entry']:.3f}), "
+                      f"weekly {position['weekly_expiry']}, monthly {position['monthly_expiry']}")
+                for name, leg in position["legs"].items():
+                    instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+                    print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")
+                trades = (await db.execute(select(func.count()).select_from(PaperNativeTrade).where(PaperNativeTrade.deployment_id == card.id))).scalar()
+                print(f"    closed trades so far: {trades}; take-profit last checked {position.get('checked_at', '-')}")
+            elif card.last_signal != "HOLD":
+                print(f"    last reason: {card.last_signal_reason or '-'}")
     pools = (await db.execute(select(func.count()).select_from(PaperPortfolio).where(func.trim(PaperPortfolio.name) == NAME))).scalar()
     print(f"  pools named {NAME!r}: {pools}")
 
