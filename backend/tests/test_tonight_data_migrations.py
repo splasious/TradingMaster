@@ -949,7 +949,9 @@ async def test_conti_calendar_is_created_with_its_pool_and_card_for_conti_stradd
 
 async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_open_position(db_engine, db_session):
     migration = _load("c4e6a8b0d2f5_conti_calendar_14000_daily_close")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f8b0d2e4a6c9"
+    assert migration.down_revision == "f8b0d2e4a6c9"
+    assert _load("d6f8a0c2e4b7_conti_calendar_hundreds_two_a_day").FROM_MD5S == {migration.TO_MD5}  # version 3 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 3 now: the mechanics are what's tested here
     v1 = "# Conti Calendar 15 MIN, version 1: Rs 50,000, held overnight\n"
     migration.FROM_MD5S = {_md5_text(v1)}
 
@@ -984,6 +986,32 @@ async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_o
         select(AuditLog.new_value).where(AuditLog.action == "PAPER_NATIVE_VERSION_UPDATED", AuditLog.object_id == str(running.id))
     )).scalars().all()
     assert [r["open_position_kept"] for r in reasons] == [True] and "Rs 14,000" in reasons[0]["reason"]
+
+
+async def test_conti_calendar_moves_onto_hundreds_and_two_trades_a_day_keeping_its_open_position(db_engine, db_session):
+    migration = _load("d6f8a0c2e4b7_conti_calendar_hundreds_two_a_day")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c4e6a8b0d2f5"
+    v2 = "# Conti Calendar 15 MIN, version 2: Rs 14,000, closed at 15:00\n"
+    migration.FROM_MD5S = {_md5_text(v2)}
+
+    running = await _deployment(db_session, "cal3_a@tradingmaster.internal", v2)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    position = {"strike": 24250, "take_profit": 14_000.0, "opened_at": "2026-11-06T04:00:08+00:00", "legs": {}}
+    running.state = {"position": position}
+    edited = await _deployment(db_session, "cal3_b@tradingmaster.internal", "# Conti Calendar 15 MIN, edited by hand\n")
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id, StrategyVersion.python_code)
+        .where(StrategyVersion.strategy_id == running.strategy_id).order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _, _ in numbers] == [11, 12] and numbers[-1][2] == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert running.strategy_version_id == numbers[-1][1] and running.state == {"position": position}  # kept as it is
+    assert len((await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == edited.strategy_id))).all()) == 1
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

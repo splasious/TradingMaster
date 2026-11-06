@@ -76,7 +76,7 @@ class Market:
             Instrument(exchange="NFO", symbol=f"{SYMBOLS[e]}{k}{t}", name="opt", instrument_type="option", data_source="zerodha_kite",
                        external_ref=f"{SYMBOLS[e]}{k}{t}", expiry=e, strike=float(k), option_type=t, lot_size=65,
                        underlying_instrument_id=self.nifty.id)
-            for e in SYMBOLS for k in range(23400, 24001, 50) for t in ("CE", "PE")
+            for e in SYMBOLS for k in range(23000, 24001, 50) for t in ("CE", "PE")
         ]
         db.add_all(self.options)
         await db.commit()
@@ -136,7 +136,7 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
 
     ctx = await market.check(at(4, 9, 30))
     p = ctx.state["position"]
-    assert (p["strike"], p["side"], p["weekly_expiry"], p["monthly_expiry"]) == (23450, "call", "2026-11-09", "2026-11-23")
+    assert (p["strike"], p["side"], p["weekly_expiry"], p["monthly_expiry"]) == (23400, "call", "2026-11-09", "2026-11-23")
     legs = p["legs"]
     assert {n: (leg["side"], leg["expiry"], leg["option_type"], leg["quantity"]) for n, leg in legs.items()} == {
         "short_ce": ("sell", "2026-11-09", "CE", QTY), "short_pe": ("sell", "2026-11-09", "PE", QTY),
@@ -181,7 +181,7 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
     held = (await market.check(at(4, 9, 30))).state["position"]
 
     def decay_to(each: float) -> None:  # the weekly's two premiums fall; the monthly's are as the day prices them
-        market.premium[(W1, 23450.0, "CE")] = market.premium[(W1, 23450.0, "PE")] = each
+        market.premium[(W1, 23400.0, "CE")] = market.premium[(W1, 23400.0, "PE")] = each
 
     market.prices(at(4, 11, 0), 23460.0)  # the book later that day
     longs = {n: tick_engine.get_fresh_bid_ask(uuid.UUID(held["legs"][n]["instrument_id"]), timedelta(minutes=1), at(4, 11, 0))
@@ -226,12 +226,12 @@ async def test_on_an_expiry_day_it_opens_on_next_weeks_and_in_the_months_last_we
 
 
 async def test_no_bid_or_ask_on_a_leg_means_no_entry_and_no_take_profit_reading(market):
-    market.no_book = {(W3, 23450.0, "PE")}
+    market.no_book = {(W3, 23400.0, "PE")}
     ctx = await market.check(at(4, 9, 30))
-    assert ctx.state.get("position") is None and "no bid/ask for the 23,450 PE monthly" in ctx._last_reason
+    assert ctx.state.get("position") is None and "no bid/ask for the 23,400 PE monthly" in ctx._last_reason
     market.no_book = set()
     await market.check(at(4, 9, 31))
-    market.no_book = {(W1, 23450.0, "CE")}
+    market.no_book = {(W1, 23400.0, "CE")}
     held = await market.check(at(4, 10, 0))
     assert held.state["position"] is not None and "no bid/ask for short_ce" in held._last_reason
 
@@ -281,6 +281,30 @@ async def test_the_telegram_entry_alert_carries_the_setup_with_its_1500_figures(
     payoff = await trade_alerts._entry_payoff(market.db, position, ctx, 23460.0)
     assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.target == cal.TAKE_PROFIT
     title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
-    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
+    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,400 · 16 lots a leg" in body
     assert "Target +14,000 after costs" in body and "At 15:00, IV as now:" in body and " Max loss " in body
     assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None
+
+
+def test_only_strikes_in_hundreds_are_looked_at():
+    """6 Nov (version 3): the PCR picks among 24,200, 24,300 ... -- never 24,250."""
+    assert cal.candidate_strikes(23460.0) == [23200, 23300, 23400, 23500, 23600, 23700, 23800]
+    assert cal.candidate_strikes(24268.0) == [24000, 24100, 24200, 24300, 24400, 24500, 24600]
+
+
+async def test_at_most_two_trades_a_day_counting_one_opened_before_the_count_was_kept(market):
+    first = await market.check(at(4, 9, 30))
+    assert first.state["position"]["strike"] % 100 == 0 and "trade 1 of 2 today" in first._last_reason
+    # As if version 2 had opened it: no count kept -- the card's trades are counted instead.
+    market.deployment.state = {"position": first.state["position"], "force_exit": True}
+    await market.check(at(4, 10, 0))
+    second = await market.check(at(4, 10, 1))
+    assert second.state["position"] is not None and "trade 2 of 2 today" in second._last_reason
+    market.deployment.state = {**market.deployment.state, "force_exit": True}
+    await market.check(at(4, 10, 30))
+    third = await market.check(at(4, 10, 31))
+    assert third.state["position"] is None
+    assert third._last_reason == "2 trades taken today, the most a day (2) -- the next from 09:30 tomorrow"
+    assert len(await market.trades()) == 2
+    nxt = await market.check(at(5, 9, 30))
+    assert nxt.state["position"] is not None and "trade 1 of 2 today" in nxt._last_reason
