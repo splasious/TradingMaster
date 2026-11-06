@@ -4,7 +4,8 @@ Conti Calendar 15 MIN -- Conti Straddle's short straddle with the same strike bo
 
 Conti Straddle 15 MIN with a monthly hedge (agreed 4 Nov; version 2, 5 Nov:
 take-profit Rs 14,000 and a 15:00 close every day; version 3, 6 Nov:
-strikes in hundreds only, and at most two trades a day): four legs at one
+strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
+a day taken off again): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -13,9 +14,8 @@ strike, LOTS_PER_LEG (16) lots each --
                                this month's, or next month's in the month's
                                last week, when this month's IS the weekly
 
--- opened from 09:30 (ENTRY_TIME) to 15:00 IST whenever none is open, at
-most MAX_TRADES_PER_DAY (2) a day: once the second has closed, none until
-the next trading day. The PCR picks the strike as Conti picks it, but from
+-- opened from 09:30 (ENTRY_TIME) to 15:00 IST whenever none is open, as
+many a day as that allows. The PCR picks the strike as Conti picks it, but from
 the strikes in hundreds only (STRIKE_MULTIPLE: 24,200, 24,300 -- never
 24,250) around NIFTY, by the weekly's live premiums:
 
@@ -58,7 +58,6 @@ from datetime import date, datetime, time as dtime
 from sqlalchemy import func, select
 
 from app.models.instrument import Instrument
-from app.models.paper_trading import PaperNativeTrade
 from app.services.broker.zerodha_broker import IST
 from app.services.paper_trading.trade_record import order_charges
 
@@ -66,7 +65,6 @@ UNDERLYING_SYMBOL = "NIFTY 50"
 PCR_TIMEFRAME = "15m"
 STRIKE_MULTIPLE = 100  # only strikes in hundreds (version 3; Conti's 50-point strikes before)
 CANDIDATE_STEPS = 3  # strikes looked at either side of the one nearest NIFTY
-MAX_TRADES_PER_DAY = 2  # positions opened in a day (version 3)
 LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
@@ -91,25 +89,6 @@ def side_for(pcr: float) -> str:
 def candidate_strikes(spot: float) -> list[float]:
     nearest = round(spot / STRIKE_MULTIPLE) * STRIKE_MULTIPLE
     return [nearest + STRIKE_MULTIPLE * k for k in range(-CANDIDATE_STEPS, CANDIDATE_STEPS + 1)]
-
-
-async def trades_today(ctx, today: date) -> int:
-    """Positions opened today: the count this strategy keeps in its state, or
-    -- on paper -- the card's trades opened today, if more (one opened before
-    the count was kept: version 2's)."""
-    kept = ctx.state.get("trades_today") or {}
-    count = kept.get("count", 0) if kept.get("day") == today.isoformat() else 0
-    deployment = getattr(ctx, "deployment", None)
-    if deployment is not None and not getattr(ctx, "is_backtest", False) and not getattr(ctx, "is_live", False):
-        start = datetime.combine(today, dtime(0), tzinfo=IST)
-        opened = (
-            await ctx.db.execute(
-                select(func.count()).select_from(PaperNativeTrade)
-                .where(PaperNativeTrade.deployment_id == deployment.id, PaperNativeTrade.opened_at >= start)
-            )
-        ).scalar() or 0
-        count = max(count, opened)
-    return count
 
 
 def pick_strike(quotes: dict[float, tuple[float, float]], side: str, spot: float) -> float | None:
@@ -274,10 +253,6 @@ async def evaluate(ctx) -> None:
     if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
         ctx.note("skipped", reason=f"outside entry window ({ENTRY_TIME:%H:%M}-{ENTRY_UNTIL:%H:%M} IST)")
         return
-    taken = await trades_today(ctx, today)
-    if taken >= MAX_TRADES_PER_DAY:
-        ctx.note("skipped", reason=f"{taken} trades taken today, the most a day ({MAX_TRADES_PER_DAY}) -- the next from {ENTRY_TIME:%H:%M} tomorrow")
-        return
 
     spot = await ctx.get_price(underlying.id)
     if spot is None:
@@ -358,11 +333,10 @@ async def evaluate(ctx) -> None:
         "legs": legs,
         "opened_at": now_utc.isoformat(),
     }
-    ctx.state["trades_today"] = {"day": today.isoformat(), "count": taken + 1}
+    ctx.state.pop("trades_today", None)  # version 3's count, no longer kept
     sold = legs["short_ce"]["entry_price"] + legs["short_pe"]["entry_price"]
     bought = legs["long_ce"]["entry_price"] + legs["long_pe"]["entry_price"]
     ctx.note("entered", signal="CALENDAR", reason=(
         f"{side}-heavy calendar opened at {strike:,.0f} (PCR {pcr:.3f}): sell {weekly:%d %b} CE+PE {sold:,.2f} at the bid, "
-        f"buy {monthly:%d %b} CE+PE {bought:,.2f} at the ask; {LOTS_PER_LEG} lots a leg; take-profit Rs {TAKE_PROFIT:,.0f}; "
-        f"trade {taken + 1} of {MAX_TRADES_PER_DAY} today"
+        f"buy {monthly:%d %b} CE+PE {bought:,.2f} at the ask; {LOTS_PER_LEG} lots a leg; take-profit Rs {TAKE_PROFIT:,.0f}"
     ))

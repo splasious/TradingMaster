@@ -990,7 +990,9 @@ async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_o
 
 async def test_conti_calendar_moves_onto_hundreds_and_two_trades_a_day_keeping_its_open_position(db_engine, db_session):
     migration = _load("d6f8a0c2e4b7_conti_calendar_hundreds_two_a_day")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c4e6a8b0d2f5"
+    assert migration.down_revision == "c4e6a8b0d2f5"
+    assert _load("e8a0c2e4f6b9_conti_calendar_no_daily_limit").FROM_MD5S == {migration.TO_MD5}  # version 4 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 4 now: the mechanics are what's tested here
     v2 = "# Conti Calendar 15 MIN, version 2: Rs 14,000, closed at 15:00\n"
     migration.FROM_MD5S = {_md5_text(v2)}
 
@@ -1012,6 +1014,28 @@ async def test_conti_calendar_moves_onto_hundreds_and_two_trades_a_day_keeping_i
     assert [n for n, _, _ in numbers] == [11, 12] and numbers[-1][2] == migration.BUILT_IN.read_text(encoding="utf-8")
     assert running.strategy_version_id == numbers[-1][1] and running.state == {"position": position}  # kept as it is
     assert len((await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == edited.strategy_id))).all()) == 1
+
+
+async def test_conti_calendar_moves_onto_no_daily_limit_keeping_its_open_position(db_engine, db_session):
+    migration = _load("e8a0c2e4f6b9_conti_calendar_no_daily_limit")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d6f8a0c2e4b7"
+    v3 = "# Conti Calendar 15 MIN, version 3: hundreds, two trades a day\n"
+    migration.FROM_MD5S = {_md5_text(v3)}
+    running = await _deployment(db_session, "cal4_a@tradingmaster.internal", v3)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    state = {"position": {"strike": 24650, "legs": {}}, "trades_today": {"day": "2026-11-06", "count": 2}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

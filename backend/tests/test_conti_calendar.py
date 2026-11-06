@@ -292,19 +292,15 @@ def test_only_strikes_in_hundreds_are_looked_at():
     assert cal.candidate_strikes(24268.0) == [24000, 24100, 24200, 24300, 24400, 24500, 24600]
 
 
-async def test_at_most_two_trades_a_day_counting_one_opened_before_the_count_was_kept(market):
-    first = await market.check(at(4, 9, 30))
-    assert first.state["position"]["strike"] % 100 == 0 and "trade 1 of 2 today" in first._last_reason
-    # As if version 2 had opened it: no count kept -- the card's trades are counted instead.
-    market.deployment.state = {"position": first.state["position"], "force_exit": True}
-    await market.check(at(4, 10, 0))
-    second = await market.check(at(4, 10, 1))
-    assert second.state["position"] is not None and "trade 2 of 2 today" in second._last_reason
-    market.deployment.state = {**market.deployment.state, "force_exit": True}
-    await market.check(at(4, 10, 30))
-    third = await market.check(at(4, 10, 31))
-    assert third.state["position"] is None
-    assert third._last_reason == "2 trades taken today, the most a day (2) -- the next from 09:30 tomorrow"
-    assert len(await market.trades()) == 2
-    nxt = await market.check(at(5, 9, 30))
-    assert nxt.state["position"] is not None and "trade 1 of 2 today" in nxt._last_reason
+async def test_there_is_no_limit_on_trades_a_day(market):
+    """6 Nov (version 4): version 3's two-a-day limit is gone -- each close
+    before 15:00 is followed by the next trade."""
+    for n, (opens, closes) in enumerate(((at(4, 9, 30), at(4, 10, 0)), (at(4, 10, 1), at(4, 10, 30)), (at(4, 10, 31), at(4, 11, 0)))):
+        ctx = await market.check(opens)
+        assert ctx.state["position"] is not None and ctx.state["position"]["strike"] % 100 == 0, n
+        assert "trades_today" not in ctx.state
+        market.deployment.state = {**market.deployment.state, "force_exit": True}
+        await market.check(closes)
+    assert len(await market.trades()) == 3
+    fourth = await market.check(at(4, 11, 1))
+    assert fourth.state["position"] is not None and fourth._last_signal == "CALENDAR"
