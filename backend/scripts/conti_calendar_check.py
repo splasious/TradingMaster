@@ -32,7 +32,7 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "f653cd88497795267d63170831d49c3f"}
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "ae5cdd3f35b40368c83f32ab220d66dd"}
 LISTEN_SECONDS = 6
 
 
@@ -73,6 +73,12 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")
                 trades = (await db.execute(select(func.count()).select_from(PaperNativeTrade).where(PaperNativeTrade.deployment_id == card.id))).scalar()
                 print(f"    closed trades so far: {trades}; take-profit last checked {position.get('checked_at', '-')}")
+                seen = []
+                for _ in range(4):  # how often it's re-checked: the check time, read once a second
+                    await asyncio.sleep(1)
+                    await db.refresh(card)
+                    seen.append(((card.state or {}).get("position") or {}).get("checked_at", "-"))
+                print(f"    re-read every second: {', '.join(seen)}")
             elif card.last_signal != "HOLD":
                 reason = (card.last_signal_reason or "-").split(", P&L")[0]  # no P&L in this public log
                 print(f"    last reason: {reason}")
