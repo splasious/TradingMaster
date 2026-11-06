@@ -11,8 +11,8 @@ import type { PayoffOut } from "@/lib/types";
  * (services/options/calendar_payoff.py): each option repriced at its implied
  * volatility now, closed at bid/ask, after every charge. */
 
-const H = 200;
-const PAD = { top: 14, right: 12, bottom: 24, left: 56 };
+const H = 220;
+const PAD = { top: 18, right: 12, bottom: 28, left: 64 };
 
 function money(value: number, signed = false): string {
   const sign = value < 0 ? "-" : signed && value > 0 ? "+" : "";
@@ -50,9 +50,9 @@ function pnlAt(points: PayoffOut["points"], x: number): number {
 function Field({ label, children, sub }: { label: string; children: React.ReactNode; sub?: React.ReactNode }) {
   return (
     <div className="min-w-0 space-y-0.5">
-      <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">{label}</div>
-      <div className="font-financial text-sm">{children}</div>
-      {sub && <div className="text-xs text-text-muted">{sub}</div>}
+      <div className="text-xs font-medium uppercase tracking-wide text-text-muted">{label}</div>
+      <div className="font-financial text-base">{children}</div>
+      {sub && <div className="text-sm text-text-muted">{sub}</div>}
     </div>
   );
 }
@@ -121,8 +121,8 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
   return (
     <div className="space-y-3 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <div className="text-sm font-semibold text-text-primary">If closed at 15:00 today</div>
-        <div className="text-xs text-text-muted">each option at its implied volatility now · closed at bid/ask · after charges</div>
+        <div className="text-base font-semibold text-text-primary">If closed at 15:00 today</div>
+        <div className="text-sm text-text-muted">each option at its implied volatility now · closed at bid/ask · after charges</div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -178,7 +178,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           {geo.yTicks.map((t) => (
             <g key={`y${t}`}>
               <line x1={PAD.left} x2={W - PAD.right} y1={geo.y(t)} y2={geo.y(t)} stroke="var(--border)" strokeWidth={t === 0 ? 0 : 1} />
-              <text x={PAD.left - 6} y={geo.y(t) + 3} textAnchor="end" fontSize={10} fill="var(--text-muted)">
+              <text x={PAD.left - 6} y={geo.y(t) + 4} textAnchor="end" fontSize={12} fill="var(--text-muted)">
                 {shortMoney(t)}
               </text>
             </g>
@@ -188,8 +188,8 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
               key={`x${t}`}
               x={geo.x(t)}
               y={H - 6}
-              textAnchor={geo.x(t) < PAD.left + 24 ? "start" : geo.x(t) > W - PAD.right - 24 ? "end" : "middle"}
-              fontSize={10}
+              textAnchor={geo.x(t) < PAD.left + 28 ? "start" : geo.x(t) > W - PAD.right - 28 ? "end" : "middle"}
+              fontSize={12}
               fill="var(--text-muted)"
             >
               {level(t)}
@@ -201,7 +201,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           {targetReached && payoff.target != null && (
             <g>
               <line x1={PAD.left} x2={W - PAD.right} y1={geo.y(payoff.target)} y2={geo.y(payoff.target)} stroke="var(--positive)" strokeDasharray="4 3" strokeWidth={1} />
-              <text x={W - PAD.right} y={geo.y(payoff.target) - 4} textAnchor="end" fontSize={10} fill="var(--text-secondary)">
+              <text x={W - PAD.right} y={geo.y(payoff.target) - 4} textAnchor="end" fontSize={12} fill="var(--text-secondary)">
                 take-profit {money(payoff.target)}
               </text>
             </g>
@@ -214,7 +214,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           <path d={geo.line} fill="none" stroke="var(--negative)" strokeWidth={2} clipPath="url(#payoff-below)" strokeLinejoin="round" />
           <line x1={geo.x(spot)} x2={geo.x(spot)} y1={PAD.top} y2={H - PAD.bottom} stroke="var(--oi-spot)" strokeWidth={1.5} />
           <circle cx={geo.x(spot)} cy={geo.y(now)} r={4} fill="var(--oi-spot)" stroke="var(--surface)" strokeWidth={2} />
-          <text x={geo.x(spot) + 5} y={PAD.top + 9} fontSize={10} fill="var(--text-secondary)">
+          <text x={geo.x(spot) + 5} y={PAD.top + 11} fontSize={12} fill="var(--text-secondary)">
             NIFTY now
           </text>
           {hover != null && (
@@ -226,7 +226,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
         </svg>
         {hover != null && (
           <div
-            className="pointer-events-none absolute top-1 rounded-md border border-border bg-surface-elevated px-2 py-1 text-xs shadow"
+            className="pointer-events-none absolute top-1 rounded-md border border-border bg-surface-elevated px-2 py-1 text-sm shadow"
             style={hover > (first + last) / 2 ? { left: 8 } : { right: 8 }}
           >
             <div className="text-text-secondary">

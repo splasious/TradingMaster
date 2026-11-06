@@ -1229,7 +1229,7 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
 
   return (
     <>
-      <Table className="text-xs">
+      <Table className="text-sm">
         <Thead>
           <tr>
             <Th className="px-3">Stock</Th>
@@ -1261,7 +1261,7 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
               <tr key={h.instrument_symbol}>
                 <Td className={`${cell} font-medium`}>{h.instrument_symbol}</Td>
                 <Td className={cell}>
-                  <Badge tone="active" className="px-2 py-0.5 text-[10px] uppercase">
+                  <Badge tone="active" className="px-2 py-0.5 text-xs uppercase">
                     {status}
                   </Badge>
                 </Td>
@@ -1304,7 +1304,7 @@ function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency:
   const cell = "px-3 py-2 whitespace-nowrap";
   return (
     <>
-      <Table className="text-xs">
+      <Table className="text-sm">
         <Thead>
           <tr>
             <Th className="px-3">Side</Th>
@@ -1329,7 +1329,7 @@ function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency:
             return (
               <tr key={l.instrument_symbol}>
                 <Td className={cell}>
-                  <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-[10px] uppercase">
+                  <Badge tone={l.side === "short" ? "negative" : "positive"} className="px-2 py-0.5 text-xs uppercase">
                     {l.side}
                   </Badge>
                 </Td>
@@ -1411,7 +1411,7 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
           <Badge tone={regimeTone} className="capitalize">
             {regime}
           </Badge>{" "}
-          <span className="text-xs text-text-muted" title={istDateTime(position.opened_at)}>
+          <span className="text-sm text-text-muted" title={istDateTime(position.opened_at)}>
             since {openedText}
           </span>
         </SummaryField>
@@ -1437,14 +1437,14 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
             <SummaryField label="PCR (entry → now)">
               {pcrAtEntry.toFixed(3)} →{" "}
               <span className={pcrOutsideBand ? "text-negative" : ""}>{currentPcr != null ? currentPcr.toFixed(3) : "--"}</span>
-              {exitRule && <div className="text-xs text-text-muted">exit if {exitRule}</div>}
+              {exitRule && <div className="text-sm text-text-muted">exit if {exitRule}</div>}
             </SummaryField>
           )}
           {entrySpot != null && (
             <SummaryField label={`${position.underlying_symbol ?? "Spot"} (entry → ${position.underlying_close ? `close ${sessionDay(position.underlying_close.session)}` : "now"})`}>
               {formatPrice(entrySpot)} → {position.underlying_price != null ? formatPrice(position.underlying_price) : "--"}
               {spotMoved != null && (
-                <div className={`text-xs ${nearRoll ? "text-warning" : "text-text-muted"}`}>
+                <div className={`text-sm ${nearRoll ? "text-warning" : "text-text-muted"}`}>
                   {spotMoved >= 0 ? "+" : ""}
                   {spotMoved.toFixed(1)} pt{rollTrigger != null ? ` · rolls at ±${rollTrigger}` : ""}
                 </div>
@@ -1812,8 +1812,8 @@ function NativeDeploymentDetail({ deployment, pool }: { deployment: NativeDeploy
 function SummaryField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="space-y-0.5">
-      <div className="text-[10px] font-medium uppercase tracking-wide text-text-muted">{label}</div>
-      <div className="font-financial text-sm">{children}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-text-muted">{label}</div>
+      <div className="font-financial text-base">{children}</div>
     </div>
   );
 }
