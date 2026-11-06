@@ -159,8 +159,8 @@ class NativeContext:
         it would really fill at now (market_data/live_price.live_bid_ask):
         the Kite ticker's order book, else a /quote read. None outside market
         hours, or when the book has no bid or no ask. Keeps the contract on
-        the live feeds, as get_price does. A backtest has no order book
-        (BacktestNativeContext has no get_bid_ask)."""
+        the live feeds, as get_price does. A backtest has no order book: a
+        strategy checks ctx.is_backtest and uses the last price instead."""
         instrument = await self.db.get(Instrument, instrument_id)
         if instrument is None or not needs_live_price(instrument, self.now):
             return None

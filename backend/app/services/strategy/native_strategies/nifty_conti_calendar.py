@@ -5,7 +5,8 @@ Conti Calendar 15 MIN -- Conti Straddle's short straddle with the same strike bo
 Conti Straddle 15 MIN with a monthly hedge (agreed 4 Nov; version 2, 5 Nov:
 take-profit Rs 14,000 and a 15:00 close every day; version 3, 6 Nov:
 strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
-a day taken off again): four legs at one
+a day taken off again; version 5, 6 Nov: re-checked every second while a
+position is open): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -30,8 +31,11 @@ the bid, a buy at the ask -- and the take-profit reads what closing all four
 right now would really give: the sold legs bought back at the ask, the
 bought legs sold at the bid, less the estimated charges of all eight orders
 (trade_record.order_charges). At TAKE_PROFIT (Rs 14,000; Rs 50,000 in
-version 1) or more, all four close at those prices. Checked on every run (about every 10 seconds) while
-NSE trades; a leg with no bid or no ask waits for one.
+version 1) or more, all four close at those prices. Checked every RECHECK
+(1 second) while a position is open and NSE trades -- the strategy asks to
+be run again then (ctx.wake_at) on top of the scheduler's 10-second cycle --
+and the next position opens a second after a take-profit; a leg with no bid
+or no ask waits for one.
 
 Closed at 15:00 every day (version 2; version 1 carried it overnight and
 closed it at 15:00 only on the weekly's expiry day): when the take-profit
@@ -44,8 +48,7 @@ check before 15:00. No stop-loss.
 
 A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a month's
 three letters) against a weekly's NIFTY26N1723700CE. In a backtest there is
-no order book (ctx has no get_bid_ask): the last price stands for both bid
-and ask.
+no order book (ctx.is_backtest): the last price stands for both bid and ask.
 
 PCR is ctx.get_pcr(timeframe="15m"). Runs through
 services/paper_trading/native_runner.py.
@@ -53,7 +56,7 @@ services/paper_trading/native_runner.py.
 
 import re
 import uuid
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 from sqlalchemy import func, select
 
@@ -70,6 +73,7 @@ DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when 
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
 DAILY_CLOSE = dtime(15, 0)  # every day, whatever's open closes at this time
+RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again (version 5)
 TAKE_PROFIT = 14_000.0  # rupees, after charges, at bid / ask
 PCR_PIVOT = 1.0
 MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
@@ -138,7 +142,7 @@ def if_closed_now(position: dict, quotes: dict[str, tuple[float, float]]) -> tup
 
 
 async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
-    getter = getattr(ctx, "get_bid_ask", None)
+    getter = None if getattr(ctx, "is_backtest", False) else getattr(ctx, "get_bid_ask", None)
     if getter is None:  # a backtest: no order book, the last price both ways
         price = await ctx.get_price(instrument_id)
         return (price, price) if price is not None else None
@@ -232,6 +236,7 @@ async def evaluate(ctx) -> None:
                 f"calendar {position['strike']:,.0f} open; no bid/ask for {', '.join(missing)} -- "
                 f"take-profit checked once all four have one"
             ))
+            ctx.wake_at(now_utc + RECHECK)
             return
         net, exit_charges, prices = if_closed_now(position, quotes)
         position["net_if_closed_now"] = round(net, 2)
@@ -242,12 +247,14 @@ async def evaluate(ctx) -> None:
                 f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
                 f"P&L {pnl:+,.0f} before charges"
             ))
+            ctx.wake_at(now_utc + RECHECK)  # the next one, a second on
             return
         ctx.note("hold", reason=(
             f"calendar {position['strike']:,.0f} (sold {weekly:%d %b}, bought {date.fromisoformat(position['monthly_expiry']):%d %b}): "
             f"Rs {net:,.0f} if closed now at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; "
             f"closes at {DAILY_CLOSE:%H:%M} otherwise"
         ))
+        ctx.wake_at(now_utc + RECHECK)
         return
 
     if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
@@ -340,3 +347,4 @@ async def evaluate(ctx) -> None:
         f"{side}-heavy calendar opened at {strike:,.0f} (PCR {pcr:.3f}): sell {weekly:%d %b} CE+PE {sold:,.2f} at the bid, "
         f"buy {monthly:%d %b} CE+PE {bought:,.2f} at the ask; {LOTS_PER_LEG} lots a leg; take-profit Rs {TAKE_PROFIT:,.0f}"
     ))
+    ctx.wake_at(now_utc + RECHECK)

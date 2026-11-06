@@ -201,3 +201,22 @@ async def test_outside_market_hours_there_is_no_bid_or_ask(db_session):
         assert await _ctx(db_session).get_bid_ask(inst.id) is None
     finally:
         tick_engine._real_bid_ask.pop(inst.id, None)
+
+
+async def test_a_quote_with_no_book_is_not_asked_for_again_for_10_seconds(db_session, market_open, monkeypatch):
+    """6 Nov: Conti Calendar reads its legs every second; when Kite's /quote
+    has no book for one, it isn't asked again within QUOTE_RETRY."""
+    inst = await _option(db_session)
+    kite = FakeKiteQuote({"NFO:NIFTY26O0622800CE": {"last_price": 131.25, "depth": {"buy": [], "sell": []}}})
+    _kite(monkeypatch, kite)
+    try:
+        assert await live_price_module.live_bid_ask(db_session, inst, NOW) is None
+        assert await live_price_module.live_bid_ask(db_session, inst, NOW + timedelta(seconds=5)) is None
+        assert len(kite.calls) == 1  # not again within 10 s
+        kite.quotes["NFO:NIFTY26O0622800CE"]["depth"] = {"buy": [{"price": 130.9, "quantity": 65}], "sell": [{"price": 131.4, "quantity": 65}]}
+        assert await live_price_module.live_bid_ask(db_session, inst, NOW + timedelta(seconds=11)) == (130.9, 131.4)
+        assert len(kite.calls) == 2
+    finally:
+        _forget(inst.id)
+        tick_engine._real_bid_ask.pop(inst.id, None)
+        live_price_module._quote_missed.pop(inst.id, None)

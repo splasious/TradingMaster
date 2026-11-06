@@ -1018,12 +1018,36 @@ async def test_conti_calendar_moves_onto_hundreds_and_two_trades_a_day_keeping_i
 
 async def test_conti_calendar_moves_onto_no_daily_limit_keeping_its_open_position(db_engine, db_session):
     migration = _load("e8a0c2e4f6b9_conti_calendar_no_daily_limit")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d6f8a0c2e4b7"
+    assert migration.down_revision == "d6f8a0c2e4b7"
+    assert _load("f0b2d4e6a8c1_conti_calendar_every_second").FROM_MD5S == {migration.TO_MD5}  # version 5 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 5 now: the mechanics are what's tested here
     v3 = "# Conti Calendar 15 MIN, version 3: hundreds, two trades a day\n"
     migration.FROM_MD5S = {_md5_text(v3)}
     running = await _deployment(db_session, "cal4_a@tradingmaster.internal", v3)
     (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
     state = {"position": {"strike": 24650, "legs": {}}, "trades_today": {"day": "2026-11-06", "count": 2}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
+async def test_conti_calendar_moves_onto_the_every_second_check_keeping_its_open_position(db_engine, db_session):
+    migration = _load("f0b2d4e6a8c1_conti_calendar_every_second")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e8a0c2e4f6b9"
+    v4 = "# Conti Calendar 15 MIN, version 4: checked every 10 seconds\n"
+    migration.FROM_MD5S = {_md5_text(v4)}
+    running = await _deployment(db_session, "cal5_a@tradingmaster.internal", v4)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    state = {"position": {"strike": 24600, "legs": {}}}
     running.state = state
     await db_session.commit()
 

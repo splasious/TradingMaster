@@ -29,6 +29,7 @@ import {
   useLiveNativeTrades,
   useLiveRuns,
   useNativeDeployments,
+  useNativePosition,
   useNativeTrades,
   usePaperDeployments,
   usePaperOrders,
@@ -1890,7 +1891,12 @@ function NativeDeploymentCard({
   const [turningOff, setTurningOff] = useState(false);
   const [lastEval, setLastEval] = useState<NativeEvaluationOut | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
-  const position = deployment.position;
+  // A calendar's position is re-read every second (its strategy re-checks
+  // "Net if closed now" every second, 6 Nov); every other card's comes with
+  // the list, every 5 s.
+  const isCalendar = deployment.position?.bias === "calendar";
+  const { data: livePosition } = useNativePosition(deployment.id, isCalendar);
+  const position = isCalendar && livePosition !== undefined ? livePosition : deployment.position;
   // Multi-holding strategies (e.g. the MACD/RSI rotation strategy) have no
   // single position -- each holding is its own independently-opened long,
   // so it's rendered the same way as position.legs but without a single

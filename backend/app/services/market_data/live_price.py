@@ -57,14 +57,25 @@ async def live_price(db: AsyncSession, instrument: Instrument, now: datetime) ->
     return float(price)
 
 
+# A /quote read that found no book (or failed) isn't repeated for this long --
+# Conti Calendar 15 MIN reads its legs every second (6 Nov), and every /quote
+# shares Kite's one-a-second allowance with the rest of the app.
+QUOTE_RETRY = timedelta(seconds=10)
+_quote_missed: dict = {}  # instrument id -> when Kite last had no book for it
+
+
 async def live_bid_ask(db: AsyncSession, instrument: Instrument, now: datetime) -> tuple[float, float] | None:
     """(best bid, best ask) of a Kite-priced contract while NSE is open (4
     Nov, for Conti Calendar 15 MIN's fills and take-profit): the ticker's
     order-book depth from the last LIVE_PRICE_MAX_AGE, else Kite's /quote
-    read right now. None when neither has both a bid and an ask."""
+    read right now (not again within QUOTE_RETRY of one that found none).
+    None when neither has both a bid and an ask."""
     held = tick_engine.get_fresh_bid_ask(instrument.id, LIVE_PRICE_MAX_AGE, now)
     if held is not None:
         return held
+    missed = _quote_missed.get(instrument.id)
+    if missed is not None and now - missed < QUOTE_RETRY:
+        return None  # Kite had no book for it just now: not asked again every second
     broker = await kite_broker(db)
     if broker is None:
         return None
@@ -73,10 +84,13 @@ async def live_bid_ask(db: AsyncSession, instrument: Instrument, now: datetime) 
         await quote_pacer.wait()
         quote = (await broker.get_quote_batch([key])).get(key) or {}
     except KiteAPIError:
+        _quote_missed[instrument.id] = now
         return None
     best = best_bid_ask(quote.get("depth"))
     if best is None:
+        _quote_missed[instrument.id] = now
         return None
+    _quote_missed.pop(instrument.id, None)
     tick_engine.set_real_bid_ask(instrument.id, *best)
     if quote.get("last_price"):
         tick_engine.set_real_price(instrument.id, float(quote["last_price"]), source="kite_quote")

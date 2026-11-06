@@ -36,6 +36,7 @@ import type {
   NativeBacktestResultOut,
   NativeBacktestTradeOut,
   NativeDeploymentOut,
+  NativePositionOut,
   NativeTradeOut,
   LiveNativeTradeOut,
   LiveRunOut,
@@ -442,6 +443,18 @@ export function useNativeDeployments() {
     queryKey: ["native-deployments"],
     queryFn: () => apiFetch<NativeDeploymentOut[]>("/api/v1/paper-trading/native-deployments"),
     refetchInterval: 5000,
+  });
+}
+
+/** One card's open position alone, every second while `enabled` -- for a
+ * calendar card, whose "Net if closed now" its strategy re-reads every
+ * second (6 Nov); the full card list stays on its 5 s refresh. */
+export function useNativePosition(deploymentId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["native-position", deploymentId],
+    queryFn: () => apiFetch<NativePositionOut | null>(`/api/v1/paper-trading/native-deployments/${deploymentId}/position`),
+    enabled,
+    refetchInterval: 1000,
   });
 }
 

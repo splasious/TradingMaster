@@ -246,7 +246,7 @@ async def test_a_manual_exit_closes_all_four(market):
 
 
 async def test_in_a_backtest_the_last_price_stands_for_bid_and_ask(market, monkeypatch):
-    monkeypatch.delattr(NativeContext, "get_bid_ask")
+    monkeypatch.setattr(NativeContext, "is_backtest", True)  # BacktestNativeContext's flag: no order book to read
     ctx = await market.check(at(4, 9, 30))
     legs = ctx.state["position"]["legs"]
     assert legs["short_ce"]["entry_price"] == tick_engine.get_current_price(uuid.UUID(legs["short_ce"]["instrument_id"]))
@@ -304,3 +304,55 @@ async def test_there_is_no_limit_on_trades_a_day(market):
     assert len(await market.trades()) == 3
     fourth = await market.check(at(4, 11, 1))
     assert fourth.state["position"] is not None and fourth._last_signal == "CALENDAR"
+
+
+async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(market):
+    """6 Nov (version 5): "Net if closed now" and the take-profit are read
+    every second while a position is open, and the next position opens a
+    second after a take-profit; flat and outside its window, no hurry."""
+    from datetime import timedelta as td
+
+    early = await market.check(at(4, 9, 29))
+    assert early._wake_at is None
+    opened = await market.check(at(4, 9, 30))
+    assert opened._wake_at == at(4, 9, 30) + td(seconds=1)
+    held = await market.check(at(4, 9, 30, 1))
+    assert held.state["position"] is not None and held._wake_at == at(4, 9, 30, 2)
+    market.no_book = {(W1, 23400.0, "CE")}
+    waiting = await market.check(at(4, 9, 30, 2))
+    assert "no bid/ask for short_ce" in waiting._last_reason and waiting._wake_at == at(4, 9, 30, 3)
+    market.no_book = set()
+    closed = await market.check(at(4, 15, 0))
+    assert closed.state["position"] is None and closed._wake_at is None  # the day's close: nothing until tomorrow
+
+
+async def test_the_card_can_fetch_its_position_alone(market, client, monkeypatch):
+    """6 Nov: GET /native-deployments/{id}/position -- what a calendar card
+    re-reads every second; null when flat, 403 for someone else's card."""
+    from app.api.v1.endpoints import paper_native_trading as ep
+    from app.core.deps import get_current_user
+    from app.main import app
+    from app.models.user import User
+
+    owner = await market.db.get(User, market.portfolio.user_id)
+    app.dependency_overrides[get_current_user] = lambda: owner
+    try:
+        url = f"/api/v1/paper-trading/native-deployments/{market.deployment.id}/position"
+        assert (await client.get(url)).json() is None  # flat
+        await market.check(at(4, 9, 30))
+
+        original = ep._build_position_out
+
+        async def built(db, state, now=None):  # as at 09:31, when the market is open
+            return await original(db, state, at(4, 9, 31))
+
+        monkeypatch.setattr(ep, "_build_position_out", built)
+        body = (await client.get(url)).json()
+        assert body["bias"] == "calendar" and len(body["legs"]) == 4 and body["metrics"]["strike"] == 23400
+        stranger = User(email=f"x_{uuid.uuid4().hex[:6]}@tradingmaster.internal", hashed_password="x", full_name="X")
+        market.db.add(stranger)
+        await market.db.commit()
+        app.dependency_overrides[get_current_user] = lambda: stranger
+        assert (await client.get(url)).status_code == 403  # the app's ownership check
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)

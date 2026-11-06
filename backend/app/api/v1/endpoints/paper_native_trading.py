@@ -453,6 +453,17 @@ async def restart_native_deployment(deployment_id: str, db: AsyncSession = Depen
     return await _deployment_out(db, deployment)
 
 
+@router.get("/native-deployments/{deployment_id}/position", response_model=NativePositionOut | None)
+async def native_deployment_position(
+    deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> NativePositionOut | None:
+    """Just the card's open position (None when flat) -- for a card that
+    refreshes it every second (Conti Calendar 15 MIN, 6 Nov) without
+    fetching every card each time."""
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    return await _build_position_out(db, deployment.state)
+
+
 @router.post("/native-deployments/{deployment_id}/use-latest-version", response_model=NativeDeploymentOut)
 async def use_latest_strategy_version(deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> NativeDeploymentOut:
     """Moves a deployment onto its strategy's newest saved version, keeping
