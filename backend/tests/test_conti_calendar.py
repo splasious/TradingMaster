@@ -209,7 +209,10 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
     assert ("short", lo - 0.05 + SPREAD) in exits  # bought back at the ask
     assert ("long", longs["long_ce"][0]) in exits and ("long", longs["long_pe"][0]) in exits  # sold at the bid
 
-    again = await market.check(at(4, 11, 0, 20))  # the next check opens the next one
+    assert "next entry from 11:05:10" in done._last_reason and done._wake_at == at(4, 11, 5, 10)
+    paused = await market.check(at(4, 11, 0, 20))  # 5 minutes' pause (version 7)
+    assert paused.state.get("position") is None and "next entry from 11:05:10" in paused._last_reason
+    again = await market.check(at(4, 11, 5, 10))  # then the next opens
     assert again.state["position"] is not None and again._last_signal == "CALENDAR"
 
 
@@ -240,7 +243,8 @@ async def test_a_manual_exit_closes_all_four(market):
     await market.check(at(4, 9, 30))
     market.deployment.state = {**market.deployment.state, "force_exit": True}
     ctx = await market.check(at(4, 10, 0))
-    assert ctx.state["position"] is None and ctx._last_reason == "manual exit"
+    assert ctx.state["position"] is None and ctx._last_reason == "manual exit; next entry from 10:05:00"
+    assert ctx._wake_at == at(4, 10, 5)
     [trade] = await market.trades()
     assert trade.exit_reason == "manual" and {leg["side"] for leg in trade.legs} == {"short", "long"}
 
@@ -295,16 +299,39 @@ def test_the_strikes_looked_at_are_every_50_points():
 
 async def test_there_is_no_limit_on_trades_a_day(market):
     """6 Nov (version 4): version 3's two-a-day limit is gone -- each close
-    before 15:00 is followed by the next trade."""
-    for n, (opens, closes) in enumerate(((at(4, 9, 30), at(4, 10, 0)), (at(4, 10, 1), at(4, 10, 30)), (at(4, 10, 31), at(4, 11, 0)))):
+    before 15:00 is followed by the next trade (5 minutes on, version 7)."""
+    for n, (opens, closes) in enumerate(((at(4, 9, 30), at(4, 10, 0)), (at(4, 10, 5), at(4, 10, 30)), (at(4, 10, 35), at(4, 11, 0)))):
         ctx = await market.check(opens)
         assert ctx.state["position"] is not None and ctx.state["position"]["strike"] % 50 == 0, n
         assert "trades_today" not in ctx.state
         market.deployment.state = {**market.deployment.state, "force_exit": True}
         await market.check(closes)
     assert len(await market.trades()) == 3
-    fourth = await market.check(at(4, 11, 1))
+    fourth = await market.check(at(4, 11, 5))
     assert fourth.state["position"] is not None and fourth._last_signal == "CALENDAR"
+
+
+async def test_after_a_close_it_waits_5_minutes_then_opens_the_next_right_away(market):
+    """6 Nov (version 7): no new position within 5 minutes of one closing --
+    closed 11:27:15, the next from 11:32:15 -- kept in the state, so a
+    restart doesn't cut it short; past 15:00 none opens anyway."""
+    assert cal.PAUSE_AFTER_CLOSE == timedelta(minutes=5)
+    await market.check(at(4, 11, 0))
+    market.deployment.state = {**market.deployment.state, "force_exit": True}
+    await market.check(at(4, 11, 27, 15))
+    assert market.deployment.state["paused_until"] == at(4, 11, 32, 15).astimezone(timezone.utc).isoformat()
+    for second in (at(4, 11, 27, 16), at(4, 11, 30), at(4, 11, 32, 14)):
+        ctx = await market.check(second)
+        assert ctx.state.get("position") is None and ctx._last_signal is None, second
+        assert ctx._last_reason == "paused 5 minutes after the last close: next entry from 11:32:15" and ctx._wake_at == at(4, 11, 32, 15)
+    opened = await market.check(at(4, 11, 32, 15))
+    assert opened.state["position"] is not None and opened._last_signal == "CALENDAR" and "paused_until" not in opened.state
+
+    market.deployment.state = {**market.deployment.state, "force_exit": True}
+    await market.check(at(4, 14, 57))
+    late = await market.check(at(4, 15, 2))
+    assert late.state.get("position") is None and "outside entry window" in late._last_reason
+    assert (await market.check(at(5, 9, 30))).state["position"] is not None  # the next morning as usual
 
 
 async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(market):

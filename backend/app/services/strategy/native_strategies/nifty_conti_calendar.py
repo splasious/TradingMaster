@@ -7,7 +7,7 @@ take-profit Rs 14,000 and a 15:00 close every day; version 3, 6 Nov:
 strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
 a day taken off again; version 5, 6 Nov: re-checked every second while a
 position is open; version 6, 6 Nov: version 3's hundreds-only strikes taken
-off again): four legs at one
+off again; version 7, 6 Nov: a 5-minute pause after every close): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -17,7 +17,11 @@ strike, LOTS_PER_LEG (16) lots each --
                                last week, when this month's IS the weekly
 
 -- opened from 09:30 (ENTRY_TIME) to 15:00 IST whenever none is open, as
-many a day as that allows. The PCR picks the strike as Conti picks it, from
+many a day as that allows, but never within PAUSE_AFTER_CLOSE (5 minutes;
+version 7) of the last one closing -- by take-profit or a manual exit: the
+next opens as soon as those 5 minutes are up, at that moment's PCR, strike
+and bid/ask (closed 11:27:15, next from 11:32:15). The pause is kept in the
+strategy's state (paused_until), so a restart doesn't cut it short. The PCR picks the strike as Conti picks it, from
 the 50-point strikes (STRIKE_MULTIPLE) around NIFTY by the weekly's live
 premiums:
 
@@ -35,8 +39,8 @@ bought legs sold at the bid, less the estimated charges of all eight orders
 version 1) or more, all four close at those prices. Checked every RECHECK
 (1 second) while a position is open and NSE trades -- the strategy asks to
 be run again then (ctx.wake_at) on top of the scheduler's 10-second cycle --
-and the next position opens a second after a take-profit; a leg with no bid
-or no ask waits for one.
+and is run again right when a pause ends; a leg with no bid or no ask waits
+for one.
 
 Closed at 15:00 every day (version 2; version 1 carried it overnight and
 closed it at 15:00 only on the weekly's expiry day): when the take-profit
@@ -45,7 +49,7 @@ the profit -- nothing is held overnight -- and the next one opens from 09:30
 the next trading day. One still open from an earlier day (the app was down
 at 15:00) closes at its first check. No rolls: a position keeps its strike
 however far NIFTY goes. After a take-profit the next one opens at the next
-check before 15:00. No stop-loss.
+check once the pause is up, before 15:00. No stop-loss.
 
 A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a month's
 three letters) against a weekly's NIFTY26N1723700CE. In a backtest there is
@@ -75,6 +79,7 @@ ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
 DAILY_CLOSE = dtime(15, 0)  # every day, whatever's open closes at this time
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again (version 5)
+PAUSE_AFTER_CLOSE = timedelta(minutes=5)  # no new position this soon after one closes (version 7)
 TAKE_PROFIT = 14_000.0  # rupees, after charges, at bid / ask
 PCR_PIVOT = 1.0
 MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
@@ -195,6 +200,7 @@ async def evaluate(ctx) -> None:
             opened_at=datetime.fromisoformat(position["opened_at"]),
         )
         ctx.state["position"] = None
+        ctx.state["paused_until"] = (now_utc + PAUSE_AFTER_CLOSE).isoformat()
         return total
 
     async def forced_prices() -> dict[str, float]:
@@ -215,7 +221,8 @@ async def evaluate(ctx) -> None:
         weekly = date.fromisoformat(position["weekly_expiry"])
         if force_exit:
             await close_all("manual", await forced_prices())
-            ctx.note("exited", signal="COVER", reason="manual exit")
+            ctx.note("exited", signal="COVER", reason=f"manual exit; next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}")
+            ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)
             return
         opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date()
         if opened_day < today or now_ist.time() >= DAILY_CLOSE:
@@ -246,9 +253,9 @@ async def evaluate(ctx) -> None:
             pnl = await close_all("take_profit", prices)
             ctx.note("exited", signal="COVER", reason=(
                 f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
-                f"P&L {pnl:+,.0f} before charges"
+                f"P&L {pnl:+,.0f} before charges; next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}"
             ))
-            ctx.wake_at(now_utc + RECHECK)  # the next one, a second on
+            ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)  # the next one, once the pause is up
             return
         ctx.note("hold", reason=(
             f"calendar {position['strike']:,.0f} (sold {weekly:%d %b}, bought {date.fromisoformat(position['monthly_expiry']):%d %b}): "
@@ -260,6 +267,13 @@ async def evaluate(ctx) -> None:
 
     if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
         ctx.note("skipped", reason=f"outside entry window ({ENTRY_TIME:%H:%M}-{ENTRY_UNTIL:%H:%M} IST)")
+        return
+    paused_until = ctx.state.get("paused_until")
+    if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
+        ctx.note("skipped", reason=(
+            f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minutes after the last close: next entry from {resume.astimezone(IST):%H:%M:%S}"
+        ))
+        ctx.wake_at(resume)
         return
 
     spot = await ctx.get_price(underlying.id)
@@ -342,6 +356,7 @@ async def evaluate(ctx) -> None:
         "opened_at": now_utc.isoformat(),
     }
     ctx.state.pop("trades_today", None)  # version 3's count, no longer kept
+    ctx.state.pop("paused_until", None)
     sold = legs["short_ce"]["entry_price"] + legs["short_pe"]["entry_price"]
     bought = legs["long_ce"]["entry_price"] + legs["long_pe"]["entry_price"]
     ctx.note("entered", signal="CALENDAR", reason=(
