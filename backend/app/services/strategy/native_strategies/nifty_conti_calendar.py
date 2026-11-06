@@ -6,7 +6,8 @@ Conti Straddle 15 MIN with a monthly hedge (agreed 4 Nov; version 2, 5 Nov:
 take-profit Rs 14,000 and a 15:00 close every day; version 3, 6 Nov:
 strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
 a day taken off again; version 5, 6 Nov: re-checked every second while a
-position is open): four legs at one
+position is open; version 6, 6 Nov: version 3's hundreds-only strikes taken
+off again): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -16,9 +17,9 @@ strike, LOTS_PER_LEG (16) lots each --
                                last week, when this month's IS the weekly
 
 -- opened from 09:30 (ENTRY_TIME) to 15:00 IST whenever none is open, as
-many a day as that allows. The PCR picks the strike as Conti picks it, but from
-the strikes in hundreds only (STRIKE_MULTIPLE: 24,200, 24,300 -- never
-24,250) around NIFTY, by the weekly's live premiums:
+many a day as that allows. The PCR picks the strike as Conti picks it, from
+the 50-point strikes (STRIKE_MULTIPLE) around NIFTY by the weekly's live
+premiums:
 
   PCR below 1     the strike whose CALL premium is just above its PUT's
   PCR 1 or above  the strike whose PUT premium is just above its CALL's
@@ -66,7 +67,7 @@ from app.services.paper_trading.trade_record import order_charges
 
 UNDERLYING_SYMBOL = "NIFTY 50"
 PCR_TIMEFRAME = "15m"
-STRIKE_MULTIPLE = 100  # only strikes in hundreds (version 3; Conti's 50-point strikes before)
+STRIKE_MULTIPLE = 50  # every 50-point strike, as Conti (version 6; versions 3-5 took hundreds only)
 CANDIDATE_STEPS = 3  # strikes looked at either side of the one nearest NIFTY
 LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
@@ -299,7 +300,7 @@ async def evaluate(ctx) -> None:
     if strike is None:
         heavier = "CALL" if side == "call" else "PUT"
         ctx.note("skipped", reason=(
-            f"PCR {pcr:.3f}: no strike in hundreds within {STRIKE_MULTIPLE * CANDIDATE_STEPS} of NIFTY with the {heavier} premium above "
+            f"PCR {pcr:.3f}: no strike within {STRIKE_MULTIPLE * CANDIDATE_STEPS} of NIFTY with the {heavier} premium above "
             f"the other ({len(contracts)} with both premiums live)"
         ))
         return

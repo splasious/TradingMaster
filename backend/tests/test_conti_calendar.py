@@ -136,7 +136,7 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
 
     ctx = await market.check(at(4, 9, 30))
     p = ctx.state["position"]
-    assert (p["strike"], p["side"], p["weekly_expiry"], p["monthly_expiry"]) == (23400, "call", "2026-11-09", "2026-11-23")
+    assert (p["strike"], p["side"], p["weekly_expiry"], p["monthly_expiry"]) == (23450, "call", "2026-11-09", "2026-11-23")
     legs = p["legs"]
     assert {n: (leg["side"], leg["expiry"], leg["option_type"], leg["quantity"]) for n, leg in legs.items()} == {
         "short_ce": ("sell", "2026-11-09", "CE", QTY), "short_pe": ("sell", "2026-11-09", "PE", QTY),
@@ -181,7 +181,7 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
     held = (await market.check(at(4, 9, 30))).state["position"]
 
     def decay_to(each: float) -> None:  # the weekly's two premiums fall; the monthly's are as the day prices them
-        market.premium[(W1, 23400.0, "CE")] = market.premium[(W1, 23400.0, "PE")] = each
+        market.premium[(W1, 23450.0, "CE")] = market.premium[(W1, 23450.0, "PE")] = each
 
     market.prices(at(4, 11, 0), 23460.0)  # the book later that day
     longs = {n: tick_engine.get_fresh_bid_ask(uuid.UUID(held["legs"][n]["instrument_id"]), timedelta(minutes=1), at(4, 11, 0))
@@ -226,12 +226,12 @@ async def test_on_an_expiry_day_it_opens_on_next_weeks_and_in_the_months_last_we
 
 
 async def test_no_bid_or_ask_on_a_leg_means_no_entry_and_no_take_profit_reading(market):
-    market.no_book = {(W3, 23400.0, "PE")}
+    market.no_book = {(W3, 23450.0, "PE")}
     ctx = await market.check(at(4, 9, 30))
-    assert ctx.state.get("position") is None and "no bid/ask for the 23,400 PE monthly" in ctx._last_reason
+    assert ctx.state.get("position") is None and "no bid/ask for the 23,450 PE monthly" in ctx._last_reason
     market.no_book = set()
     await market.check(at(4, 9, 31))
-    market.no_book = {(W1, 23400.0, "CE")}
+    market.no_book = {(W1, 23450.0, "CE")}
     held = await market.check(at(4, 10, 0))
     assert held.state["position"] is not None and "no bid/ask for short_ce" in held._last_reason
 
@@ -281,15 +281,16 @@ async def test_the_telegram_entry_alert_carries_the_setup_with_its_1500_figures(
     payoff = await trade_alerts._entry_payoff(market.db, position, ctx, 23460.0)
     assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.target == cal.TAKE_PROFIT
     title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
-    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,400 · 16 lots a leg" in body
+    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
     assert "Target +14,000 after costs" in body and "At 15:00, IV as now:" in body and " Max loss " in body
     assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None
 
 
-def test_only_strikes_in_hundreds_are_looked_at():
-    """6 Nov (version 3): the PCR picks among 24,200, 24,300 ... -- never 24,250."""
-    assert cal.candidate_strikes(23460.0) == [23200, 23300, 23400, 23500, 23600, 23700, 23800]
-    assert cal.candidate_strikes(24268.0) == [24000, 24100, 24200, 24300, 24400, 24500, 24600]
+def test_the_strikes_looked_at_are_every_50_points():
+    """6 Nov (version 6): version 3's hundreds-only rule taken off again -- the
+    PCR picks among every 50-point strike, as Conti does."""
+    assert cal.candidate_strikes(23460.0) == [23300, 23350, 23400, 23450, 23500, 23550, 23600]
+    assert cal.candidate_strikes(24268.0) == [24100, 24150, 24200, 24250, 24300, 24350, 24400]
 
 
 async def test_there_is_no_limit_on_trades_a_day(market):
@@ -297,7 +298,7 @@ async def test_there_is_no_limit_on_trades_a_day(market):
     before 15:00 is followed by the next trade."""
     for n, (opens, closes) in enumerate(((at(4, 9, 30), at(4, 10, 0)), (at(4, 10, 1), at(4, 10, 30)), (at(4, 10, 31), at(4, 11, 0)))):
         ctx = await market.check(opens)
-        assert ctx.state["position"] is not None and ctx.state["position"]["strike"] % 100 == 0, n
+        assert ctx.state["position"] is not None and ctx.state["position"]["strike"] % 50 == 0, n
         assert "trades_today" not in ctx.state
         market.deployment.state = {**market.deployment.state, "force_exit": True}
         await market.check(closes)
@@ -318,7 +319,7 @@ async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(
     assert opened._wake_at == at(4, 9, 30) + td(seconds=1)
     held = await market.check(at(4, 9, 30, 1))
     assert held.state["position"] is not None and held._wake_at == at(4, 9, 30, 2)
-    market.no_book = {(W1, 23400.0, "CE")}
+    market.no_book = {(W1, 23450.0, "CE")}
     waiting = await market.check(at(4, 9, 30, 2))
     assert "no bid/ask for short_ce" in waiting._last_reason and waiting._wake_at == at(4, 9, 30, 3)
     market.no_book = set()
@@ -348,7 +349,7 @@ async def test_the_card_can_fetch_its_position_alone(market, client, monkeypatch
 
         monkeypatch.setattr(ep, "_build_position_out", built)
         body = (await client.get(url)).json()
-        assert body["bias"] == "calendar" and len(body["legs"]) == 4 and body["metrics"]["strike"] == 23400
+        assert body["bias"] == "calendar" and len(body["legs"]) == 4 and body["metrics"]["strike"] == 23450
         stranger = User(email=f"x_{uuid.uuid4().hex[:6]}@tradingmaster.internal", hashed_password="x", full_name="X")
         market.db.add(stranger)
         await market.db.commit()
