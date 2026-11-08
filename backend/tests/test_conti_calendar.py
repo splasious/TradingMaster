@@ -1,11 +1,11 @@
 """Conti Calendar 15 MIN (native_strategies/nifty_conti_calendar.py, 4 Nov;
 version 2, 5 Nov): Conti Straddle's short weekly straddle with the same
 strike's monthly CE and PE bought, 16 lots a leg, every fill at bid / ask;
-held with no rolls until Rs 14,000 after charges at bid / ask, or 15:00 --
-every day, nothing overnight."""
+held with no rolls until Rs 14,000 after charges at bid / ask, or 15:29 --
+every day, nothing overnight (15:00 until version 8, 8 Nov)."""
 
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -150,30 +150,35 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
     assert p["entry_charges"] > 0 and "16 lots a leg" in ctx._last_reason and ctx._last_signal == "CALENDAR"
 
 
-async def test_if_the_take_profit_hasnt_come_all_four_close_at_1500_every_day_and_the_next_opens_at_0930(market):
+async def test_if_the_take_profit_hasnt_come_all_four_close_at_1529_every_day_and_the_next_opens_at_0930(market):
+    """8 Nov (version 8): the daily close is 15:29 -- not 15:30 itself, when
+    NSE shuts and the app runs no strategy; still no new entry after 15:00."""
+    assert cal.DAILY_CLOSE == dtime(15, 29) and cal.ENTRY_UNTIL == dtime(15, 0)
     await market.check(at(4, 9, 30))
-    held = await market.check(at(4, 14, 59, 50))
-    assert held.state["position"] is not None and "closes at 15:00 otherwise" in held._last_reason
+    still = await market.check(at(4, 15, 0))  # 15:00 no longer closes it
+    assert still.state["position"] is not None and "closes at 15:29 otherwise" in still._last_reason
+    held = await market.check(at(4, 15, 28, 59))
+    assert held.state["position"] is not None and "closes at 15:29 otherwise" in held._last_reason
     assert held.state["position"]["net_if_closed_now"] < 0  # the spreads and charges paid, nothing earned yet
-    closed = await market.check(at(4, 15, 0))
-    assert closed.state["position"] is None and closed._last_reason.startswith("15:00 close: all four legs closed at bid/ask")
+    closed = await market.check(at(4, 15, 29))
+    assert closed.state["position"] is None and closed._last_reason.startswith("15:29 close: all four legs closed at bid/ask")
     [trade] = await market.trades()
-    assert trade.exit_reason == "time_cutoff_3pm" and len(trade.legs) == 4
+    assert trade.exit_reason == "time_cutoff_329pm" and len(trade.legs) == 4
     exits = {leg["side"]: leg for leg in trade.legs}
     short_ltp = tick_engine.get_current_price(uuid.UUID(exits["short"]["instrument_id"]))
     assert exits["short"]["exit_price"] == short_ltp + SPREAD  # bought back at the ask
-    later = await market.check(at(4, 15, 10))
+    later = await market.check(at(4, 15, 29, 10))
     assert later.state.get("position") is None and "outside entry window" in later._last_reason
     nxt = await market.check(at(5, 9, 30))
     assert nxt.state["position"] is not None and nxt.state["position"]["weekly_expiry"] == "2026-11-09"
 
 
 async def test_one_left_open_from_an_earlier_day_closes_at_its_first_check(market):
-    await market.check(at(4, 9, 30))  # and the app is down from before 15:00 until the next morning
+    await market.check(at(4, 9, 30))  # and the app is down from before 15:29 until the next morning
     ctx = await market.check(at(5, 9, 15))
-    assert ctx.state["position"] is None and "open since 04 Nov, past its 15:00 close" in ctx._last_reason
+    assert ctx.state["position"] is None and "open since 04 Nov, past its 15:29 close" in ctx._last_reason
     [trade] = await market.trades()
-    assert trade.exit_reason == "time_cutoff_3pm"
+    assert trade.exit_reason == "time_cutoff_329pm"
 
 
 async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14000_after_charges(market):
@@ -219,7 +224,7 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
 async def test_on_an_expiry_day_it_opens_on_next_weeks_and_in_the_months_last_week_buys_next_months(market):
     expiry_day = await market.check(at(9, 9, 30))
     assert expiry_day.state["position"]["weekly_expiry"] == "2026-11-17"
-    assert (await market.check(at(9, 15, 0))).state["position"] is None  # closed at 15:00 like any day
+    assert (await market.check(at(9, 15, 29))).state["position"] is None  # closed at 15:29 like any day
     market.deployment.state = None
     market.weeklies = [W3, DEC]
     last_week = await market.check(at(18, 9, 30))
@@ -256,37 +261,40 @@ async def test_in_a_backtest_the_last_price_stands_for_bid_and_ask(market, monke
     assert legs["short_ce"]["entry_price"] == tick_engine.get_current_price(uuid.UUID(legs["short_ce"]["instrument_id"]))
 
 
-async def test_the_card_shows_the_profit_at_1500_across_nifty_levels(market):
+async def test_the_card_shows_the_profit_at_the_close_across_nifty_levels(market):
     """5 Nov: the card's payoff (services/options/calendar_payoff.py) -- built
-    from the position and the live book, while 15:00 is still ahead."""
+    from the position and the live book, while the 15:29 close is still ahead."""
     from app.api.v1.endpoints import paper_native_trading as ep
 
     await market.check(at(4, 9, 30))
     market.prices(at(4, 11, 0), 23480.0)
     out = await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))
     payoff = out.payoff
-    assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.spot == 23480.0
+    assert payoff is not None and payoff.horizon == at(4, 15, 29) and payoff.spot == 23480.0
     assert payoff.points[0].spot == 22480.0 and payoff.points[-1].spot == 24480.0
     assert payoff.target == cal.TAKE_PROFIT and set(payoff.implied_vols) == {"short_ce", "short_pe", "long_ce", "long_pe"}
     assert payoff.max_loss <= payoff.max_profit and payoff.loss_cap is not None and payoff.loss_cap > 0
 
     market.prices(at(4, 15, 0), 23480.0)
-    late = await ep._build_position_out(market.db, market.deployment.state, at(4, 15, 0, 5).astimezone(timezone.utc))
-    assert late.payoff is None  # 15:00 has come: it's closing
+    three = await ep._build_position_out(market.db, market.deployment.state, at(4, 15, 0, 5).astimezone(timezone.utc))
+    assert three.payoff is not None and three.payoff.horizon == at(4, 15, 29)  # 15:00 isn't the close any more
+    market.prices(at(4, 15, 29), 23480.0)
+    late = await ep._build_position_out(market.db, market.deployment.state, at(4, 15, 29, 5).astimezone(timezone.utc))
+    assert late.payoff is None  # 15:29 has come: it's closing
 
 
-async def test_the_telegram_entry_alert_carries_the_setup_with_its_1500_figures(market):
+async def test_the_telegram_entry_alert_carries_the_setup_with_its_close_figures(market):
     """5 Nov: the entry alert (notifications/trade_alerts.py) works out the
-    same 15:00 figures as the card, from the position just opened."""
+    same figures at the 15:29 close as the card, from the position just opened."""
     from app.services.notifications import trade_alerts
 
     ctx = await market.check(at(4, 9, 30))
     position = ctx.state["position"]
     payoff = await trade_alerts._entry_payoff(market.db, position, ctx, 23460.0)
-    assert payoff is not None and payoff.horizon == at(4, 15, 0) and payoff.target == cal.TAKE_PROFIT
+    assert payoff is not None and payoff.horizon == at(4, 15, 29) and payoff.target == cal.TAKE_PROFIT
     title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
     assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
-    assert "Target +14,000 after costs" in body and "At 15:00, IV as now:" in body and " Max loss " in body
+    assert "Target +14,000 after costs" in body and "Exit 15:29 if not hit" in body and "At 15:29, IV as now:" in body and " Max loss " in body
     assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None
 
 
@@ -350,7 +358,7 @@ async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(
     waiting = await market.check(at(4, 9, 30, 2))
     assert "no bid/ask for short_ce" in waiting._last_reason and waiting._wake_at == at(4, 9, 30, 3)
     market.no_book = set()
-    closed = await market.check(at(4, 15, 0))
+    closed = await market.check(at(4, 15, 29))
     assert closed.state["position"] is None and closed._wake_at is None  # the day's close: nothing until tomorrow
 
 

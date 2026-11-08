@@ -1090,10 +1090,34 @@ async def test_conti_calendar_moves_back_onto_every_50_points_keeping_its_open_p
 
 async def test_conti_calendar_moves_onto_the_pause_after_a_close_keeping_its_open_position(db_engine, db_session):
     migration = _load("b4d6f8a0c2e5_conti_calendar_pause_after_close")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a2c4e6f8b0d3"
+    assert migration.down_revision == "a2c4e6f8b0d3"
+    assert _load("c6e8a0b2d4f7_conti_calendar_close_1529").FROM_MD5S == {migration.TO_MD5}  # version 8 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 8 now: the mechanics are what's tested here
     v6 = "# Conti Calendar 15 MIN, version 6: every 50-point strike\n"
     migration.FROM_MD5S = {_md5_text(v6)}
     running = await _deployment(db_session, "cal7_a@tradingmaster.internal", v6)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    state = {"position": {"strike": 24700, "legs": {}}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
+async def test_conti_calendar_moves_onto_the_1529_close_keeping_its_open_position(db_engine, db_session):
+    migration = _load("c6e8a0b2d4f7_conti_calendar_close_1529")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "b4d6f8a0c2e5"
+    v7 = "# Conti Calendar 15 MIN, version 7: a 5-minute pause after a close\n"
+    migration.FROM_MD5S = {_md5_text(v7)}
+    running = await _deployment(db_session, "cal8_a@tradingmaster.internal", v7)
     (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
     state = {"position": {"strike": 24700, "legs": {}}}
     running.state = state

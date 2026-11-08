@@ -1113,14 +1113,14 @@ function istTime(iso: string): string {
 const EXIT_REASON_ACRONYMS = new Set(["pcr", "rsi", "macd", "atm", "oi", "sl", "tsl", "tp", "eod", "ltp"]);
 
 /** A strategy's exit_reason as words: "time_cutoff_3pm" -> "Time Cutoff 3 PM",
- * "pcr_exit_0.845" -> "PCR Exit 0.845". */
+ * "time_cutoff_329pm" -> "Time Cutoff 3:29 PM", "pcr_exit_0.845" -> "PCR Exit 0.845". */
 function exitReasonLabel(reason: string): string {
   return reason
     .split("_")
     .filter(Boolean)
     .map((w) => {
-      const clock = /^(\d{1,2})(am|pm)$/i.exec(w);
-      if (clock) return `${clock[1]} ${clock[2].toUpperCase()}`;
+      const clock = /^(\d{1,2})(\d{2})?(am|pm)$/i.exec(w);
+      if (clock) return `${clock[1]}${clock[2] ? `:${clock[2]}` : ""} ${clock[3].toUpperCase()}`;
       if (EXIT_REASON_ACRONYMS.has(w.toLowerCase())) return w.toUpperCase();
       return w.charAt(0).toUpperCase() + w.slice(1);
     })

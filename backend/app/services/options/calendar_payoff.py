@@ -1,6 +1,7 @@
 """A calendar position's profit at its exit across NIFTY levels (5 Nov) -- for
 the Conti Calendar 15 MIN card: the most it can make and lose by today's
-15:00 close, and the NIFTY range it ends in profit.
+daily close (EXIT_TIME, the strategy's own: 15:29 since 8 Nov, 15:00
+before), and the NIFTY range it ends in profit.
 
 A calendar's figures aren't fixed like a plain straddle's: what the bought
 monthly options are still worth when it closes depends on volatility. So
@@ -24,9 +25,10 @@ from typing import Callable
 
 from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
+from app.services.strategy.native_strategies.nifty_conti_calendar import DAILY_CLOSE
 
 EXPIRY_TIME = time(15, 30)  # IST: when an NSE option expires
-EXIT_TIME = time(15, 0)  # IST: Conti Calendar 15 MIN's daily close (version 2), the horizon shown
+EXIT_TIME = DAILY_CLOSE  # IST: Conti Calendar 15 MIN's daily close, the horizon shown
 YEAR_SECONDS = 365.0 * 24 * 3600
 GRID_POINTS = 1000  # NIFTY levels this far either side of NIFTY now
 GRID_STEP = 10
@@ -174,7 +176,7 @@ def position_payoff(position: dict, instruments: dict, prices: dict[str, float |
     state["position"]) profit at today's EXIT_TIME -- each leg off the order
     book the ticker last saw, else its price in `prices` (leg name -> price)
     with no spread. `instruments`: leg name -> its Instrument. None for any
-    other position, without NIFTY or a leg's price, or once 15:00 has come.
+    other position, without NIFTY or a leg's price, or once EXIT_TIME has come.
     Shared by the card (endpoints/paper_native_trading.py) and the Telegram
     entry alert (notifications/trade_alerts.py)."""
     from app.services.market_data.live_price import LIVE_PRICE_MAX_AGE

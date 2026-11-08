@@ -149,9 +149,9 @@ def _payoff_out(
     position: dict, instruments: list[Instrument], prices: list[float | None], spot: float | None, spot_close: SessionClose | None,
     now: datetime | None,
 ) -> PayoffOut | None:
-    """A calendar's profit at today's 15:00 across NIFTY levels
+    """A calendar's profit at today's daily close across NIFTY levels
     (options/calendar_payoff.py) -- while the market is open (live NIFTY,
-    live option prices) and 15:00 is still ahead."""
+    live option prices) and the close is still ahead."""
     if position.get("regime") != "calendar" or spot_close is not None:
         return None
     names = list(position["legs"])

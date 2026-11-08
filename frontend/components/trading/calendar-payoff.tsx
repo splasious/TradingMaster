@@ -4,7 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { PayoffOut } from "@/lib/types";
 
-/** A calendar card's "if closed at 15:00 today" panel (5 Nov): the most it can
+/** A calendar card's "if closed at 15:29 today" panel (5 Nov; the time is the
+ * backend's horizon, the strategy's daily close): the most it can
  * make and lose by its daily close, the NIFTY range it ends in profit and
  * where its take-profit would be reached, and the profit curve across NIFTY
  * +-1,000 with NIFTY now marked. Every point is the backend's
@@ -17,6 +18,11 @@ const PAD = { top: 18, right: 12, bottom: 28, left: 64 };
 function money(value: number, signed = false): string {
   const sign = value < 0 ? "-" : signed && value > 0 ? "+" : "";
   return `${sign}₹${Math.abs(Math.round(value)).toLocaleString("en-IN")}`;
+}
+
+/** "15:29": a time of day in IST, as the strategy's close is set. */
+function istClock(iso: string): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
 }
 
 function level(value: number): string {
@@ -83,6 +89,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
   const { points, spot } = payoff;
   const inProfit = payoff.max_profit >= 0;
   const now = pnlAt(points, spot);
+  const closeAt = istClock(payoff.horizon);
   const first = points[0].spot;
   const last = points[points.length - 1].spot;
 
@@ -115,18 +122,18 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
     ? [payoff.breakeven_low != null ? away(payoff.breakeven_low, spot) : null, payoff.breakeven_high != null ? away(payoff.breakeven_high, spot) : null]
         .filter(Boolean)
         .join(" / ")
-    : "at these volatilities, by 15:00";
+    : `at these volatilities, by ${closeAt}`;
   const targetReached = payoff.target != null && payoff.max_profit >= payoff.target;
 
   return (
     <div className="space-y-3 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <div className="text-base font-semibold text-text-primary">If closed at 15:00 today</div>
+        <div className="text-base font-semibold text-text-primary">If closed at {closeAt} today</div>
         <div className="text-sm text-text-muted">each option at its implied volatility now · closed at bid/ask · after charges</div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-        <Field label="NIFTY stays here" sub={`NIFTY ${level(spot)} at 15:00`}>
+        <Field label="NIFTY stays here" sub={`NIFTY ${level(spot)} at ${closeAt}`}>
           <span className={now >= 0 ? "text-positive" : "text-negative"}>{money(now, true)}</span>
         </Field>
         <Field label="Max profit" sub={`at NIFTY ${level(payoff.max_profit_at)} (${away(payoff.max_profit_at, spot)})`}>
@@ -147,7 +154,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           {breakevenText}
         </Field>
         {payoff.target != null && (
-          <Field label={`${money(payoff.target)} take-profit`} sub={targetReached ? "NIFTY range where 15:00 reaches it" : "the most by 15:00 falls short"}>
+          <Field label={`${money(payoff.target)} take-profit`} sub={targetReached ? `NIFTY range where ${closeAt} reaches it` : `the most by ${closeAt} falls short`}>
             {targetReached
               ? `${payoff.target_low != null ? level(payoff.target_low) : `below ${level(first)}`} – ${payoff.target_high != null ? level(payoff.target_high) : `above ${level(last)}`}`
               : "not reached at any level"}
@@ -163,7 +170,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           height={H}
           className="block w-full touch-none select-none"
           role="img"
-          aria-label={`Profit at 15:00 against NIFTY: maximum ${money(payoff.max_profit, true)} at ${level(payoff.max_profit_at)}`}
+          aria-label={`Profit at ${closeAt} against NIFTY: maximum ${money(payoff.max_profit, true)} at ${level(payoff.max_profit_at)}`}
           onPointerMove={onMove}
           onPointerLeave={() => setHover(null)}
         >
@@ -233,7 +240,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
               NIFTY {level(hover)} <span className="text-text-muted">({away(hover, spot)})</span>
             </div>
             <div className={`font-financial font-semibold ${pnlAt(points, hover) >= 0 ? "text-positive" : "text-negative"}`}>
-              {money(pnlAt(points, hover), true)} at 15:00
+              {money(pnlAt(points, hover), true)} at {closeAt}
             </div>
           </div>
         )}

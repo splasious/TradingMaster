@@ -7,7 +7,8 @@ take-profit Rs 14,000 and a 15:00 close every day; version 3, 6 Nov:
 strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
 a day taken off again; version 5, 6 Nov: re-checked every second while a
 position is open; version 6, 6 Nov: version 3's hundreds-only strikes taken
-off again; version 7, 6 Nov: a 5-minute pause after every close): four legs at one
+off again; version 7, 6 Nov: a 5-minute pause after every close; version 8,
+8 Nov: the daily close moved to 15:29): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -42,12 +43,15 @@ be run again then (ctx.wake_at) on top of the scheduler's 10-second cycle --
 and is run again right when a pause ends; a leg with no bid or no ask waits
 for one.
 
-Closed at 15:00 every day (version 2; version 1 carried it overnight and
-closed it at 15:00 only on the weekly's expiry day): when the take-profit
-hasn't come by DAILY_CLOSE, all four legs close then at bid / ask whatever
-the profit -- nothing is held overnight -- and the next one opens from 09:30
-the next trading day. One still open from an earlier day (the app was down
-at 15:00) closes at its first check. No rolls: a position keeps its strike
+Closed at 15:29 every day (version 8; 15:00 in versions 2-7; version 1
+carried it overnight and closed it at 15:00 only on the weekly's expiry
+day): when the take-profit hasn't come by DAILY_CLOSE, all four legs close
+then at bid / ask whatever the profit -- nothing is held overnight -- and
+the next one opens from 09:30 the next trading day. Not 15:30 itself: NSE
+shuts then and the app runs no strategy after 15:30:00, so 15:29 leaves a
+minute to find a leg's missing quote. New positions still open only until
+ENTRY_UNTIL (15:00), so each has at least 29 minutes. One still open from
+an earlier day (the app was down at the close) closes at its first check. No rolls: a position keeps its strike
 however far NIFTY goes. After a take-profit the next one opens at the next
 check once the pause is up, before 15:00. No stop-loss.
 
@@ -77,7 +81,8 @@ LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
-DAILY_CLOSE = dtime(15, 0)  # every day, whatever's open closes at this time
+DAILY_CLOSE = dtime(15, 29)  # every day, whatever's open closes at this time (version 8; 15:00 before)
+DAILY_CLOSE_REASON = "time_cutoff_329pm"  # its trade's exit_reason ("time_cutoff_3pm" for the 15:00 close)
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again (version 5)
 PAUSE_AFTER_CLOSE = timedelta(minutes=5)  # no new position this soon after one closes (version 7)
 TAKE_PROFIT = 14_000.0  # rupees, after charges, at bid / ask
@@ -226,7 +231,7 @@ async def evaluate(ctx) -> None:
             return
         opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date()
         if opened_day < today or now_ist.time() >= DAILY_CLOSE:
-            pnl = await close_all("time_cutoff_3pm", await forced_prices())
+            pnl = await close_all(DAILY_CLOSE_REASON, await forced_prices())
             ctx.note("exited", signal="COVER", reason=(
                 f"{DAILY_CLOSE:%H:%M} close: all four legs closed at bid/ask, P&L {pnl:+,.0f} before charges" if opened_day == today
                 else f"open since {opened_day:%d %b}, past its {DAILY_CLOSE:%H:%M} close: all four legs closed, P&L {pnl:+,.0f} before charges"

@@ -90,8 +90,8 @@ def test_the_messages_fit_the_groups_width():
 
 
 def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
-    """5 Nov: the strike and lots, the net debit, the take-profit and the 15:00
-    exit, then where it stands at 15:00 if volatility holds."""
+    """5 Nov: the strike and lots, the net debit, the take-profit and the daily
+    exit (15:29 since 8 Nov), then where it stands then if volatility holds."""
     from app.services.options.calendar_payoff import Payoff
 
     legs = [
@@ -101,7 +101,7 @@ def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
         {"symbol": "NIFTY26NOV24300PE", "side": "buy", "quantity": 1040, "price": 253.3, "lot_size": 65},
     ]
     position = {"regime": "calendar", "pcr_at_entry": 0.85, "strike": 24300, "take_profit": 14000.0}
-    payoff = Payoff(horizon=at(15, 0), spot=24310.0, points=[], max_profit=2818.9, max_profit_at=24300.0, max_loss=-274390.04,
+    payoff = Payoff(horizon=at(15, 29), spot=24310.0, points=[], max_profit=2818.9, max_profit_at=24300.0, max_loss=-274390.04,
                     max_loss_at=25300.0, loss_cap=290000.0, breakeven_low=24243.2, breakeven_high=24366.5, target=14000.0,
                     target_low=None, target_high=None)
     taken = entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8), payoff)
@@ -110,16 +110,16 @@ def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
         "Calendar · PCR 0.850", "Time 09:30:08", "Strike 24,300 · 16 lots a leg",
         "SELL NIFTY26N0924300CE", "  16 lots @ 163.45", "SELL NIFTY26N0924300PE", "  16 lots @ 138.15",
         "BUY NIFTY26NOV24300CE", "  16 lots @ 320.00", "BUY NIFTY26NOV24300PE", "  16 lots @ 253.30",
-        "Net debit 282,568", "Target +14,000 after costs", "Exit 15:00 if not hit",
-        "At 15:00, IV as now:", " Breakeven 24,243-24,366", " Max profit +2,819 @24,300", " Max loss -274,390 (±1,000)",
-        " 14,000 not reached by 15:00",
+        "Net debit 282,568", "Target +14,000 after costs", "Exit 15:29 if not hit",
+        "At 15:29, IV as now:", " Breakeven 24,243-24,366", " Max profit +2,819 @24,300", " Max loss -274,390 (±1,000)",
+        " 14,000 not reached by 15:29",
     ]
     assert max(len(line) for line in lines(taken)) <= WIDTH
 
     flat = Payoff(**{**payoff.__dict__, "max_profit": -1200.0, "breakeven_low": None, "breakeven_high": None})
     assert {" No profit at any level", " Best case -1,200 @24,300"} <= set(lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8), flat)))
     without = lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8)))  # figures not worked out
-    assert without[-1] == "Exit 15:00 if not hit"
+    assert without[-1] == "Exit 15:29 if not hit"
 
     closed = exit_message("Conti Calendar 15 MIN", {
         "legs": [{"instrument_symbol": "NIFTY26N0924300CE", "side": "short", "quantity": 1040, "lot_size": 65,
@@ -130,6 +130,9 @@ def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
     assert lines(exit_message("Conti Calendar 15 MIN", {
         "legs": [], "pnl": -100.0, "charges": 10.0, "exit_reason": "time_cutoff_3pm", "opened_at": at(9, 30), "closed_at": at(15, 0),
     }, -110.0, 1))[0] == "Exit: 15:00 close"
+    assert lines(exit_message("Conti Calendar 15 MIN", {
+        "legs": [], "pnl": -100.0, "charges": 10.0, "exit_reason": "time_cutoff_329pm", "opened_at": at(9, 30), "closed_at": at(15, 29),
+    }, -110.0, 1))[0] == "Exit: 15:29 close"
 
 
 def test_an_unknown_exit_reason_reads_as_words_and_missing_charges_drop_their_lines():

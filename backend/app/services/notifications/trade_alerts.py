@@ -11,8 +11,8 @@ for a profit or a loss. A chart that can't be drawn (no candles yet this
 session, say) leaves the text alert alone, as before.
 
 A calendar's entry (Conti Calendar 15 MIN, 5 Nov) carries its whole setup:
-the strike and lots, the net debit, the take-profit and the 15:00 exit, and
-where it stands at 15:00 if volatility holds -- the breakeven range, the
+the strike and lots, the net debit, the take-profit and the daily exit, and
+where it stands then if volatility holds -- the breakeven range, the
 most it can make and lose (options/calendar_payoff.py, as on its card).
 
 Text lines stay within 32 characters: the group's message block is narrower
@@ -52,6 +52,7 @@ EXIT_REASONS = {
     "manual": "manual exit",
     "take_profit": "take-profit hit",
     "time_cutoff_3pm": "15:00 close",
+    "time_cutoff_329pm": "15:29 close",
     "weekly_expiry_3pm": "weekly expiry, 15:00",
 }
 MA_EXITS = {"ma_stop": "MA stop", "ma_exit": "MA exit"}
@@ -106,7 +107,7 @@ def entry_message(
 
 def _calendar_setup(legs: list[dict], position: dict, payoff: Payoff | None) -> list[str]:
     """The plan under a calendar's legs: what it cost, when it closes, and --
-    `payoff`, today's 15:00 at volatility as now -- where it breaks even and
+    `payoff`, today's EXIT_TIME at volatility as now -- where it breaks even and
     the most it can make and lose."""
     debit = sum(leg["price"] * leg["quantity"] * (1 if leg["side"] == "buy" else -1) for leg in legs)
     lines = [f"Net {'debit' if debit >= 0 else 'credit'} {abs(debit):,.0f}"]
@@ -132,7 +133,7 @@ def _calendar_setup(legs: list[dict], position: dict, payoff: Payoff | None) -> 
 
 
 async def _entry_payoff(db, position: dict | None, ctx, spot: float | None) -> Payoff | None:
-    """A calendar entry's 15:00 figures, as its card shows them; None for
+    """A calendar entry's figures at its daily exit, as its card shows them; None for
     any other entry, or when they can't be worked out (logged)."""
     if not isinstance(position, dict) or position.get("regime") != "calendar":
         return None
@@ -144,7 +145,7 @@ async def _entry_payoff(db, position: dict | None, ctx, spot: float | None) -> P
             prices[name] = await ctx.get_price(instrument.id) if instrument is not None else None
         return position_payoff(position, instruments, prices, spot if spot is not None else position.get("entry_spot"), ctx.now)
     except Exception:
-        logger.exception("The calendar's 15:00 figures for its Telegram entry alert weren't worked out")
+        logger.exception("The calendar's exit-time figures for its Telegram entry alert weren't worked out")
         return None
 
 

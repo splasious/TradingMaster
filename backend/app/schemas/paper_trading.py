@@ -157,7 +157,7 @@ class PayoffPointOut(BaseModel):
 
 
 class PayoffOut(BaseModel):
-    """A calendar's profit at its exit -- today's 15:00 -- across NIFTY levels
+    """A calendar's profit at its exit -- today's daily close, `horizon` -- across NIFTY levels
     (services/options/calendar_payoff.py): each leg repriced at its implied
     volatility now, closed at bid/ask, after every charge."""
 
