@@ -342,6 +342,44 @@ async def test_after_a_close_it_waits_5_minutes_then_opens_the_next_right_away(m
     assert (await market.check(at(5, 9, 30))).state["position"] is not None  # the next morning as usual
 
 
+async def test_a_close_from_1400_ends_the_days_new_trades_and_one_before_is_held_to_the_close(market):
+    """9 Nov (version 9): once a position closes at or after 14:00 -- by
+    take-profit or a manual exit -- none opens again that day; a close
+    just before 14:00 still lets the next open after its pause; one opened
+    before 14:00 that hasn't hit the take-profit is held to 15:29."""
+    assert cal.DAY_DONE_AFTER == dtime(14, 0)
+    await market.check(at(4, 13, 0))
+    market.deployment.state = {**market.deployment.state, "force_exit": True}
+    before = await market.check(at(4, 13, 58))  # just before 14:00: the pause, then the next
+    assert before._last_reason == "manual exit; next entry from 14:03:00" and before._wake_at == at(4, 14, 3)
+    reopened = await market.check(at(4, 14, 3))
+    assert reopened.state["position"] is not None and reopened._last_signal == "CALENDAR"
+
+    market.deployment.state = {**market.deployment.state, "force_exit": True}
+    done = await market.check(at(4, 14, 12, 5))  # at 14:12: the day's last
+    assert done._last_reason == "manual exit; no new trade today (closed after 14:00)" and done._wake_at is None
+    for later in (at(4, 14, 17, 5), at(4, 14, 45), at(4, 14, 59, 59)):
+        ctx = await market.check(later)
+        assert ctx.state.get("position") is None and ctx._last_signal is None, later
+        assert ctx._last_reason == "no new trade today: the last closed at 14:12:05, after 14:00; next from 09:30 tomorrow"
+    assert (await market.check(at(5, 9, 30))).state["position"] is not None  # the next morning as usual
+
+    held = await market.check(at(5, 14, 30))  # opened before 14:00, short of the take-profit: held
+    assert held.state["position"] is not None and "closes at 15:29 otherwise" in held._last_reason
+    closed = await market.check(at(5, 15, 29))
+    assert closed.state["position"] is None and closed._last_reason.startswith("15:29 close")
+
+
+async def test_a_take_profit_from_1400_also_ends_the_days_new_trades(market):
+    held = (await market.check(at(4, 13, 50))).state["position"]
+    for leg in ("short_ce", "short_pe"):  # the weekly's premiums collapse: closing now clears Rs 14,000
+        market.premium[(date.fromisoformat(held["weekly_expiry"]), held["strike"], held["legs"][leg]["option_type"])] = 5.0
+    tp = await market.check(at(4, 14, 0))
+    assert tp.state["position"] is None and "take-profit" in tp._last_reason and tp._wake_at is None
+    assert tp._last_reason.endswith("no new trade today (closed after 14:00)")
+    assert "no new trade today" in (await market.check(at(4, 14, 5)))._last_reason
+
+
 async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(market):
     """6 Nov (version 5): "Net if closed now" and the take-profit are read
     every second while a position is open, and the next position opens a

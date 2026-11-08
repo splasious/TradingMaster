@@ -8,7 +8,8 @@ strikes in hundreds only; version 4, 6 Nov: version 3's limit of two trades
 a day taken off again; version 5, 6 Nov: re-checked every second while a
 position is open; version 6, 6 Nov: version 3's hundreds-only strikes taken
 off again; version 7, 6 Nov: a 5-minute pause after every close; version 8,
-8 Nov: the daily close moved to 15:29): four legs at one
+8 Nov: the daily close moved to 15:29; version 9, 9 Nov: no new position
+after one closes from 14:00): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -22,7 +23,13 @@ many a day as that allows, but never within PAUSE_AFTER_CLOSE (5 minutes;
 version 7) of the last one closing -- by take-profit or a manual exit: the
 next opens as soon as those 5 minutes are up, at that moment's PCR, strike
 and bid/ask (closed 11:27:15, next from 11:32:15). The pause is kept in the
-strategy's state (paused_until), so a restart doesn't cut it short. The PCR picks the strike as Conti picks it, from
+strategy's state (paused_until), so a restart doesn't cut it short. And
+once one closes at or after DAY_DONE_AFTER (14:00; version 9), by
+take-profit or a manual exit, none opens again that day: a position taken
+before then that hasn't reached the take-profit is simply held to the
+close. A close before 14:00 still allows the next after its pause (closed
+13:58, next at 14:03), up to 15:00. The last close is kept in the state
+(last_closed_at). The PCR picks the strike as Conti picks it, from
 the 50-point strikes (STRIKE_MULTIPLE) around NIFTY by the weekly's live
 premiums:
 
@@ -82,6 +89,7 @@ DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when 
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
 DAILY_CLOSE = dtime(15, 29)  # every day, whatever's open closes at this time (version 8; 15:00 before)
+DAY_DONE_AFTER = dtime(14, 0)  # a close at or after this ends the day's new positions (version 9)
 DAILY_CLOSE_REASON = "time_cutoff_329pm"  # its trade's exit_reason ("time_cutoff_3pm" for the 15:00 close)
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again (version 5)
 PAUSE_AFTER_CLOSE = timedelta(minutes=5)  # no new position this soon after one closes (version 7)
@@ -206,7 +214,15 @@ async def evaluate(ctx) -> None:
         )
         ctx.state["position"] = None
         ctx.state["paused_until"] = (now_utc + PAUSE_AFTER_CLOSE).isoformat()
+        ctx.state["last_closed_at"] = now_utc.isoformat()
         return total
+
+    def after_close() -> str:
+        """What follows a close made now, for its note -- and its wake-up."""
+        if now_ist.time() >= DAY_DONE_AFTER:
+            return f"no new trade today (closed after {DAY_DONE_AFTER:%H:%M})"
+        ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)
+        return f"next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}"
 
     async def forced_prices() -> dict[str, float]:
         """Closing prices that must be had now: bid / ask, else the last
@@ -226,8 +242,7 @@ async def evaluate(ctx) -> None:
         weekly = date.fromisoformat(position["weekly_expiry"])
         if force_exit:
             await close_all("manual", await forced_prices())
-            ctx.note("exited", signal="COVER", reason=f"manual exit; next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}")
-            ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)
+            ctx.note("exited", signal="COVER", reason=f"manual exit; {after_close()}")
             return
         opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date()
         if opened_day < today or now_ist.time() >= DAILY_CLOSE:
@@ -258,9 +273,8 @@ async def evaluate(ctx) -> None:
             pnl = await close_all("take_profit", prices)
             ctx.note("exited", signal="COVER", reason=(
                 f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
-                f"P&L {pnl:+,.0f} before charges; next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}"
+                f"P&L {pnl:+,.0f} before charges; {after_close()}"  # wakes for the next one once the pause is up
             ))
-            ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)  # the next one, once the pause is up
             return
         ctx.note("hold", reason=(
             f"calendar {position['strike']:,.0f} (sold {weekly:%d %b}, bought {date.fromisoformat(position['monthly_expiry']):%d %b}): "
@@ -272,6 +286,13 @@ async def evaluate(ctx) -> None:
 
     if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
         ctx.note("skipped", reason=f"outside entry window ({ENTRY_TIME:%H:%M}-{ENTRY_UNTIL:%H:%M} IST)")
+        return
+    last_closed = ctx.state.get("last_closed_at")
+    closed_ist = datetime.fromisoformat(last_closed).astimezone(IST) if last_closed else None
+    if closed_ist is not None and closed_ist.date() == today and closed_ist.time() >= DAY_DONE_AFTER:
+        ctx.note("skipped", reason=(
+            f"no new trade today: the last closed at {closed_ist:%H:%M:%S}, after {DAY_DONE_AFTER:%H:%M}; next from {ENTRY_TIME:%H:%M} tomorrow"
+        ))
         return
     paused_until = ctx.state.get("paused_until")
     if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
