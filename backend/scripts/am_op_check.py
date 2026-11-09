@@ -19,9 +19,11 @@ no P&L, no sizes.
 
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 
+from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.live_native import LiveNativeDeployment
 from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade
@@ -87,6 +89,15 @@ async def main() -> None:
                     .group_by(PaperNativeTrade.exit_reason).order_by(func.count().desc()).limit(8)
                 )).all()
                 print(f"    exit reasons (all time): {', '.join(f'{_reason(r)} x{n}' for r, n in reasons) or 'none'}")
+                today = datetime.now(timezone.utc).astimezone(IST).date()
+                closes = (await db.execute(
+                    select(PaperNativeTrade.closed_at, PaperNativeTrade.exit_reason).where(PaperNativeTrade.deployment_id == card.id)
+                    .order_by(PaperNativeTrade.closed_at.desc()).limit(20)
+                )).all()
+                todays = [(as_aware_utc(c).astimezone(IST), r) for c, r in closes if as_aware_utc(c).astimezone(IST).date() == today]
+                print(f"    today's closes: {', '.join(f'{c:%H:%M:%S} {_reason(r)}' for c, r in reversed(todays)) or 'none'}")
+                opened = (position or {}).get("opened_at")
+                print(f"    open position opened: {as_aware_utc(datetime.fromisoformat(opened)).astimezone(IST):%d-%b %H:%M:%S}" if opened else "    open position opened: -")
                 live = (await db.execute(
                     select(LiveNativeDeployment.status, LiveNativeDeployment.strategy_version_id)
                     .where(LiveNativeDeployment.paper_deployment_id == card.id)
