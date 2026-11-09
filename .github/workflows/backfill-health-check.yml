@@ -69,7 +69,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: backend/scripts
+          sparse-checkout: |
+            backend/scripts
+            backend/alembic/versions
 
       - name: Check backfill data on the VPS
         env:
