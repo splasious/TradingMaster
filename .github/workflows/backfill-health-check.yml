@@ -453,7 +453,9 @@ jobs:
 
           if [ "${AM_OP_CHECK:-false}" = "true" ]; then
             echo "== AM OP TRD 15 MIN: versions, cards, live runs, hook points (read-only; counts, md5s and yes/no only)"
-            py_file=$(vps 'f=$(mktemp /tmp/amop-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/am_op_check.py)
+            # The pending edit migration in front, so the check can try its edits (no DB write: upgrade() isn't called).
+            cat backend/alembic/versions/e2a4c6e8f0b3_am_op_take_profit_stop_loss.py backend/scripts/am_op_check.py > "$RUNNER_TEMP/amop.py"
+            py_file=$(vps 'f=$(mktemp /tmp/amop-XXXXXX.py) && cat > "$f" && echo "$f"' < "$RUNNER_TEMP/amop.py")
             remote py "$py_file"
             exit 0
           fi

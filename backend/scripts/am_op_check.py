@@ -12,7 +12,8 @@ printing any of the code:
   newest code, and whether the names it would add are already taken.
 
 Run inside the backend container (the health check's `am_op_check` input
-pipes it to `python -`). Counts, md5s and yes/no only -- no code, no user,
+pipes it to `python -`, with the pending AM OP edit migration in front of
+it, so its edited() is tried on the newest code -- yes/no and an md5). Counts, md5s and yes/no only -- no code, no user,
 no P&L, no sizes.
 """
 
@@ -64,6 +65,11 @@ async def main() -> None:
             for label, anchor in ANCHORS.items():
                 print(f"    '{label}' found {code.count(anchor)}x")
             print(f"    names already used: {', '.join(n for n in NAMES if n in code) or 'none'}")
+            print(f"    newest md5: {md5(code)}")
+            edit = globals().get("edited")  # the pending migration's own edits, when the check runs with it in front
+            if edit is not None:
+                after = edit(code)
+                print(f"    the pending migration's edits apply: {after is not None}" + (f" -> md5 {md5(after)}" if after else ""))
             cards = (await db.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == s.id))).scalars().all()
             for card in cards:
                 position = (card.state or {}).get("position")
