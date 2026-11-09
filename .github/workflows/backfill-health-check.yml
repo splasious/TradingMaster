@@ -22,6 +22,10 @@ on:
         description: "Instead of the check: read-only -- Kotak Neo's positions and holdings against what the live runs hold; field names and match results here, the rows to the private Telegram chat only (backend/scripts/kotak_holdings_check.py)"
         type: boolean
         default: false
+      am_op_check:
+        description: "Instead of the check: read-only -- AM OP TRD 15 MIN's versions (md5), cards and live runs, and whether its code still has the places a new rule hooks into; counts, md5s and yes/no only, no code (backend/scripts/am_op_check.py)"
+        type: boolean
+        default: false
       depth_check:
         description: "Instead of the check: read-only -- the 5-level bid/ask book of Conti Calendar's open legs from one Kite quote, and the average fill for the card's quantity; market data only (backend/scripts/depth_check.py)"
         type: boolean
@@ -83,6 +87,7 @@ jobs:
           CONTI_CALENDAR_CHECK: ${{ inputs.conti_calendar_check }}
           TELEGRAM_ALERT_CHECK: ${{ inputs.telegram_alert_check }}
           DEPTH_CHECK: ${{ inputs.depth_check }}
+          AM_OP_CHECK: ${{ inputs.am_op_check }}
           KOTAK_HOLDINGS_CHECK: ${{ inputs.kotak_holdings_check }}
         run: |
           set -euo pipefail
@@ -442,6 +447,13 @@ jobs:
           if [ "${KOTAK_HOLDINGS_CHECK:-false}" = "true" ]; then
             echo "== Kotak Neo holdings check (read-only; rows to the private Telegram chat only; field names and match results here)"
             py_file=$(vps 'f=$(mktemp /tmp/kotak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/kotak_holdings_check.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${AM_OP_CHECK:-false}" = "true" ]; then
+            echo "== AM OP TRD 15 MIN: versions, cards, live runs, hook points (read-only; counts, md5s and yes/no only)"
+            py_file=$(vps 'f=$(mktemp /tmp/amop-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/am_op_check.py)
             remote py "$py_file"
             exit 0
           fi
