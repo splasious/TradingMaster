@@ -65,6 +65,7 @@ def test_the_edits_fit_the_running_code_once_and_never_twice():
     docstring_gone = code.replace("Entry: 9:45 AM IST onward.", "Entry: from 9:45.")
     assert migration.edited(docstring_gone) is not None  # the docstring's note is optional
     assert "TAKE_PROFIT = 14_000.0" in after and "STOP_LOSS = 10_000.0" in after
+    assert migration.FROM_MD5S == {"e2849f707968eab162cb45c2094047f3"} and migration.down_revision == "d8f0a2c4e6b1"
 
 
 async def test_the_straddle_closes_at_14000_profit_and_the_next_opens_at_the_next_check(market):
@@ -138,3 +139,39 @@ async def test_a_leg_with_no_price_means_no_reading(market):
     market.prices = prices_without_one
     ctx = await market.check(at(1, 10, 5), 1.00)  # ...but one leg unpriced: no reading, nothing closed on it
     assert ctx.state["position"] is not None and ctx._last_action == "hold"
+
+
+async def test_the_migration_gives_the_card_the_edited_code_as_its_next_version_keeping_its_position(db_engine, db_session):
+    import hashlib
+
+    from sqlalchemy import select
+
+    from app.models.paper_trading import DeploymentStatus
+    from app.models.strategy import Strategy, StrategyVersion
+    from tests.test_tonight_data_migrations import _deployment, _run
+
+    migration = _load("e2a4c6e8f0b3_am_op_take_profit_stop_loss")
+    code = _running_code()
+    migration.FROM_MD5S = {hashlib.md5(code.encode()).hexdigest()}  # the repo's copy stands in for the card's code
+    card = await _deployment(db_session, "amop_tpsl@tradingmaster.internal", code)
+    other = await _deployment(db_session, "amop_tpsl_b@tradingmaster.internal", code + "\n# edited by hand\n")
+    for d in (card, other):
+        (await db_session.get(Strategy, d.strategy_id)).name = "AM OP TRD 15 MIN"
+    state = {"position": {"regime": "sideways", "legs": {}}}
+    card.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all: the edited code's names are taken
+
+    await db_session.refresh(card)
+    rows = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id, StrategyVersion.python_code)
+        .where(StrategyVersion.strategy_id == card.strategy_id).order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _, _ in rows] == [11, 12] and card.strategy_version_id == rows[-1][1] and card.state == state
+    assert rows[-1][2] == migration.edited(code) and card.status == DeploymentStatus.ACTIVE.value
+    untouched = (await db_session.execute(
+        select(StrategyVersion.version_number).where(StrategyVersion.strategy_id == other.strategy_id)
+    )).scalars().all()
+    assert untouched == [11]  # code it wasn't written for: left alone

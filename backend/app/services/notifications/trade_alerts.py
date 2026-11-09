@@ -51,6 +51,7 @@ EXIT_REASONS = {
     "carried_overnight": "carried overnight",
     "manual": "manual exit",
     "take_profit": "take-profit hit",
+    "stop_loss": "stop-loss hit",
     "time_cutoff_3pm": "15:00 close",
     "time_cutoff_329pm": "15:29 close",
     "weekly_expiry_3pm": "weekly expiry, 15:00",

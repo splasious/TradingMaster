@@ -41,7 +41,9 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 STRATEGY_NAME = "AM OP TRD 15 MIN"
-FROM_MD5S = {"FROM_MD5_PENDING"}  # the running code: version 13, after d1f3a5c7e9b2's room to the OI walls
+FROM_MD5S = {"e2849f707968eab162cb45c2094047f3"}  # the running code: version 13, after d1f3a5c7e9b2's room to the OI walls
+# Tried on it on the server (health check am_op_check, 9 Nov): the edits apply, giving 09ab73900e943bb912f1eb70d040b64d.
+TO_MD5 = "09ab73900e943bb912f1eb70d040b64d"
 REASON = "a take-profit at +Rs 14,000 and a stop-loss at -Rs 10,000 on each position (agreed 9 Nov)"
 OPTIONAL_EDITS = {0}  # the docstring's note: applied when its place is found
 ADDED_NAMES = ("TAKE_PROFIT", "STOP_LOSS", "_open_pnl", "_pnl_stop")  # must not be taken already
