@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # group (services/notifications/trade_alerts.py, 16 Oct). Nifty PCR
     # Futures taken off on 22 Oct; on 5 Nov AM OP TRD 15 MIN taken off and
     # Conti Calendar 15 MIN put on, its entry with its whole setup.
-    telegram_trade_alert_strategies: str = "Conti Calendar 15 MIN,Conti Calendar 400 15 MIN"
+    telegram_trade_alert_strategies: str = "Conti Calendar 15 MIN"
     # NIFTY's top-3 OTM open interest (resistance/support) pushed to that
     # chat every this many minutes from 09:15 IST, at a 15-minute PCR record
     # (services/options/oi_levels.py) -- 15, 30, 60...; 0 turns it off.

@@ -52,9 +52,9 @@ def alerted(monkeypatch):
     monkeypatch.setattr(get_settings(), "telegram_trade_alert_strategies", "Nifty PCR Futures,AM OP TRD 15 MIN")
 
 
-def test_the_two_conti_calendars_are_alerted_on_by_default():
-    # 5 Nov: AM OP TRD 15 MIN's trade calls taken off, Conti Calendar 15 MIN's put on; 11 Nov: Conti Calendar 400 15 MIN's too.
-    assert Settings.model_fields["telegram_trade_alert_strategies"].default == "Conti Calendar 15 MIN,Conti Calendar 400 15 MIN"
+def test_only_conti_calendar_15_min_is_alerted_on_by_default():
+    # 5 Nov: AM OP TRD 15 MIN's trade calls taken off, Conti Calendar 15 MIN's put on (11 Nov: not Conti Calendar 400 15 MIN's).
+    assert Settings.model_fields["telegram_trade_alert_strategies"].default == "Conti Calendar 15 MIN"
 
 
 def at(hh: int, mm: int, ss: int = 0) -> datetime:
