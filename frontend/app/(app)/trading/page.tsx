@@ -1303,6 +1303,8 @@ function HoldingsTable({ holdings, currency }: { holdings: NativeHoldingOut[]; c
 /** One row per leg of an options position (spread, straddle, iron condor). */
 function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency: string }) {
   const cell = "px-3 py-2 whitespace-nowrap";
+  // A calendar's legs valued at what closing fills at (the backend's bid/ask, 11 Nov).
+  const atBook = legs.some((l) => l.bid != null && l.ask != null);
   return (
     <>
       <Table className="text-sm">
@@ -1313,9 +1315,9 @@ function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency:
             <Th className="px-3 text-right">Strike</Th>
             <Th className="px-3 text-right">Qty</Th>
             <Th className="px-3 text-right">Entry</Th>
-            <Th className="px-3 text-right">{priceHeading(legs)}</Th>
+            <Th className="px-3 text-right">{atBook ? "Close At" : priceHeading(legs)}</Th>
             <Th className="px-3 text-right">Trade Value</Th>
-            <Th className="px-3 text-right">{valueHeading(legs)}</Th>
+            <Th className="px-3 text-right">{atBook ? "Value at Bid/Ask" : valueHeading(legs)}</Th>
             <Th className="px-3 text-right">P&amp;L {currencySymbol(currency)}</Th>
             <Th className="px-3 text-right">P&amp;L %</Th>
           </tr>
@@ -1343,6 +1345,11 @@ function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency:
                 <Td className={`${cell} text-right font-financial`}>
                   {l.current_price != null ? formatPrice(l.current_price) : <span className="text-text-muted">—</span>}
                   <CloseMark close={l.close} legs={legs} />
+                  {l.bid != null && l.ask != null && (
+                    <div className="text-xs text-text-muted" title="What closing fills at: a sold leg is bought back at the ask, a bought one sold at the bid">
+                      {l.side === "short" ? "ask" : "bid"} · LTP {l.last_price != null ? formatPrice(l.last_price) : "—"}
+                    </div>
+                  )}
                 </Td>
                 <Td className={`${cell} text-right font-financial`}>{formatMoney(tradeValue, currency)}</Td>
                 <Td className={`${cell} text-right font-financial`}>
@@ -1428,6 +1435,9 @@ function PositionView({ deployment, position }: { deployment: NativeDeploymentOu
             </span>
           ) : (
             <span className="text-text-muted">--</span>
+          )}
+          {position.legs.some((l) => l.bid != null && l.ask != null) && (
+            <div className="text-sm text-text-muted">at bid/ask, before charges</div>
           )}
         </SummaryField>
       </div>

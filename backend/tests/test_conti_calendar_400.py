@@ -241,3 +241,29 @@ async def test_the_card_shows_the_payoff_at_the_weekly_roll_with_what_rolls_book
     without = dict(state, position={**state["position"], "booked": {"gross": 0.0, "charges": 0.0}})
     bare = (await ep._build_position_out(market.db, without, at(11, 10, 0).astimezone(timezone.utc))).payoff
     assert [p.pnl for p in after.points] == pytest.approx([p.pnl + booked for p in bare.points], abs=0.02)
+
+
+async def test_the_card_values_a_calendars_legs_at_bid_and_ask(market):
+    """11 Nov: a calendar's card values each leg at what closing it fills at
+    -- a sold leg at the ask, a bought one at the bid -- the last price
+    alongside; Unrealized / Total P&L follow. Other positions, and a shut
+    market, keep the last price."""
+    from app.api.v1.endpoints import paper_native_trading as ep
+
+    await market.check(at(4, 9, 30))
+    market.prices(at(4, 11, 0), 23460.0)
+    out = await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))
+    for leg in out.legs:
+        assert leg.bid == leg.last_price - SPREAD and leg.ask == leg.last_price + SPREAD
+        assert leg.current_price == (leg.ask if leg.side == "short" else leg.bid)
+    spread_cost = sum(SPREAD * leg.quantity for leg in out.legs)
+    at_last = sum((leg.entry_price - leg.last_price if leg.side == "short" else leg.last_price - leg.entry_price) * leg.quantity
+                  for leg in out.legs)
+    assert out.unrealized_pnl == pytest.approx(at_last - spread_cost)  # the half-spread on every leg
+
+    other = {**market.deployment.state, "position": {**market.deployment.state["position"], "regime": "sideways"}}
+    plain = await ep._build_position_out(market.db, other, at(4, 11, 0).astimezone(timezone.utc))
+    assert all(leg.bid is None and leg.current_price == leg_out.last_price for leg, leg_out in zip(plain.legs, out.legs))
+
+    shut = await ep._build_position_out(market.db, market.deployment.state, at(4, 16, 0).astimezone(timezone.utc))
+    assert all(leg.bid is None and leg.last_price is None for leg in shut.legs)

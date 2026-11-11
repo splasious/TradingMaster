@@ -305,6 +305,11 @@ export interface NativeLegOut {
   /** "future" books only its P&L -- equity counts that, not its contract value. */
   instrument_type?: string | null;
   close?: ClosePriceOut | null;
+  /** A calendar card's leg while NSE is open: current_price is what closing it fills at (sold: the ask, bought: the bid),
+   * with the book and the last traded price alongside. */
+  bid?: number | null;
+  ask?: number | null;
+  last_price?: number | null;
 }
 
 /** One entry of a multi-holding strategy's state["holdings"]: the leg,

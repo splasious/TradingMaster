@@ -137,6 +137,13 @@ class NativeLegOut(BaseModel):
     # equity counts its P&L, not its full contract value.
     instrument_type: str | None = None
     close: ClosePriceOut | None = None
+    # A calendar card's legs (Conti Calendar / Conti Calendar 400, 11 Nov)
+    # while NSE is open: current_price is what closing the leg would fill at
+    # -- a sold leg bought back at the ask, a bought one sold at the bid --
+    # with the book and the last traded price alongside. None otherwise.
+    bid: float | None = None
+    ask: float | None = None
+    last_price: float | None = None
 
 
 class NativeHoldingOut(NativeLegOut):

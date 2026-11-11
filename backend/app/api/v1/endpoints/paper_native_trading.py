@@ -30,6 +30,9 @@ from app.schemas.paper_trading import (
 from app.services.audit import write_audit_log
 from app.services.options.calendar_payoff import position_payoff
 from app.services.market_data.closing_price import SessionClose, display_prices
+from app.services.market_data.hours import nse_market_open
+from app.services.market_data.live_price import LIVE_PRICE_MAX_AGE
+from app.services.market_data.tick_engine import tick_engine
 from app.services.live_trading.live_runs import linked_run
 from app.services.paper_trading.day_pnl import CardPnl, card_pnl
 from app.services.paper_trading.native_runner import exit_native_deployment_now, run_native_strategy
@@ -96,16 +99,27 @@ async def _build_position_out(db: AsyncSession, state: dict | None, now: datetim
     # Live while NSE is open; the session's close while it's shut.
     shown = await display_prices(db, [i.id for i in leg_instruments] + ([underlying.id] if underlying else []), now)
 
+    # A calendar fills at bid / ask (nifty_conti_calendar*.py), so while NSE
+    # is open its legs are valued at what closing them would fill at -- the
+    # ask for a sold leg, the bid for a bought one -- from the ticker's fresh
+    # book; a leg with no fresh book keeps its last price (11 Nov).
+    at_book = position.get("regime") in ("calendar", "double calendar") and nse_market_open(now or datetime.now(timezone.utc))
     legs_out: list[NativeLegOut] = []
     prices: list[float | None] = []
     for (side, leg), instrument in zip(raw_legs, leg_instruments):
         current_price, close = shown[instrument.id]
+        book = (tick_engine.get_fresh_bid_ask(instrument.id, LIVE_PRICE_MAX_AGE, as_aware_utc(now or datetime.now(timezone.utc)))
+                if at_book and close is None else None)
+        last_price = current_price
+        if book is not None:
+            current_price = book[1] if side == "sell" else book[0]
         prices.append(current_price)
         legs_out.append(
             NativeLegOut(
                 instrument_symbol=instrument.symbol, strike=instrument.strike, option_type=instrument.option_type,
                 side="short" if side == "sell" else "long", quantity=leg["quantity"], entry_price=leg["entry_price"],
                 current_price=current_price, instrument_type=instrument.instrument_type, close=_close_out(close),
+                bid=book[0] if book else None, ask=book[1] if book else None, last_price=last_price if book else None,
             )
         )
 
