@@ -106,17 +106,17 @@ async def test_it_takes_the_profit_at_14000_then_pauses_5_minutes_and_keeps_the_
     market.premium[(W1, 23100.0, "PE")] = market.premium[(W1, 23900.0, "CE")] = 1.0  # both sold weeklies collapse
     done = await market.check(at(4, 13, 0))
     assert done.state.get("position") is None and done._last_signal == "COVER" and "take-profit" in done._last_reason
-    assert "max loss reached" in done._last_reason and done._wake_at == at(4, 13, 5)
+    assert "max loss reached" in done._last_reason and done._wake_at == at(4, 13, 1)  # a minute's pause (version 2)
     [trade] = await market.trades()
     assert trade.exit_reason == "take_profit" and len(trade.legs) == 4
     e = trade.extremes
     assert e["max_profit_reached"] >= 14_000 and e["max_profit_at"] == "04 Nov 13:00:00 IST"
     assert e["max_loss_reached"] == low and e["max_loss_at"] == "04 Nov 11:00:00 IST"
 
-    paused = await market.check(at(4, 13, 4, 59))
-    assert paused.state.get("position") is None and "next entry from 13:05:00" in paused._last_reason
+    paused = await market.check(at(4, 13, 0, 59))
+    assert paused.state.get("position") is None and "next entry from 13:01:00" in paused._last_reason
     market.premium.clear()
-    again = await market.check(at(4, 13, 5))
+    again = await market.check(at(4, 13, 1))
     assert again.state["position"] is not None and "max_profit_reached" not in again.state["position"]
 
 

@@ -9,7 +9,8 @@ a day taken off again; version 5, 6 Nov: re-checked every second while a
 position is open; version 6, 6 Nov: version 3's hundreds-only strikes taken
 off again; version 7, 6 Nov: a 5-minute pause after every close; version 8,
 8 Nov: the daily close moved to 15:29; version 9, 9 Nov: no new position
-after one closes from 14:00): four legs at one
+after one closes from 14:00; version 10, 11 Nov: the pause after a close
+cut to 1 minute): four legs at one
 strike, LOTS_PER_LEG (16) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
@@ -19,16 +20,17 @@ strike, LOTS_PER_LEG (16) lots each --
                                last week, when this month's IS the weekly
 
 -- opened from 09:30 (ENTRY_TIME) to 15:00 IST whenever none is open, as
-many a day as that allows, but never within PAUSE_AFTER_CLOSE (5 minutes;
-version 7) of the last one closing -- by take-profit or a manual exit: the
-next opens as soon as those 5 minutes are up, at that moment's PCR, strike
-and bid/ask (closed 11:27:15, next from 11:32:15). The pause is kept in the
+many a day as that allows, but never within PAUSE_AFTER_CLOSE (1 minute,
+version 10; 5 minutes in versions 7-9) of the last one closing -- by
+take-profit or a manual exit: the next opens as soon as that minute is up,
+at that moment's PCR, strike and bid/ask (closed 11:27:15, next from
+11:28:15). The pause is kept in the
 strategy's state (paused_until), so a restart doesn't cut it short. And
 once one closes at or after DAY_DONE_AFTER (14:00; version 9), by
 take-profit or a manual exit, none opens again that day: a position taken
 before then that hasn't reached the take-profit is simply held to the
 close. A close before 14:00 still allows the next after its pause (closed
-13:58, next at 14:03), up to 15:00. The last close is kept in the state
+13:58:30, next at 13:59:30), up to 15:00. The last close is kept in the state
 (last_closed_at). The PCR picks the strike as Conti picks it, from
 the 50-point strikes (STRIKE_MULTIPLE) around NIFTY by the weekly's live
 premiums:
@@ -92,7 +94,7 @@ DAILY_CLOSE = dtime(15, 29)  # every day, whatever's open closes at this time (v
 DAY_DONE_AFTER = dtime(14, 0)  # a close at or after this ends the day's new positions (version 9)
 DAILY_CLOSE_REASON = "time_cutoff_329pm"  # its trade's exit_reason ("time_cutoff_3pm" for the 15:00 close)
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again (version 5)
-PAUSE_AFTER_CLOSE = timedelta(minutes=5)  # no new position this soon after one closes (version 7)
+PAUSE_AFTER_CLOSE = timedelta(minutes=1)  # no new position this soon after one closes (version 10; 5 minutes in 7-9)
 TAKE_PROFIT = 14_000.0  # rupees, after charges, at bid / ask
 PCR_PIVOT = 1.0
 MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
@@ -297,7 +299,8 @@ async def evaluate(ctx) -> None:
     paused_until = ctx.state.get("paused_until")
     if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
         ctx.note("skipped", reason=(
-            f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minutes after the last close: next entry from {resume.astimezone(IST):%H:%M:%S}"
+            f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minute{'s' if PAUSE_AFTER_CLOSE.seconds != 60 else ''} after the last close: "
+            f"next entry from {resume.astimezone(IST):%H:%M:%S}"
         ))
         ctx.wake_at(resume)
         return

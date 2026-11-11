@@ -3,8 +3,8 @@
 A new built-in (native_strategies/nifty_conti_reverse_calendar.py): Conti
 Calendar 15 MIN with the sides reversed, as agreed 11 Nov -- the weekly CE
 and PE bought and the same strike's monthly CE and PE sold, everything else
-as Conti Calendar's version 9: the PCR's 50-point strike, 16 lots a leg at
-bid / ask, Rs 14,000 take-profit after charges, the 15:29 close, a 5-minute
+as Conti Calendar's version 10: the PCR's 50-point strike, 16 lots a leg at
+bid / ask, Rs 14,000 take-profit after charges, the 15:29 close, a 1-minute
 pause after a close and none after one from 14:00. Created for the owner
 of Conti Calendar 15 MIN: the strategy with version 1 the built-in's code,
 its own pool "Conti Reverse Calendar 15 MIN" of Rs 20,00,000, and an active

@@ -2,7 +2,8 @@
 Conti Calendar 400 15 MIN -- a double calendar 400 points either side of NIFTY (native)
 ======================================================================================
 
-Conti Calendar 15 MIN copied with the amendments agreed 11 Nov: instead of
+Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
+11 Nov: the pause after a close cut to 1 minute): instead of
 one strike's straddle calendar, a call calendar AWAY (400) points above the
 ATM and a put calendar AWAY below it, strikes in hundreds -- ATM is NIFTY
 rounded to the nearest STRIKE_STEP (100), a 50 rounding up -- LOTS_PER_LEG
@@ -18,7 +19,7 @@ next month's in the month's last week. NIFTY 24,630: ATM 24,600, the
 25,000 CE and the 24,200 PE.
 
 Opened from 09:30 (ENTRY_TIME) to 15:00 whenever none is open, and never
-within PAUSE_AFTER_CLOSE (5 minutes) of the last one closing (kept in the
+within PAUSE_AFTER_CLOSE (1 minute; 5 in version 1) of the last one closing (kept in the
 state, paused_until, so a restart doesn't cut it short).
 
 Held overnight -- no daily close -- until the take-profit:
@@ -81,7 +82,7 @@ ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
 ROLL_TIME = dtime(15, 0)  # on the sold weeklies' expiry day
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again
-PAUSE_AFTER_CLOSE = timedelta(minutes=5)  # no new position this soon after one closes
+PAUSE_AFTER_CLOSE = timedelta(minutes=1)  # no new position this soon after one closes (version 2; 5 minutes in 1)
 TAKE_PROFIT = 14_000.0  # rupees, the whole position after charges, at bid / ask
 MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
 LEGS = (  # name, option type, side at entry, which expiry
@@ -349,7 +350,8 @@ async def evaluate(ctx) -> None:
         paused_until = ctx.state.get("paused_until")
         if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
             ctx.note("skipped", reason=(
-                f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minutes after the last close: next entry from {resume.astimezone(IST):%H:%M:%S}"
+                f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minute{'s' if PAUSE_AFTER_CLOSE.seconds != 60 else ''} after the last close: "
+            f"next entry from {resume.astimezone(IST):%H:%M:%S}"
             ))
             ctx.wake_at(resume)
             return

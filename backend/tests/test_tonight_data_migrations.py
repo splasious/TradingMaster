@@ -1192,7 +1192,9 @@ async def test_conti_calendar_moves_onto_the_1529_close_keeping_its_open_positio
 
 async def test_conti_calendar_moves_onto_the_1400_day_end_keeping_its_open_position(db_engine, db_session):
     migration = _load("d8f0a2c4e6b1_conti_calendar_day_done_after_1400")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c6e8a0b2d4f7"
+    assert migration.down_revision == "c6e8a0b2d4f7"
+    assert _load("d2f4b6a8c0e5_conti_calendar_pause_1_minute").FROM_MD5S == {migration.TO_MD5}  # version 10 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 10 now: the mechanics are what's tested here
     v8 = "# Conti Calendar 15 MIN, version 8: the 15:29 close\n"
     migration.FROM_MD5S = {_md5_text(v8)}
     running = await _deployment(db_session, "cal9_a@tradingmaster.internal", v8)
@@ -1210,6 +1212,38 @@ async def test_conti_calendar_moves_onto_the_1400_day_end_keeping_its_open_posit
         .order_by(StrategyVersion.version_number)
     )).all()
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
+async def test_conti_calendar_and_conti_calendar_400_move_onto_the_1_minute_pause_keeping_their_positions(db_engine, db_session):
+    """11 Nov: the pause after a close cut to 1 minute in every calendar strategy --
+    Conti Calendar 15 MIN version 10, Conti Calendar 400 15 MIN version 2 (Conti
+    Reverse Calendar 15 MIN, created the same day, starts with it)."""
+    for name, migration_name, down, built_in, email in (
+        ("Conti Calendar 15 MIN", "d2f4b6a8c0e5_conti_calendar_pause_1_minute", "c0e2a4b6d8f3", "nifty_conti_calendar.py", "cal10"),
+        ("Conti Calendar 400 15 MIN", "e4a6c8f0b2d7_conti_calendar_400_pause_1_minute", "d2f4b6a8c0e5", "nifty_conti_calendar_400.py", "c400v2"),
+    ):
+        migration = _load(migration_name)
+        assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == down and migration.BUILT_IN.name == built_in
+        assert "PAUSE_AFTER_CLOSE = timedelta(minutes=1)" in migration.BUILT_IN.read_text(encoding="utf-8")
+        before = f"# {name}, the version before: a 5-minute pause\n"
+        migration.FROM_MD5S = {_md5_text(before)}
+        running = await _deployment(db_session, f"{email}_a@tradingmaster.internal", before)
+        (await db_session.get(Strategy, running.strategy_id)).name = name
+        state = {"position": {"strike": 24700, "legs": {}}, "paused_until": "2026-11-11T09:00:00+00:00"}
+        running.state = state
+        await db_session.commit()
+
+        await _run(db_engine, migration)
+        await _run(db_engine, migration)  # once is all
+
+        await db_session.refresh(running)
+        numbers = (await db_session.execute(
+            select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+            .order_by(StrategyVersion.version_number)
+        )).all()
+        assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state, name
+    reverse = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_conti_reverse_calendar.py").read_text(encoding="utf-8")
+    assert "PAUSE_AFTER_CLOSE = timedelta(minutes=1)" in reverse
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

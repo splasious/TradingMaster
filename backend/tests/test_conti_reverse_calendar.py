@@ -69,11 +69,11 @@ async def test_it_takes_the_profit_at_14000_after_charges_then_pauses(market):
     assert held._last_action == "hold" and held.state["position"]["net_if_closed_now"] < 0
     market.premium[(W3, 23450.0, "CE")] = market.premium[(W3, 23450.0, "PE")] = 150.0  # the sold monthlies fall
     done = await market.check(at(4, 11, 0))
-    assert done.state.get("position") is None and "take-profit" in done._last_reason and done._wake_at == at(4, 11, 5)
+    assert done.state.get("position") is None and "take-profit" in done._last_reason and done._wake_at == at(4, 11, 1)
     [trade] = await market.trades()
     assert trade.exit_reason == "take_profit" and len(trade.legs) == 4
-    paused = await market.check(at(4, 11, 4))
-    assert paused.state.get("position") is None and "next entry from 11:05:00" in paused._last_reason
+    paused = await market.check(at(4, 11, 0, 30))  # a minute's pause
+    assert paused.state.get("position") is None and "next entry from 11:01:00" in paused._last_reason
 
 
 async def test_it_closes_at_1529_and_takes_no_new_trade_after_a_close_from_1400(market):

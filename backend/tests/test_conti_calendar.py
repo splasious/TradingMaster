@@ -214,10 +214,10 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
     assert ("short", lo - 0.05 + SPREAD) in exits  # bought back at the ask
     assert ("long", longs["long_ce"][0]) in exits and ("long", longs["long_pe"][0]) in exits  # sold at the bid
 
-    assert "next entry from 11:05:10" in done._last_reason and done._wake_at == at(4, 11, 5, 10)
-    paused = await market.check(at(4, 11, 0, 20))  # 5 minutes' pause (version 7)
-    assert paused.state.get("position") is None and "next entry from 11:05:10" in paused._last_reason
-    again = await market.check(at(4, 11, 5, 10))  # then the next opens
+    assert "next entry from 11:01:10" in done._last_reason and done._wake_at == at(4, 11, 1, 10)
+    paused = await market.check(at(4, 11, 0, 20))  # a minute's pause (version 10; 5 minutes in 7-9)
+    assert paused.state.get("position") is None and "next entry from 11:01:10" in paused._last_reason
+    again = await market.check(at(4, 11, 1, 10))  # then the next opens
     assert again.state["position"] is not None and again._last_signal == "CALENDAR"
 
 
@@ -248,8 +248,8 @@ async def test_a_manual_exit_closes_all_four(market):
     await market.check(at(4, 9, 30))
     market.deployment.state = {**market.deployment.state, "force_exit": True}
     ctx = await market.check(at(4, 10, 0))
-    assert ctx.state["position"] is None and ctx._last_reason == "manual exit; next entry from 10:05:00"
-    assert ctx._wake_at == at(4, 10, 5)
+    assert ctx.state["position"] is None and ctx._last_reason == "manual exit; next entry from 10:01:00"
+    assert ctx._wake_at == at(4, 10, 1)
     [trade] = await market.trades()
     assert trade.exit_reason == "manual" and {leg["side"] for leg in trade.legs} == {"short", "long"}
 
@@ -319,20 +319,21 @@ async def test_there_is_no_limit_on_trades_a_day(market):
     assert fourth.state["position"] is not None and fourth._last_signal == "CALENDAR"
 
 
-async def test_after_a_close_it_waits_5_minutes_then_opens_the_next_right_away(market):
-    """6 Nov (version 7): no new position within 5 minutes of one closing --
-    closed 11:27:15, the next from 11:32:15 -- kept in the state, so a
-    restart doesn't cut it short; past 15:00 none opens anyway."""
-    assert cal.PAUSE_AFTER_CLOSE == timedelta(minutes=5)
+async def test_after_a_close_it_waits_a_minute_then_opens_the_next_right_away(market):
+    """6 Nov (version 7; 1 minute since version 10, 11 Nov): no new position
+    within a minute of one closing -- closed 11:27:15, the next from
+    11:28:15 -- kept in the state, so a restart doesn't cut it short; past
+    15:00 none opens anyway."""
+    assert cal.PAUSE_AFTER_CLOSE == timedelta(minutes=1)
     await market.check(at(4, 11, 0))
     market.deployment.state = {**market.deployment.state, "force_exit": True}
     await market.check(at(4, 11, 27, 15))
-    assert market.deployment.state["paused_until"] == at(4, 11, 32, 15).astimezone(timezone.utc).isoformat()
-    for second in (at(4, 11, 27, 16), at(4, 11, 30), at(4, 11, 32, 14)):
+    assert market.deployment.state["paused_until"] == at(4, 11, 28, 15).astimezone(timezone.utc).isoformat()
+    for second in (at(4, 11, 27, 16), at(4, 11, 28), at(4, 11, 28, 14)):
         ctx = await market.check(second)
         assert ctx.state.get("position") is None and ctx._last_signal is None, second
-        assert ctx._last_reason == "paused 5 minutes after the last close: next entry from 11:32:15" and ctx._wake_at == at(4, 11, 32, 15)
-    opened = await market.check(at(4, 11, 32, 15))
+        assert ctx._last_reason == "paused 1 minute after the last close: next entry from 11:28:15" and ctx._wake_at == at(4, 11, 28, 15)
+    opened = await market.check(at(4, 11, 28, 15))
     assert opened.state["position"] is not None and opened._last_signal == "CALENDAR" and "paused_until" not in opened.state
 
     market.deployment.state = {**market.deployment.state, "force_exit": True}
@@ -350,9 +351,9 @@ async def test_a_close_from_1400_ends_the_days_new_trades_and_one_before_is_held
     assert cal.DAY_DONE_AFTER == dtime(14, 0)
     await market.check(at(4, 13, 0))
     market.deployment.state = {**market.deployment.state, "force_exit": True}
-    before = await market.check(at(4, 13, 58))  # just before 14:00: the pause, then the next
-    assert before._last_reason == "manual exit; next entry from 14:03:00" and before._wake_at == at(4, 14, 3)
-    reopened = await market.check(at(4, 14, 3))
+    before = await market.check(at(4, 13, 59, 30))  # just before 14:00: the pause, then the next
+    assert before._last_reason == "manual exit; next entry from 14:00:30" and before._wake_at == at(4, 14, 0, 30)
+    reopened = await market.check(at(4, 14, 0, 30))
     assert reopened.state["position"] is not None and reopened._last_signal == "CALENDAR"
 
     market.deployment.state = {**market.deployment.state, "force_exit": True}
