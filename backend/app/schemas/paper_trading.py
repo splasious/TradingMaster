@@ -294,6 +294,10 @@ class NativeTradeOut(BaseModel):
     net_pnl: float
     pnl_pct: float
     exit_reason: str
+    # The most profit / loss "if closed now" reached while open, with when
+    # (max_profit_reached, max_profit_at, max_loss_reached, max_loss_at);
+    # None for a strategy that doesn't track them.
+    extremes: dict | None = None
 
 
 class NativeEvaluationOut(BaseModel):

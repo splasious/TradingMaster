@@ -508,6 +508,15 @@ export interface NativeTradeOut {
   net_pnl: number;
   pnl_pct: number;
   exit_reason: string;
+  /** The most profit / loss "if closed now" the position reached while open, with when -- for a strategy that tracks them. */
+  extremes?: TradeExtremes | null;
+}
+
+export interface TradeExtremes {
+  max_profit_reached: number;
+  max_profit_at: string | null;
+  max_loss_reached: number;
+  max_loss_at: string | null;
 }
 
 /** A closed live trade of a live run, at the broker's fills. */

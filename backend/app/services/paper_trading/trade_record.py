@@ -214,6 +214,32 @@ def _lots(quantity: float, lot_size) -> float | None:
     return quantity / lot_size if lot_size else None
 
 
+def _calendar(legs: list[dict]) -> str | None:
+    """A calendar's name, when every sold leg is matched by a bought one of
+    the same type and strike expiring later (11 Nov): "Straddle Calendar"
+    (Conti Calendar 15 MIN), "Double Calendar" (Conti Calendar 400 15 MIN --
+    its rolled weeklies included), "Call Calendar" / "Put Calendar"; None
+    for anything else."""
+    shorts = [leg for leg in legs if leg["side"] == "short"]
+    longs = [leg for leg in legs if leg["side"] == "long"]
+    if not shorts or not longs or any(leg.get("expiry") is None or leg.get("strike") is None for leg in legs):
+        return None
+    bought = {}
+    for leg in longs:
+        bought.setdefault((leg.get("option_type"), leg["strike"]), []).append(str(leg["expiry"]))
+    if set(bought) != {(leg.get("option_type"), leg["strike"]) for leg in shorts}:
+        return None
+    if any(str(leg["expiry"]) >= min(bought[(leg.get("option_type"), leg["strike"])]) for leg in shorts):
+        return None
+    types = {t for t, _ in bought}
+    strikes = {k for _, k in bought}
+    if types == {"CE", "PE"}:
+        return "Straddle Calendar" if len(strikes) == 1 else "Double Calendar"
+    if len(bought) == 1:
+        return "Call Calendar" if types == {"CE"} else "Put Calendar"
+    return "Calendar"
+
+
 def _structure(legs: list[dict], is_credit: bool) -> str:
     """A trader's name for the legs: "Short Straddle", "Bull Put Spread",
     "Iron Condor", ... falling back to a plain "Long"/"Short" or "N-leg"."""
@@ -222,6 +248,9 @@ def _structure(legs: list[dict], is_credit: bool) -> str:
         side = "Short" if leg["side"] == "short" else "Long"
         return f"{side} {leg['option_type']}" if leg.get("option_type") else side
 
+    calendar = _calendar(legs)
+    if calendar is not None:
+        return calendar
     option_types = [leg.get("option_type") for leg in legs]
     sides = {leg["side"] for leg in legs}
     if len(legs) == 2 and sorted(t or "" for t in option_types) == ["CE", "PE"] and len(sides) == 1:

@@ -548,6 +548,7 @@ async def _trade_outs(db: AsyncSession, rows: list[tuple[PaperNativeTrade, str, 
                 id=str(t.id), deployment_id=str(t.deployment_id), strategy_name=name, currency=currency,
                 opened_at=as_aware_utc(t.opened_at), closed_at=as_aware_utc(t.closed_at), **summarize_trade(legs),
                 pnl=t.pnl, charges=charges, net_pnl=t.pnl - (charges or 0.0), pnl_pct=t.pnl_pct, exit_reason=t.exit_reason,
+                extremes=t.extremes,
             )
         )
     return out

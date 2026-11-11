@@ -288,7 +288,7 @@ class NativeContext:
 
     async def record_trade(
         self, legs: list[dict], pnl: float, pnl_pct: float, exit_reason: str, opened_at: datetime, closed_at: datetime | None = None,
-        alert: bool = True,
+        alert: bool = True, extremes: dict | None = None,
     ) -> None:
         """`legs`: [{"instrument_id": str, "side": "short"|"long", "quantity": float, "entry_price": float, "exit_price": float}, ...]
 
@@ -297,7 +297,9 @@ class NativeContext:
         if either can't be worked out, the trade is still saved as given.
         Times are stored as UTC: SQLite keeps a datetime's wall-clock digits
         but drops its offset, so an IST opened_at saved as-is came back
-        5h30m off. A naive time is taken as UTC, the app-wide convention."""
+        5h30m off. A naive time is taken as UTC, the app-wide convention.
+        `extremes`: the most profit and loss the position reached, saved
+        with it when the strategy tracks them."""
         opened_at = as_aware_utc(opened_at).astimezone(timezone.utc)
         closed_at = as_aware_utc(closed_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
         charges = None
@@ -310,10 +312,12 @@ class NativeContext:
             PaperNativeTrade(
                 deployment_id=self.deployment.id, opened_at=opened_at, closed_at=closed_at,
                 legs=legs, pnl=pnl, pnl_pct=pnl_pct, charges=charges, exit_reason=exit_reason[:NATIVE_EXIT_REASON_MAX_LEN],
+                extremes=extremes,
             )
         )
         self.closed_trades.append(
-            {"legs": legs, "pnl": pnl, "charges": charges, "exit_reason": exit_reason, "opened_at": opened_at, "closed_at": closed_at}
+            {"legs": legs, "pnl": pnl, "charges": charges, "exit_reason": exit_reason, "opened_at": opened_at, "closed_at": closed_at,
+             "extremes": extremes}
         )
         if not alert:  # the strategy sends its own
             return

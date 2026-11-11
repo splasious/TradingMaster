@@ -22,7 +22,7 @@ than the private chat's (see oi_levels.MAX_WIDTH).
 import asyncio
 import logging
 import uuid
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
 from sqlalchemy import func, select
 
@@ -54,10 +54,11 @@ EXIT_REASONS = {
     "stop_loss": "stop-loss hit",
     "time_cutoff_3pm": "15:00 close",
     "time_cutoff_329pm": "15:29 close",
+    "monthly_roll": "monthly roll",
     "weekly_expiry_3pm": "weekly expiry, 15:00",
 }
 MA_EXITS = {"ma_stop": "MA stop", "ma_exit": "MA exit"}
-VIEW_MARKS = {"bullish": "📈", "bearish": "📉", "sideways": "↔️", "calendar": "📅"}
+VIEW_MARKS = {"bullish": "📈", "bearish": "📉", "sideways": "↔️", "calendar": "📅", "double calendar": "📅"}
 VIEW_ARROWS = {"bullish": ("▲", "good"), "bearish": ("▼", "bad"), "sideways": ("↔", "neutral")}
 NIFTY = "NIFTY 50"
 
@@ -95,15 +96,43 @@ def entry_message(
     lines = [head] if head else []
     lines.append(f"Time {_ist(at):%H:%M:%S}")
     calendar = view == "calendar"
+    double = view == "double calendar"
+    rolled = double and position.get("rolled_at") == as_aware_utc(at).isoformat()  # a weekly roll, not a new trade
     lots = {_lots(leg["quantity"], leg.get("lot_size")) for leg in legs}
     if calendar and position.get("strike") is not None:
         lines.append(f"Strike {position['strike']:,.0f}" + (f" · {lots.pop()} a leg" if len(lots) == 1 else ""))
+    if double and not rolled and position.get("strike_ce") is not None:
+        lines.append(f"{position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE")
+        if len(lots) == 1:
+            lines.append(f"{lots.pop()} a leg")
+    if rolled:
+        lines.append(f"Weeklies rolled to {date.fromisoformat(position['weekly_expiry']):%d %b}")
     for leg in legs:
         lines.append(f"{'BUY' if leg['side'] == 'buy' else 'SELL'} {leg['symbol']}")
         lines.append(f"  {_lots(leg['quantity'], leg.get('lot_size'))} @ {leg['price']:,.2f}")
     if calendar:
         lines += _calendar_setup(legs, position, payoff)
-    return f"{VIEW_MARKS.get(view or '', '🔔')} {strategy}: trade taken", "\n".join(lines)
+    if double and not rolled:
+        lines += _double_calendar_setup(legs, position)
+    if rolled:
+        lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
+        title = f"{VIEW_MARKS[view]} {strategy}: weekly rolled"
+    else:
+        title = f"{VIEW_MARKS.get(view or '', '🔔')} {strategy}: trade taken"
+    return title, "\n".join(lines)
+
+
+def _double_calendar_setup(legs: list[dict], position: dict) -> list[str]:
+    """The plan under a double calendar's legs (Conti Calendar 400 15 MIN):
+    what it cost, its target, and that it's held -- the weeklies rolled."""
+    debit = sum(leg["price"] * leg["quantity"] * (1 if leg["side"] == "buy" else -1) for leg in legs)
+    lines = [f"Net {'debit' if debit >= 0 else 'credit'} {abs(debit):,.0f}"]
+    target = position.get("take_profit")
+    if isinstance(target, (int, float)):
+        lines.append(f"Target +{target:,.0f} after costs")
+    lines.append("Held overnight; weeklies")
+    lines.append(" roll 15:00 on expiry day")
+    return lines
 
 
 def _calendar_setup(legs: list[dict], position: dict, payoff: Payoff | None) -> list[str]:
@@ -154,10 +183,10 @@ def exit_message(strategy: str, trade: dict, day_net: float, day_trades: int) ->
     pnl, charges = trade["pnl"], trade.get("charges")
     net = _net(trade)
     reason = EXIT_REASONS.get(trade["exit_reason"]) or trade["exit_reason"].replace("_", " ")
-    lines = [
-        f"Exit: {reason}"[:32],
-        f"Held {_ist(trade['opened_at']):%H:%M} → {_ist(trade['closed_at']):%H:%M}",
-    ]
+    opened, closed = _ist(trade["opened_at"]), _ist(trade["closed_at"])
+    held = (f"Held {opened:%H:%M} → {closed:%H:%M}" if opened.date() == closed.date()
+            else f"Held {opened:%d%b %H:%M} → {closed:%d%b %H:%M}")  # held overnight
+    lines = [f"Exit: {reason}"[:32], held]
     for leg in trade["legs"]:
         symbol = leg.get("instrument_symbol") or leg.get("instrument_id", "?")
         lines.append(f"{'SELL' if leg['side'] == 'short' else 'BUY'} {symbol}")
@@ -167,6 +196,12 @@ def exit_message(strategy: str, trade: dict, day_net: float, day_trades: int) ->
         lines.append(f"Charges   {-charges:>+14,.2f}")
         lines.append(f"Net P&L   {net:>+14,.2f}")
     lines.append(f"Today net {day_net:>+14,.2f} ({day_trades})")
+    extremes = trade.get("extremes") or {}
+    if extremes.get("max_profit_reached") is not None:
+        lines.append(f"Max profit {extremes['max_profit_reached']:>+13,.0f}")
+        lines.append(f"  {extremes.get('max_profit_at') or '-'}")
+        lines.append(f"Max loss   {extremes['max_loss_reached']:>+13,.0f}")
+        lines.append(f"  {extremes.get('max_loss_at') or '-'}")
     return f"{'🟢' if net >= 0 else '🔴'} {strategy}: trade closed · P&L {net:+,.0f}", "\n".join(lines)
 
 

@@ -96,6 +96,31 @@ def test_structure_names(legs, structure):
     assert summarize_trade(raw)["structure"] == structure
 
 
+@pytest.mark.parametrize(
+    ("legs", "structure"),
+    [  # (side, type, strike, expiry): a sold leg matched by a bought one of its type and strike, expiring later (11 Nov)
+        ([("short", "CE", 23500, "2026-11-17"), ("short", "PE", 23500, "2026-11-17"),
+          ("long", "CE", 23500, "2026-11-24"), ("long", "PE", 23500, "2026-11-24")], "Straddle Calendar"),
+        ([("short", "CE", 23900, "2026-11-17"), ("long", "CE", 23900, "2026-11-24"),
+          ("short", "PE", 23100, "2026-11-17"), ("long", "PE", 23100, "2026-11-24")], "Double Calendar"),
+        ([("short", "CE", 23900, "2026-11-10"), ("short", "PE", 23100, "2026-11-10"),  # the weeklies rolled once
+          ("short", "CE", 23900, "2026-11-17"), ("long", "CE", 23900, "2026-11-24"),
+          ("short", "PE", 23100, "2026-11-17"), ("long", "PE", 23100, "2026-11-24")], "Double Calendar"),
+        ([("short", "CE", 23900, "2026-11-17"), ("long", "CE", 23900, "2026-11-24")], "Call Calendar"),
+        ([("short", "CE", 23500, "2026-11-24"), ("long", "CE", 23500, "2026-11-17")], "Bear Call Spread"),  # bought nearer: no calendar
+        ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-17"),
+          ("short", "PE", 23300, "2026-11-17"), ("long", "PE", 23200, "2026-11-17")], "Iron Condor"),
+    ],
+)
+def test_calendar_structure_names(legs, structure):
+    raw = [
+        {"side": side, "option_type": opt, "strike": strike, "expiry": expiry, "quantity": 65, "lot_size": 65,
+         "entry_price": 200.0 - abs(strike - 23400) / 2, "exit_price": 150.0}
+        for side, opt, strike, expiry in legs
+    ]
+    assert summarize_trade(raw)["structure"] == structure
+
+
 def test_sell_buy_side_spelling_reads_as_short_long():
     legs = [{**leg, "side": "sell"} for leg in _straddle_legs()]
     summary = summarize_trade(legs)

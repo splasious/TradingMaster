@@ -57,6 +57,7 @@ import type {
   PaperEvaluationOut,
   PaperPortfolioOut,
   PaperTradeOut,
+  TradeExtremes,
   StrategyOut,
 } from "@/lib/types";
 
@@ -1161,7 +1162,7 @@ const HOLDING_METRIC_LABELS: Record<string, string> = {
 // them; unknown keys alphabetically after; rank always last.
 const HOLDING_METRIC_ORDER = ["macd", "macd_hist", "macd_histogram", "macd_signal", "signal", "rsi", "rsi14", "rsi_14", "rs_value", "score"];
 
-const METRIC_ACRONYMS = new Set(["pcr", "rsi", "macd", "atm", "oi", "sma", "ema", "rs", "pnl", "ltp"]);
+const METRIC_ACRONYMS = new Set(["pcr", "rsi", "macd", "atm", "oi", "sma", "ema", "rs", "pnl", "ltp", "ce", "pe"]);
 
 function metricLabel(key: string): string {
   return (
@@ -1363,7 +1364,7 @@ function PositionLegsTable({ legs, currency }: { legs: NativeLegOut[]; currency:
 
 // Position fields PositionView lays out itself; any other scalar the
 // strategy stores on its position is listed generically after them.
-const POSITION_LAYOUT_KEYS = new Set(["pcr_at_entry", "pcr_exit_below", "pcr_exit_above", "entry_spot", "roll_trigger", "expiry", "exit_time"]);
+const POSITION_LAYOUT_KEYS = new Set(["pcr_at_entry", "pcr_exit_below", "pcr_exit_above", "entry_spot", "roll_trigger", "expiry", "exit_time", "rolled_at"]);
 
 /** An options position (state["position"]): what it is and when it opened,
  * the strategy's own decision inputs next to their live values (PCR at
@@ -1512,7 +1513,7 @@ function downloadTradeRecordCsv(trades: HistoryTrade[], filename: string, withMo
   const fixed = (v: number | null) => (v == null ? "" : v.toFixed(2));
   const header = [
     "Date", ...(withMode ? ["Paper / Live"] : []), "Strategy", "Symbol", "Side", "Entry Time (IST)", "Exit Time (IST)", "Entry Price", "Exit Price",
-    "Qty", "Lots", "Gross P&L", "Charges (est.)", "Net P&L", "Return %", "Exit Reason", "Legs",
+    "Qty", "Lots", "Gross P&L", "Charges (est.)", "Net P&L", "Return %", "Exit Reason", "Legs", "Max Profit Reached", "Max Loss Reached",
   ];
   const rows = trades.map((t) => [
     istDate(t.opened_at), ...(withMode ? [t.mode === "live" ? `Live ${t.broker ?? ""}` : "Paper"] : []),
@@ -1522,6 +1523,8 @@ function downloadTradeRecordCsv(trades: HistoryTrade[], filename: string, withMo
     t.legs
       .map((l) => `${l.side === "short" ? "Short" : "Long"} ${legContract(l)} ${l.quantity} @ ${l.entry_price.toFixed(2)} -> ${l.exit_price.toFixed(2)}${l.pnl != null ? ` (${signedText(l.pnl)})` : ""}`)
       .join("; "),
+    t.extremes ? `${t.extremes.max_profit_reached.toFixed(2)} (${t.extremes.max_profit_at ?? ""})` : "",
+    t.extremes ? `${t.extremes.max_loss_reached.toFixed(2)} (${t.extremes.max_loss_at ?? ""})` : "",
   ]);
   const csv = [header, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
   const url = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
@@ -1532,6 +1535,25 @@ function downloadTradeRecordCsv(trades: HistoryTrade[], filename: string, withMo
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+/** The most profit and loss a position reached while open, with when, above its legs. */
+function TradeExtremesLine({ extremes: e, currency }: { extremes: TradeExtremes; currency: string }) {
+  return (
+    <div className="mb-2 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+      <span>
+        <span className="text-text-muted">Max profit reached </span>
+        <span className={`font-financial font-semibold ${toneFor(e.max_profit_reached)}`}>{formatMoney(e.max_profit_reached, currency, true)}</span>
+        {e.max_profit_at && <span className="text-text-muted"> · {e.max_profit_at}</span>}
+      </span>
+      <span>
+        <span className="text-text-muted">Max loss reached </span>
+        <span className={`font-financial font-semibold ${toneFor(e.max_loss_reached)}`}>{formatMoney(e.max_loss_reached, currency, true)}</span>
+        {e.max_loss_at && <span className="text-text-muted"> · {e.max_loss_at}</span>}
+      </span>
+      <span className="text-text-muted">if closed then, at bid/ask after charges</span>
+    </div>
+  );
 }
 
 /** One row per leg of a closed trade -- what each contract did on its own. */
@@ -1638,11 +1660,18 @@ function TradeRecordRow({ trade: t, showStrategy, showMode }: { trade: HistoryTr
         <Td className={`${cell} text-right font-financial ${toneFor(t.pnl_pct)}`}>{signedText(t.pnl_pct)}%</Td>
         <Td className={`${cell} text-text-secondary`} title={t.exit_reason}>
           {exitReasonLabel(t.exit_reason)}
+          {t.extremes && (
+            <div className="font-financial text-xs text-text-muted" title="The most profit and loss the position reached while open">
+              max <span className={toneFor(t.extremes.max_profit_reached)}>{formatMoney(t.extremes.max_profit_reached, currency, true)}</span>
+              {" · "}min <span className={toneFor(t.extremes.max_loss_reached)}>{formatMoney(t.extremes.max_loss_reached, currency, true)}</span>
+            </div>
+          )}
         </Td>
       </tr>
       {open && (
         <tr>
           <td colSpan={columns} className="bg-surface-elevated/60 py-2 pl-8 pr-2.5">
+            {t.extremes && <TradeExtremesLine extremes={t.extremes} currency={currency} />}
             <TradeLegsTable trade={t} />
           </td>
         </tr>
@@ -1894,7 +1923,8 @@ function NativeDeploymentCard({
   // A calendar's position is re-read every second (its strategy re-checks
   // "Net if closed now" every second, 6 Nov); every other card's comes with
   // the list, every 5 s.
-  const isCalendar = deployment.position?.bias === "calendar";
+  // A calendar's "Net if closed now" moves every second (Conti Calendar; the double calendar of Conti Calendar 400).
+  const isCalendar = deployment.position?.bias === "calendar" || deployment.position?.bias === "double calendar";
   const { data: livePosition } = useNativePosition(deployment.id, isCalendar);
   const position = isCalendar && livePosition !== undefined ? livePosition : deployment.position;
   // Multi-holding strategies (e.g. the MACD/RSI rotation strategy) have no

@@ -186,4 +186,9 @@ class PaperNativeTrade(Base):
     pnl_pct: Mapped[float] = mapped_column(Float, nullable=False)
     charges: Mapped[float | None] = mapped_column(Float)
     exit_reason: Mapped[str] = mapped_column(String(NATIVE_EXIT_REASON_MAX_LEN), nullable=False)
+    # The most profit and the most loss "if closed now" the position reached
+    # while open, with when ({"max_profit_reached", "max_profit_at",
+    # "max_loss_reached", "max_loss_at"}) -- for a strategy that tracks them
+    # (Conti Calendar 400 15 MIN, 11 Nov); None otherwise.
+    extremes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
