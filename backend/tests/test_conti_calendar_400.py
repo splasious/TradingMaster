@@ -215,3 +215,29 @@ async def test_the_trades_endpoint_shows_the_extremes(market):
     [out] = await ep._trade_outs(market.db, rows)
     assert out.extremes is not None and set(out.extremes) == {"max_profit_reached", "max_profit_at", "max_loss_reached", "max_loss_at"}
     assert uuid.UUID(out.id)
+
+
+async def test_the_card_shows_the_payoff_at_the_weekly_roll_with_what_rolls_booked(market):
+    """11 Nov: the payoff panel (services/options/calendar_payoff.py) for the
+    double calendar is at 15:00 on the sold weeklies' expiry day, every point
+    carrying what earlier rolls booked."""
+    from app.api.v1.endpoints import paper_native_trading as ep
+
+    await market.check(at(4, 9, 30))
+    market.prices(at(4, 11, 0), 23460.0)
+    first = (await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))).payoff
+    assert first is not None and first.horizon == at(9, 15, 0) and first.booked == 0.0 and first.target == 14_000.0
+    assert first.points[0].spot == 22460.0 and first.points[-1].spot == 24460.0
+    inside = max(p.pnl for p in first.points if 23100.0 <= p.spot <= 23900.0)
+    outside = max(p.pnl for p in first.points if p.spot < 22800.0 or p.spot > 24200.0)
+    assert inside > outside  # the tent: best between the strikes
+
+    await market.check(at(9, 15, 0))  # the weeklies roll
+    state = market.deployment.state
+    booked = state["position"]["booked_net"]
+    market.prices(at(11, 10, 0), 23460.0)
+    after = (await ep._build_position_out(market.db, state, at(11, 10, 0).astimezone(timezone.utc))).payoff
+    assert after.horizon == at(17, 15, 0) and after.booked == pytest.approx(booked)
+    without = dict(state, position={**state["position"], "booked": {"gross": 0.0, "charges": 0.0}})
+    bare = (await ep._build_position_out(market.db, without, at(11, 10, 0).astimezone(timezone.utc))).payoff
+    assert [p.pnl for p in after.points] == pytest.approx([p.pnl + booked for p in bare.points], abs=0.02)

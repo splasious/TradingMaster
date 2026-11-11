@@ -174,6 +174,11 @@ class PayoffOut(BaseModel):
     target: float | None
     target_low: float | None
     target_high: float | None
+    booked: float = 0.0  # what a double calendar's earlier rolls booked, already in every point
+    # Every NIFTY range in profit / at the target, low to high, [low, high] (None past the points) --
+    # a double calendar can have one at each strike.
+    profit_zones: list[tuple[float | None, float | None]] = []
+    target_zones: list[tuple[float | None, float | None]] = []
     implied_vols: dict[str, float]
 
 

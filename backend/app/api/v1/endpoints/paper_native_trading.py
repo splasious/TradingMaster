@@ -149,10 +149,11 @@ def _payoff_out(
     position: dict, instruments: list[Instrument], prices: list[float | None], spot: float | None, spot_close: SessionClose | None,
     now: datetime | None,
 ) -> PayoffOut | None:
-    """A calendar's profit at today's daily close across NIFTY levels
-    (options/calendar_payoff.py) -- while the market is open (live NIFTY,
-    live option prices) and the close is still ahead."""
-    if position.get("regime") != "calendar" or spot_close is not None:
+    """A calendar's profit across NIFTY levels at its horizon -- today's
+    daily close, or a double calendar's weekly roll (options/
+    calendar_payoff.py) -- while the market is open (live NIFTY, live option
+    prices) and the horizon is still ahead."""
+    if position.get("regime") not in ("calendar", "double calendar") or spot_close is not None:
         return None
     names = list(position["legs"])
     payoff = position_payoff(position, dict(zip(names, instruments)), dict(zip(names, prices)), spot, now or datetime.now(timezone.utc))
@@ -163,7 +164,8 @@ def _payoff_out(
         max_profit=payoff.max_profit, max_profit_at=payoff.max_profit_at, max_loss=payoff.max_loss, max_loss_at=payoff.max_loss_at,
         loss_cap=payoff.loss_cap, breakeven_low=payoff.breakeven_low, breakeven_high=payoff.breakeven_high,
         target=payoff.target, target_low=payoff.target_low, target_high=payoff.target_high,
-        implied_vols={name: round(vol, 4) for name, vol in payoff.vols.items()},
+        implied_vols={name: round(vol, 4) for name, vol in payoff.vols.items()}, booked=round(payoff.booked, 2),
+        profit_zones=payoff.profit_zones, target_zones=payoff.target_zones,
     )
 
 

@@ -350,6 +350,11 @@ export interface PayoffOut {
   target_low: number | null;
   target_high: number | null;
   implied_vols: Record<string, number>;
+  /** What a double calendar's earlier rolls booked, already in every point (0 otherwise). */
+  booked?: number;
+  /** Every NIFTY range in profit / at the target, low to high, [low, high] (null past the points) -- a double calendar can have two. */
+  profit_zones?: [number | null, number | null][];
+  target_zones?: [number | null, number | null][];
 }
 
 export interface EffectivePcrOut {

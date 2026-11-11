@@ -14,8 +14,12 @@ closing orders and of the opening ones already paid. Rates and dividends
 are left out (each volatility is implied under the same model, so they
 largely cancel over days).
 
-Display only -- the strategy's own take-profit reads the live bid / ask
-(native_strategies/nifty_conti_calendar.py).
+Also Conti Calendar 400 15 MIN's double calendar (11 Nov): held overnight,
+its horizon is ROLL_TIME (15:00) on the sold weeklies' expiry day, when they
+roll, and every point carries what earlier rolls have booked (`booked`).
+
+Display only -- the strategies' own take-profit reads the live bid / ask
+(native_strategies/nifty_conti_calendar.py, nifty_conti_calendar_400.py).
 """
 
 import math
@@ -26,6 +30,7 @@ from typing import Callable
 from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
 from app.services.strategy.native_strategies.nifty_conti_calendar import DAILY_CLOSE
+from app.services.strategy.native_strategies.nifty_conti_calendar_400 import REGIME as DOUBLE, ROLL_TIME, booked_net
 
 EXPIRY_TIME = time(15, 30)  # IST: when an NSE option expires
 EXIT_TIME = DAILY_CLOSE  # IST: Conti Calendar 15 MIN's daily close, the horizon shown
@@ -65,6 +70,12 @@ class Payoff:
     target_low: float | None
     target_high: float | None
     vols: dict[str, float] = field(default_factory=dict)
+    booked: float = 0.0  # what earlier rolls booked, in every point (the double calendar)
+    # Every NIFTY range in profit / at the target, low to high -- a double
+    # calendar can have one at each strike; breakeven_* and target_* are the
+    # one around the best point. A side None: past the grid.
+    profit_zones: list[tuple[float | None, float | None]] = field(default_factory=list)
+    target_zones: list[tuple[float | None, float | None]] = field(default_factory=list)
 
 
 def _cdf(x: float) -> float:
@@ -128,12 +139,30 @@ def _zone(points: list[tuple[float, float]], peak: int, level: float) -> tuple[f
     return low, high
 
 
+def _zones_at(points: list[tuple[float, float]], level: float) -> list[tuple[float | None, float | None]]:
+    """Every NIFTY range where profit is at least `level`, low to high."""
+    zones, i = [], 0
+    while i < len(points):
+        if points[i][1] < level:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(points) and points[j + 1][1] >= level:
+            j += 1
+        low = _crossing(points[i - 1], points[i], level) if i > 0 else None
+        high = _crossing(points[j], points[j + 1], level) if j < len(points) - 1 else None
+        zones.append((low, high))
+        i = j + 1
+    return zones
+
+
 def calendar_payoff(
     legs: list[PayoffLeg], spot: float, now: datetime, horizon: datetime, entry_charges: float,
-    charges: Callable[[PayoffLeg, float, bool], float], target: float | None = None,
+    charges: Callable[[PayoffLeg, float, bool], float], target: float | None = None, booked: float = 0.0,
 ) -> Payoff | None:
     """`charges(leg, price, buying)`: one closing order's estimated charges.
-    None when the horizon has passed."""
+    `booked`: what's already been booked (a double calendar's rolls),
+    added to every point. None when the horizon has passed."""
     if horizon <= now or not legs:
         return None
     vols = {leg.name: implied_vol(leg.mid, spot, leg.strike, years_until(leg.expiry, now), leg.option_type) for leg in legs}
@@ -141,7 +170,7 @@ def calendar_payoff(
     centre = round(spot / GRID_STEP) * GRID_STEP
     points = []
     for level in range(int(centre - GRID_POINTS), int(centre + GRID_POINTS) + 1, GRID_STEP):
-        total = -entry_charges
+        total = booked - entry_charges
         for leg in legs:
             value = option_value(float(level), leg.strike, left[leg.name], vols[leg.name], leg.option_type)
             if leg.side == "sell":
@@ -164,10 +193,11 @@ def calendar_payoff(
     return Payoff(
         horizon=horizon, spot=spot, points=points,
         max_profit=points[peak][1], max_profit_at=points[peak][0], max_loss=points[trough][1], max_loss_at=points[trough][0],
-        loss_cap=(net_debit + entry_charges + entry_exit) if covered and net_debit > 0 else None,
+        loss_cap=(net_debit + entry_charges + entry_exit - booked) if covered and net_debit > 0 else None,
         breakeven_low=breakeven[0], breakeven_high=breakeven[1],
         target=target, target_low=zone[0] if zone else None, target_high=zone[1] if zone else None,
-        vols=vols,
+        vols=vols, booked=booked,
+        profit_zones=_zones_at(points, 0.0), target_zones=_zones_at(points, target) if target is not None else [],
     )
 
 
@@ -183,10 +213,14 @@ def position_payoff(position: dict, instruments: dict, prices: dict[str, float |
     from app.services.market_data.tick_engine import tick_engine
     from app.services.paper_trading.trade_record import order_charges
 
-    if position.get("regime") != "calendar" or spot is None or not isinstance(position.get("legs"), dict):
+    regime = position.get("regime")
+    if regime not in ("calendar", DOUBLE) or spot is None or not isinstance(position.get("legs"), dict):
         return None
     at = as_aware_utc(now)
-    horizon = datetime.combine(at.astimezone(IST).date(), EXIT_TIME, tzinfo=IST)
+    if regime == DOUBLE:  # held overnight: at the sold weeklies' roll
+        horizon = datetime.combine(date.fromisoformat(position["weekly_expiry"]), ROLL_TIME, tzinfo=IST)
+    else:
+        horizon = datetime.combine(at.astimezone(IST).date(), EXIT_TIME, tzinfo=IST)
     legs = []
     for name, leg in position["legs"].items():
         instrument, price = instruments.get(name), prices.get(name)
@@ -204,4 +238,5 @@ def position_payoff(position: dict, instruments: dict, prices: dict[str, float |
 
     target = position.get("take_profit")
     return calendar_payoff(legs, spot, at, horizon, float(position.get("entry_charges") or 0.0), charges,
-                           float(target) if isinstance(target, (int, float)) else None)
+                           float(target) if isinstance(target, (int, float)) else None,
+                           booked_net(position) if regime == DOUBLE else 0.0)

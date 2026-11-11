@@ -25,6 +25,11 @@ function istClock(iso: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
 }
 
+/** "17 Nov": an IST date -- for a horizon that isn't today (a double calendar's weekly roll). */
+function istDayMonth(iso: string | Date): string {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short" }).format(new Date(iso));
+}
+
 function level(value: number): string {
   return Math.round(value).toLocaleString("en-IN");
 }
@@ -89,7 +94,9 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
   const { points, spot } = payoff;
   const inProfit = payoff.max_profit >= 0;
   const now = pnlAt(points, spot);
-  const closeAt = istClock(payoff.horizon);
+  const onDay = istDayMonth(payoff.horizon) === istDayMonth(new Date()) ? null : istDayMonth(payoff.horizon);
+  const closeAt = onDay ? `${istClock(payoff.horizon)} ${onDay}` : istClock(payoff.horizon);  // "15:29", or "15:00 17 Nov"
+  const booked = payoff.booked ?? 0;
   const first = points[0].spot;
   const last = points[points.length - 1].spot;
 
@@ -115,21 +122,36 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
     setHover(v < first || v > last ? null : Math.round(v / 10) * 10);
   };
 
+  const range = (low: number | null, high: number | null) =>
+    `${low != null ? level(low) : `below ${level(first)}`} – ${high != null ? level(high) : `above ${level(last)}`}`;
+  const profitZones = payoff.profit_zones ?? [];
+  const targetZones = payoff.target_zones ?? [];
+  // A double calendar can be in profit around each of its strikes: every range then, low to high.
   const breakevenText = !inProfit
     ? "none -- no NIFTY level ends in profit"
-    : `${payoff.breakeven_low != null ? level(payoff.breakeven_low) : `below ${level(first)}`} – ${payoff.breakeven_high != null ? level(payoff.breakeven_high) : `above ${level(last)}`}`;
-  const breakevenSub = inProfit
-    ? [payoff.breakeven_low != null ? away(payoff.breakeven_low, spot) : null, payoff.breakeven_high != null ? away(payoff.breakeven_high, spot) : null]
-        .filter(Boolean)
-        .join(" / ")
-    : `at these volatilities, by ${closeAt}`;
+    : profitZones.length > 1
+      ? profitZones.map(([low, high]) => range(low, high)).join(" and ")
+      : range(payoff.breakeven_low, payoff.breakeven_high);
+  const breakevenSub = !inProfit
+    ? `at these volatilities, by ${closeAt}`
+    : profitZones.length > 1
+      ? `${profitZones.length} ranges, at these volatilities`
+      : [payoff.breakeven_low != null ? away(payoff.breakeven_low, spot) : null, payoff.breakeven_high != null ? away(payoff.breakeven_high, spot) : null]
+          .filter(Boolean)
+          .join(" / ");
   const targetReached = payoff.target != null && payoff.max_profit >= payoff.target;
+  const targetText = targetZones.length > 1
+    ? targetZones.map(([low, high]) => range(low, high)).join(" and ")
+    : range(payoff.target_low, payoff.target_high);
 
   return (
     <div className="space-y-3 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <div className="text-base font-semibold text-text-primary">If closed at {closeAt} today</div>
-        <div className="text-sm text-text-muted">each option at its implied volatility now · closed at bid/ask · after charges</div>
+        <div className="text-base font-semibold text-text-primary">If closed at {onDay ? `${istClock(payoff.horizon)} on ${onDay}` : `${closeAt} today`}</div>
+        <div className="text-sm text-text-muted">
+          each option at its implied volatility now · closed at bid/ask · after charges
+          {booked !== 0 && ` · ${money(booked, true)} booked by rolls included`}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -154,10 +176,8 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
           {breakevenText}
         </Field>
         {payoff.target != null && (
-          <Field label={`${money(payoff.target)} take-profit`} sub={targetReached ? `NIFTY range where ${closeAt} reaches it` : `the most by ${closeAt} falls short`}>
-            {targetReached
-              ? `${payoff.target_low != null ? level(payoff.target_low) : `below ${level(first)}`} – ${payoff.target_high != null ? level(payoff.target_high) : `above ${level(last)}`}`
-              : "not reached at any level"}
+          <Field label={`${money(payoff.target)} take-profit`} sub={targetReached ? `NIFTY ${targetZones.length > 1 ? "ranges" : "range"} where ${closeAt} reaches it` : `the most by ${closeAt} falls short`}>
+            {targetReached ? targetText : "not reached at any level"}
           </Field>
         )}
       </div>
@@ -214,7 +234,7 @@ export function CalendarPayoff({ payoff }: { payoff: PayoffOut }) {
             </g>
           )}
           {inProfit &&
-            [payoff.breakeven_low, payoff.breakeven_high].map((b, i) =>
+            (profitZones.length > 1 ? profitZones.flat() : [payoff.breakeven_low, payoff.breakeven_high]).map((b, i) =>
               b != null ? <line key={`be${i}`} x1={geo.x(b)} x2={geo.x(b)} y1={PAD.top} y2={H - PAD.bottom} stroke="var(--text-muted)" strokeDasharray="2 3" strokeWidth={1} /> : null,
             )}
           <path d={geo.line} fill="none" stroke="var(--positive)" strokeWidth={2} clipPath="url(#payoff-above)" strokeLinejoin="round" />

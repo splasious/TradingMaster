@@ -74,3 +74,12 @@ def test_the_target_zone_and_a_day_with_no_profit_anywhere():
     assert poor.max_profit < 0 and (poor.breakeven_low, poor.breakeven_high) == (None, None)
 
     assert cp.calendar_payoff(legs, 24300.0, THREE, THREE, 500.0, _charges) is None  # 15:00 has come
+
+
+def test_every_range_in_profit_is_listed_a_double_calendar_having_two():
+    points = [(float(x), y) for x, y in zip(range(0, 110, 10), (-5, 2, 4, -1, -3, -3, -1, 6, 3, -2, -4))]
+    assert cp._zones_at(points, 0.0) == [(pytest.approx(10 * 5 / 7), pytest.approx(20 + 10 * 4 / 5)),
+                                         (pytest.approx(60 + 10 * 1 / 7), pytest.approx(80 + 10 * 3 / 5))]
+    assert cp._zones_at(points, 5.0) == [(pytest.approx(60 + 10 * 6 / 7), pytest.approx(70 + 10 * 1 / 3))]
+    assert cp._zones_at([(0.0, 1.0), (10.0, 2.0)], 0.0) == [(None, None)]  # all of it: past both edges
+    assert cp._zones_at([(0.0, -1.0), (10.0, -2.0)], 0.0) == []
