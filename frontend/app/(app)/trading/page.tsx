@@ -1933,8 +1933,9 @@ function NativeDeploymentCard({
   // A calendar's position is re-read every second (its strategy re-checks
   // "Net if closed now" every second, 6 Nov); every other card's comes with
   // the list, every 5 s.
-  // A calendar's "Net if closed now" moves every second (Conti Calendar; the double calendar of Conti Calendar 400).
-  const isCalendar = deployment.position?.bias === "calendar" || deployment.position?.bias === "double calendar";
+  // A calendar's "Net if closed now" moves every second (Conti Calendar, Conti Calendar 400's double calendar,
+  // Conti Reverse Calendar).
+  const isCalendar = ["calendar", "double calendar", "reverse calendar"].includes(String(deployment.position?.bias ?? ""));
   const { data: livePosition } = useNativePosition(deployment.id, isCalendar);
   const position = isCalendar && livePosition !== undefined ? livePosition : deployment.position;
   // Multi-holding strategies (e.g. the MACD/RSI rotation strategy) have no

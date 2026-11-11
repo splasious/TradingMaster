@@ -107,7 +107,10 @@ def test_structure_names(legs, structure):
           ("short", "CE", 23900, "2026-11-17"), ("long", "CE", 23900, "2026-11-24"),
           ("short", "PE", 23100, "2026-11-17"), ("long", "PE", 23100, "2026-11-24")], "Double Calendar"),
         ([("short", "CE", 23900, "2026-11-17"), ("long", "CE", 23900, "2026-11-24")], "Call Calendar"),
-        ([("short", "CE", 23500, "2026-11-24"), ("long", "CE", 23500, "2026-11-17")], "Bear Call Spread"),  # bought nearer: no calendar
+        ([("long", "CE", 23500, "2026-11-17"), ("long", "PE", 23500, "2026-11-17"),  # Conti Reverse Calendar
+          ("short", "CE", 23500, "2026-11-24"), ("short", "PE", 23500, "2026-11-24")], "Reverse Straddle Calendar"),
+        ([("short", "CE", 23500, "2026-11-24"), ("long", "CE", 23500, "2026-11-17")], "Reverse Call Calendar"),  # bought nearer
+        ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-24")], "Bear Call Spread"),  # other strikes: no calendar
         ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-17"),
           ("short", "PE", 23300, "2026-11-17"), ("long", "PE", 23200, "2026-11-17")], "Iron Condor"),
     ],

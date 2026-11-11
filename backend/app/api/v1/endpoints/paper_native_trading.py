@@ -103,7 +103,7 @@ async def _build_position_out(db: AsyncSession, state: dict | None, now: datetim
     # is open its legs are valued at what closing them would fill at -- the
     # ask for a sold leg, the bid for a bought one -- from the ticker's fresh
     # book; a leg with no fresh book keeps its last price (11 Nov).
-    at_book = position.get("regime") in ("calendar", "double calendar") and nse_market_open(now or datetime.now(timezone.utc))
+    at_book = position.get("regime") in CALENDAR_REGIMES and nse_market_open(now or datetime.now(timezone.utc))
     legs_out: list[NativeLegOut] = []
     prices: list[float | None] = []
     for (side, leg), instrument in zip(raw_legs, leg_instruments):
@@ -167,7 +167,7 @@ def _payoff_out(
     daily close, or a double calendar's weekly roll (options/
     calendar_payoff.py) -- while the market is open (live NIFTY, live option
     prices) and the horizon is still ahead."""
-    if position.get("regime") not in ("calendar", "double calendar") or spot_close is not None:
+    if position.get("regime") not in CALENDAR_REGIMES or spot_close is not None:
         return None
     names = list(position["legs"])
     payoff = position_payoff(position, dict(zip(names, instruments)), dict(zip(names, prices)), spot, now or datetime.now(timezone.utc))
@@ -182,6 +182,10 @@ def _payoff_out(
         profit_zones=payoff.profit_zones, target_zones=payoff.target_zones,
     )
 
+
+# The calendar strategies' positions (Conti Calendar, Conti Calendar 400,
+# Conti Reverse Calendar): filled at bid / ask, valued so on the card, with a payoff.
+CALENDAR_REGIMES = ("calendar", "double calendar", "reverse calendar")
 
 # Keys every holding carries (see nifty_rs_rotation.py's holdings shape) --
 # anything else a strategy stores on a holding is its own per-stock metric.

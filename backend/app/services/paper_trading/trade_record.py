@@ -218,10 +218,18 @@ def _calendar(legs: list[dict]) -> str | None:
     """A calendar's name, when every sold leg is matched by a bought one of
     the same type and strike expiring later (11 Nov): "Straddle Calendar"
     (Conti Calendar 15 MIN), "Double Calendar" (Conti Calendar 400 15 MIN --
-    its rolled weeklies included), "Call Calendar" / "Put Calendar"; None
-    for anything else."""
-    shorts = [leg for leg in legs if leg["side"] == "short"]
-    longs = [leg for leg in legs if leg["side"] == "long"]
+    its rolled weeklies included), "Call Calendar" / "Put Calendar"; the
+    other way round -- the near expiry bought, the far one sold -- a
+    "Reverse ..." one (Conti Reverse Calendar 15 MIN); None for anything else."""
+    name = _calendar_of([leg for leg in legs if leg["side"] == "short"], [leg for leg in legs if leg["side"] == "long"], legs)
+    if name is not None:
+        return name
+    name = _calendar_of([leg for leg in legs if leg["side"] == "long"], [leg for leg in legs if leg["side"] == "short"], legs)
+    return f"Reverse {name}" if name is not None else None
+
+
+def _calendar_of(shorts: list[dict], longs: list[dict], legs: list[dict]) -> str | None:
+    """`shorts` (the near legs) each matched by one of `longs` (the far legs)."""
     if not shorts or not longs or any(leg.get("expiry") is None or leg.get("strike") is None for leg in legs):
         return None
     bought = {}

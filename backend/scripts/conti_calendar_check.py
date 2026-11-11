@@ -33,7 +33,8 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "f7416f3e472ab2586c509cb4ad09e348",
-         "Conti Calendar 400 15 MIN": "219d45c9a94b2eae1060dfeed203599b"}
+         "Conti Calendar 400 15 MIN": "219d45c9a94b2eae1060dfeed203599b",
+         "Conti Reverse Calendar 15 MIN": "1e4bb91272bcc3507eb4ff9b62169291"}
 LISTEN_SECONDS = 6
 
 
@@ -77,7 +78,7 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 else:
                     print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
                 continue
-            if NAME != "Conti Calendar 15 MIN":
+            if NAME not in ("Conti Calendar 15 MIN", "Conti Reverse Calendar 15 MIN"):
                 continue
             if position:
                 opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")

@@ -14,7 +14,9 @@ closing orders and of the opening ones already paid. Rates and dividends
 are left out (each volatility is implied under the same model, so they
 largely cancel over days).
 
-Also Conti Calendar 400 15 MIN's double calendar (11 Nov): held overnight,
+Conti Reverse Calendar 15 MIN's reverse calendar (11 Nov) is shown as Conti
+Calendar's, at today's EXIT_TIME. Also Conti Calendar 400 15 MIN's double
+calendar (11 Nov): held overnight,
 its horizon is ROLL_TIME (15:00) on the sold weeklies' expiry day, when they
 roll, and every point carries what earlier rolls have booked (`booked`).
 
@@ -31,6 +33,7 @@ from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
 from app.services.strategy.native_strategies.nifty_conti_calendar import DAILY_CLOSE
 from app.services.strategy.native_strategies.nifty_conti_calendar_400 import REGIME as DOUBLE, ROLL_TIME, booked_net
+from app.services.strategy.native_strategies.nifty_conti_reverse_calendar import REGIME as REVERSE
 
 EXPIRY_TIME = time(15, 30)  # IST: when an NSE option expires
 EXIT_TIME = DAILY_CLOSE  # IST: Conti Calendar 15 MIN's daily close, the horizon shown
@@ -214,7 +217,7 @@ def position_payoff(position: dict, instruments: dict, prices: dict[str, float |
     from app.services.paper_trading.trade_record import order_charges
 
     regime = position.get("regime")
-    if regime not in ("calendar", DOUBLE) or spot is None or not isinstance(position.get("legs"), dict):
+    if regime not in ("calendar", DOUBLE, REVERSE) or spot is None or not isinstance(position.get("legs"), dict):
         return None
     at = as_aware_utc(now)
     if regime == DOUBLE:  # held overnight: at the sold weeklies' roll

@@ -974,6 +974,33 @@ async def test_conti_calendar_400_is_created_with_its_pool_and_card_for_conti_ca
     assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
 
 
+async def test_conti_reverse_calendar_is_created_with_its_pool_and_card_for_conti_calendars_owner(db_engine, db_session):
+    from app.models.audit import AuditLog as Log
+
+    calendar = await _amop_pool(db_session, "Conti Calendar 15 MIN", "Conti Calendar 15 MIN", 2_000_000.0, 2_041_000.0)
+    stranger = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_000_000.0)  # no Conti Calendar
+    migration = _load("c0e2a4b6d8f3_conti_reverse_calendar_15min")
+    assert migration.down_revision == "a6c8e0b2d4f9"
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    name = "Conti Reverse Calendar 15 MIN"
+    [strategy] = (await db_session.execute(select(Strategy).where(Strategy.name == name))).scalars().all()
+    assert (strategy.owner_id, strategy.code_type, strategy.status) == (calendar.user_id, "native", "paper_trading")
+    [version] = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))).scalars().all()
+    built_in = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_conti_reverse_calendar.py").read_text(encoding="utf-8")
+    assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", built_in)
+    [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == name))).scalars().all()
+    assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (calendar.user_id, "INR", 2_000_000.0, 2_000_000.0)
+    [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
+    assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
+    actions = (await db_session.execute(select(Log.action).where(Log.user_id == calendar.user_id))).scalars().all()
+    assert sorted(actions) == ["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"]
+    assert not (await db_session.execute(select(Log.action).where(Log.user_id == stranger.user_id))).scalars().all()
+    await db_session.refresh(calendar)
+    assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
+
+
 async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_open_position(db_engine, db_session):
     migration = _load("c4e6a8b0d2f5_conti_calendar_14000_daily_close")
     assert migration.down_revision == "f8b0d2e4a6c9"
