@@ -59,6 +59,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
         print(f"  paper cards: {', '.join(f'{st} on v{by_id.get(vid)} x{n}' for st, vid, n in cards) or 'none'}")
         runs = (await db.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == s.id))).scalars().all()
         for card in runs:
+            if card.status == "active" and (card.state or {}).get("position"):
+                print(f"  card {str(card.id)[:8]} on the card: {_legs_at_book(card.id, s.owner_id)}")
             ran = card.last_evaluated_at.astimezone(IST).strftime("%d-%b %H:%M:%S") if card.last_evaluated_at else "never"
             print(f"  card {str(card.id)[:8]}: last run {ran}, last signal {card.last_signal or '-'}, "
                   f"position open: {bool((card.state or {}).get('position'))}")
@@ -106,6 +108,27 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
     pools = (await db.execute(select(func.count()).select_from(PaperPortfolio).where(func.trim(PaperPortfolio.name) == NAME))).scalar()
     print(f"  pools named {NAME!r}: {pools}")
 
+
+
+def _legs_at_book(deployment_id, owner_id) -> str:
+    """What the running app's card shows for the position (GET .../position,
+    as its owner): how many legs are valued at the book -- a sold leg at
+    the ask, a bought one at the bid (11 Nov). Counts only."""
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://localhost:8000/api/v1/paper-trading/native-deployments/{deployment_id}/position",
+        headers={"Authorization": f"Bearer {create_access_token(str(owner_id), [])}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            position = json.loads(response.read())
+    except Exception as exc:  # noqa: BLE001 -- the kind only, no detail
+        return f"not read ({type(exc).__name__})"
+    legs = (position or {}).get("legs") or []
+    booked = [leg for leg in legs if leg.get("bid") is not None and leg.get("ask") is not None]
+    right = [leg for leg in booked if leg["current_price"] == (leg["ask"] if leg["side"] == "short" else leg["bid"])]
+    return f"{len(booked)} of {len(legs)} legs at bid/ask, {len(right)} at the right side; payoff shown: {bool((position or {}).get('payoff'))}"
 
 
 async def main() -> None:
