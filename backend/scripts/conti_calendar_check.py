@@ -32,7 +32,8 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "f7416f3e472ab2586c509cb4ad09e348"}
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "f7416f3e472ab2586c509cb4ad09e348",
+         "Conti Calendar 400 15 MIN": "219d45c9a94b2eae1060dfeed203599b"}
 LISTEN_SECONDS = 6
 
 
@@ -62,6 +63,18 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
             print(f"  card {str(card.id)[:8]}: last run {ran}, last signal {card.last_signal or '-'}, "
                   f"position open: {bool((card.state or {}).get('position'))}")
             position = (card.state or {}).get("position")
+            if NAME == "Conti Calendar 400 15 MIN":
+                if position:
+                    opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
+                    print(f"    opened {opened}: {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE (ATM {position['atm']:,.0f}), "
+                          f"weekly {position['weekly_expiry']}, monthly {position['monthly_expiry']}, rolls {position.get('rolls', 0)}")
+                    for name, leg in position["legs"].items():
+                        instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+                        print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")
+                    print(f"    checked at {position.get('checked_at', '-')}; extremes tracked: {position.get('max_profit_reached') is not None}")
+                else:
+                    print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
+                continue
             if NAME != "Conti Calendar 15 MIN":
                 continue
             if position:
