@@ -1,22 +1,32 @@
 """
-Conti Calendar 400 15 MIN -- a double calendar 400 points either side of NIFTY (native)
-======================================================================================
+Conti Calendar 400 15 MIN -- a double calendar on the OTM strikes nearest a Rs 100 premium (native)
+==================================================================================================
 
 Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
-11 Nov: the pause after a close cut to 1 minute): instead of
-one strike's straddle calendar, a call calendar AWAY (400) points above the
-ATM and a put calendar AWAY below it, strikes in hundreds -- ATM is NIFTY
-rounded to the nearest STRIKE_STEP (100), a 50 rounding up -- LOTS_PER_LEG
-(16) lots each, every fill at the order book's best price (a sell at the
-bid, a buy at the ask):
+11 Nov: the pause after a close cut to 1 minute; version 3, 12 Nov: the
+strikes by premium, not 400 points out): instead of one strike's straddle
+calendar, a call calendar on an OTM call and a put calendar on an OTM put,
+LOTS_PER_LEG (16) lots each, every fill at the order book's best price (a
+sell at the bid, a buy at the ask):
 
-  sell  the weekly CE at ATM+400   buy  the monthly CE at ATM+400
-  sell  the weekly PE at ATM-400   buy  the monthly PE at ATM-400
+  sell  the weekly CE at the call strike   buy  the monthly CE at it
+  sell  the weekly PE at the put strike    buy  the monthly PE at it
+
+The strikes (version 3; ATM+-400 in hundreds before): on each side, the
+furthest OTM strike -- any STRIKE_STEP (50-point) strike, calls above NIFTY
+and puts below it, however far out -- whose weekly's bid (what it sells at)
+is still MIN_PREMIUM (Rs 100) or more: walked out from the first OTM strike
+until a bid falls under Rs 100, so both sold premiums sit just above
+Rs 100, close to each other. NIFTY 25,300 with the 25,600 CE bid 118 and
+the 25,650 CE 96, the 25,000 PE 104 and the 24,950 PE 88: the 25,600 CE
+and the 25,000 PE. A strike on the way with no book yet means no entry that
+check (the next tries again); none at Rs 100 or more on a side, none at all.
+Every new position is picked so -- the monthly roll's reopen too; a weekly
+roll keeps its position's strikes.
 
 Weekly: the nearest weekly expiry, next week's on an expiry day itself.
 Monthly: the nearest monthly expiry after that weekly -- this month's, or
-next month's in the month's last week. NIFTY 24,630: ATM 24,600, the
-25,000 CE and the 24,200 PE.
+next month's in the month's last week.
 
 Opened from 09:30 (ENTRY_TIME) to 15:00 whenever none is open, and never
 within PAUSE_AFTER_CLOSE (1 minute; 5 in version 1) of the last one closing (kept in the
@@ -40,7 +50,7 @@ Held overnight -- no daily close -- until the take-profit:
   Monthly roll when next week's weekly would be the bought monthlies'
                own expiry (the month's last week), the roll instead closes
                all four ("monthly_roll") and opens a fresh double calendar
-               at once -- at the new ATM +-400, selling that week and
+               at once -- at that moment's Rs 100 strikes, selling that week and
                buying next month's monthly -- whatever the time and pause
                (state reopen_due: a reopen that can't be had at once, a
                leg unquoted, is tried again at every check until it is).
@@ -74,8 +84,9 @@ from app.services.paper_trading.trade_record import order_charges
 
 UNDERLYING_SYMBOL = "NIFTY 50"
 REGIME = "double calendar"
-STRIKE_STEP = 100  # ATM and both strikes in hundreds
-AWAY = 400  # the call calendar this far above the ATM, the put calendar this far below
+STRIKE_STEP = 50  # any 50-point strike (version 3; hundreds, ATM+-400, before)
+MIN_PREMIUM = 100.0  # rupees: the furthest OTM strike whose sold weekly's bid is still this much (version 3)
+MAX_STEPS = 40  # how many strikes out it looks on a side: 2,000 points
 LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
@@ -94,14 +105,11 @@ LEGS = (  # name, option type, side at entry, which expiry
 WEEKLY_LEGS = ("short_ce", "short_pe")
 
 
-def atm_of(spot: float) -> float:
-    """NIFTY to the nearest STRIKE_STEP, a half rounding up."""
-    return math.floor(spot / STRIKE_STEP + 0.5) * STRIKE_STEP
-
-
-def strikes_for(spot: float) -> dict[str, float]:
-    atm = atm_of(spot)
-    return {"CE": atm + AWAY, "PE": atm - AWAY}
+def first_otm(spot: float, option_type: str) -> float:
+    """The nearest STRIKE_STEP strike out of the money: a call's above NIFTY, a put's below."""
+    if option_type == "CE":
+        return (math.floor(spot / STRIKE_STEP) + 1) * STRIKE_STEP
+    return (math.ceil(spot / STRIKE_STEP) - 1) * STRIKE_STEP
 
 
 def is_monthly(tradingsymbol: str | None) -> bool:
@@ -373,7 +381,34 @@ async def evaluate(ctx) -> None:
         ctx.note("skipped", reason=f"no monthly NIFTY expiry after {weekly:%d %b} in the catalog yet")
         return
 
-    strikes = strikes_for(spot)
+    async def premium_strike(option_type: str) -> tuple[float | None, str]:
+        """(the furthest OTM strike whose weekly bid is MIN_PREMIUM or more, "")
+        or (None, why not)."""
+        found, step = None, STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
+        for k in range(MAX_STEPS):
+            strike = first_otm(spot, option_type) + k * step
+            instrument = await ctx.find_option(underlying.id, weekly, strike, option_type)
+            if instrument is None:
+                break  # past the catalog's last strike
+            quote = await bid_ask(ctx, instrument.id)
+            if quote is None:
+                return None, f"no bid/ask for the {weekly:%d %b} {strike:,.0f} {option_type} yet"
+            if quote[0] < MIN_PREMIUM:
+                break
+            found = strike
+        if found is None:
+            return None, f"no OTM {weekly:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more"
+        return found, ""
+
+    strikes: dict[str, float] = {}
+    for option_type in ("CE", "PE"):
+        strike, why = await premium_strike(option_type)
+        if strike is None:
+            ctx.note("skipped", reason=why)
+            if reopening:
+                ctx.wake_at(now_utc + RECHECK)
+            return
+        strikes[option_type] = strike
     chosen: dict[str, tuple[Instrument, float]] = {}
     for name, option_type, order_side, which in LEGS:
         expiry = weekly if which == "weekly" else monthly
@@ -405,7 +440,7 @@ async def evaluate(ctx) -> None:
 
     ctx.state["position"] = {
         "regime": REGIME,
-        "atm": atm_of(spot),
+        "min_premium": MIN_PREMIUM,
         "strike_ce": strikes["CE"],
         "strike_pe": strikes["PE"],
         "entry_spot": spot,
@@ -425,7 +460,8 @@ async def evaluate(ctx) -> None:
     debit = sum(leg["entry_price"] * leg["quantity"] * (1 if leg["side"] == "buy" else -1) for leg in legs.values())
     ctx.note("entered", signal="CALENDAR", reason=(
         (rolled_note or ("monthly roll's reopen: " if reopening else ""))
-        + f"double calendar opened, NIFTY {spot:,.1f} (ATM {atm_of(spot):,.0f}): {strikes['CE']:,.0f} CE and {strikes['PE']:,.0f} PE, "
+        + f"double calendar opened, NIFTY {spot:,.1f}: {strikes['CE']:,.0f} CE (bid {chosen['short_ce'][1]:,.2f}) and "
+        f"{strikes['PE']:,.0f} PE (bid {chosen['short_pe'][1]:,.2f}), the furthest OTM with a weekly bid of Rs {MIN_PREMIUM:,.0f} or more, "
         f"sell {weekly:%d %b} at the bid, buy {monthly:%d %b} at the ask; net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
         f"take-profit Rs {TAKE_PROFIT:,.0f}"
     ))

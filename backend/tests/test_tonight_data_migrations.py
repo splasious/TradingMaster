@@ -1223,7 +1223,11 @@ async def test_conti_calendar_and_conti_calendar_400_move_onto_the_1_minute_paus
         ("Conti Calendar 400 15 MIN", "e4a6c8f0b2d7_conti_calendar_400_pause_1_minute", "d2f4b6a8c0e5", "nifty_conti_calendar_400.py", "c400v2"),
     ):
         migration = _load(migration_name)
-        assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == down and migration.BUILT_IN.name == built_in
+        assert migration.down_revision == down and migration.BUILT_IN.name == built_in
+        if name == "Conti Calendar 400 15 MIN":  # version 3 moves on from it (12 Nov)
+            assert _load("f6b8a0c2d4e9_conti_calendar_400_premium_strikes").FROM_MD5S == {migration.TO_MD5}
+            migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 3 now: the mechanics are what's tested here
+        assert _md5(migration.BUILT_IN) == migration.TO_MD5
         assert "PAUSE_AFTER_CLOSE = timedelta(minutes=1)" in migration.BUILT_IN.read_text(encoding="utf-8")
         before = f"# {name}, the version before: a 5-minute pause\n"
         migration.FROM_MD5S = {_md5_text(before)}
@@ -1244,6 +1248,29 @@ async def test_conti_calendar_and_conti_calendar_400_move_onto_the_1_minute_paus
         assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state, name
     reverse = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_conti_reverse_calendar.py").read_text(encoding="utf-8")
     assert "PAUSE_AFTER_CLOSE = timedelta(minutes=1)" in reverse
+
+
+async def test_conti_calendar_400_moves_onto_the_rs_100_strikes_keeping_its_open_position(db_engine, db_session):
+    migration = _load("f6b8a0c2d4e9_conti_calendar_400_premium_strikes")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e4a6c8f0b2d7"
+    assert "MIN_PREMIUM = 100.0" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v2 = "# Conti Calendar 400 15 MIN, version 2: ATM +-400\n"
+    migration.FROM_MD5S = {_md5_text(v2)}
+    running = await _deployment(db_session, "c400v3_a@tradingmaster.internal", v2)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    state = {"position": {"strike_ce": 25700, "strike_pe": 24900, "rolls": 0, "legs": {}, "max_profit_reached": -1.0}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

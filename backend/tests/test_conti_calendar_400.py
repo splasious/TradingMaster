@@ -1,8 +1,9 @@
 """Conti Calendar 400 15 MIN (native_strategies/nifty_conti_calendar_400.py,
 11 Nov): Conti Calendar 15 MIN copied as a double calendar -- the weekly CE
-sold and the monthly CE bought at ATM+400, the weekly PE sold and the
-monthly PE bought at ATM-400, strikes in hundreds, 16 lots a leg at bid /
-ask -- held overnight, the sold weeklies rolled at 15:00 on their expiry
+sold and the monthly CE bought at an OTM call strike, the weekly PE sold
+and the monthly PE bought at an OTM put strike (since version 3, 12 Nov:
+on each side the furthest OTM 50-point strike whose weekly bid is still
+Rs 100 or more; ATM+-400 before), 16 lots a leg at bid / ask -- held overnight, the sold weeklies rolled at 15:00 on their expiry
 day (all four reopened on next month's monthly in the month's last week),
 closed at Rs 14,000 after charges, every trade keeping the most profit and
 loss it reached."""
@@ -23,10 +24,20 @@ from tests.test_conti_calendar import DEC, SPREAD, W1, W2, W3, Market, at
 WIDTH = 32  # the Telegram group's message block
 
 
+def premium(spot: float, strike: float, option_type: str, weeks: float) -> float:
+    intrinsic = max(0.0, spot - strike) if option_type == "CE" else max(0.0, strike - spot)
+    return max(5.0, 220.0 - 0.4 * abs(spot - strike)) * weeks ** 0.5 + intrinsic
+
+
+CE, PE = 23750.0, 23200.0  # NIFTY 23,460's strikes in this market
+
+
 class Market400(Market):
-    """Conti Calendar's test market, run with the double calendar; options
-    priced so the ones 400 away have a premium: 30 a week to expiry plus
-    what's in the money."""
+    """Conti Calendar's test market, run with the double calendar; an
+    option's time value falls 0.40 a point from 220 at the money (to 5 at
+    least), times the square root of its weeks to expiry, plus what's in the
+    money. NIFTY 23,460: the 23,750 CE's weekly bid 103.5 (the 23,800's
+    83.5), the 23,200 PE's 115.5 (the 23,150's 95.5)."""
 
     def prices(self, now: datetime, spot: float) -> None:
         tick_engine.set_real_price(self.nifty.id, spot, source="test")
@@ -34,7 +45,7 @@ class Market400(Market):
         for o in self.options:
             weeks = max(1, (o.expiry - now.date()).days / 7)
             intrinsic = max(0.0, spot - o.strike) if o.option_type == "CE" else max(0.0, o.strike - spot)
-            ltp = self.premium.get((o.expiry, o.strike, o.option_type), 30 * weeks + intrinsic)
+            ltp = self.premium.get((o.expiry, o.strike, o.option_type), premium(spot, o.strike, o.option_type, weeks))
             tick_engine.set_real_price(o.id, ltp, source="test")
             tick_engine._real_price_at[o.id] = now
             if (o.expiry, o.strike, o.option_type) in self.no_book:
@@ -63,10 +74,36 @@ def _legs(position: dict) -> dict[str, tuple]:
     return {name: (leg["side"], leg["option_type"], leg["strike"], leg["expiry"]) for name, leg in position["legs"].items()}
 
 
-def test_the_strikes_are_400_either_side_of_nifty_to_the_nearest_100():
-    assert c400.atm_of(24630.0) == 24600.0 and c400.strikes_for(24630.0) == {"CE": 25000.0, "PE": 24200.0}
-    assert c400.atm_of(24650.0) == 24700.0 and c400.atm_of(24649.9) == 24600.0  # a half rounds up
-    assert c400.strikes_for(23460.0) == {"CE": 23900.0, "PE": 23100.0}
+def test_the_first_otm_strike_each_side_is_the_nearest_50_point_one_beyond_nifty():
+    assert (c400.first_otm(25310.0, "CE"), c400.first_otm(25310.0, "PE")) == (25350.0, 25300.0)
+    assert (c400.first_otm(25300.0, "CE"), c400.first_otm(25300.0, "PE")) == (25350.0, 25250.0)  # at the money: neither
+    assert c400.MIN_PREMIUM == 100.0 and c400.STRIKE_STEP == 50
+
+
+async def test_each_side_takes_the_furthest_otm_strike_whose_weekly_bid_is_still_100(market):
+    """12 Nov (version 3): however far from NIFTY -- walked out until a bid falls under Rs 100."""
+    p = (await market.check(at(4, 9, 30))).state["position"]
+    assert (p["strike_ce"], p["strike_pe"]) == (CE, PE) and p["min_premium"] == 100.0
+    assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(103.5) and p["legs"]["short_pe"]["entry_price"] == pytest.approx(115.5)
+    market.deployment.state = None
+
+    moved = await market.check(at(5, 9, 30), spot=23360.0)  # NIFTY elsewhere: so are the strikes, wherever Rs 100 is
+    assert (moved.state["position"]["strike_ce"], moved.state["position"]["strike_pe"]) == (23650.0, 23100.0)
+    market.deployment.state = None
+    edge = await market.check(at(5, 9, 31), spot=23060.0)  # the listed puts end at 23,000 still over Rs 100: the last listed
+    assert (edge.state["position"]["strike_ce"], edge.state["position"]["strike_pe"]) == (23350.0, 23000.0)
+    market.deployment.state = None
+
+    market.premium = {(W2, k, "CE"): 99.0 for k in range(23000, 24001, 50)}  # no call at Rs 100 or more on the 17 Nov weekly
+    none = await market.check(at(9, 9, 30))
+    assert none.state.get("position") is None and none._last_reason == "no OTM 17 Nov CE with a bid of Rs 100 or more"
+
+    market.premium = {}
+    market.no_book = {(W2, 23300.0, "PE")}  # an OTM put on the way out with no book: no entry this check
+    waiting = await market.check(at(9, 9, 31))
+    assert waiting.state.get("position") is None and waiting._last_reason == "no bid/ask for the 17 Nov 23,300 PE yet"
+    market.no_book = set()
+    assert (await market.check(at(9, 9, 32))).state["position"] is not None  # the next check: in
 
 
 async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
@@ -74,13 +111,14 @@ async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
     assert early.state.get("position") is None and "outside entry window" in early._last_reason
     ctx = await market.check(at(4, 9, 30))
     p = ctx.state["position"]
-    assert p["regime"] == "double calendar" and (p["strike_ce"], p["strike_pe"], p["atm"]) == (23900.0, 23100.0, 23500.0)
+    assert p["regime"] == "double calendar" and (p["strike_ce"], p["strike_pe"]) == (CE, PE)
     assert _legs(p) == {
-        "short_ce": ("sell", "CE", 23900.0, W1.isoformat()), "long_ce": ("buy", "CE", 23900.0, W3.isoformat()),
-        "short_pe": ("sell", "PE", 23100.0, W1.isoformat()), "long_pe": ("buy", "PE", 23100.0, W3.isoformat()),
+        "short_ce": ("sell", "CE", CE, W1.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W1.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
     }
-    monthly = 30 * (W3 - date(2026, 11, 4)).days / 7  # the test market's monthly premium 400 out
-    assert p["legs"]["short_ce"]["entry_price"] == 30.0 - SPREAD and p["legs"]["long_ce"]["entry_price"] == pytest.approx(monthly + SPREAD)
+    monthly = premium(23460.0, CE, "CE", (W3 - date(2026, 11, 4)).days / 7)
+    assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(premium(23460.0, CE, "CE", 1) - SPREAD)  # sold at the bid
+    assert p["legs"]["long_ce"]["entry_price"] == pytest.approx(monthly + SPREAD)  # bought at the ask
     assert all(leg["quantity"] == 16 * 65 for leg in p["legs"].values())
     assert p["take_profit"] == 14_000.0 and p["entry_charges"] > 0 and ctx._last_signal == "CALENDAR"
     assert ctx._wake_at == at(4, 9, 30) + timedelta(seconds=1)
@@ -98,12 +136,11 @@ async def test_it_takes_the_profit_at_14000_then_pauses_5_minutes_and_keeps_the_
     await market.check(at(4, 9, 30))
     p = dict((await market.check(at(4, 10, 0))).state["position"])  # a copy: the next checks change the position in place
     assert p["max_profit_reached"] < 0 and p["max_loss_reached"] < 0  # the spreads and charges paid
-    market.premium[(W1, 23900.0, "CE")] = market.premium[(W1, 23900.0, "PE")] = 10.0  # untouched strikes: the default prices
-    market.premium[(W1, 23100.0, "PE")] = 60.0  # NIFTY dips toward the put: a loss for now
+    market.premium[(W1, PE, "PE")] = 180.0  # NIFTY dips toward the put: a loss for now
     dip = await market.check(at(4, 11, 0))
     low = dip.state["position"]["max_loss_reached"]
     assert low < p["max_loss_reached"] and dip.state["position"]["max_loss_at"] == "04 Nov 11:00:00 IST"
-    market.premium[(W1, 23100.0, "PE")] = market.premium[(W1, 23900.0, "CE")] = 1.0  # both sold weeklies collapse
+    market.premium[(W1, PE, "PE")] = market.premium[(W1, CE, "CE")] = 1.0  # both sold weeklies collapse
     done = await market.check(at(4, 13, 0))
     assert done.state.get("position") is None and done._last_signal == "COVER" and "take-profit" in done._last_reason
     assert "max loss reached" in done._last_reason and done._wake_at == at(4, 13, 1)  # a minute's pause (version 2)
@@ -128,8 +165,8 @@ async def test_the_sold_weeklies_roll_at_1500_on_their_expiry_at_the_same_strike
     p = rolled.state["position"]
     assert rolled._last_signal == "ROLL" and "weekly roll 09 Nov -> 17 Nov at the same strikes" in rolled._last_reason
     assert _legs(p) == {
-        "short_ce": ("sell", "CE", 23900.0, W2.isoformat()), "long_ce": ("buy", "CE", 23900.0, W3.isoformat()),
-        "short_pe": ("sell", "PE", 23100.0, W2.isoformat()), "long_pe": ("buy", "PE", 23100.0, W3.isoformat()),
+        "short_ce": ("sell", "CE", CE, W2.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W2.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
     }
     assert p["rolls"] == 1 and p["weekly_expiry"] == W2.isoformat() and p["monthly_expiry"] == W3.isoformat()
     assert len(p["closed_legs"]) == 2 and {leg["side"] for leg in p["closed_legs"]} == {"short"}
@@ -155,7 +192,7 @@ async def test_in_the_months_last_week_all_four_close_and_reopen_on_next_months_
     assert trade.extremes is not None
     p = reopened.state["position"]
     assert reopened._last_signal == "CALENDAR" and reopened._last_reason.startswith("monthly roll: all four closed")
-    assert (p["strike_ce"], p["strike_pe"]) == (24000.0, 23200.0)  # the new ATM 23,600 +-400
+    assert (p["strike_ce"], p["strike_pe"]) == (23850.0, 23300.0)  # NIFTY 23,560's Rs 100 strikes
     assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat()) and p["rolls"] == 0
     assert "reopen_due" not in reopened.state and "paused_until" not in reopened.state
 
@@ -163,7 +200,7 @@ async def test_in_the_months_last_week_all_four_close_and_reopen_on_next_months_
 async def test_a_reopen_that_cant_be_had_is_tried_again_whatever_the_time(market):
     await market.check(at(4, 9, 30))
     await market.check(at(9, 15, 0))
-    market.no_book = {(DEC, 24000.0, "CE")}
+    market.no_book = {(DEC, 23850.0, "CE")}
     waiting = await market.check(at(17, 15, 0), spot=23560.0)
     assert waiting.state.get("position") is None and waiting.state.get("reopen_due") and "no bid/ask" in waiting._last_reason
     market.no_book = set()
@@ -186,7 +223,7 @@ async def test_the_telegram_alerts_show_the_setup_the_roll_and_the_extremes(mark
     title, body = entry_message("Conti Calendar 400 15 MIN", opened.opened_legs, opened.state["position"], opened.now)
     lines = body.split("\n")
     assert title == "📅 Conti Calendar 400 15 MIN: trade taken"
-    assert lines[0] == "Double Calendar" and "23,900 CE / 23,100 PE" in lines and "16 lots a leg" in lines
+    assert lines[0] == "Double Calendar" and "23,750 CE / 23,200 PE" in lines and "16 lots a leg" in lines
     assert "Target +14,000 after costs" in lines and "Held overnight; weeklies" in lines
     assert max(len(line) for line in lines) <= WIDTH
 
@@ -228,7 +265,7 @@ async def test_the_card_shows_the_payoff_at_the_weekly_roll_with_what_rolls_book
     first = (await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))).payoff
     assert first is not None and first.horizon == at(9, 15, 0) and first.booked == 0.0 and first.target == 14_000.0
     assert first.points[0].spot == 22460.0 and first.points[-1].spot == 24460.0
-    inside = max(p.pnl for p in first.points if 23100.0 <= p.spot <= 23900.0)
+    inside = max(p.pnl for p in first.points if PE <= p.spot <= CE)
     outside = max(p.pnl for p in first.points if p.spot < 22800.0 or p.spot > 24200.0)
     assert inside > outside  # the tent: best between the strikes
 

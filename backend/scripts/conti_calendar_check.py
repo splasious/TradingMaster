@@ -33,7 +33,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "b06beb715e2e655bd2de770b5a81684e",
-         "Conti Calendar 400 15 MIN": "3065392a5b1c7feb6c40879341d5b932",
+         "Conti Calendar 400 15 MIN": "0fa1f372a0d6c83bc455d24dd2931bb9",
          "Conti Reverse Calendar 15 MIN": "6af8f071e4b34e157dde754a6068d7fc"}
 LISTEN_SECONDS = 6
 
@@ -69,7 +69,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
             if NAME == "Conti Calendar 400 15 MIN":
                 if position:
                     opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
-                    print(f"    opened {opened}: {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE (ATM {position['atm']:,.0f}), "
+                    basis = f"ATM {position['atm']:,.0f}" if position.get("atm") is not None else f"weekly bids >= {position.get('min_premium', 100):,.0f}"
+                    print(f"    opened {opened}: {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE ({basis}), "
                           f"weekly {position['weekly_expiry']}, monthly {position['monthly_expiry']}, rolls {position.get('rolls', 0)}")
                     for name, leg in position["legs"].items():
                         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
