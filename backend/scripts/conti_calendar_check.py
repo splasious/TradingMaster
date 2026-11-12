@@ -24,6 +24,7 @@ import websockets
 from sqlalchemy import func, select
 
 from app.core.security import create_access_token
+from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade, PaperPortfolio
@@ -78,6 +79,14 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     print(f"    checked at {position.get('checked_at', '-')}; extremes tracked: {position.get('max_profit_reached') is not None}")
                 else:
                     print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
+                closes = (await db.execute(
+                    select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
+                    .where(PaperNativeTrade.deployment_id == card.id).order_by(PaperNativeTrade.closed_at.desc()).limit(5)
+                )).all()
+                for reason, opened_at, closed_at, legs in closes:  # times, reasons and strikes only
+                    strikes = sorted({f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs if leg.get("strike")})
+                    print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
+                          f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {len(legs)} legs {', '.join(strikes)}")
                 continue
             if NAME not in ("Conti Calendar 15 MIN", "Conti Reverse Calendar 15 MIN"):
                 continue
