@@ -1224,9 +1224,10 @@ async def test_conti_calendar_and_conti_calendar_400_move_onto_the_1_minute_paus
     ):
         migration = _load(migration_name)
         assert migration.down_revision == down and migration.BUILT_IN.name == built_in
-        if name == "Conti Calendar 400 15 MIN":  # version 3 moves on from it (12 Nov)
-            assert _load("f6b8a0c2d4e9_conti_calendar_400_premium_strikes").FROM_MD5S == {migration.TO_MD5}
-            migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in is version 3 now: the mechanics are what's tested here
+        later = {"Conti Calendar 400 15 MIN": "f6b8a0c2d4e9_conti_calendar_400_premium_strikes",  # version 3 moves on from it
+                 "Conti Calendar 15 MIN": "a8c0e2b4d6f1_conti_calendar_carry_in_loss"}[name]  # version 11 (12 Nov)
+        assert _load(later).FROM_MD5S == {migration.TO_MD5}
+        migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
         assert _md5(migration.BUILT_IN) == migration.TO_MD5
         assert "PAUSE_AFTER_CLOSE = timedelta(minutes=1)" in migration.BUILT_IN.read_text(encoding="utf-8")
         before = f"# {name}, the version before: a 5-minute pause\n"
@@ -1271,6 +1272,35 @@ async def test_conti_calendar_400_moves_onto_the_rs_100_strikes_keeping_its_open
         .order_by(StrategyVersion.version_number)
     )).all()
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
+async def test_conti_calendar_and_conti_reverse_calendar_move_onto_carrying_a_loss_keeping_their_positions(db_engine, db_session):
+    """12 Nov: Conti Calendar 15 MIN version 11, Conti Reverse Calendar 15 MIN version 2."""
+    for name, migration_name, down, built_in, email in (
+        ("Conti Calendar 15 MIN", "a8c0e2b4d6f1_conti_calendar_carry_in_loss", "f6b8a0c2d4e9", "nifty_conti_calendar.py", "cal11"),
+        ("Conti Reverse Calendar 15 MIN", "b0d2f4a6c8e3_conti_reverse_calendar_carry_in_loss", "a8c0e2b4d6f1",
+         "nifty_conti_reverse_calendar.py", "rev2"),
+    ):
+        migration = _load(migration_name)
+        assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == down and migration.BUILT_IN.name == built_in
+        assert "ROLL_TIME = dtime(15, 0)" in migration.BUILT_IN.read_text(encoding="utf-8")
+        before = f"# {name}, the version before: closed at 15:29 whatever the profit\n"
+        migration.FROM_MD5S = {_md5_text(before)}
+        running = await _deployment(db_session, f"{email}_a@tradingmaster.internal", before)
+        (await db_session.get(Strategy, running.strategy_id)).name = name
+        state = {"position": {"strike": 25350, "legs": {}}, "last_closed_at": "2026-11-11T09:00:00+00:00"}
+        running.state = state
+        await db_session.commit()
+
+        await _run(db_engine, migration)
+        await _run(db_engine, migration)  # once is all
+
+        await db_session.refresh(running)
+        numbers = (await db_session.execute(
+            select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+            .order_by(StrategyVersion.version_number)
+        )).all()
+        assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state, name
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

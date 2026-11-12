@@ -150,35 +150,91 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
     assert p["entry_charges"] > 0 and "16 lots a leg" in ctx._last_reason and ctx._last_signal == "CALENDAR"
 
 
-async def test_if_the_take_profit_hasnt_come_all_four_close_at_1529_every_day_and_the_next_opens_at_0930(market):
-    """8 Nov (version 8): the daily close is 15:29 -- not 15:30 itself, when
-    NSE shuts and the app runs no strategy; still no new entry after 15:00."""
+def gain(market, position: dict, each: float) -> None:
+    """Price every leg so that closing it now gains `each` a unit (a loss when
+    negative): a sold leg's ask, a bought leg's bid, `each` the right side of its entry."""
+    for leg in position["legs"].values():
+        option = next(o for o in market.options if str(o.id) == leg["instrument_id"])
+        close_at = leg["entry_price"] - each if leg["side"] == "sell" else leg["entry_price"] + each
+        market.premium[(option.expiry, option.strike, option.option_type)] = close_at - SPREAD if leg["side"] == "sell" else close_at + SPREAD
+
+
+async def test_at_1529_one_in_profit_closes_and_one_in_loss_is_carried_overnight(market):
+    """12 Nov (version 11): at 15:29, with the take-profit not reached, a
+    position in profit ("Net if closed now" Rs 0 or more) closes; one in loss
+    is carried -- the take-profit checked every second, each later 15:29
+    deciding the same way. Not 15:30 itself; no new entry after 15:00."""
     assert cal.DAILY_CLOSE == dtime(15, 29) and cal.ENTRY_UNTIL == dtime(15, 0)
-    await market.check(at(4, 9, 30))
-    still = await market.check(at(4, 15, 0))  # 15:00 no longer closes it
-    assert still.state["position"] is not None and "closes at 15:29 otherwise" in still._last_reason
+    p = (await market.check(at(4, 9, 30))).state["position"]
     held = await market.check(at(4, 15, 28, 59))
-    assert held.state["position"] is not None and "closes at 15:29 otherwise" in held._last_reason
+    assert held.state["position"] is not None and "at 15:29 closed in profit, carried in loss" in held._last_reason
     assert held.state["position"]["net_if_closed_now"] < 0  # the spreads and charges paid, nothing earned yet
-    closed = await market.check(at(4, 15, 29))
-    assert closed.state["position"] is None and closed._last_reason.startswith("15:29 close: all four legs closed at bid/ask")
+    carried = await market.check(at(4, 15, 29))
+    assert carried.state["position"] is not None and await market.trades() == []
+    assert "in loss at 15:29 -- carried overnight" in carried._last_reason and carried.state["position"]["carried_from"] == "2026-11-04"
+    assert carried._wake_at == at(4, 15, 29, 1)
+
+    morning = await market.check(at(5, 9, 15))  # no closing at the first check of the next day
+    assert morning.state["position"] is not None and morning._last_action == "hold"
+    gain(market, p, 3.0)  # in profit by 15:29, short of Rs 14,000
+    closed = await market.check(at(5, 15, 29))
+    assert closed.state.get("position") is None and closed._last_reason.startswith("15:29 close in profit (Rs ")
     [trade] = await market.trades()
     assert trade.exit_reason == "time_cutoff_329pm" and len(trade.legs) == 4
-    exits = {leg["side"]: leg for leg in trade.legs}
-    short_ltp = tick_engine.get_current_price(uuid.UUID(exits["short"]["instrument_id"]))
-    assert exits["short"]["exit_price"] == short_ltp + SPREAD  # bought back at the ask
-    later = await market.check(at(4, 15, 29, 10))
+    shorts = sorted(leg["exit_price"] for leg in trade.legs if leg["side"] == "short")
+    assert shorts == pytest.approx(sorted(p["legs"][n]["entry_price"] - 3.0 for n in ("short_ce", "short_pe")))  # bought back at the ask
+    later = await market.check(at(5, 15, 29, 10))
     assert later.state.get("position") is None and "outside entry window" in later._last_reason
-    nxt = await market.check(at(5, 9, 30))
+    market.premium.clear()
+    nxt = await market.check(at(6, 9, 30))
     assert nxt.state["position"] is not None and nxt.state["position"]["weekly_expiry"] == "2026-11-09"
 
 
-async def test_one_left_open_from_an_earlier_day_closes_at_its_first_check(market):
-    await market.check(at(4, 9, 30))  # and the app is down from before 15:29 until the next morning
-    ctx = await market.check(at(5, 9, 15))
-    assert ctx.state["position"] is None and "open since 04 Nov, past its 15:29 close" in ctx._last_reason
+async def test_a_carried_position_on_its_weekly_expiry_day_in_loss_is_rolled_into_a_new_one_at_1500(market):
+    """12 Nov (version 11): never held past its weekly's expiry. At 15:00
+    that day, in loss: all four close ("expiry_roll") and a new position
+    opens at once by the usual rule -- next week's weekly, its monthly, the
+    PCR's strike near NIFTY now -- whatever the time, the pause, the 14:00 rule."""
+    p = (await market.check(at(4, 9, 30))).state["position"]
+    await market.check(at(4, 15, 29))  # in loss: carried
+    gain(market, p, -2.0)
+    before = await market.check(at(9, 14, 59, 59))
+    assert before.state["position"]["weekly_expiry"] == W1.isoformat() and before._last_action == "hold"
+    rolled = await market.check(at(9, 15, 0), spot=23560.0)
     [trade] = await market.trades()
-    assert trade.exit_reason == "time_cutoff_329pm"
+    assert trade.exit_reason == "expiry_roll" and len(trade.legs) == 4
+    q = rolled.state["position"]
+    assert rolled._last_signal == "CALENDAR" and rolled._last_reason.startswith("expiry roll: the 09 Nov weekly expiring with Rs -")
+    assert (q["weekly_expiry"], q["monthly_expiry"]) == (W2.isoformat(), W3.isoformat()) and q["opened_at"] == at(9, 15, 0).astimezone(timezone.utc).isoformat()
+    assert "reopen_due" not in rolled.state and rolled._wake_at == at(9, 15, 0, 1)
+
+
+async def test_a_carried_position_on_its_weekly_expiry_day_in_profit_just_closes(market):
+    p = (await market.check(at(4, 9, 30))).state["position"]
+    await market.check(at(4, 15, 29))  # in loss: carried
+    gain(market, p, 3.0)  # by the expiry day it's in profit, short of Rs 14,000
+    done = await market.check(at(9, 15, 0))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "weekly_expiry_3pm" and done.state.get("position") is None
+    assert done._last_reason.startswith("the 09 Nov weekly expiring, in profit")
+    later = await market.check(at(9, 15, 0, 30))
+    assert later.state.get("position") is None and "outside entry window" in later._last_reason  # nothing new that day
+
+
+async def test_a_roll_missed_while_the_app_was_down_happens_at_the_first_check_after(market):
+    await market.check(at(4, 9, 30))
+    await market.check(at(4, 15, 29))  # carried
+    late = await market.check(at(11, 9, 20))  # down over 9 Nov's 15:00 (10 Nov a holiday): the weekly has expired
+    [trade] = await market.trades()
+    assert trade.exit_reason == "expiry_roll"  # in loss: rolled at once, before the entry window even
+    assert late.state["position"]["weekly_expiry"] == W2.isoformat() and late.state["position"]["monthly_expiry"] == W3.isoformat()
+
+
+async def test_with_a_leg_unquoted_at_1529_profit_or_loss_cant_be_told_so_it_is_held(market):
+    await market.check(at(4, 9, 30))
+    market.no_book = {(W1, 23450.0, "CE")}
+    held = await market.check(at(4, 15, 29))
+    assert held.state["position"] is not None and "profit or loss unknown, held" in held._last_reason
 
 
 async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14000_after_charges(market):
@@ -224,7 +280,7 @@ async def test_it_takes_the_profit_once_closing_now_at_bid_and_ask_would_give_14
 async def test_on_an_expiry_day_it_opens_on_next_weeks_and_in_the_months_last_week_buys_next_months(market):
     expiry_day = await market.check(at(9, 9, 30))
     assert expiry_day.state["position"]["weekly_expiry"] == "2026-11-17"
-    assert (await market.check(at(9, 15, 29))).state["position"] is None  # closed at 15:29 like any day
+    assert (await market.check(at(9, 15, 29))).state["position"] is not None  # in loss at 15:29: carried (version 11)
     market.deployment.state = None
     market.weeklies = [W3, DEC]
     last_week = await market.check(at(18, 9, 30))
@@ -294,7 +350,7 @@ async def test_the_telegram_entry_alert_carries_the_setup_with_its_close_figures
     assert payoff is not None and payoff.horizon == at(4, 15, 29) and payoff.target == cal.TAKE_PROFIT
     title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
     assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
-    assert "Target +14,000 after costs" in body and "Exit 15:29 if not hit" in body and "At 15:29, IV as now:" in body and " Max loss " in body
+    assert "Target +14,000 after costs" in body and "15:29: closed if in profit," in body and "At 15:29, IV as now:" in body and " Max loss " in body
     assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None
 
 
@@ -366,9 +422,9 @@ async def test_a_close_from_1400_ends_the_days_new_trades_and_one_before_is_held
     assert (await market.check(at(5, 9, 30))).state["position"] is not None  # the next morning as usual
 
     held = await market.check(at(5, 14, 30))  # opened before 14:00, short of the take-profit: held
-    assert held.state["position"] is not None and "closes at 15:29 otherwise" in held._last_reason
-    closed = await market.check(at(5, 15, 29))
-    assert closed.state["position"] is None and closed._last_reason.startswith("15:29 close")
+    assert held.state["position"] is not None and "at 15:29 closed in profit, carried in loss" in held._last_reason
+    carried = await market.check(at(5, 15, 29))  # in loss at 15:29: carried overnight (version 11)
+    assert carried.state["position"] is not None and "carried overnight" in carried._last_reason
 
 
 async def test_a_take_profit_from_1400_also_ends_the_days_new_trades(market):
@@ -398,7 +454,7 @@ async def test_while_a_position_is_open_it_asks_to_be_checked_again_a_second_on(
     assert "no bid/ask for short_ce" in waiting._last_reason and waiting._wake_at == at(4, 9, 30, 3)
     market.no_book = set()
     closed = await market.check(at(4, 15, 29))
-    assert closed.state["position"] is None and closed._wake_at is None  # the day's close: nothing until tomorrow
+    assert closed.state["position"] is not None and closed._wake_at == at(4, 15, 29, 1)  # in loss: carried, still watched
 
 
 async def test_the_card_can_fetch_its_position_alone(market, client, monkeypatch):

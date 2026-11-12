@@ -14,7 +14,7 @@ import app.services.strategy.native_strategies.nifty_conti_reverse_calendar as r
 from app.models.paper_trading import PaperNativeTrade
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import NativeContext
-from tests.test_conti_calendar import SPREAD, W1, W3, Market, at
+from tests.test_conti_calendar import SPREAD, W1, W2, W3, Market, at, gain
 
 
 class ReverseMarket(Market):
@@ -76,20 +76,41 @@ async def test_it_takes_the_profit_at_14000_after_charges_then_pauses(market):
     assert paused.state.get("position") is None and "next entry from 11:01:00" in paused._last_reason
 
 
-async def test_it_closes_at_1529_and_takes_no_new_trade_after_a_close_from_1400(market):
-    await market.check(at(4, 9, 30))
-    held = await market.check(at(4, 15, 28, 59))
-    assert held.state["position"] is not None
-    closed = await market.check(at(4, 15, 29))
-    assert closed.state.get("position") is None and closed._last_reason.startswith("15:29 close")
+async def test_at_1529_in_profit_it_closes_in_loss_it_is_carried_and_no_new_trade_after_a_close_from_1400(market):
+    """12 Nov (version 2, as Conti Calendar's version 11)."""
+    p = (await market.check(at(4, 9, 30))).state["position"]
+    carried = await market.check(at(4, 15, 29))  # in loss (the spreads and charges): carried
+    assert carried.state["position"] is not None and "carried overnight" in carried._last_reason and await market.trades() == []
+    gain(market, p, 3.0)
+    closed = await market.check(at(5, 15, 29))
+    assert closed.state.get("position") is None and closed._last_reason.startswith("15:29 close in profit")
     [trade] = await market.trades()
     assert trade.exit_reason == "time_cutoff_329pm"
 
-    await market.check(at(5, 13, 0))
+    market.premium.clear()
+    await market.check(at(6, 13, 0))
     market.deployment.state = {**market.deployment.state, "force_exit": True}
-    await market.check(at(5, 14, 10))
-    later = await market.check(at(5, 14, 30))
+    await market.check(at(6, 14, 10))
+    later = await market.check(at(6, 14, 30))
     assert later.state.get("position") is None and later._last_reason.startswith("no new trade today")
+
+
+async def test_on_its_weekly_expiry_day_in_loss_it_is_rolled_into_a_new_one_and_in_profit_just_closes(market):
+    p = (await market.check(at(4, 9, 30))).state["position"]
+    await market.check(at(4, 15, 29))  # carried
+    gain(market, p, -2.0)
+    rolled = await market.check(at(9, 15, 0), spot=23560.0)
+    [trade] = await market.trades()
+    q = rolled.state["position"]
+    assert trade.exit_reason == "expiry_roll" and rolled._last_reason.startswith("expiry roll: the 09 Nov weekly expiring")
+    assert q["regime"] == "reverse calendar" and (q["weekly_expiry"], q["monthly_expiry"]) == (W2.isoformat(), W3.isoformat())
+    assert {leg["side"] for name, leg in q["legs"].items() if name.startswith("long")} == {"buy"}  # still the weekly bought
+
+    gain(market, q, 3.0)
+    market.deployment.state = {**market.deployment.state, "position": {**q, "weekly_expiry": "2026-11-16"}}  # its weekly due: 16 Nov
+    done = await market.check(at(16, 15, 0), spot=23560.0)
+    assert done.state.get("position") is None and done._last_reason.startswith("the 16 Nov weekly expiring, in profit")
+    assert [t.exit_reason for t in await market.trades()] == ["expiry_roll", "weekly_expiry_3pm"]
 
 
 async def test_the_card_shows_it_at_bid_and_ask_with_its_1529_payoff_and_names_the_trade(market):

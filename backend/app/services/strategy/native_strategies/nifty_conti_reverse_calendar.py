@@ -2,7 +2,8 @@
 Conti Reverse Calendar 15 MIN -- Conti Calendar 15 MIN the other way round (native)
 ==================================================================================
 
-Agreed 11 Nov: Conti Calendar 15 MIN (its version 10) with the sides
+Agreed 11 Nov: Conti Calendar 15 MIN (its version 10; version 2, 12 Nov: its
+version 11's carry and expiry roll) with the sides
 reversed -- the weekly bought and the monthly sold at one strike, everything
 else as it: four legs at one strike, LOTS_PER_LEG (16) lots each --
 
@@ -48,15 +49,23 @@ be run again then (ctx.wake_at) on top of the scheduler's 10-second cycle --
 and is run again right when a pause ends; a leg with no bid or no ask waits
 for one.
 
-Closed at 15:29 every day: when the take-profit hasn't come by DAILY_CLOSE, all four legs close
-then at bid / ask whatever the profit -- nothing is held overnight -- and
-the next one opens from 09:30 the next trading day. Not 15:30 itself: NSE
-shuts then and the app runs no strategy after 15:30:00, so 15:29 leaves a
-minute to find a leg's missing quote. New positions still open only until
-ENTRY_UNTIL (15:00), so each has at least 29 minutes. One still open from
-an earlier day (the app was down at the close) closes at its first check. No rolls: a position keeps its strike
-however far NIFTY goes. After a take-profit the next one opens at the next
-check once the pause is up, before 15:00. No stop-loss.
+The 15:29 close (version 11, 12 Nov; before it every position closed at
+DAILY_CLOSE, and one left from an earlier day at its first check): when
+the take-profit hasn't come by DAILY_CLOSE, a position IN PROFIT ("Net if
+closed now" at bid / ask after charges, Rs 0 or more) closes then at bid /
+ask; one IN LOSS is carried overnight -- the take-profit still checked
+every second -- and each later day's 15:29 decides the same way. Not 15:30
+itself: NSE shuts then and the app runs no strategy after 15:30:00. With a
+leg unquoted at 15:29 profit or loss can't be told: it's held and checked
+again. New positions open only until ENTRY_UNTIL (15:00).
+
+The expiry roll (version 11): a carried position is never held past its
+weekly's expiry. At ROLL_TIME (15:00) on that day -- or the first check
+after, the app down then -- it closes: IN LOSS ("expiry_roll") a new
+position opens at once by the usual rule (the PCR's strike near NIFTY now,
+on next week's weekly and its monthly), whatever the time, the pause and
+the 14:00 rule (state reopen_due, that day only); IN PROFIT
+("weekly_expiry_3pm") it just closes, nothing new that day. No stop-loss.
 
 A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a month's
 three letters) against a weekly's NIFTY26N1723700CE. In a backtest there is
@@ -86,6 +95,7 @@ ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
 DAILY_CLOSE = dtime(15, 29)  # every day, whatever's open closes at this time
 DAY_DONE_AFTER = dtime(14, 0)  # a close at or after this ends the day's new positions
+ROLL_TIME = dtime(15, 0)  # on a carried position's weekly expiry day: closed, and in loss rolled into a new one
 DAILY_CLOSE_REASON = "time_cutoff_329pm"  # its trade's exit_reason
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again
 PAUSE_AFTER_CLOSE = timedelta(minutes=1)  # no new position this soon after one closes
@@ -144,6 +154,12 @@ def charges_of(leg: dict, price: float, buying: bool) -> float:
     return order_charges({"option_type": leg["option_type"], "quantity": leg["quantity"]}, price, buying, False) or 0.0
 
 
+def net_at(position: dict, prices: dict[str, float]) -> float:
+    """The position's profit after every charge were each leg closed at `prices` (name -> price)."""
+    return (sum(leg_pnl(leg, prices[name]) for name, leg in position["legs"].items()) - position["entry_charges"]
+            - sum(charges_of(leg, prices[name], buying=leg["side"] == "sell") for name, leg in position["legs"].items()))
+
+
 def if_closed_now(position: dict, quotes: dict[str, tuple[float, float]]) -> tuple[float, float, dict[str, float]]:
     """(profit after every charge, the closing orders' charges, each leg's
     closing price) were all four closed now at `quotes` (name -> (bid, ask))."""
@@ -192,6 +208,7 @@ async def evaluate(ctx) -> None:
 
     force_exit = ctx.state.pop("force_exit", False)
     position = ctx.state.get("position")
+    rolled_note = ""
 
     async def close_all(exit_reason: str, prices: dict[str, float]) -> float:
         trade_legs, total = [], 0.0
@@ -241,14 +258,6 @@ async def evaluate(ctx) -> None:
             await close_all("manual", await forced_prices())
             ctx.note("exited", signal="COVER", reason=f"manual exit; {after_close()}")
             return
-        opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date()
-        if opened_day < today or now_ist.time() >= DAILY_CLOSE:
-            pnl = await close_all(DAILY_CLOSE_REASON, await forced_prices())
-            ctx.note("exited", signal="COVER", reason=(
-                f"{DAILY_CLOSE:%H:%M} close: all four legs closed at bid/ask, P&L {pnl:+,.0f} before charges" if opened_day == today
-                else f"open since {opened_day:%d %b}, past its {DAILY_CLOSE:%H:%M} close: all four legs closed, P&L {pnl:+,.0f} before charges"
-            ))
-            return
         quotes, missing = {}, []
         for name, leg in position["legs"].items():
             quote = await bid_ask(ctx, uuid.UUID(leg["instrument_id"]))
@@ -256,49 +265,106 @@ async def evaluate(ctx) -> None:
                 missing.append(name)
             else:
                 quotes[name] = quote
-        if missing:
+        net = prices = None
+        if not missing:
+            net, exit_charges, prices = if_closed_now(position, quotes)
+            position["net_if_closed_now"] = round(net, 2)
+            position["checked_at"] = now_ist.strftime("%d %b %H:%M:%S IST")
+            if net >= TAKE_PROFIT:
+                pnl = await close_all("take_profit", prices)
+                ctx.note("exited", signal="COVER", reason=(
+                    f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
+                    f"P&L {pnl:+,.0f} before charges; {after_close()}"  # wakes for the next one once the pause is up
+                ))
+                return
+        monthly = date.fromisoformat(position["monthly_expiry"])
+        if weekly < today or (weekly == today and now_ist.time() >= ROLL_TIME):
+            # its weekly expires today (or has, the app down at ROLL_TIME): never held past it
+            if missing and weekly == today and now_ist.time() < DAILY_CLOSE:
+                ctx.note("hold", reason=(
+                    f"reverse calendar {position['strike']:,.0f}: its {weekly:%d %b} weekly expires today; no bid/ask for "
+                    f"{', '.join(missing)} -- closed once all four have one"
+                ))
+                ctx.wake_at(now_utc + RECHECK)
+                return
+            if prices is None:
+                prices = await forced_prices()
+                net = net_at(position, prices)
+            if net < 0:  # in loss: closed, and a new one opened at once at the strike now
+                pnl = await close_all("expiry_roll", prices)
+                ctx.state.pop("paused_until", None)
+                ctx.state["reopen_due"] = today.isoformat()
+                rolled_note = (f"expiry roll: the {weekly:%d %b} weekly expiring with Rs {net:,.0f} in loss -- all four closed, "
+                               f"P&L {pnl:+,.0f} before charges; ")
+            else:  # in profit: closed, nothing new that day
+                pnl = await close_all("weekly_expiry_3pm", prices)
+                ctx.note("exited", signal="COVER", reason=(
+                    f"the {weekly:%d %b} weekly expiring, in profit (Rs {net:,.0f} after charges): all four closed at bid/ask, "
+                    f"P&L {pnl:+,.0f} before charges"
+                ))
+                return
+        elif now_ist.time() >= DAILY_CLOSE:  # version 11: in profit it closes, in loss it's carried overnight
+            if net is None:
+                ctx.note("hold", reason=(
+                    f"reverse calendar {position['strike']:,.0f}: no bid/ask for {', '.join(missing)} at the {DAILY_CLOSE:%H:%M} close -- "
+                    f"profit or loss unknown, held and checked again"
+                ))
+                ctx.wake_at(now_utc + RECHECK)
+                return
+            if net >= 0:
+                pnl = await close_all(DAILY_CLOSE_REASON, prices)
+                ctx.note("exited", signal="COVER", reason=(
+                    f"{DAILY_CLOSE:%H:%M} close in profit (Rs {net:,.0f} after charges): all four legs closed at bid/ask, "
+                    f"P&L {pnl:+,.0f} before charges"
+                ))
+                return
+            position["carried_from"] = position.get("carried_from") or today.isoformat()
             ctx.note("hold", reason=(
-                f"reverse calendar {position['strike']:,.0f} open; no bid/ask for {', '.join(missing)} -- "
-                f"take-profit checked once all four have one"
+                f"reverse calendar {position['strike']:,.0f}: Rs {net:,.0f} in loss at {DAILY_CLOSE:%H:%M} -- carried overnight; "
+                f"take-profit at Rs {TAKE_PROFIT:,.0f}; closes at a later {DAILY_CLOSE:%H:%M} in profit"
             ))
             ctx.wake_at(now_utc + RECHECK)
             return
-        net, exit_charges, prices = if_closed_now(position, quotes)
-        position["net_if_closed_now"] = round(net, 2)
-        position["checked_at"] = now_ist.strftime("%d %b %H:%M:%S IST")
-        if net >= TAKE_PROFIT:
-            pnl = await close_all("take_profit", prices)
-            ctx.note("exited", signal="COVER", reason=(
-                f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
-                f"P&L {pnl:+,.0f} before charges; {after_close()}"  # wakes for the next one once the pause is up
+        else:
+            if missing:
+                ctx.note("hold", reason=(
+                    f"reverse calendar {position['strike']:,.0f} open; no bid/ask for {', '.join(missing)} -- "
+                    f"take-profit checked once all four have one"
+                ))
+            else:
+                ctx.note("hold", reason=(
+                    f"reverse calendar {position['strike']:,.0f} (bought {weekly:%d %b}, sold {monthly:%d %b}): "
+                    f"Rs {net:,.0f} if closed now at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; "
+                    f"at {DAILY_CLOSE:%H:%M} closed in profit, carried in loss"
+                ))
+            ctx.wake_at(now_utc + RECHECK)
+            return
+
+    reopen = ctx.state.get("reopen_due")
+    reopening = reopen == today.isoformat()  # an expiry roll's new position: whatever the time, the pause, the 14:00 rule
+    if reopen and not reopening:
+        ctx.state.pop("reopen_due")  # one not had that day: the next opens by the usual rules
+    if reopening:
+        ctx.wake_at(now_utc + RECHECK)  # tried again a second on until it's had
+    else:
+        if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
+            ctx.note("skipped", reason=f"outside entry window ({ENTRY_TIME:%H:%M}-{ENTRY_UNTIL:%H:%M} IST)")
+            return
+        last_closed = ctx.state.get("last_closed_at")
+        closed_ist = datetime.fromisoformat(last_closed).astimezone(IST) if last_closed else None
+        if closed_ist is not None and closed_ist.date() == today and closed_ist.time() >= DAY_DONE_AFTER:
+            ctx.note("skipped", reason=(
+                f"no new trade today: the last closed at {closed_ist:%H:%M:%S}, after {DAY_DONE_AFTER:%H:%M}; next from {ENTRY_TIME:%H:%M} tomorrow"
             ))
             return
-        ctx.note("hold", reason=(
-            f"reverse calendar {position['strike']:,.0f} (bought {weekly:%d %b}, sold {date.fromisoformat(position['monthly_expiry']):%d %b}): "
-            f"Rs {net:,.0f} if closed now at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; "
-            f"closes at {DAILY_CLOSE:%H:%M} otherwise"
-        ))
-        ctx.wake_at(now_utc + RECHECK)
-        return
-
-    if not ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
-        ctx.note("skipped", reason=f"outside entry window ({ENTRY_TIME:%H:%M}-{ENTRY_UNTIL:%H:%M} IST)")
-        return
-    last_closed = ctx.state.get("last_closed_at")
-    closed_ist = datetime.fromisoformat(last_closed).astimezone(IST) if last_closed else None
-    if closed_ist is not None and closed_ist.date() == today and closed_ist.time() >= DAY_DONE_AFTER:
-        ctx.note("skipped", reason=(
-            f"no new trade today: the last closed at {closed_ist:%H:%M:%S}, after {DAY_DONE_AFTER:%H:%M}; next from {ENTRY_TIME:%H:%M} tomorrow"
-        ))
-        return
-    paused_until = ctx.state.get("paused_until")
-    if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
-        ctx.note("skipped", reason=(
-            f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minute{'s' if PAUSE_AFTER_CLOSE.seconds != 60 else ''} after the last close: "
-            f"next entry from {resume.astimezone(IST):%H:%M:%S}"
-        ))
-        ctx.wake_at(resume)
-        return
+        paused_until = ctx.state.get("paused_until")
+        if paused_until and now_utc < (resume := datetime.fromisoformat(paused_until)):
+            ctx.note("skipped", reason=(
+                f"paused {PAUSE_AFTER_CLOSE.seconds // 60} minute{'s' if PAUSE_AFTER_CLOSE.seconds != 60 else ''} after the last close: "
+                f"next entry from {resume.astimezone(IST):%H:%M:%S}"
+            ))
+            ctx.wake_at(resume)
+            return
 
     spot = await ctx.get_price(underlying.id)
     if spot is None:
@@ -366,6 +432,7 @@ async def evaluate(ctx) -> None:
                       "expiry": (weekly if which == "weekly" else monthly).isoformat(), "quantity": quantity, "entry_price": price}
         entry_charges += charges_of(legs[name], price, buying=order_side == "buy")
 
+    ctx.state.pop("reopen_due", None)
     ctx.state["position"] = {
         "regime": REGIME,
         "side": side,
@@ -383,7 +450,7 @@ async def evaluate(ctx) -> None:
     bought = legs["long_ce"]["entry_price"] + legs["long_pe"]["entry_price"]
     sold = legs["short_ce"]["entry_price"] + legs["short_pe"]["entry_price"]
     ctx.note("entered", signal="CALENDAR", reason=(
-        f"{side}-heavy reverse calendar opened at {strike:,.0f} (PCR {pcr:.3f}): buy {weekly:%d %b} CE+PE {bought:,.2f} at the ask, "
+        rolled_note + f"{side}-heavy reverse calendar opened at {strike:,.0f} (PCR {pcr:.3f}): buy {weekly:%d %b} CE+PE {bought:,.2f} at the ask, "
         f"sell {monthly:%d %b} CE+PE {sold:,.2f} at the bid; {LOTS_PER_LEG} lots a leg; take-profit Rs {TAKE_PROFIT:,.0f}"
     ))
     ctx.wake_at(now_utc + RECHECK)

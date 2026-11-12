@@ -33,9 +33,9 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "b06beb715e2e655bd2de770b5a81684e",
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8eccd7bd20441d55227be3a015d730ea",
          "Conti Calendar 400 15 MIN": "0fa1f372a0d6c83bc455d24dd2931bb9",
-         "Conti Reverse Calendar 15 MIN": "6af8f071e4b34e157dde754a6068d7fc"}
+         "Conti Reverse Calendar 15 MIN": "e0d7eecad581e0086d71857e0a5a1877"}
 LISTEN_SECONDS = 6
 
 

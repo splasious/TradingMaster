@@ -55,6 +55,7 @@ EXIT_REASONS = {
     "time_cutoff_3pm": "15:00 close",
     "time_cutoff_329pm": "15:29 close",
     "monthly_roll": "monthly roll",
+    "expiry_roll": "expiry roll, in loss",
     "weekly_expiry_3pm": "weekly expiry, 15:00",
 }
 MA_EXITS = {"ma_stop": "MA stop", "ma_exit": "MA exit"}
@@ -144,7 +145,8 @@ def _calendar_setup(legs: list[dict], position: dict, payoff: Payoff | None) -> 
     target = position.get("take_profit")
     if isinstance(target, (int, float)):
         lines.append(f"Target +{target:,.0f} after costs")
-    lines.append(f"Exit {EXIT_TIME:%H:%M} if not hit")
+    lines.append(f"{EXIT_TIME:%H:%M}: closed if in profit,")  # version 11: a losing one is carried
+    lines.append(" carried overnight if in loss")
     if payoff is None:
         return lines
     lines.append(f"At {EXIT_TIME:%H:%M}, IV as now:")

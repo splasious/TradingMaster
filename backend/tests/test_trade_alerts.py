@@ -110,7 +110,7 @@ def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
         "Calendar · PCR 0.850", "Time 09:30:08", "Strike 24,300 · 16 lots a leg",
         "SELL NIFTY26N0924300CE", "  16 lots @ 163.45", "SELL NIFTY26N0924300PE", "  16 lots @ 138.15",
         "BUY NIFTY26NOV24300CE", "  16 lots @ 320.00", "BUY NIFTY26NOV24300PE", "  16 lots @ 253.30",
-        "Net debit 282,568", "Target +14,000 after costs", "Exit 15:29 if not hit",
+        "Net debit 282,568", "Target +14,000 after costs", "15:29: closed if in profit,", " carried overnight if in loss",
         "At 15:29, IV as now:", " Breakeven 24,243-24,366", " Max profit +2,819 @24,300", " Max loss -274,390 (±1,000)",
         " 14,000 not reached by 15:29",
     ]
@@ -119,7 +119,7 @@ def test_a_calendars_entry_carries_its_whole_setup_within_the_groups_width():
     flat = Payoff(**{**payoff.__dict__, "max_profit": -1200.0, "breakeven_low": None, "breakeven_high": None})
     assert {" No profit at any level", " Best case -1,200 @24,300"} <= set(lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8), flat)))
     without = lines(entry_message("Conti Calendar 15 MIN", legs, position, at(9, 30, 8)))  # figures not worked out
-    assert without[-1] == "Exit 15:29 if not hit"
+    assert without[-2:] == ["15:29: closed if in profit,", " carried overnight if in loss"]
 
     closed = exit_message("Conti Calendar 15 MIN", {
         "legs": [{"instrument_symbol": "NIFTY26N0924300CE", "side": "short", "quantity": 1040, "lot_size": 65,
