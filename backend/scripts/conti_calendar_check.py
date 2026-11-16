@@ -108,6 +108,19 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     held = ", ".join(f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs)
                     print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
                           f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {held}")
+                from app.models.pcr import PcrSnapshot  # NIFTY market data: today's records, as the card reads them
+
+                today = datetime.now(timezone.utc).astimezone(IST).date()
+                snaps = (await db.execute(
+                    select(PcrSnapshot).where(PcrSnapshot.underlying == "NIFTY", PcrSnapshot.session_date == today).order_by(PcrSnapshot.ts)
+                )).scalars().all()
+                print("    today's records (close: day's change put / call -> side | last 15 min put / call -> side; captured after):")
+                side = lambda put, call: "-" if put is None or call is None or put == call else ("CALL" if put > call else "PUT")  # noqa: E731
+                for snap in snaps:
+                    lag = (as_aware_utc(snap.captured_at) - as_aware_utc(snap.ts)).total_seconds()
+                    print(f"      {as_aware_utc(snap.ts).astimezone(IST):%H:%M}: day {snap.put_oi_change_day} / {snap.call_oi_change_day} -> "
+                          f"{side(snap.put_oi_change_day, snap.call_oi_change_day)} | 15m {snap.put_oi_change} / {snap.call_oi_change} -> "
+                          f"{side(snap.put_oi_change, snap.call_oi_change)}; {snap.source} {lag:+.0f}s")
                 continue
             if NAME not in ("Conti Calendar 15 MIN", "Conti Reverse Calendar 15 MIN"):
                 continue
