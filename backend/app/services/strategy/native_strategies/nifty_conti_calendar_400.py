@@ -4,7 +4,8 @@ Conti Calendar 400 15 MIN -- a double calendar on the OTM strikes nearest a Rs 1
 
 Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
 11 Nov: the pause after a close cut to 1 minute; version 3, 12 Nov: the
-strikes by premium, not 400 points out): instead of one strike's straddle
+strikes by premium, not 400 points out; version 4, 16 Nov: the next weekly
+when the nearest has no Rs 100 strike): instead of one strike's straddle
 calendar, a call calendar on an OTM call and a put calendar on an OTM put,
 LOTS_PER_LEG (16) lots each, every fill at the order book's best price (a
 sell at the bid, a buy at the ask):
@@ -24,9 +25,16 @@ check (the next tries again); none at Rs 100 or more on a side, none at all.
 Every new position is picked so -- the monthly roll's reopen too; a weekly
 roll keeps its position's strikes.
 
-Weekly: the nearest weekly expiry, next week's on an expiry day itself.
+Weekly: the nearest weekly expiry, next week's on an expiry day itself --
+or (version 4) the expiry after it when the nearest has, on either side, no
+OTM strike whose bid is still MIN_PREMIUM (the day before an expiry, its
+calls or puts worth little more than their last day): both sides then sold
+on that later expiry at its Rs 100 strikes. Only that one step: none there
+either, no entry that check. A strike on the way with no book is no reason
+to move on -- the next check tries the nearest again.
 Monthly: the nearest monthly expiry after that weekly -- this month's, or
-next month's in the month's last week.
+next month's in the month's last week (or when the later expiry is this
+month's monthly itself).
 
 Opened from 09:30 (ENTRY_TIME) to 15:00 whenever none is open, and never
 within PAUSE_AFTER_CLOSE (1 minute; 5 in version 1) of the last one closing (kept in the
@@ -381,34 +389,52 @@ async def evaluate(ctx) -> None:
         ctx.note("skipped", reason=f"no monthly NIFTY expiry after {weekly:%d %b} in the catalog yet")
         return
 
-    async def premium_strike(option_type: str) -> tuple[float | None, str]:
-        """(the furthest OTM strike whose weekly bid is MIN_PREMIUM or more, "")
-        or (None, why not)."""
-        found, step = None, STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
-        for k in range(MAX_STEPS):
-            strike = first_otm(spot, option_type) + k * step
-            instrument = await ctx.find_option(underlying.id, weekly, strike, option_type)
-            if instrument is None:
-                break  # past the catalog's last strike
-            quote = await bid_ask(ctx, instrument.id)
-            if quote is None:
-                return None, f"no bid/ask for the {weekly:%d %b} {strike:,.0f} {option_type} yet"
-            if quote[0] < MIN_PREMIUM:
-                break
-            found = strike
-        if found is None:
-            return None, f"no OTM {weekly:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more"
-        return found, ""
+    async def premium_strikes(expiry: date) -> tuple[dict[str, float] | None, str, str | None]:
+        """({"CE": strike, "PE": strike}, "", None) -- on each side the
+        furthest OTM strike whose `expiry` bid is MIN_PREMIUM or more -- or
+        (None, why not, the side -- "CE" or "PE" -- with no strike at
+        MIN_PREMIUM, None when it was a strike with no book yet)."""
+        strikes: dict[str, float] = {}
+        for option_type in ("CE", "PE"):
+            found, step = None, STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
+            for k in range(MAX_STEPS):
+                strike = first_otm(spot, option_type) + k * step
+                instrument = await ctx.find_option(underlying.id, expiry, strike, option_type)
+                if instrument is None:
+                    break  # past the catalog's last strike
+                quote = await bid_ask(ctx, instrument.id)
+                if quote is None:
+                    return None, f"no bid/ask for the {expiry:%d %b} {strike:,.0f} {option_type} yet", None
+                if quote[0] < MIN_PREMIUM:
+                    break
+                found = strike
+            if found is None:
+                return None, f"no OTM {expiry:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more", option_type
+            strikes[option_type] = found
+        return strikes, "", None
 
-    strikes: dict[str, float] = {}
-    for option_type in ("CE", "PE"):
-        strike, why = await premium_strike(option_type)
-        if strike is None:
-            ctx.note("skipped", reason=why)
-            if reopening:
-                ctx.wake_at(now_utc + RECHECK)
-            return
-        strikes[option_type] = strike
+    strikes, why, short_side = await premium_strikes(weekly)
+    passed_note = ""  # version 4: the nearest weekly had no Rs 100 strike on a side, the next expiry sold instead
+    if strikes is None and short_side is not None:
+        later = next((e for e in expiries if e > weekly), None)
+        later_monthly = await monthly_after(ctx, underlying.id, later) if later is not None else None
+        if later is None:
+            why += "; no later expiry listed to sell instead"
+        elif later_monthly is None:
+            why += f"; no monthly NIFTY expiry after {later:%d %b} in the catalog yet to buy against the {later:%d %b}"
+        else:
+            later_strikes, later_why, _ = await premium_strikes(later)
+            if later_strikes is None:
+                why += f"; nor the next: {later_why}"
+            else:
+                passed_note = (f" (the {weekly:%d %b} weekly had no OTM {short_side} with a bid of Rs {MIN_PREMIUM:,.0f} or more: "
+                               f"the next expiry instead)")
+                weekly, monthly, strikes = later, later_monthly, later_strikes
+    if strikes is None:
+        ctx.note("skipped", reason=why)
+        if reopening:
+            ctx.wake_at(now_utc + RECHECK)
+        return
     chosen: dict[str, tuple[Instrument, float]] = {}
     for name, option_type, order_side, which in LEGS:
         expiry = weekly if which == "weekly" else monthly
@@ -462,7 +488,7 @@ async def evaluate(ctx) -> None:
         (rolled_note or ("monthly roll's reopen: " if reopening else ""))
         + f"double calendar opened, NIFTY {spot:,.1f}: {strikes['CE']:,.0f} CE (bid {chosen['short_ce'][1]:,.2f}) and "
         f"{strikes['PE']:,.0f} PE (bid {chosen['short_pe'][1]:,.2f}), the furthest OTM with a weekly bid of Rs {MIN_PREMIUM:,.0f} or more, "
-        f"sell {weekly:%d %b} at the bid, buy {monthly:%d %b} at the ask; net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
+        f"sell {weekly:%d %b} at the bid{passed_note}, buy {monthly:%d %b} at the ask; net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
         f"take-profit Rs {TAKE_PROFIT:,.0f}"
     ))
     ctx.wake_at(now_utc + RECHECK)

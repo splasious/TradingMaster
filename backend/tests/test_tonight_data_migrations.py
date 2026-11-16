@@ -1253,7 +1253,9 @@ async def test_conti_calendar_and_conti_calendar_400_move_onto_the_1_minute_paus
 
 async def test_conti_calendar_400_moves_onto_the_rs_100_strikes_keeping_its_open_position(db_engine, db_session):
     migration = _load("f6b8a0c2d4e9_conti_calendar_400_premium_strikes")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e4a6c8f0b2d7"
+    assert migration.down_revision == "e4a6c8f0b2d7"
+    assert _load("c2e4a6b8d0f5_conti_calendar_400_next_weekly").FROM_MD5S == {migration.TO_MD5}  # version 4 moves on from it (16 Nov)
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert "MIN_PREMIUM = 100.0" in migration.BUILT_IN.read_text(encoding="utf-8")
     v2 = "# Conti Calendar 400 15 MIN, version 2: ATM +-400\n"
     migration.FROM_MD5S = {_md5_text(v2)}
@@ -1301,6 +1303,37 @@ async def test_conti_calendar_and_conti_reverse_calendar_move_onto_carrying_a_lo
             .order_by(StrategyVersion.version_number)
         )).all()
         assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state, name
+
+
+async def test_conti_calendar_400_moves_onto_the_next_weekly_fallback_keeping_its_open_position(db_engine, db_session):
+    """16 Nov: Conti Calendar 400 15 MIN version 4."""
+    migration = _load("c2e4a6b8d0f5_conti_calendar_400_next_weekly")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "b0d2f4a6c8e3"
+    assert "the next expiry instead" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v3 = "# Conti Calendar 400 15 MIN, version 3: the nearest weekly's Rs 100 strikes or none\n"
+    migration.FROM_MD5S = {_md5_text(v3)}
+    running = await _deployment(db_session, "c400v4_a@tradingmaster.internal", v3)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    edited = await _deployment(db_session, "c400v4_b@tradingmaster.internal", "# Conti Calendar 400 15 MIN, edited by hand\n")
+    (await db_session.get(Strategy, edited.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    state = {"paused_until": "2026-11-16T03:46:58+00:00", "position": None}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    version = await db_session.get(StrategyVersion, moved.strategy_version_id)
+    assert version.python_code == migration.BUILT_IN.read_text(encoding="utf-8")
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # left alone
 
 
 # ------------------------------- Conti Ladder Straddle steps with NIFTY --

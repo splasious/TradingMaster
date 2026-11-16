@@ -3,7 +3,8 @@
 sold and the monthly CE bought at an OTM call strike, the weekly PE sold
 and the monthly PE bought at an OTM put strike (since version 3, 12 Nov:
 on each side the furthest OTM 50-point strike whose weekly bid is still
-Rs 100 or more; ATM+-400 before), 16 lots a leg at bid / ask -- held overnight, the sold weeklies rolled at 15:00 on their expiry
+Rs 100 or more; ATM+-400 before; since version 4, 16 Nov: the next expiry
+when the nearest has no such strike on a side), 16 lots a leg at bid / ask -- held overnight, the sold weeklies rolled at 15:00 on their expiry
 day (all four reopened on next month's monthly in the month's last week),
 closed at Rs 14,000 after charges, every trade keeping the most profit and
 loss it reached."""
@@ -94,9 +95,10 @@ async def test_each_side_takes_the_furthest_otm_strike_whose_weekly_bid_is_still
     assert (edge.state["position"]["strike_ce"], edge.state["position"]["strike_pe"]) == (23350.0, 23000.0)
     market.deployment.state = None
 
-    market.premium = {(W2, k, "CE"): 99.0 for k in range(23000, 24001, 50)}  # no call at Rs 100 or more on the 17 Nov weekly
+    market.premium = {(e, k, "CE"): 99.0 for e in (W2, W3) for k in range(23000, 24001, 50)}  # no call at Rs 100 on 17 or 23 Nov
     none = await market.check(at(9, 9, 30))
-    assert none.state.get("position") is None and none._last_reason == "no OTM 17 Nov CE with a bid of Rs 100 or more"
+    assert none.state.get("position") is None and none._last_reason == (
+        "no OTM 17 Nov CE with a bid of Rs 100 or more; nor the next: no OTM 23 Nov CE with a bid of Rs 100 or more")
 
     market.premium = {}
     market.no_book = {(W2, 23300.0, "PE")}  # an OTM put on the way out with no book: no entry this check
@@ -104,6 +106,48 @@ async def test_each_side_takes_the_furthest_otm_strike_whose_weekly_bid_is_still
     assert waiting.state.get("position") is None and waiting._last_reason == "no bid/ask for the 17 Nov 23,300 PE yet"
     market.no_book = set()
     assert (await market.check(at(9, 9, 32))).state["position"] is not None  # the next check: in
+
+
+async def test_with_no_rs_100_strike_on_the_nearest_weekly_it_sells_the_next_expiry(market):
+    """16 Nov (version 4): the day before the 17 Nov expiry no OTM call bid
+    Rs 100 -- both sides then sold on the expiry after it (23 Nov, November's
+    monthly) at its Rs 100 strikes, December's monthly bought."""
+    market.premium = {(W2, k, "CE"): 60.0 for k in range(23000, 24001, 50)}  # the 17 Nov calls, a day from expiry
+    ctx = await market.check(at(16, 9, 30))
+    p = ctx.state["position"]
+    assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat())
+    assert (p["strike_ce"], p["strike_pe"]) == (CE, PE)  # the 23 Nov's Rs 100 strikes
+    assert _legs(p) == {
+        "short_ce": ("sell", "CE", CE, W3.isoformat()), "long_ce": ("buy", "CE", CE, DEC.isoformat()),
+        "short_pe": ("sell", "PE", PE, W3.isoformat()), "long_pe": ("buy", "PE", PE, DEC.isoformat()),
+    }
+    assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(103.5) and ctx._last_signal == "CALENDAR"
+    assert ("sell 23 Nov at the bid (the 17 Nov weekly had no OTM CE with a bid of Rs 100 or more: the next expiry instead), "
+            "buy 29 Dec at the ask") in ctx._last_reason
+    market.deployment.state = None
+
+    market.premium = {(W2, k, "PE"): 60.0 for k in range(23000, 24001, 50)}  # the puts short instead: the same
+    puts = await market.check(at(16, 9, 31))
+    assert puts.state["position"]["weekly_expiry"] == W3.isoformat() and "no OTM PE with a bid" in puts._last_reason
+    market.deployment.state = None
+
+    market.premium = {}
+    near = await market.check(at(16, 9, 32))  # Rs 100 on the nearest: it is sold
+    assert (near.state["position"]["weekly_expiry"], near.state["position"]["monthly_expiry"]) == (W2.isoformat(), W3.isoformat())
+    assert "the next expiry instead" not in near._last_reason
+    market.deployment.state = None
+
+    market.premium = {(W2, k, "CE"): 60.0 for k in range(23000, 24001, 50)}
+    market.no_book = {(W3, 23700.0, "CE")}  # the next has a strike on the way with no book: no entry this check
+    waiting = await market.check(at(16, 9, 33))
+    assert waiting.state.get("position") is None and waiting._last_reason == (
+        "no OTM 17 Nov CE with a bid of Rs 100 or more; nor the next: no bid/ask for the 23 Nov 23,700 CE yet")
+
+
+async def test_a_strike_with_no_book_on_the_nearest_weekly_doesnt_move_it_on(market):
+    market.no_book = {(W2, 23300.0, "PE")}
+    waiting = await market.check(at(16, 9, 30))
+    assert waiting.state.get("position") is None and waiting._last_reason == "no bid/ask for the 17 Nov 23,300 PE yet"
 
 
 async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
