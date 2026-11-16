@@ -35,7 +35,8 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8eccd7bd20441d55227be3a015d730ea",
          "Conti Calendar 400 15 MIN": "5226c6668e3ad16736f8c0bb48474ffc",
-         "Conti Reverse Calendar 15 MIN": "e0d7eecad581e0086d71857e0a5a1877"}
+         "Conti Reverse Calendar 15 MIN": "e0d7eecad581e0086d71857e0a5a1877",
+         "OI Change Buy 15 MIN": "cd4e7b5315c6ec475c8812b794adf40e"}
 LISTEN_SECONDS = 6
 
 
@@ -87,6 +88,26 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     strikes = sorted({f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs if leg.get("strike")})
                     print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
                           f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {len(legs)} legs {', '.join(strikes)}")
+                continue
+            if NAME == "OI Change Buy 15 MIN":  # sides, strikes, times and the day's change in OI only -- no P&L
+                state = card.state or {}
+                oi = state.get("last_oi") or {}
+                print(f"    last 15-min close read: {state.get('last_mark', '-')}; day's change in OI then: "
+                      f"put {oi.get('put_change_day')}, call {oi.get('call_change_day')}; buy pending: {bool(state.get('pending'))}")
+                if position:
+                    opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
+                    leg = position["legs"]["long"]
+                    print(f"    holding {position['option']} ({position['bias']}), bought {opened} at {leg['entry_price']:,.2f}, "
+                          f"{leg['quantity'] / 65:g} lot, decided at the {position.get('decided_at')} close")
+                print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
+                closes = (await db.execute(
+                    select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
+                    .where(PaperNativeTrade.deployment_id == card.id).order_by(PaperNativeTrade.closed_at.desc()).limit(8)
+                )).all()
+                for reason, opened_at, closed_at, legs in closes:
+                    held = ", ".join(f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs)
+                    print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
+                          f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {held}")
                 continue
             if NAME not in ("Conti Calendar 15 MIN", "Conti Reverse Calendar 15 MIN"):
                 continue

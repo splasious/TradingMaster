@@ -102,8 +102,9 @@ async def _build_position_out(db: AsyncSession, state: dict | None, now: datetim
     # A calendar fills at bid / ask (nifty_conti_calendar*.py), so while NSE
     # is open its legs are valued at what closing them would fill at -- the
     # ask for a sold leg, the bid for a bought one -- from the ticker's fresh
-    # book; a leg with no fresh book keeps its last price (11 Nov).
-    at_book = position.get("regime") in CALENDAR_REGIMES and nse_market_open(now or datetime.now(timezone.utc))
+    # book; a leg with no fresh book keeps its last price (11 Nov). So too
+    # OI Change Buy 15 MIN's bought option, sold at the bid (16 Nov).
+    at_book = position.get("regime") in BOOK_REGIMES and nse_market_open(now or datetime.now(timezone.utc))
     legs_out: list[NativeLegOut] = []
     prices: list[float | None] = []
     for (side, leg), instrument in zip(raw_legs, leg_instruments):
@@ -186,6 +187,9 @@ def _payoff_out(
 # The calendar strategies' positions (Conti Calendar, Conti Calendar 400,
 # Conti Reverse Calendar): filled at bid / ask, valued so on the card, with a payoff.
 CALENDAR_REGIMES = ("calendar", "double calendar", "reverse calendar")
+# Valued at the book on the card (a payoff only for the calendars): the calendars
+# and OI Change Buy 15 MIN's option (nifty_oi_change_buy.py, 16 Nov).
+BOOK_REGIMES = (*CALENDAR_REGIMES, "oi change buy")
 
 # Keys every holding carries (see nifty_rs_rotation.py's holdings shape) --
 # anything else a strategy stores on a holding is its own per-stock metric.
