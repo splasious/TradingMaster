@@ -36,7 +36,7 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8eccd7bd20441d55227be3a015d730ea",
          "Conti Calendar 400 15 MIN": "5226c6668e3ad16736f8c0bb48474ffc",
          "Conti Reverse Calendar 15 MIN": "e0d7eecad581e0086d71857e0a5a1877",
-         "OI Change Buy 15 MIN": "f0b755d3358cbefcbd7ddde1a73bba61"}
+         "OI Change Buy 15 MIN": "758bf271f4c2f171b3abf3b6b5843cd0"}
 LISTEN_SECONDS = 6
 
 
@@ -92,8 +92,9 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
             if NAME == "OI Change Buy 15 MIN":  # sides, strikes, times and the day's change in OI only -- no P&L
                 state = card.state or {}
                 oi = state.get("last_oi") or {}
-                print(f"    last 15-min close read: {state.get('last_mark', '-')}; day's change in OI then: "
-                      f"put {oi.get('put_change_day')}, call {oi.get('call_change_day')}; buy pending: {bool(state.get('pending'))}")
+                print(f"    last 15-min close read: {state.get('last_mark', '-')}; change in OI then (15 min / day): "
+                      f"put {oi.get('put_change_15m', '-')} / {oi.get('put_change_day', '-')}, "
+                      f"call {oi.get('call_change_15m', '-')} / {oi.get('call_change_day', '-')}; buy pending: {bool(state.get('pending'))}")
                 if position:
                     opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
                     leg = position["legs"]["long"]

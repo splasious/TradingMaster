@@ -1,16 +1,17 @@
 """
-OI Change Buy 15 MIN -- one NIFTY option bought on the day's change in OI (native)
-==================================================================================
+OI Change Buy 15 MIN -- one NIFTY option bought on the last 15 minutes' change in OI (native)
+============================================================================================
 
-Agreed 16 Nov. At every 15-minute close from FIRST_MARK (09:30) to
-LAST_MARK (15:15), the PCR Analysis tab's record for that close
-(models/pcr.py, services/options/pcr_snapshots.py: NIFTY, its 4 expiries,
-ATM +-40 strikes) gives the day's change in OI since the previous
-session's close -- the TODAY row's Put dOI and Call dOI:
+Agreed 16 Nov (version 2, the same day: the last 15 minutes' change, not
+the day's). At every 15-minute close from FIRST_MARK (09:30) to LAST_MARK
+(15:15), the PCR Analysis tab's record for that close (models/pcr.py,
+services/options/pcr_snapshots.py: NIFTY, its 4 expiries, ATM +-40
+strikes) gives the change in OI over that 15-minute candle -- since the
+record before, that close's row's Put dOI and Call dOI:
 
-  Put dOI (day) higher than Call dOI (day)   buy a CALL
-  Call dOI (day) higher than Put dOI (day)   buy a PUT
-  equal                                     no change
+  Put dOI (15 min) higher than Call dOI (15 min)   buy a CALL
+  Call dOI (15 min) higher than Put dOI (15 min)   buy a PUT
+  equal                                           no change
 
 The two are compared as they are, a fall in OI (unwinding) a negative
 change: call unwinding with puts building, a call; put unwinding with
@@ -73,11 +74,11 @@ def atm_strike(spot: float) -> float:
     return float(int(spot / STRIKE_STEP + 0.5) * STRIKE_STEP)
 
 
-def wanted_side(put_day: float | None, call_day: float | None) -> str | None:
-    """"CE" when the day's put dOI is the higher, "PE" when the call's is, None when equal or unknown."""
-    if put_day is None or call_day is None or put_day == call_day:
+def wanted_side(put_change: float | None, call_change: float | None) -> str | None:
+    """"CE" when the put dOI is the higher, "PE" when the call's is, None when equal or unknown."""
+    if put_change is None or call_change is None or put_change == call_change:
         return None
-    return "CE" if put_day > call_day else "PE"
+    return "CE" if put_change > call_change else "PE"
 
 
 def latest_mark(now_ist: datetime) -> datetime | None:
@@ -185,7 +186,7 @@ async def evaluate(ctx) -> None:
         ctx.note("skipped", reason=f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision at {FIRST_MARK:%H:%M}")
         return
 
-    # -- the 15-minute close: the day's change in OI decides the side
+    # -- the 15-minute close: that candle's change in OI decides the side
     mark = latest_mark(now_ist)
     decided = ""
     if mark is not None and "last_mark" not in state and now_ist - mark >= RECORD_WAIT:
@@ -204,13 +205,15 @@ async def evaluate(ctx) -> None:
             decided = f"no {mark:%H:%M} change-in-OI record in {RECORD_WAIT.seconds // 60} minutes: passed over; "
         else:
             state["last_mark"] = mark.isoformat()
-            put_day, call_day = snap.put_oi_change_day, snap.call_oi_change_day
-            state["last_oi"] = {"at": f"{mark:%H:%M}", "put_change_day": put_day, "call_change_day": call_day}
-            side = wanted_side(put_day, call_day)
-            reading = (f"{mark:%H:%M} day's change in OI: put {put_day:+,.0f}, call {call_day:+,.0f}"
-                       if put_day is not None and call_day is not None else f"{mark:%H:%M}: no day's change in OI on the record")
+            put_15m, call_15m = snap.put_oi_change, snap.call_oi_change  # since the record before (version 2)
+            state["last_oi"] = {"at": f"{mark:%H:%M}", "put_change_15m": put_15m, "call_change_15m": call_15m}
+            side = wanted_side(put_15m, call_15m)
+            reading = (f"{mark:%H:%M} change in OI over the last 15 minutes: put {put_15m:+,.0f}, call {call_15m:+,.0f}"
+                       if put_15m is not None and call_15m is not None else f"{mark:%H:%M}: no 15-minute change in OI on the record")
             if position is not None:
-                position["put_change_day"], position["call_change_day"], position["oi_read_at"] = put_day, call_day, f"{mark:%H:%M}"
+                for old_key in ("put_change_day", "call_change_day"):  # version 1's reading, on a position carried over
+                    position.pop(old_key, None)
+                position["put_change_15m"], position["call_change_15m"], position["oi_read_at"] = put_15m, call_15m, f"{mark:%H:%M}"
             if side is None:
                 decided = f"{reading} -- no change; "
             elif position is not None and position["option_type"] == side:
@@ -220,8 +223,8 @@ async def evaluate(ctx) -> None:
                 price, pnl = await close("oi_flip")
                 position = None
                 due = now_utc + FLIP_GAP
-                state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": f"{mark:%H:%M}", "put_change_day": put_day,
-                                    "call_change_day": call_day}
+                state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
+                                    "call_change_15m": call_15m}
                 ctx.note("exited", signal="SELL", reason=(
                     f"{reading} -- now a {SIDE_NAME[side]}: {old} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
                     f"the {SIDE_NAME[side]} bought at {due.astimezone(IST):%H:%M:%S}"
@@ -229,8 +232,8 @@ async def evaluate(ctx) -> None:
                 ctx.wake_at(due)
                 return
             else:
-                state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": f"{mark:%H:%M}", "put_change_day": put_day,
-                                    "call_change_day": call_day}
+                state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
+                                    "call_change_15m": call_15m}
                 decided = f"{reading} -- a {SIDE_NAME[side]}; "
 
     # -- a buy due: at once, or 5 seconds after a flip's sale
@@ -274,8 +277,8 @@ async def evaluate(ctx) -> None:
             "weekly_expiry": weekly.isoformat(),
             "entry_spot": spot,
             "decided_at": pending.get("mark"),
-            "put_change_day": pending.get("put_change_day"),
-            "call_change_day": pending.get("call_change_day"),
+            "put_change_15m": pending.get("put_change_15m"),
+            "call_change_15m": pending.get("call_change_15m"),
             "legs": {"long": {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": "buy",
                               "expiry": weekly.isoformat(), "quantity": quantity, "entry_price": price}},
             "opened_at": now_utc.isoformat(),

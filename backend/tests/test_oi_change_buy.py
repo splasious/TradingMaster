@@ -1,5 +1,6 @@
 """OI Change Buy 15 MIN (native_strategies/nifty_oi_change_buy.py, 16 Nov):
-at every 15-minute close 09:30-15:15 the PCR record's day's change in OI --
+at every 15-minute close 09:30-15:15 the PCR record's change in OI over that
+15-minute candle (version 2; the day's in version 1) --
 put side higher, one lot of the ATM NIFTY call bought; call side higher,
 the ATM put -- on the nearest weekly (next week's on its expiry day) at the
 ask; the side flipping, the held option sold at the bid and the other bought
@@ -20,11 +21,14 @@ from tests.test_conti_calendar import SPREAD, W1, W2, Market, at
 
 class OIMarket(Market):
     async def record(self, mark: datetime, put_day: float | None, call_day: float | None) -> None:
-        """The PCR Analysis tab's record for the close `mark`, a few seconds after it."""
+        """The PCR Analysis tab's record for the close `mark`, a few seconds
+        after it: `put_day` / `call_day` its last 15 minutes' change in OI
+        (version 2) -- the day's change the other way round, so a rule on the
+        day's would pick the other side."""
         self.db.add(PcrSnapshot(
             underlying="NIFTY", ts=mark.astimezone(timezone.utc), session_date=mark.date(),
             captured_at=(mark + timedelta(seconds=4)).astimezone(timezone.utc), source=SOURCE_LIVE, strike_window=40,
-            expiries=[], put_oi_change_day=put_day, call_oi_change_day=call_day,
+            expiries=[], put_oi_change=put_day, call_oi_change=call_day, put_oi_change_day=call_day, call_oi_change_day=put_day,
         ))
         await self.db.commit()
 
@@ -163,7 +167,7 @@ async def test_the_card_values_the_option_at_the_bid_and_names_the_trade(market)
     out = await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))
     [leg] = out.legs
     assert out.bias == "long call" and leg.current_price == leg.bid and leg.ask == leg.bid + 2 * SPREAD
-    assert out.payoff is None and out.metrics["put_change_day"] == 6_50_000
+    assert out.payoff is None and out.metrics["put_change_15m"] == 6_50_000
 
     market.deployment.state = {**market.deployment.state, "force_exit": True}
     manual = await market.check(at(4, 11, 0))
@@ -171,6 +175,23 @@ async def test_the_card_values_the_option_at_the_bid_and_names_the_trade(market)
     rows = [(t, "OI Change Buy 15 MIN", "INR") for t in (await market.db.execute(select(PaperNativeTrade))).scalars().all()]
     [trade] = await ep._trade_outs(market.db, rows)
     assert trade.structure == "Long CE"
+
+
+async def test_version_2_reads_the_last_15_minutes_and_a_position_carried_over_keeps_on(market):
+    """16 Nov, version 2: the 13:00 record's last 15 minutes had the call side
+    higher (the day's still the put's): the call held is sold and a put bought."""
+    await market.record(at(4, 11, 30), put_day=4_38_984, call_day=2_47_377)
+    market.deployment.state = {"last_mark": at(4, 11, 15).isoformat()}
+    held = (await market.check(at(4, 11, 30, 6))).state["position"]
+    held.pop("put_change_15m"), held.pop("call_change_15m")
+    market.deployment.state = {**market.deployment.state, "position": {**held, "put_change_day": 8.6e7, "call_change_day": 7.6e7}}
+    await market.record(at(4, 11, 45), put_day=3_04_811, call_day=2_79_402)
+    kept = (await market.check(at(4, 11, 45, 4))).state["position"]
+    assert "put_change_day" not in kept and kept["put_change_15m"] == 3_04_811 and kept["option_type"] == "CE"
+    await market.record(at(4, 12, 0), put_day=-7_76_295, call_day=36_63_530)
+    sold = await market.check(at(4, 12, 0, 3))
+    assert [t.exit_reason for t in await market.trades()] == ["oi_flip"] and "over the last 15 minutes" in sold._last_reason
+    assert (await market.check(at(4, 12, 0, 8))).state["position"]["option_type"] == "PE"
 
 
 def test_its_trades_dont_go_to_telegram():

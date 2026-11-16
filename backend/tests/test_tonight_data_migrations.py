@@ -1029,6 +1029,35 @@ async def test_oi_change_buy_is_created_with_its_pool_and_card_for_conti_calenda
     assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
 
 
+async def test_oi_change_buy_moves_onto_the_15_minute_change_keeping_its_option(db_engine, db_session):
+    """16 Nov: OI Change Buy 15 MIN version 2 -- the last 15 minutes' change in OI, not the day's."""
+    migration = _load("e6a8c0b2d4f1_oi_change_buy_15_minute_change")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d4f6a8c0e2b9"
+    assert "snap.put_oi_change, snap.call_oi_change" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v1 = "# OI Change Buy 15 MIN, version 1: the day's change in OI\n"
+    migration.FROM_MD5S = {_md5_text(v1)}
+    running = await _deployment(db_session, "oib2_a@tradingmaster.internal", v1)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib2_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    (await db_session.get(Strategy, edited.strategy_id)).name = "OI Change Buy 15 MIN"
+    state = {"last_mark": "2026-11-16T13:00:00+05:30", "position": {"option": "17 Nov 25,200 CE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # left alone
+
+
 async def test_conti_calendar_moves_onto_14000_and_the_daily_close_keeping_its_open_position(db_engine, db_session):
     migration = _load("c4e6a8b0d2f5_conti_calendar_14000_daily_close")
     assert migration.down_revision == "f8b0d2e4a6c9"
