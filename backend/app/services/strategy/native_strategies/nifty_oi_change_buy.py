@@ -12,6 +12,11 @@ session's close -- the TODAY row's Put dOI and Call dOI:
   Call dOI (day) higher than Put dOI (day)   buy a PUT
   equal                                     no change
 
+The two are compared as they are, a fall in OI (unwinding) a negative
+change: call unwinding with puts building, a call; put unwinding with
+calls building, a put; both unwinding, the side unwinding less is the
+higher -- calls covered harder, a call; puts covered harder, a put.
+
 What it buys: LOTS (1) lot of the ATM option -- the STRIKE_STEP (50-point)
 strike nearest NIFTY at that moment -- on the nearest weekly expiry
 (next week's on that weekly's own expiry day), at the ask.

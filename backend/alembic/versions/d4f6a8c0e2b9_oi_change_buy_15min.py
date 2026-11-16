@@ -1,4 +1,4 @@
-"""OI Change Buy 15 MIN: the strategy, its 20-lakh pool and its paper card (16 Nov).
+"""OI Change Buy 15 MIN: the strategy, its 4-lakh pool and its paper card (16 Nov).
 
 A new built-in (native_strategies/nifty_oi_change_buy.py), as agreed 16
 Nov: at every 15-minute close from 09:30 to 15:15, the day's change in OI
@@ -8,7 +8,7 @@ NIFTY call bought; call side higher, the ATM put -- on the nearest weekly
 option sold at the bid and the other bought 5 seconds later; everything
 sold at 15:29. No take-profit or stop-loss. Created for the owner of Conti
 Calendar 15 MIN: the strategy with version 1 the built-in's code, its own
-pool "OI Change Buy 15 MIN" of Rs 20,00,000, and an active paper card on
+pool "OI Change Buy 15 MIN" of Rs 4,00,000, and an active paper card on
 it -- no live run, no Telegram alerts. Nothing when that owner has a
 strategy of this name already. Recorded in audit_logs.
 
@@ -32,7 +32,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 NAME = "OI Change Buy 15 MIN"
 FROM_STRATEGY = "conti calendar 15 min"
-CAPITAL = 2_000_000.0
+CAPITAL = 400_000.0
 BUILT_IN = pathlib.Path(__file__).resolve().parents[2] / "app/services/strategy/native_strategies/nifty_oi_change_buy.py"
 DESCRIPTION = ("NIFTY: 1 lot of the ATM weekly call bought when the day's put change in OI is higher than the call's, the put "
                "when the call's is higher -- decided at every 15-minute close 09:30-15:15, flipped 5 s after selling, sold 15:29 (16 Nov)")

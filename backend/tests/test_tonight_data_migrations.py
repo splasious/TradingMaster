@@ -1019,7 +1019,7 @@ async def test_oi_change_buy_is_created_with_its_pool_and_card_for_conti_calenda
     built_in = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_oi_change_buy.py").read_text(encoding="utf-8")
     assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", built_in)
     [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == name))).scalars().all()
-    assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (calendar.user_id, "INR", 2_000_000.0, 2_000_000.0)
+    assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (calendar.user_id, "INR", 400_000.0, 400_000.0)  # Rs 4 lakh
     [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
     assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
     actions = (await db_session.execute(select(Log.action).where(Log.user_id == calendar.user_id))).scalars().all()

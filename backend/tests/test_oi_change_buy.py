@@ -49,9 +49,10 @@ async def market(db_session, monkeypatch):
     tick_engine.forget([m.nifty.id, *(o.id for o in m.options)])
 
 
-def test_the_side_and_the_strike():
+def test_the_side_and_the_strike():  # unwinding (a negative change) compared as it is
     assert oib.wanted_side(5_00_000, 2_00_000) == "CE" and oib.wanted_side(-1_00_000, 3_00_000) == "PE"
     assert oib.wanted_side(1.0, 1.0) is None and oib.wanted_side(None, 1.0) is None
+    assert oib.wanted_side(-1_00_000, -4_00_000) == "CE" and oib.wanted_side(-4_00_000, -1_00_000) == "PE"  # both unwinding
     assert (oib.atm_strike(23460.0), oib.atm_strike(23474.9), oib.atm_strike(23475.0)) == (23450.0, 23450.0, 23500.0)
     assert oib.latest_mark(at(4, 9, 29)) is None and oib.latest_mark(at(4, 9, 44, 59)) == at(4, 9, 30)
     assert oib.latest_mark(at(4, 15, 28)) == at(4, 15, 15) and oib.next_mark(at(4, 15, 15)) is None
