@@ -36,7 +36,7 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8eccd7bd20441d55227be3a015d730ea",
          "Conti Calendar 400 15 MIN": "5226c6668e3ad16736f8c0bb48474ffc",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
-         "OI Change Buy 15 MIN": "758bf271f4c2f171b3abf3b6b5843cd0"}
+         "OI Change Buy 15 MIN": "5f2b082395e7d0ab04a3e72b6e24ba14"}
 LISTEN_SECONDS = 6
 
 

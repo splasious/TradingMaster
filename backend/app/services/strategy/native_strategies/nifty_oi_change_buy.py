@@ -35,9 +35,18 @@ card started between two closes begins at the next one.
 
 At DAY_CLOSE (15:29) whatever is held is sold at the bid (a position left
 from an earlier day, the app down at 15:29, at the first check after) and
-nothing more is bought that day. No take-profit or stop-loss. A buy that
-can't be had -- no ask yet -- is tried again every second until it is, or
-until 15:29. In a backtest there is no order book (ctx.is_backtest): the
+nothing more is bought that day. A buy that can't be had -- no ask yet --
+is tried again every second until it is, or until 15:29.
+
+The trailing stop (version 3, 17 Nov; +15% / 5% picked on the backtest of
+the 36 stored sessions, scripts/oi_trail_backtest.py): the held option's
+bid, read every RECHECK (1 second), switches the trail on once it reaches
+TRAIL_START (15%) above the price paid; from then the stop sits TRAIL (5%)
+below the highest bid since, only ever moving up -- at least +9.25% over
+cost the moment it starts. The bid at or under the stop: sold at the bid
+("trailing_stop"), and nothing more until the next 15-minute close, which
+buys whatever side it reads -- the same one again included. No take-profit
+or stop-loss besides; a loser still runs to the flip or 15:29. In a backtest there is no order book (ctx.is_backtest): the
 last price stands for both bid and ask.
 
 Paper only, no Telegram alerts. Runs through
@@ -66,6 +75,8 @@ DAY_CLOSE = dtime(15, 29)
 FLIP_GAP = timedelta(seconds=5)
 RECORD_WAIT = timedelta(minutes=2)
 RECHECK = timedelta(seconds=1)
+TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
+TRAIL = 0.05  # then the stop sits this far below the highest bid since, only moving up
 SIDE_NAME = {"CE": "call", "PE": "put"}
 
 
@@ -157,7 +168,12 @@ async def evaluate(ctx) -> None:
         return price, pnl
 
     def held_text() -> str:
-        return f"{position['option']} bought at {position['legs']['long']['entry_price']:,.2f}"
+        text = f"{position['option']} bought at {position['legs']['long']['entry_price']:,.2f}"
+        if position.get("trail_stop") is not None:
+            return f"{text}; trailing stop {position['trail_stop']:,.2f} (5% under the highest bid {position['peak_bid']:,.2f})"
+        if position.get("trail_starts_at") is not None:
+            return f"{text}; trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)"
+        return text
 
     def wake_for_next() -> None:
         """Run again at the next 15-minute close, or at 15:29 while something is held."""
@@ -166,6 +182,7 @@ async def evaluate(ctx) -> None:
             ctx.wake_at(mark)
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
+            ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
 
     # -- a manual exit, and 15:29 (or a position left from an earlier day)
     if position is not None and force_exit:
@@ -185,6 +202,31 @@ async def evaluate(ctx) -> None:
         state.pop("pending", None)
         ctx.note("skipped", reason=f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision at {FIRST_MARK:%H:%M}")
         return
+
+    # -- the trailing stop (version 3): on the bid, every second while something is held
+    if position is not None:
+        leg = position["legs"]["long"]
+        quote = await bid_ask(ctx, uuid.UUID(leg["instrument_id"]))
+        if quote is not None:
+            bid_now = quote[0]
+            position["trail_starts_at"] = position.get("trail_starts_at") or round(leg["entry_price"] * (1 + TRAIL_START), 2)
+            position["peak_bid"] = round(max(position.get("peak_bid") or bid_now, bid_now), 2)
+            if position.get("trail_stop") is not None or position["peak_bid"] >= position["trail_starts_at"]:
+                position["trail_stop"] = round(max(position.get("trail_stop") or 0.0, position["peak_bid"] * (1 - TRAIL)), 2)
+            if position.get("trail_stop") is not None and bid_now <= position["trail_stop"]:
+                option, peak, stop = position["option"], position["peak_bid"], position["trail_stop"]
+                price, pnl = await close("trailing_stop")
+                position = None
+                state.pop("pending", None)
+                current = latest_mark(now_ist)
+                if current is not None:
+                    state["last_mark"] = current.isoformat()  # flat until the next close, whatever this one reads
+                ctx.note("exited", signal="SELL", reason=(
+                    f"trailing stop: {option} sold at {price:,.2f} (the bid), its stop {stop:,.2f} -- {TRAIL * 100:g}% under the "
+                    f"highest bid {peak:,.2f}; P&L {pnl:+,.0f} before charges; next decision {_next_text(now_ist)}"
+                ))
+                wake_for_next()
+                return
 
     # -- the 15-minute close: that candle's change in OI decides the side
     mark = latest_mark(now_ist)
@@ -279,13 +321,17 @@ async def evaluate(ctx) -> None:
             "decided_at": pending.get("mark"),
             "put_change_15m": pending.get("put_change_15m"),
             "call_change_15m": pending.get("call_change_15m"),
+            "trail_starts_at": round(price * (1 + TRAIL_START), 2),
+            "peak_bid": None,
+            "trail_stop": None,
             "legs": {"long": {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": "buy",
                               "expiry": weekly.isoformat(), "quantity": quantity, "entry_price": price}},
             "opened_at": now_utc.isoformat(),
         }
         state.pop("pending", None)
         ctx.note("entered", signal="BUY", reason=(
-            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; sold at 15:29 or when the side flips"
+            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; trail from a bid of "
+            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), {TRAIL * 100:g}% under its peak; sold at 15:29 or when the side flips"
         ))
         wake_for_next()
         return

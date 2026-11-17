@@ -78,7 +78,8 @@ async def test_at_0930_put_side_higher_it_buys_one_lot_of_the_atm_weekly_call_at
     leg = p["legs"]["long"]
     assert leg["quantity"] == 65 and leg["entry_price"] == market.ltp(W1, 23450.0, "CE", at(4, 9, 30, 4), 23460.0) + SPREAD  # the ask
     assert ctx._last_signal == "BUY" and "put +650,000, call +210,000" in ctx._last_reason
-    assert ctx._wake_at == at(4, 9, 45)
+    assert ctx._wake_at == at(4, 9, 30, 5)  # version 3: read every second while held, for the trail
+    assert p["trail_starts_at"] == pytest.approx(leg["entry_price"] * 1.15, abs=0.01) and p["trail_stop"] is None
 
 
 async def test_the_same_side_keeps_the_option_held_and_a_flip_sells_it_then_buys_the_other_5_seconds_later(market):
@@ -119,7 +120,7 @@ async def test_at_1529_it_is_sold_at_the_bid_and_nothing_more_is_bought_that_day
     await market.record(at(4, 15, 15), put_day=1_00_000, call_day=4_00_000)
     market.deployment.state = {"last_mark": at(4, 15, 0).isoformat()}
     bought = await market.check(at(4, 15, 15, 4))
-    assert bought.state["position"]["option_type"] == "PE" and bought._wake_at == at(4, 15, 29)
+    assert bought.state["position"]["option_type"] == "PE" and bought._wake_at == at(4, 15, 15, 5)
     closed = await market.check(at(4, 15, 29))
     [trade] = await market.trades()
     assert trade.exit_reason == "time_cutoff_329pm" and closed.state.get("position") is None
@@ -192,6 +193,45 @@ async def test_version_2_reads_the_last_15_minutes_and_a_position_carried_over_k
     sold = await market.check(at(4, 12, 0, 3))
     assert [t.exit_reason for t in await market.trades()] == ["oi_flip"] and "over the last 15 minutes" in sold._last_reason
     assert (await market.check(at(4, 12, 0, 8))).state["position"]["option_type"] == "PE"
+
+
+async def test_the_trail_starts_at_plus_15_percent_then_sells_5_percent_under_the_highest_bid(market):
+    """17 Nov (version 3): +15% / 5% on the bid, read every second; after it, flat until the next close."""
+    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
+    p = (await market.check(at(4, 9, 30, 4))).state["position"]
+    cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    market.premium[key] = cost * 1.14 + SPREAD  # a bid of +14%: not yet
+    early = await market.check(at(4, 9, 35))
+    assert early.state["position"]["trail_stop"] is None and "trail starts at a bid of" in early._last_reason
+    market.premium[key] = cost * 1.30 + SPREAD  # +30%: on, the stop 5% under it
+    on = (await market.check(at(4, 9, 36))).state["position"]
+    assert on["peak_bid"] == pytest.approx(cost * 1.30, abs=0.01) and on["trail_stop"] == pytest.approx(cost * 1.30 * 0.95, abs=0.02)
+    market.premium[key] = cost * 1.25 + SPREAD  # down a little, over the stop: held, the stop where it was
+    held = (await market.check(at(4, 9, 37))).state["position"]
+    assert held["trail_stop"] == on["trail_stop"] and await market.trades() == []
+    market.premium[key] = cost * 1.22 + SPREAD  # under the stop: sold at the bid
+    out = await market.check(at(4, 9, 38))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "trailing_stop" and trade.legs[0]["exit_price"] == pytest.approx(cost * 1.22, abs=0.01)
+    assert out.state.get("position") is None and out._last_reason.startswith("trailing stop:")
+    again = await market.check(at(4, 9, 40))  # flat until the next close
+    assert again.state.get("position") is None and "next decision at the 09:45 close" in again._last_reason
+    await market.record(at(4, 9, 45), put_day=5_00_000, call_day=1_00_000)  # the same side again: bought again
+    market.premium.clear()
+    assert (await market.check(at(4, 9, 45, 4))).state["position"]["option_type"] == "CE"
+
+
+async def test_a_stop_hit_at_a_close_waits_for_the_next_one(market):
+    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
+    p = (await market.check(at(4, 9, 30, 4))).state["position"]
+    cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    market.premium[key] = cost * 1.40 + SPREAD
+    await market.check(at(4, 9, 44))
+    market.premium[key] = cost * 1.20 + SPREAD
+    await market.record(at(4, 9, 45), put_day=5_00_000, call_day=1_00_000)
+    out = await market.check(at(4, 9, 45, 2))  # the stop hit just after the 09:45 close: that close isn't bought on
+    assert out.state.get("position") is None and out.state["last_mark"] == at(4, 9, 45).isoformat()
+    assert (await market.check(at(4, 9, 45, 5))).state.get("position") is None
 
 
 def test_its_trades_dont_go_to_telegram():
