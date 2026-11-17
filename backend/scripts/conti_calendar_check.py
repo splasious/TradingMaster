@@ -177,11 +177,47 @@ def _legs_at_book(deployment_id, owner_id) -> str:
     return f"{len(booked)} of {len(legs)} legs at bid/ask, {len(right)} at the right side; payoff shown: {bool((position or {}).get('payoff'))}"
 
 
+async def stored_data(db) -> None:
+    """What the server keeps for a backtest (17 Nov): the 15-minute change-in-OI
+    records and the stored NIFTY option candles -- dates and counts only."""
+    from app.models.backfill_platform import BfOhlcvBar, BfSymbol
+    from app.models.pcr import PcrSnapshot, PcrStrikeOi
+
+    first, last, records, sessions = (await db.execute(
+        select(func.min(PcrSnapshot.session_date), func.max(PcrSnapshot.session_date), func.count(),
+               func.count(func.distinct(PcrSnapshot.session_date))).where(PcrSnapshot.underlying == "NIFTY")
+    )).one()
+    with_15m = (await db.execute(select(func.count()).select_from(PcrSnapshot).where(
+        PcrSnapshot.underlying == "NIFTY", PcrSnapshot.put_oi_change.is_not(None), PcrSnapshot.call_oi_change.is_not(None))
+    )).scalar()
+    strike_rows = (await db.execute(select(func.count()).select_from(PcrStrikeOi))).scalar()
+    priced = (await db.execute(select(func.count()).select_from(PcrStrikeOi).where(PcrStrikeOi.last_price.is_not(None)))).scalar()
+    print("stored data (17 Nov):")
+    print(f"  NIFTY change-in-OI records: {records} across {sessions} sessions, {first} -> {last}; with a 15-min put/call change: {with_15m}")
+    print(f"  per-contract rows on those records: {strike_rows} (with a last price: {priced})")
+    rows = (await db.execute(
+        select(BfOhlcvBar.timeframe, func.count(), func.count(func.distinct(BfOhlcvBar.symbol_id)), func.min(BfOhlcvBar.ts), func.max(BfOhlcvBar.ts))
+        .join(BfSymbol, BfSymbol.id == BfOhlcvBar.symbol_id)
+        .where(BfSymbol.underlying_symbol == "NIFTY", BfSymbol.option_type.is_not(None))
+        .group_by(BfOhlcvBar.timeframe)
+    )).all()
+    for tf, n, contracts, lo, hi in rows:
+        print(f"  NIFTY option candles {tf}: {n} bars, {contracts} contracts, {as_aware_utc(lo).astimezone(IST):%d-%b-%Y} -> "
+              f"{as_aware_utc(hi).astimezone(IST):%d-%b-%Y %H:%M}")
+    expiries = (await db.execute(
+        select(BfSymbol.expiry, func.count()).where(BfSymbol.underlying_symbol == "NIFTY", BfSymbol.option_type.is_not(None))
+        .group_by(BfSymbol.expiry).order_by(BfSymbol.expiry)
+    )).all()
+    print(f"  NIFTY option expiries with candles kept: {len(expiries)}: " + ", ".join(f"{e:%d %b}" for e, _ in expiries[-12:] if e))
+
+
 async def main() -> None:
     today = datetime.now(timezone.utc).astimezone(IST).date()
     async with AsyncSessionLocal() as db:
         for NAME, FILE_MD5 in NAMES.items():
             await describe(db, NAME, FILE_MD5)
+
+        await stored_data(db)
 
         nifty = (await db.execute(select(Instrument).where(Instrument.symbol == "NIFTY 50", Instrument.exchange == "NSE"))).scalars().first()
         rows = (await db.execute(
