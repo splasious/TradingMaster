@@ -100,6 +100,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     leg = position["legs"]["long"]
                     print(f"    holding {position['option']} ({position['bias']}), bought {opened} at {leg['entry_price']:,.2f}, "
                           f"{leg['quantity'] / 65:g} lot, decided at the {position.get('decided_at')} close")
+                    print(f"    trail: starts at a bid of {position.get('trail_starts_at')}, highest bid {position.get('peak_bid')}, "
+                          f"stop {position.get('trail_stop')}")
                 print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
                 closes = (await db.execute(
                     select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
