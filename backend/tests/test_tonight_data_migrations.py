@@ -1029,6 +1029,35 @@ async def test_oi_change_buy_is_created_with_its_pool_and_card_for_conti_calenda
     assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
 
 
+async def test_conti_reverse_calendar_moves_onto_the_roll_a_day_before_keeping_its_position(db_engine, db_session):
+    """17 Nov: Conti Reverse Calendar 15 MIN version 3 -- rolled the trading day before its weekly's expiry."""
+    migration = _load("f8a0c2e4b6d3_conti_reverse_calendar_roll_day_before")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e6a8c0b2d4f1"
+    assert "def roll_day(weekly: date) -> date:" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v2 = "# Conti Reverse Calendar 15 MIN, version 2: rolled on its weekly's expiry day\n"
+    migration.FROM_MD5S = {_md5_text(v2)}
+    running = await _deployment(db_session, "rev3_a@tradingmaster.internal", v2)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Reverse Calendar 15 MIN"
+    edited = await _deployment(db_session, "rev3_b@tradingmaster.internal", "# Conti Reverse Calendar 15 MIN, edited by hand\n")
+    (await db_session.get(Strategy, edited.strategy_id)).name = "Conti Reverse Calendar 15 MIN"
+    state = {"position": {"strike": 25350, "weekly_expiry": "2026-11-17", "legs": {}}, "carried_from": "2026-11-12"}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # left alone
+
+
 async def test_oi_change_buy_moves_onto_the_15_minute_change_keeping_its_option(db_engine, db_session):
     """16 Nov: OI Change Buy 15 MIN version 2 -- the last 15 minutes' change in OI, not the day's."""
     migration = _load("e6a8c0b2d4f1_oi_change_buy_15_minute_change")
@@ -1341,6 +1370,9 @@ async def test_conti_calendar_and_conti_reverse_calendar_move_onto_carrying_a_lo
          "nifty_conti_reverse_calendar.py", "rev2"),
     ):
         migration = _load(migration_name)
+        if name == "Conti Reverse Calendar 15 MIN":  # version 3 (17 Nov) moves on from it
+            assert _load("f8a0c2e4b6d3_conti_reverse_calendar_roll_day_before").FROM_MD5S == {migration.TO_MD5}
+            migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
         assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == down and migration.BUILT_IN.name == built_in
         assert "ROLL_TIME = dtime(15, 0)" in migration.BUILT_IN.read_text(encoding="utf-8")
         before = f"# {name}, the version before: closed at 15:29 whatever the profit\n"

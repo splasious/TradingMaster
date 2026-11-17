@@ -67,6 +67,14 @@ on next week's weekly and its monthly), whatever the time, the pause and
 the 14:00 rule (state reopen_due, that day only); IN PROFIT
 ("weekly_expiry_3pm") it just closes, nothing new that day. No stop-loss.
 
+The roll a day before (version 3, 17 Nov): all that now happens at
+ROLL_TIME (15:00) on the trading day BEFORE the weekly's expiry (roll_day:
+16 Nov for the 17 Nov weekly, a holiday skipped back over) -- or at the
+first check after, the app down then or the position already past it --
+IN LOSS rolled ("expiry_roll") as above, IN PROFIT just closed
+("pre_expiry_close"). A new position never takes a weekly on or past its
+roll day: from that day it buys next week's.
+
 A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a month's
 three letters) against a weekly's NIFTY26N1723700CE. In a backtest there is
 no order book (ctx.is_backtest): the last price stands for both bid and ask.
@@ -82,6 +90,7 @@ from datetime import date, datetime, time as dtime, timedelta
 from sqlalchemy import func, select
 
 from app.models.instrument import Instrument
+from app.services.backfill_platform.coverage import previous_trading_day
 from app.services.broker.zerodha_broker import IST
 from app.services.paper_trading.trade_record import order_charges
 
@@ -181,6 +190,11 @@ async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
     return await getter(instrument_id)
 
 
+def roll_day(weekly: date) -> date:
+    """The trading day before `weekly`'s expiry: when a position on it rolls (version 3)."""
+    return previous_trading_day(weekly)
+
+
 async def monthly_after(ctx, underlying_id: uuid.UUID, weekly: date) -> date | None:
     """The nearest monthly expiry after `weekly` the catalog holds."""
     rows = (
@@ -278,11 +292,12 @@ async def evaluate(ctx) -> None:
                 ))
                 return
         monthly = date.fromisoformat(position["monthly_expiry"])
-        if weekly < today or (weekly == today and now_ist.time() >= ROLL_TIME):
-            # its weekly expires today (or has, the app down at ROLL_TIME): never held past it
-            if missing and weekly == today and now_ist.time() < DAILY_CLOSE:
+        due = roll_day(weekly)
+        if due < today or (due == today and now_ist.time() >= ROLL_TIME):
+            # a day before its weekly expires (or later, the app down at ROLL_TIME): rolled then, never held into expiry day
+            if missing and weekly >= today and now_ist.time() < DAILY_CLOSE:
                 ctx.note("hold", reason=(
-                    f"reverse calendar {position['strike']:,.0f}: its {weekly:%d %b} weekly expires today; no bid/ask for "
+                    f"reverse calendar {position['strike']:,.0f}: its {weekly:%d %b} weekly is due to roll; no bid/ask for "
                     f"{', '.join(missing)} -- closed once all four have one"
                 ))
                 ctx.wake_at(now_utc + RECHECK)
@@ -294,13 +309,13 @@ async def evaluate(ctx) -> None:
                 pnl = await close_all("expiry_roll", prices)
                 ctx.state.pop("paused_until", None)
                 ctx.state["reopen_due"] = today.isoformat()
-                rolled_note = (f"expiry roll: the {weekly:%d %b} weekly expiring with Rs {net:,.0f} in loss -- all four closed, "
-                               f"P&L {pnl:+,.0f} before charges; ")
-            else:  # in profit: closed, nothing new that day
-                pnl = await close_all("weekly_expiry_3pm", prices)
+                rolled_note = (f"expiry roll: the {weekly:%d %b} weekly due to roll a day before its expiry, Rs {net:,.0f} in loss -- "
+                               f"all four closed, P&L {pnl:+,.0f} before charges; ")
+            else:  # in profit: closed; a new one by the usual rules (none after 15:00)
+                pnl = await close_all("pre_expiry_close", prices)
                 ctx.note("exited", signal="COVER", reason=(
-                    f"the {weekly:%d %b} weekly expiring, in profit (Rs {net:,.0f} after charges): all four closed at bid/ask, "
-                    f"P&L {pnl:+,.0f} before charges"
+                    f"the {weekly:%d %b} weekly due to roll a day before its expiry, in profit (Rs {net:,.0f} after charges): "
+                    f"all four closed at bid/ask, P&L {pnl:+,.0f} before charges; {after_close()}"
                 ))
                 return
         elif now_ist.time() >= DAILY_CLOSE:  # version 11: in profit it closes, in loss it's carried overnight
@@ -380,9 +395,9 @@ async def evaluate(ctx) -> None:
     if not expiries:
         ctx.note("skipped", reason="no live NIFTY option expiries found")
         return
-    weekly = expiries[1] if today == expiries[0] and len(expiries) > 1 else expiries[0]
-    if weekly == today:
-        ctx.note("skipped", reason="only today's expiry is listed -- nothing to buy for a later week")
+    weekly = next((e for e in expiries if roll_day(e) > today), None)  # version 3: never one on or past its roll day
+    if weekly is None:
+        ctx.note("skipped", reason="no NIFTY weekly listed short of its roll day (the day before its expiry) -- nothing to buy")
         return
     monthly = await monthly_after(ctx, underlying.id, weekly)
     if monthly is None:

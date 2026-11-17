@@ -3,9 +3,10 @@
 PE bought, the same strike's monthly CE and PE sold, 16 lots a leg at bid /
 ask -- everything else as Conti Calendar: the PCR's strike, Rs 14,000
 take-profit after charges, the 15:29 close, a 5-minute pause after a close
-and none after one from 14:00."""
+and none after one from 14:00; since version 3 (17 Nov) rolled at 15:00 the
+trading day before its weekly's expiry."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -14,7 +15,7 @@ import app.services.strategy.native_strategies.nifty_conti_reverse_calendar as r
 from app.models.paper_trading import PaperNativeTrade
 from app.services.market_data.tick_engine import tick_engine
 from app.services.paper_trading.native_runner import NativeContext
-from tests.test_conti_calendar import SPREAD, W1, W2, W3, Market, at, gain
+from tests.test_conti_calendar import DEC, SPREAD, W1, W2, W3, Market, at, gain
 
 
 class ReverseMarket(Market):
@@ -95,22 +96,38 @@ async def test_at_1529_in_profit_it_closes_in_loss_it_is_carried_and_no_new_trad
     assert later.state.get("position") is None and later._last_reason.startswith("no new trade today")
 
 
-async def test_on_its_weekly_expiry_day_in_loss_it_is_rolled_into_a_new_one_and_in_profit_just_closes(market):
+async def test_a_day_before_its_weekly_expiry_in_loss_it_is_rolled_into_a_new_one_and_in_profit_just_closes(market):
+    """17 Nov (version 3): the roll at 15:00 on the trading day before the weekly's expiry -- 6 Nov (Fri) for the 9 Nov."""
+    assert (rev.roll_day(W1), rev.roll_day(W2), rev.roll_day(W3)) == (date(2026, 11, 6), date(2026, 11, 16), date(2026, 11, 20))
     p = (await market.check(at(4, 9, 30))).state["position"]
     await market.check(at(4, 15, 29))  # carried
     gain(market, p, -2.0)
-    rolled = await market.check(at(9, 15, 0), spot=23560.0)
+    before = await market.check(at(6, 14, 59, 59), spot=23560.0)
+    assert before.state["position"]["weekly_expiry"] == W1.isoformat() and await market.trades() == []
+    rolled = await market.check(at(6, 15, 0), spot=23560.0)
     [trade] = await market.trades()
     q = rolled.state["position"]
-    assert trade.exit_reason == "expiry_roll" and rolled._last_reason.startswith("expiry roll: the 09 Nov weekly expiring")
+    assert trade.exit_reason == "expiry_roll" and rolled._last_reason.startswith("expiry roll: the 09 Nov weekly due to roll a day before")
     assert q["regime"] == "reverse calendar" and (q["weekly_expiry"], q["monthly_expiry"]) == (W2.isoformat(), W3.isoformat())
     assert {leg["side"] for name, leg in q["legs"].items() if name.startswith("long")} == {"buy"}  # still the weekly bought
 
     gain(market, q, 3.0)
-    market.deployment.state = {**market.deployment.state, "position": {**q, "weekly_expiry": "2026-11-16"}}  # its weekly due: 16 Nov
-    done = await market.check(at(16, 15, 0), spot=23560.0)
-    assert done.state.get("position") is None and done._last_reason.startswith("the 16 Nov weekly expiring, in profit")
-    assert [t.exit_reason for t in await market.trades()] == ["expiry_roll", "weekly_expiry_3pm"]
+    done = await market.check(at(16, 15, 0), spot=23560.0)  # the 17 Nov weekly's roll day, in profit
+    assert done.state.get("position") is None and done._last_reason.startswith("the 17 Nov weekly due to roll a day before its expiry, in profit")
+    assert [t.exit_reason for t in await market.trades()] == ["expiry_roll", "pre_expiry_close"]
+    assert "no new trade today" in done._last_reason  # 15:00: nothing new that day
+
+
+async def test_one_found_past_its_roll_day_closes_at_once_and_a_new_one_buys_next_weeks(market):
+    """17 Nov: the 17 Nov position, version 3 arriving on its expiry day -- rolled at the first check."""
+    p = (await market.check(at(16, 9, 30))).state["position"]  # on the 17 Nov weekly's roll day: next week's bought
+    assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat())
+    market.deployment.state = {**market.deployment.state, "position": {**p, "weekly_expiry": W2.isoformat()}}  # one on 17 Nov
+    gain(market, p, -2.0)
+    late = await market.check(at(17, 9, 50), spot=23560.0)
+    [trade] = await market.trades()
+    q = late.state["position"]
+    assert trade.exit_reason == "expiry_roll" and (q["weekly_expiry"], q["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat())
 
 
 async def test_the_card_shows_it_at_bid_and_ask_with_its_1529_payoff_and_names_the_trade(market):
