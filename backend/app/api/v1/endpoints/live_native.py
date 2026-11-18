@@ -4,7 +4,9 @@ which every broker must have registered as the static IP API orders come
 from (SEBI's retail algo rules, since 1 April 2026) -- and the Trading page's
 Paper / Live switch (live_trading/live_runs.py): a live run started from a
 paper card, edited, resumed, turned off, every live position exited, and
-the live trades."""
+the live trades -- and the account-wide daily loss limit across all of a
+user's live runs (18 Nov: set in the app, 0 turning it off, none the
+default DEFAULT_ACCOUNT_LOSS_PCT of their live capital)."""
 
 import time
 import uuid
@@ -21,7 +23,7 @@ from app.db.session import get_db
 from app.core.time import as_aware_utc
 from app.models.broker import Broker, BrokerAccount, Environment
 from app.models.instrument import Instrument
-from app.models.live_native import LiveNativeDeployment, LiveNativeTrade
+from app.models.live_native import LiveNativeDeployment, LiveNativeTrade, LiveRiskSettings
 from app.models.paper_trading import PaperNativeDeployment, PaperPortfolio
 from app.models.strategy import Strategy
 from app.models.user import User
@@ -42,6 +44,7 @@ from app.services.live_trading.live_runs import (
     start_live_run,
     stop_live_run,
 )
+from app.services.live_trading.native_live import DEFAULT_ACCOUNT_LOSS_PCT, account_limit
 from app.services.live_trading.native_scheduler import _live_lock, open_gateway
 from app.services.market_data.live_price import live_price
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
@@ -71,6 +74,17 @@ class BrokerTestOut(BaseModel):
 class ServerIpOut(BaseModel):
     ipv4: str | None
     ipv6: str | None
+
+
+class AccountLimitOut(BaseModel):
+    account_daily_loss_limit: float | None  # what's saved: None the default, 0 off
+    effective_limit: float  # what applies now; 0 or less: off
+    default_pct: float
+    live_capital: float  # the capital of the live runs that are on, which the default is a % of
+
+
+class AccountLimitIn(BaseModel):
+    account_daily_loss_limit: float | None  # None: back to the default; 0: off
 
 
 @router.post("/broker-test", response_model=BrokerTestOut)
@@ -255,6 +269,46 @@ async def _own_run(db: AsyncSession, user: User, run_id: uuid.UUID) -> LiveNativ
 def _size(payload: LiveRunIn | LiveRunEdit) -> Size:
     return Size(lots_per_leg=payload.lots_per_leg, capital=payload.capital, daily_loss_limit=payload.daily_loss_limit,
                 product_style=payload.product_style)
+
+
+async def _account_limit_out(db: AsyncSession, user: User) -> AccountLimitOut:
+    runs = (await db.execute(
+        select(LiveNativeDeployment).where(LiveNativeDeployment.owner_id == user.id, LiveNativeDeployment.status.in_(ACTIVE_STATES))
+    )).scalars().all()
+    saved = await db.get(LiveRiskSettings, user.id)
+    return AccountLimitOut(
+        account_daily_loss_limit=saved.account_daily_loss_limit if saved is not None else None,
+        effective_limit=await account_limit(db, user.id, list(runs)), default_pct=DEFAULT_ACCOUNT_LOSS_PCT,
+        live_capital=sum(run.capital for run in runs),
+    )
+
+
+@router.get("/account-limit", response_model=AccountLimitOut)
+async def get_account_limit(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)) -> AccountLimitOut:
+    """The caller's daily loss limit across all their live runs together."""
+    return await _account_limit_out(db, user)
+
+
+@router.put("/account-limit", response_model=AccountLimitOut)
+async def set_account_limit(
+    payload: AccountLimitIn, db: AsyncSession = Depends(get_db), user: User = Depends(require_role("administrator", "trader")),
+) -> AccountLimitOut:
+    """Sets it: an amount in rupees, 0 to turn it off, or none for the default."""
+    value = payload.account_daily_loss_limit
+    if value is not None and value < 0:
+        raise HTTPException(status_code=400, detail="The limit can't be negative -- 0 turns it off")
+    saved = await db.get(LiveRiskSettings, user.id)
+    before = saved.account_daily_loss_limit if saved is not None else None
+    if saved is None:
+        saved = LiveRiskSettings(user_id=user.id)
+        db.add(saved)
+    saved.account_daily_loss_limit = value
+    await write_audit_log(
+        db, user_id=user.id, action="LIVE_ACCOUNT_LOSS_LIMIT_CHANGED", object_type="live_risk_settings", object_id=str(user.id),
+        previous_value={"account_daily_loss_limit": before}, new_value={"account_daily_loss_limit": value},
+    )
+    await db.commit()
+    return await _account_limit_out(db, user)
 
 
 @router.get("/runs", response_model=list[LiveRunOut])

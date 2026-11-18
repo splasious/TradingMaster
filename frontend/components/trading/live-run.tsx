@@ -19,10 +19,10 @@ import { Select } from "@/components/ui/select";
 import { Table, Tbody, Td, Th, Thead } from "@/components/ui/table";
 import { apiFetch, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { useBrokerAccounts, useKillSwitch } from "@/lib/hooks";
+import { useAccountLimit, useBrokerAccounts, useKillSwitch } from "@/lib/hooks";
 import { istShortDateTime, istShortTime } from "@/lib/time";
 import { CloseFootnote, CloseMark, priceHeading } from "@/components/trading/close-price";
-import type { BrokerAccountOut, LiveRunOut } from "@/lib/types";
+import type { AccountLimitOut, BrokerAccountOut, LiveRunOut } from "@/lib/types";
 
 const MAX_LOTS_PER_LEG = 25; // live_runs.MAX_LOTS_PER_LEG -- under NIFTY's 1,800 freeze quantity
 
@@ -328,6 +328,77 @@ export function LiveOffModal({ run, strategyName, onClose }: { run: LiveRunOut; 
   );
 }
 
+/** What the account-wide limit is now, in words. */
+function accountLimitText(limit: AccountLimitOut): string {
+  if (limit.effective_limit <= 0) return "Off";
+  const daily = `${rupees(limit.effective_limit)} a day`;
+  return limit.account_daily_loss_limit == null
+    ? `${daily} (default: ${limit.default_pct}% of ${rupees(limit.live_capital)} live capital)`
+    : daily;
+}
+
+/** The daily loss limit across all live runs together (18 Nov): an amount,
+ * 0 to turn it off, or back to the default. Squares off and pauses every
+ * live run, and turns the kill switch on, when their combined day's loss
+ * reaches it. */
+export function AccountLimitModal({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const { data: limit } = useAccountLimit();
+  const [amount, setAmount] = useState("");
+  const save = useMutation({
+    mutationFn: (value: number | null) =>
+      apiFetch<AccountLimitOut>("/api/v1/live-native/account-limit", { method: "PUT", body: JSON.stringify({ account_daily_loss_limit: value }) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["account-limit"] });
+      invalidateLive(queryClient);
+      setAmount("");
+    },
+  });
+  const typed = Number(amount);
+  const valid = amount.trim() !== "" && Number.isFinite(typed) && typed > 0;
+
+  return (
+    <Modal open onClose={onClose} title="Account daily loss limit">
+      <div className="space-y-4 text-sm">
+        <p className="text-text-secondary">
+          All your live strategies together: when their combined loss for the day reaches it, every live position is squared off,
+          every live run paused and the kill switch turned on. Each strategy&apos;s own loss limit still applies on top.
+        </p>
+        <div className="rounded-md bg-neutral-soft px-3 py-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-text-muted">Now: </span>
+          <span className="font-financial">{limit ? accountLimitText(limit) : "..."}</span>
+        </div>
+        <div className="space-y-1">
+          <label htmlFor="account-limit" className="text-xs font-semibold text-text-secondary">New limit (₹ a day)</label>
+          <div className="flex gap-2">
+            <Input id="account-limit" inputMode="decimal" placeholder="e.g. 20000" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <Button onClick={() => save.mutate(typed)} disabled={!valid || save.isPending}>Save</Button>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {limit?.account_daily_loss_limit != null && (
+            <Button variant="secondary" size="sm" onClick={() => save.mutate(null)} disabled={save.isPending}>
+              Back to the default ({limit.default_pct}% of live capital)
+            </Button>
+          )}
+          {limit && limit.effective_limit > 0 && (
+            <Button variant="secondary" size="sm" className="text-negative" onClick={() => save.mutate(0)} disabled={save.isPending}>
+              Turn it off
+            </Button>
+          )}
+        </div>
+        {limit && limit.effective_limit <= 0 && (
+          <p className="rounded-md bg-warning-soft px-3 py-2 text-xs text-warning">
+            Off: nothing caps the day&apos;s loss across your live strategies -- only each one&apos;s own loss limit.
+          </p>
+        )}
+        {save.error && <div className="rounded-md bg-negative-soft px-3 py-2 text-negative">{errorText(save.error, "Couldn't save the limit")}</div>}
+        <div className="flex justify-end"><Button variant="secondary" onClick={onClose}>Done</Button></div>
+      </div>
+    </Modal>
+  );
+}
+
 /** The button that fixes what paused a live run. */
 function FixIt({ run, onEdit }: { run: LiveRunOut; onEdit: () => void }) {
   const queryClient = useQueryClient();
@@ -343,6 +414,7 @@ function FixIt({ run, onEdit }: { run: LiveRunOut; onEdit: () => void }) {
       invalidateLive(queryClient);
     },
   });
+  const [accountLimitOpen, setAccountLimitOpen] = useState(false);
   const resumeButton = (label = "Resume") => (
     <Button size="sm" variant="secondary" onClick={() => resume.mutate()} disabled={resume.isPending}>
       {resume.isPending ? "Resuming..." : label}
@@ -369,6 +441,14 @@ function FixIt({ run, onEdit }: { run: LiveRunOut; onEdit: () => void }) {
         </>
       );
       break;
+    case "account_limit":
+      action = (
+        <>
+          <Button size="sm" variant="secondary" onClick={() => setAccountLimitOpen(true)}>Change account limit</Button>
+          {resumeButton()}
+        </>
+      );
+      break;
     case "kill_switch":
       action = hasRole("administrator") ? (
         <Button size="sm" variant="secondary" onClick={() => killOff.mutate()} disabled={killOff.isPending}>Turn kill switch off</Button>
@@ -388,6 +468,7 @@ function FixIt({ run, onEdit }: { run: LiveRunOut; onEdit: () => void }) {
     <span className="flex flex-wrap items-center gap-2">
       {action}
       {resume.error && <span className="text-xs text-negative">{errorText(resume.error, "Couldn't resume")}</span>}
+      {accountLimitOpen && <AccountLimitModal onClose={() => setAccountLimitOpen(false)} />}
     </span>
   );
 }
@@ -518,6 +599,8 @@ export function LiveBar({ runs }: { runs: LiveRunOut[] }) {
   const [confirmExit, setConfirmExit] = useState(false);
   const [killReason, setKillReason] = useState("");
   const [killOpen, setKillOpen] = useState(false);
+  const [accountLimitOpen, setAccountLimitOpen] = useState(false);
+  const { data: accountLimit } = useAccountLimit();
   const exitAll = useMutation({
     mutationFn: () => apiFetch<{ paused: number; not_closed: string[] }>("/api/v1/live-native/exit-all", { method: "POST" }),
     onSuccess: () => invalidateLive(queryClient),
@@ -545,6 +628,9 @@ export function LiveBar({ runs }: { runs: LiveRunOut[] }) {
           {runs.length} strateg{runs.length === 1 ? "y is" : "ies are"} trading real money: {brokers.join(", ")}
           {killSwitch?.active && <span className="ml-2 rounded bg-negative px-1.5 py-0.5 text-[11px] text-white">KILL SWITCH ON</span>}
         </span>
+        <Button size="sm" variant="secondary" onClick={() => setAccountLimitOpen(true)} title="The day's loss limit across all live strategies together">
+          Account loss limit: {accountLimit ? (accountLimit.effective_limit > 0 ? `${rupees(accountLimit.effective_limit)}/day` : "off") : "..."}
+        </Button>
         <Button size="sm" variant="secondary" onClick={() => setConfirmExit(true)} disabled={!held}>
           Exit all live positions
         </Button>
@@ -584,6 +670,8 @@ export function LiveBar({ runs }: { runs: LiveRunOut[] }) {
           )}
         </div>
       </Modal>
+
+      {accountLimitOpen && <AccountLimitModal onClose={() => setAccountLimitOpen(false)} />}
 
       <Modal open={killOpen} onClose={() => setKillOpen(false)} title={killSwitch?.active ? "Kill switch is on" : "Turn the kill switch on?"}>
         <div className="space-y-4 text-sm">

@@ -328,6 +328,7 @@ def test_which_fix_a_pause_offers():
         "Exit all at 10:05: you closed every live position -- resume when ready": "resume",
         "Exit all at 10:05: couldn't close X -- check the broker": "check_broker",
         "Doesn't match the broker -- NIFTY: the broker holds 0, the live strategies -65.": "check_broker",
+        "All live strategies together: day P&L -2,619 reached the account limit of 2,500 -- squared off": "account_limit",
     }
     for reason, fix in cases.items():
         run.pause_reason = reason
@@ -335,3 +336,28 @@ def test_which_fix_a_pause_offers():
     assert live_runs.pause_fix(run, True) == "kill_switch"
     run.status = LIVE_NATIVE_ACTIVE
     assert live_runs.pause_fix(run, False) is None
+
+
+async def test_the_account_limit_is_set_in_the_app_0_turning_it_off(world, db_session):
+    """18 Nov: the daily loss limit across all live runs together -- the default
+    5% of the live capital until set; an amount, 0 (off) or back to the default."""
+    from app.models.audit import AuditLog
+    from app.services.live_trading import native_live
+
+    url = "/api/v1/live-native/account-limit"
+    assert (await world.go_live(capital=50000)).status_code == 201
+    out = (await world.client.get(url, headers=world.headers)).json()
+    assert out == {"account_daily_loss_limit": None, "effective_limit": 2500.0, "default_pct": 5.0, "live_capital": 50000.0}
+
+    set_to = lambda value: world.client.put(url, json={"account_daily_loss_limit": value}, headers=world.headers)  # noqa: E731
+    assert (await set_to(-1)).status_code == 400
+    out = (await set_to(20000)).json()
+    assert (out["account_daily_loss_limit"], out["effective_limit"]) == (20000.0, 20000.0)
+    runs = [await world.run()]
+    assert await native_live.account_limit(db_session, world.user.id, runs) == 20000.0
+    out = (await set_to(0)).json()
+    assert (out["account_daily_loss_limit"], out["effective_limit"]) == (0.0, 0.0)  # off: check_account_limits passes it by
+    out = (await set_to(None)).json()
+    assert (out["account_daily_loss_limit"], out["effective_limit"]) == (None, 2500.0)  # the default again
+    logs = (await db_session.execute(select(AuditLog).where(AuditLog.action == "LIVE_ACCOUNT_LOSS_LIMIT_CHANGED"))).scalars().all()
+    assert [log.new_value["account_daily_loss_limit"] for log in logs] == [20000.0, 0.0, None]

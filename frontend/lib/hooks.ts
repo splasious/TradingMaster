@@ -3,6 +3,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { apiFetch } from "./api";
 import { DELTA_VISIBLE } from "./features";
 import type {
+  AccountLimitOut,
   AlertOut,
   AlertSeverity,
   BackfillJobOut,
@@ -559,6 +560,14 @@ export function useBrokerBalance(accountId: string | null) {
     queryFn: () => apiFetch<BrokerBalanceOut>(`/api/v1/brokers/accounts/${accountId}/balance`),
     enabled: !!accountId,
     retry: false, // a real broker API call -- don't hammer it on failure
+  });
+}
+
+export function useAccountLimit(enabled = true) {
+  return useQuery({
+    queryKey: ["account-limit"],
+    queryFn: () => apiFetch<AccountLimitOut>("/api/v1/live-native/account-limit"),
+    enabled,
   });
 }
 

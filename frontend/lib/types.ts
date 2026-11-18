@@ -440,7 +440,16 @@ export interface LiveLegOut {
 }
 
 /** What fixes a paused live run -- the card's fix-it button. */
-export type LiveFix = "login" | "test" | "loss_limit" | "kill_switch" | "resume" | "check_broker";
+export type LiveFix = "login" | "test" | "loss_limit" | "account_limit" | "kill_switch" | "resume" | "check_broker";
+
+/** The daily loss limit across all of a user's live runs together (18 Nov):
+ * saved null = the default (default_pct of live_capital), 0 = off. */
+export interface AccountLimitOut {
+  account_daily_loss_limit: number | null;
+  effective_limit: number;
+  default_pct: number;
+  live_capital: number;
+}
 
 /** A live run switched on from a paper card (the Trading page's Paper / Live switch). */
 export interface LiveRunOut {

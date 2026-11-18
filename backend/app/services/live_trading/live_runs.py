@@ -78,6 +78,7 @@ MAX_LOTS_PER_LEG = 25
 FIX_LOGIN = "login"
 FIX_TEST = "test"
 FIX_LOSS_LIMIT = "loss_limit"
+FIX_ACCOUNT_LIMIT = "account_limit"  # the account-wide daily loss limit across all live runs (18 Nov)
 FIX_KILL_SWITCH = "kill_switch"
 FIX_RESUME = "resume"
 FIX_CHECK_BROKER = "check_broker"
@@ -280,6 +281,8 @@ def pause_fix(run: LiveNativeDeployment, kill_switch_on: bool) -> str | None:
         return FIX_TEST
     if "daily loss limit" in reason:
         return FIX_LOSS_LIMIT
+    if "account limit" in reason:
+        return FIX_ACCOUNT_LIMIT
     if "exit all" in reason and "couldn't close" not in reason:
         return FIX_RESUME
     return FIX_CHECK_BROKER
