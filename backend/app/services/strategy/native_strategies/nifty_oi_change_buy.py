@@ -28,6 +28,14 @@ held option is sold at the bid and, FLIP_GAP (5 seconds) later, the other
 side's ATM option is bought at the ask. Nothing held and a side wanted,
 it's bought at once.
 
+The first minute (version 4, 18 Nov): before the first close, at
+FIRST_READ (09:15:50) the live change in OI since the 09:15 record -- the
+PCR Analysis tab's LIVE row (services/options/pcr_live.py), so the first
+minute's build-up -- picks the side the same way, and its ATM option is
+bought at once; not had by FIRST_BUY_BY (09:16:00) -- no reading, no ask --
+nothing is bought until the 09:30 close, which then reads its 15 minutes as
+any close. Live only (a backtest has no live reading).
+
 The record lands a few seconds after its close; it's looked for every
 RECHECK (1 second) until it does, for up to RECORD_WAIT (2 minutes) -- a
 close whose record isn't in by then is passed over, what's held kept. A
@@ -58,6 +66,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.pcr import PcrSnapshot
 from app.services.broker.zerodha_broker import IST
@@ -74,6 +83,8 @@ MARK_STEP = timedelta(minutes=15)
 DAY_CLOSE = dtime(15, 29)
 FLIP_GAP = timedelta(seconds=5)
 RECORD_WAIT = timedelta(minutes=2)
+FIRST_READ = dtime(9, 15, 50)  # version 4: the first minute's live change in OI read then
+FIRST_BUY_BY = dtime(9, 16)  # and its option bought by then, or not at all (the 09:30 close decides)
 RECHECK = timedelta(seconds=1)
 TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
 TRAIL = 0.05  # then the stop sits this far below the highest bid since, only moving up
@@ -113,6 +124,14 @@ def next_mark(now_ist: datetime) -> datetime | None:
 
 def leg_pnl(leg: dict, exit_price: float) -> float:
     return (exit_price - leg["entry_price"]) * leg["quantity"]
+
+
+async def first_minute_reading(now_utc: datetime) -> tuple[dict | None, str | None]:
+    """(the PCR Analysis tab's live row -- every record field against the latest
+    record, the 09:15 one now -- None) or (None, why there isn't one)."""
+    from app.services.options.pcr_live import live_row
+
+    return await live_row(PCR_UNDERLYING, now_utc)
 
 
 async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
@@ -175,11 +194,22 @@ async def evaluate(ctx) -> None:
             return f"{text}; trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)"
         return text
 
+    first_read = datetime.combine(today, FIRST_READ, tzinfo=IST)
+    first_buy_by = datetime.combine(today, FIRST_BUY_BY, tzinfo=IST)
+    first_due = state.get("first_minute") != today.isoformat() and now_ist < first_buy_by and not getattr(ctx, "is_backtest", False)
+
+    def next_text() -> str:
+        if first_due and position is None:
+            return f"at {FIRST_READ:%H:%M:%S} (the first minute's change in OI)"
+        return _next_text(now_ist)
+
     def wake_for_next() -> None:
-        """Run again at the next 15-minute close, or at 15:29 while something is held."""
+        """Run again at the next 15-minute close (09:15:50 first, its day), or at 15:29 while something is held."""
         mark = next_mark(now_ist)
         if mark is not None:
             ctx.wake_at(mark)
+        if first_due and now_ist < first_read:
+            ctx.wake_at(first_read)
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
             ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
@@ -223,7 +253,7 @@ async def evaluate(ctx) -> None:
                     state["last_mark"] = current.isoformat()  # flat until the next close, whatever this one reads
                 ctx.note("exited", signal="SELL", reason=(
                     f"trailing stop: {option} sold at {price:,.2f} (the bid), its stop {stop:,.2f} -- {TRAIL * 100:g}% under the "
-                    f"highest bid {peak:,.2f}; P&L {pnl:+,.0f} before charges; next decision {_next_text(now_ist)}"
+                    f"highest bid {peak:,.2f}; P&L {pnl:+,.0f} before charges; next decision {next_text()}"
                 ))
                 wake_for_next()
                 return
@@ -278,8 +308,31 @@ async def evaluate(ctx) -> None:
                                     "call_change_15m": call_15m}
                 decided = f"{reading} -- a {SIDE_NAME[side]}; "
 
+    # -- the first minute (version 4): at 09:15:50 the live change in OI since the 09:15 record
+    if first_due and position is None and state.get("pending") is None and first_read <= now_ist:
+        row, why = await first_minute_reading(now_utc)
+        if row is None:
+            ctx.note("skipped", reason=f"first minute: no live change in OI yet ({why}); tried again until {FIRST_BUY_BY:%H:%M:%S}")
+            ctx.wake_at(now_utc + RECHECK)
+            return
+        state["first_minute"] = today.isoformat()
+        put_1m, call_1m = row.get("put_oi_change"), row.get("call_oi_change")
+        state["last_oi"] = {"at": "first minute", "put_change_15m": put_1m, "call_change_15m": call_1m}
+        side = wanted_side(put_1m, call_1m)
+        if side is None:
+            decided = "first minute: no side in the change in OI; "
+        else:
+            state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": "09:15 first minute",
+                                "put_change_15m": put_1m, "call_change_15m": call_1m, "buy_by": first_buy_by.isoformat()}
+            decided = (f"first minute's change in OI (since the {as_ist_hhmm(row.get('prev_ts'))} record): put {put_1m:+,.0f}, "
+                       f"call {call_1m:+,.0f} -- a {SIDE_NAME[side]}; ")
+
     # -- a buy due: at once, or 5 seconds after a flip's sale
     pending = state.get("pending")
+    if pending is not None and pending.get("buy_by") and now_utc >= datetime.fromisoformat(pending["buy_by"]):
+        state.pop("pending", None)  # the first minute's buy not had by 09:16: the 09:30 close decides
+        pending = None
+        decided += f"the first minute's buy wasn't had by {FIRST_BUY_BY:%H:%M} -- dropped; "
     if pending is not None and position is None:
         due = datetime.fromisoformat(pending["due"])
         if now_utc < due:
@@ -337,10 +390,16 @@ async def evaluate(ctx) -> None:
         return
 
     if position is not None:
-        ctx.note("hold", reason=f"{decided}{held_text()}; next decision {_next_text(now_ist)}; sold at {DAY_CLOSE:%H:%M}")
+        ctx.note("hold", reason=f"{decided}{held_text()}; next decision {next_text()}; sold at {DAY_CLOSE:%H:%M}")
     else:
-        ctx.note("skipped", reason=f"{decided}nothing held; next decision {_next_text(now_ist)}")
+        ctx.note("skipped", reason=f"{decided}nothing held; next decision {next_text()}")
     wake_for_next()
+
+
+def as_ist_hhmm(ts) -> str:
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts)
+    return as_aware_utc(ts).astimezone(IST).strftime("%H:%M") if isinstance(ts, datetime) else "latest"
 
 
 def _next_text(now_ist: datetime) -> str:

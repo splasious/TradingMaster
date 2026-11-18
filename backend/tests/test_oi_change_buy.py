@@ -234,6 +234,57 @@ async def test_a_stop_hit_at_a_close_waits_for_the_next_one(market):
     assert (await market.check(at(4, 9, 45, 5))).state.get("position") is None
 
 
+async def test_at_091550_the_first_minutes_change_in_oi_buys_before_0916(market, monkeypatch):
+    """18 Nov (version 4): the live change in OI since the 09:15 record, read at 09:15:50."""
+    readings = []
+
+    async def reading(now_utc):
+        readings.append(now_utc)
+        return {"put_oi_change": 9_00_000.0, "call_oi_change": 4_00_000.0, "prev_ts": at(4, 9, 15).astimezone(timezone.utc)}, None
+
+    monkeypatch.setattr(oib, "first_minute_reading", reading)
+    market.deployment.state = {"last_mark": at(3, 15, 15).isoformat()}
+    early = await market.check(at(4, 9, 15, 30))
+    assert early.state.get("position") is None and early._wake_at == at(4, 9, 15, 50) and readings == []
+    assert "next decision at 09:15:50" in early._last_reason
+    ctx = await market.check(at(4, 9, 15, 50))
+    p = ctx.state["position"]
+    assert (p["option"], p["decided_at"]) == ("09 Nov 23,450 CE", "09:15 first minute") and ctx._last_signal == "BUY"
+    assert "first minute's change in OI (since the 09:15 record): put +900,000, call +400,000 -- a call" in ctx._last_reason
+    await market.check(at(4, 9, 15, 55))
+    assert len(readings) == 1  # once a day
+    await market.record(at(4, 9, 30), put_day=1_00_000, call_day=5_00_000)  # the 09:30 close reads its 15 minutes as usual
+    await market.check(at(4, 9, 30, 4))
+    assert [t.exit_reason for t in await market.trades()] == ["oi_flip"]
+
+
+async def test_a_first_minute_buy_not_had_by_0916_waits_for_the_0930_close(market, monkeypatch):
+    calls = []
+
+    async def no_reading(now_utc):
+        calls.append(now_utc)
+        return None, "Zerodha isn't logged in"
+
+    monkeypatch.setattr(oib, "first_minute_reading", no_reading)
+    market.deployment.state = {"last_mark": at(3, 15, 15).isoformat()}
+    waiting = await market.check(at(4, 9, 15, 50))
+    assert waiting.state.get("position") is None and "no live change in OI yet" in waiting._last_reason
+    assert waiting._wake_at == at(4, 9, 15, 51)
+    late = await market.check(at(4, 9, 16, 0))
+    assert late.state.get("position") is None and len(calls) == 1 and "next decision at the 09:30 close" in late._last_reason
+
+    async def reading(now_utc):
+        return {"put_oi_change": 9.0, "call_oi_change": 4.0, "prev_ts": None}, None
+
+    monkeypatch.setattr(oib, "first_minute_reading", reading)
+    market.deployment.state = {"last_mark": at(4, 15, 15).isoformat()}
+    market.no_book = {(W1, 23450.0, "CE")}  # read, but no ask: not had by 09:16
+    await market.check(at(5, 9, 15, 50))
+    dropped = await market.check(at(5, 9, 16, 0))
+    assert dropped.state.get("position") is None and dropped.state.get("pending") is None
+    assert "wasn't had by 09:16 -- dropped" in dropped._last_reason
+
+
 def test_its_trades_dont_go_to_telegram():
     from app.services.notifications.trade_alerts import alerted_strategies
 
