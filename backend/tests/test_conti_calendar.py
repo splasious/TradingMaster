@@ -89,6 +89,11 @@ class Market:
 
         monkeypatch.setattr(NativeContext, "get_pcr", get_pcr)
         monkeypatch.setattr(NativeContext, "list_weekly_expiries", expiries)
+
+        async def no_records(ctx, weekly, strikes, today):  # version 13: no change-in-OI records here -- the PCR's rule picks
+            return None, "no change-in-OI records in this test"
+
+        monkeypatch.setattr(cal, "oi_added", no_records)
         # Prices and the order book only count while NSE is open (conftest turns that rule off).
         monkeypatch.setattr(live_price, "nse_market_open", hours.nse_market_open)
         return self
@@ -487,3 +492,59 @@ async def test_the_card_can_fetch_its_position_alone(market, client, monkeypatch
         assert (await client.get(url)).status_code == 403  # the app's ownership check
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+class OIMarket(Market):
+    """Conti Calendar's test market with change-in-OI records (version 13)."""
+
+    async def records(self, day: int, added: dict[float, tuple[float, float]], mark=(9, 30)) -> None:
+        """The previous session's last record and today's `mark` record: each
+        strike's weekly (W1) CE and PE OI going from 1,00,000 up by `added`."""
+        from app.models.pcr import SOURCE_LIVE, PcrSnapshot, PcrStrikeOi
+
+        base_ts = at(day - 1, 15, 30).astimezone(timezone.utc)
+        now_ts = at(day, *mark).astimezone(timezone.utc)
+        base = PcrSnapshot(underlying="NIFTY", ts=base_ts, session_date=base_ts.astimezone(IST).date(), captured_at=base_ts,
+                           source=SOURCE_LIVE, strike_window=40, expiries=[])
+        snap = PcrSnapshot(underlying="NIFTY", ts=now_ts, session_date=now_ts.astimezone(IST).date(), captured_at=now_ts,
+                           source=SOURCE_LIVE, strike_window=40, expiries=[], day_baseline_ts=base_ts)
+        self.db.add_all([base, snap])
+        await self.db.flush()
+        for strike in range(23000, 24001, 50):
+            ce, pe = added.get(float(strike), (0.0, 0.0))
+            for snapshot, oi_ce, oi_pe in ((base, 100000.0, 100000.0), (snap, 100000.0 + ce, 100000.0 + pe)):
+                for option_type, oi in (("CE", oi_ce), ("PE", oi_pe)):
+                    self.db.add(PcrStrikeOi(snapshot_id=snapshot.id, expiry=W1, strike=float(strike), option_type=option_type,
+                                            tradingsymbol=f"N{strike}{option_type}", oi=oi))
+        await self.db.commit()
+
+
+@pytest.fixture
+async def oi_market(db_session, monkeypatch):
+    real = cal.oi_added
+    m = await OIMarket(db_session).build(monkeypatch)
+    monkeypatch.setattr(cal, "oi_added", real)
+    yield m
+    tick_engine.forget([m.nifty.id, *(o.id for o in m.options)])
+
+
+async def test_the_next_position_takes_the_strike_with_the_most_ce_and_pe_oi_added_today(oi_market):
+    """19 Nov (version 13): of the 7 strikes around NIFTY, the most weekly CE + PE OI added since the previous close."""
+    waiting = await oi_market.check(at(4, 9, 30, 1))  # the 09:30 record isn't in yet: it waits
+    assert waiting.state.get("position") is None and "waiting for the 09:30 change-in-OI record" in waiting._last_reason
+    assert waiting._wake_at == at(4, 9, 30, 2)
+    await oi_market.records(4, {23400.0: (5_00_000.0, 2_00_000.0), 23550.0: (9_00_000.0, -1_00_000.0), 23700.0: (20_00_000.0, 0.0)})
+    ctx = await oi_market.check(at(4, 9, 30, 6))
+    p = ctx.state["position"]
+    assert p["strike"] == 23550.0 and p["strike_rule"] == "most OI added" and p["oi_added"] == 8_00_000  # 23,700 isn't one of the 7
+    assert (p["oi_record"], p["pcr_at_entry"]) == ("09:30", 0.9)
+    assert "the most CE+PE OI added today of the 7 strikes around NIFTY (+800,000 by the 09:30 record" in ctx._last_reason
+    assert all(leg["strike"] == 23550.0 for leg in p["legs"].values())
+
+
+async def test_a_tie_goes_to_the_strike_nearer_nifty_and_no_record_by_0935_falls_back_to_the_pcr(oi_market):
+    assert cal.most_added({23400.0: 5.0, 23500.0: 5.0, 23450.0: 1.0}, 23460.0) == 23500.0
+    assert cal.most_added({23400.0: -5.0, 23450.0: -1.0}, 23460.0) == 23450.0  # all unwinding: the one unwinding least
+    ctx = await oi_market.check(at(4, 9, 35))
+    p = ctx.state["position"]
+    assert p["strike"] == 23450.0 and p["strike_rule"].startswith("PCR (no OI record") and p["oi_added"] is None

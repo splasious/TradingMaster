@@ -1058,6 +1058,30 @@ async def test_conti_reverse_calendar_moves_onto_the_roll_a_day_before_keeping_i
     assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # left alone
 
 
+async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(db_engine, db_session):
+    """19 Nov: Conti Calendar 15 MIN version 13 -- the strike with the most OI added today."""
+    migration = _load("e8a0c2e4f6b3_conti_calendar_most_oi_added")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d6f8a0c2e4b1"
+    assert "OI_FIRST_RECORD = dtime(9, 30)" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v12 = "# Conti Calendar 15 MIN, version 12: the PCR's strike\n"
+    migration.FROM_MD5S = {_md5_text(v12)}
+    running = await _deployment(db_session, "cal13_a@tradingmaster.internal", v12)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 15 MIN"
+    state = {"position": {"strike": 25050, "legs": {}}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
 async def test_conti_calendar_400_moves_onto_the_monthly_cover_ratio(db_engine, db_session):
     """19 Nov: Conti Calendar 400 15 MIN version 5 -- the monthly cover 2.5-3x the weekly's bid."""
     migration = _load("d6f8a0c2e4b1_conti_calendar_400_monthly_cover_ratio")
@@ -1085,6 +1109,8 @@ async def test_conti_calendar_400_moves_onto_the_monthly_cover_ratio(db_engine, 
 async def test_conti_calendar_moves_onto_20_lots_keeping_its_position(db_engine, db_session):
     """19 Nov: Conti Calendar 15 MIN version 12 -- 20 lots a leg."""
     migration = _load("c4e6a8b0d2f9_conti_calendar_20_lots")
+    assert _load("e8a0c2e4f6b3_conti_calendar_most_oi_added").FROM_MD5S == {migration.TO_MD5}  # version 13 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "b2d4f6a8c0e7"
     assert "LOTS_PER_LEG = 20" in migration.BUILT_IN.read_text(encoding="utf-8") and migration.BUILT_IN.name == "nifty_conti_calendar.py"
     v11 = "# Conti Calendar 15 MIN, version 11: 16 lots a leg\n"

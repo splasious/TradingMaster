@@ -33,7 +33,7 @@ from app.models.user import User
 from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
-NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8c999e0bd056d54a18fee244fa7aa0a1",
+NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
          "Conti Calendar 400 15 MIN": "ed2551591a7b70175321e4b45ea2a28f",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "1f38bd1c34f2525ab33ac0aa68365e81"}
@@ -132,6 +132,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 continue
             if position:
                 opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
+                if position.get("strike_rule"):
+                    print(f"    strike rule: {position['strike_rule']}; OI added {position.get('oi_added')} by the {position.get('oi_record')} record")
                 print(f"    opened {opened}: strike {position['strike']:,.0f} ({position['side']}-heavy, PCR {position['pcr_at_entry']:.3f}), "
                       f"weekly {position['weekly_expiry']}, monthly {position['monthly_expiry']}")
                 for name, leg in position["legs"].items():

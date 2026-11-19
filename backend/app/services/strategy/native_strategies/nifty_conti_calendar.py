@@ -42,6 +42,17 @@ premiums:
 Nearer NIFTY on a tie; the strikes looked at are the one nearest NIFTY and
 CANDIDATE_STEPS either side.
 
+The strike by OI added (version 13, 19 Nov), in place of the PCR's: of the
+same strikes, the one whose weekly CE + PE open interest has grown the most
+since the previous session's close -- the latest 15-minute change-in-OI
+record's per-strike OI (models/pcr.py PcrStrikeOi) against its day baseline,
+the previous session's last record. Nearer NIFTY on a tie; all of them
+unwinding, the one unwinding least. The first record it reads is the 09:30
+one: before it is in (09:30 to 09:35) the entry waits a second at a time.
+No usable record today -- none from 09:30 by 09:35, or no baseline -- the
+PCR's rule above picks instead. The PCR is still read and kept with the
+position (pcr_at_entry).
+
 At bid and ask: every fill is at the order book's best price -- a sell at
 the bid, a buy at the ask -- and the take-profit reads what closing all four
 right now would really give: the sold legs bought back at the ask, the
@@ -85,7 +96,9 @@ from datetime import date, datetime, time as dtime, timedelta
 
 from sqlalchemy import func, select
 
+from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
+from app.models.pcr import PcrSnapshot, PcrStrikeOi
 from app.services.broker.zerodha_broker import IST
 from app.services.paper_trading.trade_record import order_charges
 
@@ -112,6 +125,50 @@ LEGS = (  # name, option type, side at entry, which expiry
     ("long_ce", "CE", "buy", "monthly"),
     ("long_pe", "PE", "buy", "monthly"),
 )
+
+
+OI_FIRST_RECORD = dtime(9, 30)  # version 13: the first record whose OI added counts
+OI_WAIT_UNTIL = dtime(9, 35)  # before it, the entry waits until then, then the PCR's rule picks
+PCR_UNDERLYING = "NIFTY"  # the change-in-OI records' name for it
+
+
+async def oi_added(ctx, weekly: date, strikes: list[float], today: date) -> tuple[dict[float, float] | None, str]:
+    """({strike: weekly CE + PE OI added since the previous session's close}, the
+    record's time "HH:MM") from the latest change-in-OI record today, or
+    (None, why not) -- "wait" when today's first usable record isn't in yet."""
+    snap = (await ctx.db.execute(
+        select(PcrSnapshot).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.session_date == today)
+        .order_by(PcrSnapshot.ts.desc()).limit(1)
+    )).scalar_one_or_none()
+    mark = as_aware_utc(snap.ts).astimezone(IST) if snap is not None else None
+    if snap is None or mark.time() < OI_FIRST_RECORD:
+        return None, "wait"
+    if snap.day_baseline_ts is None:
+        return None, f"the {mark:%H:%M} record has no previous close to compare with"
+    base = (await ctx.db.execute(
+        select(PcrSnapshot.id).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts == snap.day_baseline_ts)
+    )).scalar_one_or_none()
+    if base is None:
+        return None, "the previous close's record is gone"
+    rows = (await ctx.db.execute(
+        select(PcrStrikeOi.snapshot_id, PcrStrikeOi.strike, PcrStrikeOi.option_type, PcrStrikeOi.oi).where(
+            PcrStrikeOi.snapshot_id.in_((snap.id, base)), PcrStrikeOi.expiry == weekly, PcrStrikeOi.strike.in_(strikes),
+        )
+    )).all()
+    oi = {(sid, float(k), t): v for sid, k, t, v in rows}
+    added = {}
+    for strike in strikes:
+        parts = [(oi.get((snap.id, float(strike), t)), oi.get((base, float(strike), t))) for t in ("CE", "PE")]
+        if all(now is not None and before is not None for now, before in parts):
+            added[float(strike)] = sum(now - before for now, before in parts)
+    if not added:
+        return None, f"the {mark:%H:%M} record has no OI for the {weekly:%d %b} strikes around NIFTY"
+    return added, f"{mark:%H:%M}"
+
+
+def most_added(added: dict[float, float], spot: float) -> float:
+    """The strike with the most OI added; nearer NIFTY on a tie."""
+    return max(added, key=lambda k: (added[k], -abs(k - spot)))
 
 
 def side_for(pcr: float) -> str:
@@ -403,7 +460,17 @@ async def evaluate(ctx) -> None:
             pair[option_type] = (instrument, price)
         if len(pair) == 2:
             contracts[strike] = pair
-    strike = pick_strike({k: (pair["CE"][1], pair["PE"][1]) for k, pair in contracts.items()}, side, spot)
+    added, oi_note = await oi_added(ctx, weekly, list(contracts), today) if contracts else (None, "no strike with both premiums live")
+    if added is None and oi_note == "wait" and now_ist.time() < OI_WAIT_UNTIL:
+        ctx.note("skipped", reason=f"waiting for the {OI_FIRST_RECORD:%H:%M} change-in-OI record to pick the strike by OI added")
+        ctx.wake_at(now_utc + RECHECK)
+        return
+    strike_rule = "most OI added"
+    if added is not None:
+        strike = most_added(added, spot)
+    else:
+        strike_rule = "PCR (no OI record: " + ("none from 09:30 yet" if oi_note == "wait" else oi_note) + ")"
+        strike = pick_strike({k: (pair["CE"][1], pair["PE"][1]) for k, pair in contracts.items()}, side, spot)
     if strike is None:
         heavier = "CALL" if side == "call" else "PUT"
         ctx.note("skipped", reason=(
@@ -441,6 +508,9 @@ async def evaluate(ctx) -> None:
         "side": side,
         "strike": strike,
         "pcr_at_entry": pcr,
+        "strike_rule": strike_rule,
+        "oi_added": round(added[strike]) if added is not None else None,
+        "oi_record": oi_note if added is not None else None,
         "entry_spot": spot,
         "weekly_expiry": weekly.isoformat(),
         "monthly_expiry": monthly.isoformat(),
@@ -454,7 +524,10 @@ async def evaluate(ctx) -> None:
     sold = legs["short_ce"]["entry_price"] + legs["short_pe"]["entry_price"]
     bought = legs["long_ce"]["entry_price"] + legs["long_pe"]["entry_price"]
     ctx.note("entered", signal="CALENDAR", reason=(
-        rolled_note + f"{side}-heavy calendar opened at {strike:,.0f} (PCR {pcr:.3f}): sell {weekly:%d %b} CE+PE {sold:,.2f} at the bid, "
+        rolled_note + (f"calendar opened at {strike:,.0f}, the most CE+PE OI added today of the {len(added)} strikes around NIFTY "
+                       f"({added[strike]:+,.0f} by the {oi_note} record; PCR {pcr:.3f})" if added is not None
+                       else f"{side}-heavy calendar opened at {strike:,.0f} (PCR {pcr:.3f}; {strike_rule})")
+        + f": sell {weekly:%d %b} CE+PE {sold:,.2f} at the bid, "
         f"buy {monthly:%d %b} CE+PE {bought:,.2f} at the ask; {LOTS_PER_LEG} lots a leg; take-profit Rs {TAKE_PROFIT:,.0f}"
     ))
     ctx.wake_at(now_utc + RECHECK)
