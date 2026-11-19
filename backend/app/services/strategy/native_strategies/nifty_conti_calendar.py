@@ -11,8 +11,8 @@ off again; version 7, 6 Nov: a 5-minute pause after every close; version 8,
 8 Nov: the daily close moved to 15:29; version 9, 9 Nov: no new position
 after one closes from 14:00; version 10, 11 Nov: the pause after a close
 cut to 1 minute; version 11, 12 Nov: a losing position carried past 15:29,
-rolled at its weekly's expiry): four legs at one
-strike, LOTS_PER_LEG (16) lots each --
+rolled at its weekly's expiry; version 12, 19 Nov: 20 lots a leg, 16
+before): four legs at one strike, LOTS_PER_LEG (20) lots each --
 
   sell  the weekly CE and PE   the nearest weekly expiry; next week's on an
                                expiry day itself (as Conti)
@@ -93,7 +93,7 @@ UNDERLYING_SYMBOL = "NIFTY 50"
 PCR_TIMEFRAME = "15m"
 STRIKE_MULTIPLE = 50  # every 50-point strike, as Conti (version 6; versions 3-5 took hundreds only)
 CANDIDATE_STEPS = 3  # strikes looked at either side of the one nearest NIFTY
-LOTS_PER_LEG = 16
+LOTS_PER_LEG = 20  # version 12 (19 Nov); 16 before
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)

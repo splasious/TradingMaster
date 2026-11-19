@@ -25,7 +25,7 @@ W1, W2, W3 = date(2026, 11, 9), date(2026, 11, 17), date(2026, 11, 23)  # weekli
 DEC = date(2026, 12, 29)  # December's monthly
 SYMBOLS = {W1: "NIFTY26N09", W2: "NIFTY26N17", W3: "NIFTY26NOV", DEC: "NIFTY26DEC"}
 SPREAD = 0.5  # the book's half-spread around each premium in these tests
-QTY = 16 * 65.0
+QTY = 20 * 65.0  # 20 lots a leg since version 12 (19 Nov)
 
 
 def at(day: int, hh: int, mm: int, ss: int = 0) -> datetime:
@@ -147,7 +147,7 @@ async def test_it_opens_at_0930_selling_the_weekly_and_buying_the_monthly_at_one
     credit = (legs["short_ce"]["entry_price"] + legs["short_pe"]["entry_price"]) * QTY
     debit = (legs["long_ce"]["entry_price"] + legs["long_pe"]["entry_price"]) * QTY
     assert market.portfolio.cash == pytest.approx(2_000_000.0 + credit - debit)
-    assert p["entry_charges"] > 0 and "16 lots a leg" in ctx._last_reason and ctx._last_signal == "CALENDAR"
+    assert p["entry_charges"] > 0 and "20 lots a leg" in ctx._last_reason and ctx._last_signal == "CALENDAR"
 
 
 def gain(market, position: dict, each: float) -> None:
@@ -349,7 +349,7 @@ async def test_the_telegram_entry_alert_carries_the_setup_with_its_close_figures
     payoff = await trade_alerts._entry_payoff(market.db, position, ctx, 23460.0)
     assert payoff is not None and payoff.horizon == at(4, 15, 29) and payoff.target == cal.TAKE_PROFIT
     title, body = trade_alerts.entry_message("Conti Calendar 15 MIN", ctx.opened_legs, position, ctx.now, payoff)
-    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 16 lots a leg" in body
+    assert title == "📅 Conti Calendar 15 MIN: trade taken" and "Strike 23,450 · 20 lots a leg" in body
     assert "Target +14,000 after costs" in body and "15:29: closed if in profit," in body and "At 15:29, IV as now:" in body and " Max loss " in body
     assert await trade_alerts._entry_payoff(market.db, {"regime": "bullish"}, ctx, 23460.0) is None
 

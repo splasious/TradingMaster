@@ -41,7 +41,8 @@ def test_it_is_conti_calendar_with_the_sides_reversed():
 
     assert rev.LEGS == (("long_ce", "CE", "buy", "weekly"), ("long_pe", "PE", "buy", "weekly"),
                         ("short_ce", "CE", "sell", "monthly"), ("short_pe", "PE", "sell", "monthly"))
-    for name in ("STRIKE_MULTIPLE", "CANDIDATE_STEPS", "LOTS_PER_LEG", "ENTRY_TIME", "ENTRY_UNTIL", "DAILY_CLOSE", "DAY_DONE_AFTER",
+    assert (rev.LOTS_PER_LEG, cal.LOTS_PER_LEG) == (16, 20)  # Conti Calendar went to 20 lots on 19 Nov; this one stays at 16
+    for name in ("STRIKE_MULTIPLE", "CANDIDATE_STEPS", "ENTRY_TIME", "ENTRY_UNTIL", "DAILY_CLOSE", "DAY_DONE_AFTER",
                  "RECHECK", "PAUSE_AFTER_CLOSE", "TAKE_PROFIT", "PCR_PIVOT", "PCR_TIMEFRAME"):
         assert getattr(rev, name) == getattr(cal, name), name
     assert rev.REGIME == "reverse calendar"
