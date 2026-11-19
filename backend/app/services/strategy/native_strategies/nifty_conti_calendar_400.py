@@ -25,6 +25,19 @@ check (the next tries again); none at Rs 100 or more on a side, none at all.
 Every new position is picked so -- the monthly roll's reopen too; a weekly
 roll keeps its position's strikes.
 
+The monthly cover (version 5, 19 Nov): each bought monthly is no longer at
+its weekly's strike. On each side it is the monthly strike -- any 50-point
+strike of the same type -- whose ask (what it is bought at) is between
+MONTHLY_RATIO (2.5 and 3) times the sold weekly's bid; of those in range,
+the one nearest 3x (the most premium, closest to the weekly strike): walked
+from the weekly strike outward while the ratio is over 3, inward while
+under 2.5. None in range on a side, or a strike on the way with no book: no
+entry that check. Every new position, the monthly roll's reopen too; a
+weekly roll keeps both its weekly and its monthly strikes. A position from
+before (same-strike monthlies, no "monthly_rule") is closed at bid / ask at
+the first check inside the entry window ("rule_change") and a new one opened
+at once by the new rule.
+
 Weekly: the nearest weekly expiry, next week's on an expiry day itself --
 or (version 4) the expiry after it when the nearest has, on either side, no
 OTM strike whose bid is still MIN_PREMIUM (the day before an expiry, its
@@ -95,6 +108,8 @@ REGIME = "double calendar"
 STRIKE_STEP = 50  # any 50-point strike (version 3; hundreds, ATM+-400, before)
 MIN_PREMIUM = 100.0  # rupees: the furthest OTM strike whose sold weekly's bid is still this much (version 3)
 MAX_STEPS = 40  # how many strikes out it looks on a side: 2,000 points
+MONTHLY_RATIO = (2.5, 3.0)  # version 5: the bought monthly's ask over the sold weekly's bid, nearest the top
+MONTHLY_RULE = "ask 2.5-3x the weekly's bid"  # kept on a position opened by version 5's rule
 LOTS_PER_LEG = 16
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
@@ -259,6 +274,14 @@ async def evaluate(ctx) -> None:
                 f"max loss reached {e['max_loss_reached']:+,.0f} ({e['max_loss_at']})")
 
     rolled_note = ""
+    if (position is not None and not force_exit and position.get("monthly_rule") != MONTHLY_RULE
+            and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL):
+        # version 5: a same-strike position from before closes and a new one opens at once by the new monthly rule
+        pnl = await close_all("rule_change", await forced_prices())
+        ctx.state.pop("paused_until", None)
+        ctx.state["reopen_due"] = True
+        rolled_note = f"the monthly cover rule changed (version 5): the same-strike position closed, P&L {pnl:+,.0f} before charges; "
+        position = None
     if position is not None:
         if force_exit:
             pnl = await close_all("manual", await forced_prices())
@@ -350,8 +373,10 @@ async def evaluate(ctx) -> None:
             if missing:
                 ctx.note("hold", reason=f"double calendar open; no bid/ask for {', '.join(missing)} -- take-profit checked once all four have one")
             else:
+                cover = (f" covered by {position['monthly_strike_ce']:,.0f} CE / {position['monthly_strike_pe']:,.0f} PE"
+                         if position.get("monthly_strike_ce") is not None else "")
                 ctx.note("hold", reason=(
-                    f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE "
+                    f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE{cover} "
                     f"(sold {weekly:%d %b}, bought {monthly:%d %b}): Rs {position['net_if_closed_now']:,.0f} if closed now "
                     f"at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; weeklies roll {weekly:%d %b} {ROLL_TIME:%H:%M}"
                 ))
@@ -435,30 +460,80 @@ async def evaluate(ctx) -> None:
         if reopening:
             ctx.wake_at(now_utc + RECHECK)
         return
+    async def monthly_cover(option_type: str, weekly_strike: float, weekly_bid: float) -> tuple[tuple | None, str]:
+        """((the monthly instrument, its ask, ask / weekly bid, its strike), "") --
+        the strike whose ask is MONTHLY_RATIO times `weekly_bid`, nearest the
+        top -- or (None, why not). The premium falls moving OTM, so it walks
+        OTM from the weekly strike while the ratio is over the range, ITM
+        while it's under (and on through the range for the highest in it)."""
+        lo, hi = MONTHLY_RATIO
+        otm = STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
+        seen: dict[float, tuple | str | None] = {}
+
+        async def at(strike: float):
+            if strike not in seen:
+                instrument = await ctx.find_option(underlying.id, monthly, strike, option_type)
+                quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
+                seen[strike] = None if instrument is None else ("no book" if quote is None else (instrument, quote[1], quote[1] / weekly_bid))
+            return seen[strike]
+
+        k = weekly_strike
+        r = await at(k)
+        if r is None:
+            return None, f"no {monthly:%d %b} {k:,.0f} {option_type} in the catalog"
+        if r == "no book":
+            return None, f"no bid/ask for the {monthly:%d %b} {k:,.0f} {option_type} yet"
+        direction = otm if r[2] > hi else -otm
+        best = (k, r) if lo <= r[2] <= hi else None
+        for _ in range(MAX_STEPS):
+            if best is not None and direction == otm:
+                break  # walking OTM, the first in range is the nearest 3x
+            nk = k + direction
+            nr = await at(nk)
+            if nr is None:
+                break  # past the catalog's last strike
+            if nr == "no book":
+                return None, f"no bid/ask for the {monthly:%d %b} {nk:,.0f} {option_type} yet"
+            if lo <= nr[2] <= hi and best is not None and nr[2] <= best[1][2]:
+                break  # no more premium a strike further: the one before stands
+            k, r = nk, nr
+            if lo <= r[2] <= hi:
+                best = (k, r)
+            elif best is not None or (direction == otm and r[2] < lo) or (direction != otm and r[2] > hi):
+                break  # past the range (or jumped over it)
+        if best is None:
+            return None, (f"no {monthly:%d %b} {option_type} with an ask {lo:g}-{hi:g}x the {weekly:%d %b} "
+                          f"{weekly_strike:,.0f} {option_type}'s bid of {weekly_bid:,.2f}")
+        return (best[1][0], best[1][1], best[1][2], best[0]), ""
+
     chosen: dict[str, tuple[Instrument, float]] = {}
-    for name, option_type, order_side, which in LEGS:
-        expiry = weekly if which == "weekly" else monthly
-        instrument = await ctx.find_option(underlying.id, expiry, strikes[option_type], option_type)
-        if instrument is None:
-            ctx.note("skipped", reason=f"no {expiry:%d %b} {strikes[option_type]:,.0f} {option_type} in the catalog")
+    leg_strikes: dict[str, float] = {}
+    ratios: dict[str, float] = {}
+    for option_type in ("CE", "PE"):
+        weekly_name = next(n for n, t, _, w in LEGS if t == option_type and w == "weekly")
+        monthly_name = next(n for n, t, _, w in LEGS if t == option_type and w == "monthly")
+        instrument = await ctx.find_option(underlying.id, weekly, strikes[option_type], option_type)
+        quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
+        why = (f"no {weekly:%d %b} {strikes[option_type]:,.0f} {option_type} in the catalog" if instrument is None
+               else f"no bid/ask for the {weekly:%d %b} {strikes[option_type]:,.0f} {option_type} yet" if quote is None else "")
+        cover = None
+        if not why:
+            chosen[weekly_name], leg_strikes[weekly_name] = (instrument, quote[0]), strikes[option_type]
+            cover, why = await monthly_cover(option_type, strikes[option_type], quote[0])
+        if cover is None:
+            ctx.note("skipped", reason=why)
             if reopening:
                 ctx.wake_at(now_utc + RECHECK)
             return
-        quote = await bid_ask(ctx, instrument.id)
-        if quote is None:
-            ctx.note("skipped", reason=f"no bid/ask for the {expiry:%d %b} {strikes[option_type]:,.0f} {option_type} yet")
-            if reopening:
-                ctx.wake_at(now_utc + RECHECK)
-            return
-        bid, ask = quote
-        chosen[name] = (instrument, bid if order_side == "sell" else ask)
+        m_instrument, m_ask, ratio, m_strike = cover
+        chosen[monthly_name], leg_strikes[monthly_name], ratios[option_type] = (m_instrument, m_ask), m_strike, round(ratio, 2)
 
     legs, entry_charges = {}, 0.0
     for name, option_type, order_side, which in LEGS:
         instrument, price = chosen[name]
         quantity = float(LOTS_PER_LEG * (instrument.lot_size or DEFAULT_LOT_SIZE))
         await ctx.open_leg(instrument, order_side, quantity, price)
-        leg = {"instrument_id": str(instrument.id), "strike": strikes[option_type], "option_type": option_type, "side": order_side,
+        leg = {"instrument_id": str(instrument.id), "strike": leg_strikes[name], "option_type": option_type, "side": order_side,
                "expiry": (weekly if which == "weekly" else monthly).isoformat(), "quantity": quantity, "entry_price": price}
         leg["entry_charges"] = round(charges_of(leg, price, buying=order_side == "buy"), 2)
         legs[name] = leg
@@ -469,6 +544,11 @@ async def evaluate(ctx) -> None:
         "min_premium": MIN_PREMIUM,
         "strike_ce": strikes["CE"],
         "strike_pe": strikes["PE"],
+        "monthly_strike_ce": leg_strikes["long_ce"],
+        "monthly_strike_pe": leg_strikes["long_pe"],
+        "monthly_ratio_ce": ratios["CE"],
+        "monthly_ratio_pe": ratios["PE"],
+        "monthly_rule": MONTHLY_RULE,
         "entry_spot": spot,
         "weekly_expiry": weekly.isoformat(),
         "monthly_expiry": monthly.isoformat(),
@@ -488,7 +568,9 @@ async def evaluate(ctx) -> None:
         (rolled_note or ("monthly roll's reopen: " if reopening else ""))
         + f"double calendar opened, NIFTY {spot:,.1f}: {strikes['CE']:,.0f} CE (bid {chosen['short_ce'][1]:,.2f}) and "
         f"{strikes['PE']:,.0f} PE (bid {chosen['short_pe'][1]:,.2f}), the furthest OTM with a weekly bid of Rs {MIN_PREMIUM:,.0f} or more, "
-        f"sell {weekly:%d %b} at the bid{passed_note}, buy {monthly:%d %b} at the ask; net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
+        f"sell {weekly:%d %b} at the bid{passed_note}, buy {monthly:%d %b} {leg_strikes['long_ce']:,.0f} CE (ask {chosen['long_ce'][1]:,.2f}, "
+        f"{ratios['CE']:g}x) and {leg_strikes['long_pe']:,.0f} PE (ask {chosen['long_pe'][1]:,.2f}, {ratios['PE']:g}x) at the ask; "
+        f"net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
         f"take-profit Rs {TAKE_PROFIT:,.0f}"
     ))
     ctx.wake_at(now_utc + RECHECK)

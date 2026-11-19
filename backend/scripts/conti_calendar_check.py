@@ -34,7 +34,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "8c999e0bd056d54a18fee244fa7aa0a1",
-         "Conti Calendar 400 15 MIN": "5226c6668e3ad16736f8c0bb48474ffc",
+         "Conti Calendar 400 15 MIN": "ed2551591a7b70175321e4b45ea2a28f",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "1f38bd1c34f2525ab33ac0aa68365e81"}
 LISTEN_SECONDS = 6
@@ -74,6 +74,9 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     basis = f"ATM {position['atm']:,.0f}" if position.get("atm") is not None else f"weekly bids >= {position.get('min_premium', 100):,.0f}"
                     print(f"    opened {opened}: {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE ({basis}), "
                           f"weekly {position['weekly_expiry']}, monthly {position['monthly_expiry']}, rolls {position.get('rolls', 0)}")
+                    print(f"    monthly covers: {position.get('monthly_strike_ce', 'same strike')} CE "
+                          f"({position.get('monthly_ratio_ce', '-')}x), {position.get('monthly_strike_pe', 'same strike')} PE "
+                          f"({position.get('monthly_ratio_pe', '-')}x); rule: {position.get('monthly_rule', 'version 4')}")
                     for name, leg in position["legs"].items():
                         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
                         print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")

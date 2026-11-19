@@ -221,11 +221,32 @@ def _calendar(legs: list[dict]) -> str | None:
     its rolled weeklies included), "Call Calendar" / "Put Calendar"; the
     other way round -- the near expiry bought, the far one sold -- a
     "Reverse ..." one (Conti Reverse Calendar 15 MIN); None for anything else."""
-    name = _calendar_of([leg for leg in legs if leg["side"] == "short"], [leg for leg in legs if leg["side"] == "long"], legs)
+    shorts, longs = [leg for leg in legs if leg["side"] == "short"], [leg for leg in legs if leg["side"] == "long"]
+    name = _calendar_of(shorts, longs, legs) or _diagonal_of(shorts, longs, legs)
     if name is not None:
         return name
-    name = _calendar_of([leg for leg in legs if leg["side"] == "long"], [leg for leg in legs if leg["side"] == "short"], legs)
+    name = _calendar_of(longs, shorts, legs) or _diagonal_of(longs, shorts, legs)
     return f"Reverse {name}" if name is not None else None
+
+
+def _diagonal_of(near: list[dict], far: list[dict], legs: list[dict]) -> str | None:
+    """A calendar whose far legs sit at other strikes (19 Nov: Conti Calendar
+    400 15 MIN's monthly covers, picked by premium): each option type the near
+    legs have, the far ones have too, every near leg expiring before every far
+    one of its type -- "Double Diagonal" (calls and puts), "Call Diagonal",
+    "Put Diagonal"."""
+    if not near or not far or any(leg.get("expiry") is None or leg.get("option_type") is None for leg in legs):
+        return None
+    types = {leg["option_type"] for leg in near}
+    if types != {leg["option_type"] for leg in far}:
+        return None
+    for option_type in types:
+        if max(str(leg["expiry"]) for leg in near if leg["option_type"] == option_type) >= \
+                min(str(leg["expiry"]) for leg in far if leg["option_type"] == option_type):
+            return None
+    if types == {"CE", "PE"}:
+        return "Double Diagonal"
+    return "Call Diagonal" if types == {"CE"} else "Put Diagonal"
 
 
 def _calendar_of(shorts: list[dict], longs: list[dict], legs: list[dict]) -> str | None:

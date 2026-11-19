@@ -110,7 +110,7 @@ def test_structure_names(legs, structure):
         ([("long", "CE", 23500, "2026-11-17"), ("long", "PE", 23500, "2026-11-17"),  # Conti Reverse Calendar
           ("short", "CE", 23500, "2026-11-24"), ("short", "PE", 23500, "2026-11-24")], "Reverse Straddle Calendar"),
         ([("short", "CE", 23500, "2026-11-24"), ("long", "CE", 23500, "2026-11-17")], "Reverse Call Calendar"),  # bought nearer
-        ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-24")], "Bear Call Spread"),  # other strikes: no calendar
+        ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-24")], "Call Diagonal"),  # other strikes: a diagonal (19 Nov)
         ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-17"),
           ("short", "PE", 23300, "2026-11-17"), ("long", "PE", 23200, "2026-11-17")], "Iron Condor"),
     ],
@@ -268,3 +268,24 @@ async def test_other_users_cannot_read_a_deployments_trades(client: AsyncClient,
 
     resp = await client.get(f"/api/v1/paper-trading/native-trades?deployment_id={deployment_id}", headers=other_headers)
     assert resp.status_code == 403
+
+
+def test_a_calendar_with_its_far_legs_at_other_strikes_is_a_diagonal():
+    """19 Nov: Conti Calendar 400 15 MIN's monthly covers picked by premium."""
+    from app.services.paper_trading.trade_record import _structure
+
+    def leg(side, option_type, strike, expiry):
+        return {"side": side, "option_type": option_type, "strike": strike, "expiry": expiry, "quantity": 1040.0}
+
+    legs = [leg("short", "CE", 25650.0, "2026-11-23"), leg("long", "CE", 25800.0, "2026-12-29"),
+            leg("short", "PE", 25300.0, "2026-11-23"), leg("long", "PE", 25150.0, "2026-12-29")]
+    assert _structure(legs, False) == "Double Diagonal"
+    assert _structure(legs[:2], False) == "Call Diagonal"
+    flipped = [{**x, "side": "long" if x["side"] == "short" else "short"} for x in legs]
+    assert _structure(flipped, True) == "Reverse Double Diagonal"
+    same = [leg("short", "CE", 25650.0, "2026-11-23"), leg("long", "CE", 25650.0, "2026-12-29"),
+            leg("short", "PE", 25300.0, "2026-11-23"), leg("long", "PE", 25300.0, "2026-12-29")]
+    assert _structure(same, False) == "Double Calendar"  # the same strikes: still a calendar
+    condor = [leg("short", "CE", 25650.0, "2026-11-23"), leg("long", "CE", 25800.0, "2026-11-23"),
+              leg("short", "PE", 25300.0, "2026-11-23"), leg("long", "PE", 25150.0, "2026-11-23")]
+    assert _structure(condor, True) == "Iron Condor"  # one expiry: not a diagonal

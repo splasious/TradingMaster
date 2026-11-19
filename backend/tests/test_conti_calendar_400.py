@@ -31,6 +31,7 @@ def premium(spot: float, strike: float, option_type: str, weeks: float) -> float
 
 
 CE, PE = 23750.0, 23200.0  # NIFTY 23,460's strikes in this market
+MCE, MPE = 23550.0, 23400.0  # version 5: the 23 Nov monthlies covering them from 4 Nov -- asks 2.93x and 2.80x the weekly bids
 
 
 class Market400(Market):
@@ -117,13 +118,13 @@ async def test_with_no_rs_100_strike_on_the_nearest_weekly_it_sells_the_next_exp
     p = ctx.state["position"]
     assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat())
     assert (p["strike_ce"], p["strike_pe"]) == (CE, PE)  # the 23 Nov's Rs 100 strikes
-    assert _legs(p) == {
-        "short_ce": ("sell", "CE", CE, W3.isoformat()), "long_ce": ("buy", "CE", CE, DEC.isoformat()),
-        "short_pe": ("sell", "PE", PE, W3.isoformat()), "long_pe": ("buy", "PE", PE, DEC.isoformat()),
+    assert _legs(p) == {  # December's covers 2.98x and 2.92x the weekly bids (version 5)
+        "short_ce": ("sell", "CE", CE, W3.isoformat()), "long_ce": ("buy", "CE", 23700.0, DEC.isoformat()),
+        "short_pe": ("sell", "PE", PE, W3.isoformat()), "long_pe": ("buy", "PE", 23250.0, DEC.isoformat()),
     }
     assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(103.5) and ctx._last_signal == "CALENDAR"
     assert ("sell 23 Nov at the bid (the 17 Nov weekly had no OTM CE with a bid of Rs 100 or more: the next expiry instead), "
-            "buy 29 Dec at the ask") in ctx._last_reason
+            "buy 29 Dec 23,700 CE (ask") in ctx._last_reason
     market.deployment.state = None
 
     market.premium = {(W2, k, "PE"): 60.0 for k in range(23000, 24001, 50)}  # the puts short instead: the same
@@ -157,10 +158,10 @@ async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
     p = ctx.state["position"]
     assert p["regime"] == "double calendar" and (p["strike_ce"], p["strike_pe"]) == (CE, PE)
     assert _legs(p) == {
-        "short_ce": ("sell", "CE", CE, W1.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
-        "short_pe": ("sell", "PE", PE, W1.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
+        "short_ce": ("sell", "CE", CE, W1.isoformat()), "long_ce": ("buy", "CE", MCE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W1.isoformat()), "long_pe": ("buy", "PE", MPE, W3.isoformat()),
     }
-    monthly = premium(23460.0, CE, "CE", (W3 - date(2026, 11, 4)).days / 7)
+    monthly = premium(23460.0, MCE, "CE", (W3 - date(2026, 11, 4)).days / 7)
     assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(premium(23460.0, CE, "CE", 1) - SPREAD)  # sold at the bid
     assert p["legs"]["long_ce"]["entry_price"] == pytest.approx(monthly + SPREAD)  # bought at the ask
     assert all(leg["quantity"] == 16 * 65 for leg in p["legs"].values())
@@ -208,9 +209,9 @@ async def test_the_sold_weeklies_roll_at_1500_on_their_expiry_at_the_same_strike
     rolled = await market.check(at(9, 15, 0), spot=23700.0)  # NIFTY has moved: the strikes don't
     p = rolled.state["position"]
     assert rolled._last_signal == "ROLL" and "weekly roll 09 Nov -> 17 Nov at the same strikes" in rolled._last_reason
-    assert _legs(p) == {
-        "short_ce": ("sell", "CE", CE, W2.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
-        "short_pe": ("sell", "PE", PE, W2.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
+    assert _legs(p) == {  # the monthly covers stay where they were bought
+        "short_ce": ("sell", "CE", CE, W2.isoformat()), "long_ce": ("buy", "CE", MCE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W2.isoformat()), "long_pe": ("buy", "PE", MPE, W3.isoformat()),
     }
     assert p["rolls"] == 1 and p["weekly_expiry"] == W2.isoformat() and p["monthly_expiry"] == W3.isoformat()
     assert len(p["closed_legs"]) == 2 and {leg["side"] for leg in p["closed_legs"]} == {"short"}
@@ -348,3 +349,42 @@ async def test_the_card_values_a_calendars_legs_at_bid_and_ask(market):
 
     shut = await ep._build_position_out(market.db, market.deployment.state, at(4, 16, 0).astimezone(timezone.utc))
     assert all(leg.bid is None and leg.last_price is None for leg in shut.legs)
+
+
+async def test_each_monthly_cover_is_the_strike_whose_ask_is_nearest_3x_the_weekly_bid_within_2_5_to_3(market):
+    """19 Nov (version 5): any strike, its ask 2.5-3x the sold weekly's bid, nearest 3x."""
+    ctx = await market.check(at(4, 9, 30))
+    p = ctx.state["position"]
+    assert c400.MONTHLY_RATIO == (2.5, 3.0) and p["monthly_rule"] == c400.MONTHLY_RULE
+    for side, weekly_leg, monthly_leg in (("ce", "short_ce", "long_ce"), ("pe", "short_pe", "long_pe")):
+        ratio = p["legs"][monthly_leg]["entry_price"] / p["legs"][weekly_leg]["entry_price"]
+        assert 2.5 <= ratio <= 3.0 and p[f"monthly_ratio_{side}"] == pytest.approx(ratio, abs=0.01)
+        nearer = p["legs"][monthly_leg]["strike"] + (-50 if side == "ce" else 50)  # one strike nearer the money: over 3x
+        nearer_ask = premium(23460.0, nearer, side.upper(), (W3 - date(2026, 11, 4)).days / 7) + SPREAD
+        assert nearer_ask / p["legs"][weekly_leg]["entry_price"] > 3.0
+    assert (p["monthly_strike_ce"], p["monthly_strike_pe"]) == (MCE, MPE)
+    assert "23,550 CE (ask" in ctx._last_reason and "x) and 23,400 PE" in ctx._last_reason
+    market.deployment.state = None
+
+    market.premium = {(W3, float(k), "CE"): 260.0 for k in range(23000, 24001, 50)}  # every monthly call 2.51x: one in range
+    flat = await market.check(at(4, 9, 31))
+    assert flat.state["position"]["legs"]["long_ce"]["strike"] == CE  # the walk stops at the first in range
+    market.deployment.state = None
+    market.premium = {(W3, float(k), "CE"): 500.0 for k in range(23000, 24001, 50)}  # every monthly call over 3x: none
+    none = await market.check(at(4, 9, 32))
+    assert none.state.get("position") is None and "with an ask 2.5-3x the 09 Nov 23,750 CE's bid of 103.50" in none._last_reason
+
+
+async def test_a_same_strike_position_from_before_is_closed_and_reopened_by_the_new_rule(market):
+    """19 Nov: the open version 4 position -- same-strike monthlies -- closes at the first check in the entry window."""
+    old = (await market.check(at(4, 9, 30))).state["position"]
+    for key in ("monthly_rule", "monthly_strike_ce", "monthly_strike_pe", "monthly_ratio_ce", "monthly_ratio_pe"):
+        old.pop(key)
+    market.deployment.state = {**market.deployment.state, "position": old}
+    night = await market.check(at(4, 16, 0))  # outside the entry window: left as it is
+    assert night.state["position"].get("monthly_rule") is None and await market.trades() == []
+    ctx = await market.check(at(5, 9, 45))
+    [trade] = await market.trades()
+    p = ctx.state["position"]
+    assert trade.exit_reason == "rule_change" and p["monthly_rule"] == c400.MONTHLY_RULE
+    assert ctx._last_reason.startswith("the monthly cover rule changed (version 5)") and "reopen_due" not in ctx.state
