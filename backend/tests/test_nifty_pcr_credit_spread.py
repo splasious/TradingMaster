@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,23 @@ from app.services.strategy.native_strategies.nifty_pcr_credit_spread import (
     past_exit_cutoff,
     round_to_nearest_100,
 )
+
+
+def _session_day() -> date:
+    """The trading day the evaluate() tests run on: today's real IST date.
+
+    It can't be a fixed date. ctx.get_pcr() (options/pcr.py's
+    compute_effective_pcr) picks the expiries it sums OI over from the wall
+    clock (expiry >= real today), not from ctx.now, so a hard-coded expiry
+    stops counting toward the PCR once it's in the past -- the PCR comes back
+    None and evaluate() skips (these tests pinned 17/18 Sep 2026 and failed
+    from 19 Sep on). ctx.now, the expiry, the OI bars and opened_at are all
+    built from this one day instead."""
+    return datetime.now(IST).date()
+
+
+def _at(day: date, hour: int, minute: int = 0) -> datetime:
+    return datetime.combine(day, dtime(hour, minute), tzinfo=IST)
 
 
 def test_round_to_nearest_100_picks_the_closer_strike():
@@ -97,10 +114,10 @@ def _option(underlying_id, strike, option_type, expiry, lot_size=75):
     )
 
 
-async def _seed_oi(db_session, instrument_id, timeframe, oi):
+async def _seed_oi(db_session, instrument_id, timeframe, oi, day):
     db_session.add(
         OhlcvCandle(
-            instrument_id=instrument_id, timeframe=timeframe, ts=datetime(2026, 9, 17, 4, 0, tzinfo=timezone.utc),
+            instrument_id=instrument_id, timeframe=timeframe, ts=_at(day, 9, 30).astimezone(timezone.utc),
             open=100, high=100, low=100, close=100, volume=0, open_interest=oi, source="test",
         )
     )
@@ -109,23 +126,24 @@ async def _seed_oi(db_session, instrument_id, timeframe, oi):
 async def test_evaluate_enters_a_bear_call_spread_on_bearish_pcr(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)  # not "today" (9/17) -- no roll-to-next-week needed
+    day = _session_day()
+    expiry = day + timedelta(days=1)  # not "today" -- no roll-to-next-week needed
 
     short_inst = _option(underlying.id, 25000, "CE", expiry)
     long_inst = _option(underlying.id, 25200, "CE", expiry)
     put_inst = _option(underlying.id, 24800, "PE", expiry)
     db_session.add_all([short_inst, long_inst, put_inst])
     await db_session.flush()
-    await _seed_oi(db_session, short_inst.id, "15m", 600)
-    await _seed_oi(db_session, long_inst.id, "15m", 400)
-    await _seed_oi(db_session, put_inst.id, "15m", 500)  # total call OI 1000, put OI 500 -> PCR 0.5 (bearish)
+    await _seed_oi(db_session, short_inst.id, "15m", 600, day)
+    await _seed_oi(db_session, long_inst.id, "15m", 400, day)
+    await _seed_oi(db_session, put_inst.id, "15m", 500, day)  # total call OI 1000, put OI 500 -> PCR 0.5 (bearish)
     await db_session.commit()
 
     tick_engine.set_real_price(underlying.id, 25000.0, "test")
     tick_engine.set_real_price(short_inst.id, 150.0, "test")
     tick_engine.set_real_price(long_inst.id, 50.0, "test")
 
-    now = datetime(2026, 9, 17, 10, 0, tzinfo=IST)
+    now = _at(day, 10)
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state={}, now=now)
     starting_cash = ctx.portfolio.cash
 
@@ -145,7 +163,8 @@ async def test_evaluate_enters_a_bear_call_spread_on_bearish_pcr(db_session: Asy
 async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)
+    day = _session_day()
+    expiry = day + timedelta(days=1)
 
     old_short = _option(underlying.id, 25000, "CE", expiry)
     old_long = _option(underlying.id, 25200, "CE", expiry)
@@ -155,7 +174,7 @@ async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: 
     db_session.add_all([old_short, old_long, new_short, new_long, put_inst])
     await db_session.flush()
     for inst, oi in [(old_short, 600), (old_long, 400), (new_short, 100), (new_long, 100), (put_inst, 500)]:
-        await _seed_oi(db_session, inst.id, "15m", oi)
+        await _seed_oi(db_session, inst.id, "15m", oi, day)
     await db_session.commit()
 
     tick_engine.set_real_price(underlying.id, 25100.0, "test")  # 100-point move from the 25000 entry strike
@@ -164,13 +183,13 @@ async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: 
     tick_engine.set_real_price(new_short.id, 180.0, "test")
     tick_engine.set_real_price(new_long.id, 70.0, "test")
 
-    now = datetime(2026, 9, 17, 11, 0, tzinfo=IST)
+    now = _at(day, 11)
     state = {
         "position": {
             "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(old_short.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(old_long.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
-            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+            "opened_at": _at(day, 10).isoformat(),
         }
     }
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
@@ -201,7 +220,8 @@ async def test_evaluate_rolls_the_spread_when_spot_moves_100_points(db_session: 
 async def test_evaluate_exits_on_pcr_flip_without_reopening(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)
+    day = _session_day()
+    expiry = day + timedelta(days=1)
 
     short_inst = _option(underlying.id, 25000, "CE", expiry)
     long_inst = _option(underlying.id, 25200, "CE", expiry)
@@ -209,22 +229,22 @@ async def test_evaluate_exits_on_pcr_flip_without_reopening(db_session: AsyncSes
     db_session.add_all([short_inst, long_inst, put_inst])
     await db_session.flush()
     # Now bullish: put OI 1500 vs call OI 1000 -> PCR 1.5
-    await _seed_oi(db_session, short_inst.id, "15m", 600)
-    await _seed_oi(db_session, long_inst.id, "15m", 400)
-    await _seed_oi(db_session, put_inst.id, "15m", 1500)
+    await _seed_oi(db_session, short_inst.id, "15m", 600, day)
+    await _seed_oi(db_session, long_inst.id, "15m", 400, day)
+    await _seed_oi(db_session, put_inst.id, "15m", 1500, day)
     await db_session.commit()
 
     tick_engine.set_real_price(underlying.id, 25000.0, "test")
     tick_engine.set_real_price(short_inst.id, 140.0, "test")
     tick_engine.set_real_price(long_inst.id, 45.0, "test")
 
-    now = datetime(2026, 9, 17, 12, 0, tzinfo=IST)
+    now = _at(day, 12)
     state = {
         "position": {
             "bias": "bearish", "pcr_at_entry": 0.5, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
-            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+            "opened_at": _at(day, 10).isoformat(),
         }
     }
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
@@ -241,28 +261,29 @@ async def test_evaluate_exits_on_pcr_flip_without_reopening(db_session: AsyncSes
 async def test_evaluate_exits_at_3pm_cutoff(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)
+    day = _session_day()
+    expiry = day + timedelta(days=1)
     short_inst = _option(underlying.id, 25000, "CE", expiry)
     long_inst = _option(underlying.id, 25200, "CE", expiry)
     put_inst = _option(underlying.id, 24800, "PE", expiry)
     db_session.add_all([short_inst, long_inst, put_inst])
     await db_session.flush()
-    await _seed_oi(db_session, short_inst.id, "15m", 600)
-    await _seed_oi(db_session, long_inst.id, "15m", 400)
-    await _seed_oi(db_session, put_inst.id, "15m", 500)
+    await _seed_oi(db_session, short_inst.id, "15m", 600, day)
+    await _seed_oi(db_session, long_inst.id, "15m", 400, day)
+    await _seed_oi(db_session, put_inst.id, "15m", 500, day)
     await db_session.commit()
 
     tick_engine.set_real_price(underlying.id, 25000.0, "test")
     tick_engine.set_real_price(short_inst.id, 150.0, "test")
     tick_engine.set_real_price(long_inst.id, 50.0, "test")
 
-    now = datetime(2026, 9, 17, 15, 0, tzinfo=IST)  # exactly the cutoff
+    now = _at(day, 15)  # exactly the cutoff
     state = {
         "position": {
             "bias": "bearish", "pcr_at_entry": 0.5, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
-            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+            "opened_at": _at(day, 10).isoformat(),
         }
     }
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
@@ -283,7 +304,8 @@ async def test_evaluate_rolls_instead_of_exiting_when_short_strike_is_breached(d
     immediately reopen at the new ATM, same bias."""
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)
+    day = _session_day()
+    expiry = day + timedelta(days=1)
     short_inst = _option(underlying.id, 25000, "CE", expiry)
     long_inst = _option(underlying.id, 25200, "CE", expiry)  # new ATM (25150 rounds to 25200) -- this same
     # 25200 CE contract becomes the new short leg after the roll, since it's
@@ -293,9 +315,9 @@ async def test_evaluate_rolls_instead_of_exiting_when_short_strike_is_breached(d
     db_session.add_all([short_inst, long_inst, new_long, put_inst])
     await db_session.flush()
     # Keep PCR bearish (unchanged) so the flip check doesn't fire first.
-    await _seed_oi(db_session, short_inst.id, "15m", 600)
-    await _seed_oi(db_session, long_inst.id, "15m", 400)
-    await _seed_oi(db_session, put_inst.id, "15m", 500)
+    await _seed_oi(db_session, short_inst.id, "15m", 600, day)
+    await _seed_oi(db_session, long_inst.id, "15m", 400, day)
+    await _seed_oi(db_session, put_inst.id, "15m", 500, day)
     await db_session.commit()
 
     # Spot gapped from the 25000 entry to 25150 -- 150pts, past the short
@@ -305,13 +327,13 @@ async def test_evaluate_rolls_instead_of_exiting_when_short_strike_is_breached(d
     tick_engine.set_real_price(long_inst.id, 100.0, "test")  # old long's exit price == new short's entry price
     tick_engine.set_real_price(new_long.id, 60.0, "test")
 
-    now = datetime(2026, 9, 17, 13, 0, tzinfo=IST)
+    now = _at(day, 13)
     state = {
         "position": {
             "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
-            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+            "opened_at": _at(day, 10).isoformat(),
         }
     }
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
@@ -330,28 +352,29 @@ async def test_evaluate_rolls_instead_of_exiting_when_short_strike_is_breached(d
 async def test_evaluate_holds_when_spot_move_is_under_100_points(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     underlying = ctx_data["underlying"]
-    expiry = date(2026, 9, 18)
+    day = _session_day()
+    expiry = day + timedelta(days=1)
     short_inst = _option(underlying.id, 25000, "CE", expiry)
     long_inst = _option(underlying.id, 25200, "CE", expiry)
     put_inst = _option(underlying.id, 24800, "PE", expiry)
     db_session.add_all([short_inst, long_inst, put_inst])
     await db_session.flush()
-    await _seed_oi(db_session, short_inst.id, "15m", 600)
-    await _seed_oi(db_session, long_inst.id, "15m", 400)
-    await _seed_oi(db_session, put_inst.id, "15m", 500)  # PCR unchanged (bearish)
+    await _seed_oi(db_session, short_inst.id, "15m", 600, day)
+    await _seed_oi(db_session, long_inst.id, "15m", 400, day)
+    await _seed_oi(db_session, put_inst.id, "15m", 500, day)  # PCR unchanged (bearish)
     await db_session.commit()
 
     tick_engine.set_real_price(underlying.id, 25060.0, "test")  # only 60pts from entry_spot
     tick_engine.set_real_price(short_inst.id, 170.0, "test")
     tick_engine.set_real_price(long_inst.id, 60.0, "test")
 
-    now = datetime(2026, 9, 17, 13, 0, tzinfo=IST)
+    now = _at(day, 13)
     state = {
         "position": {
             "bias": "bearish", "pcr_at_entry": 0.5, "entry_spot": 25000.0, "expiry": expiry.isoformat(),
             "short": {"instrument_id": str(short_inst.id), "strike": 25000.0, "quantity": 150.0, "entry_price": 150.0},
             "long": {"instrument_id": str(long_inst.id), "strike": 25200.0, "quantity": 150.0, "entry_price": 50.0},
-            "opened_at": datetime(2026, 9, 17, 10, 0, tzinfo=IST).isoformat(),
+            "opened_at": _at(day, 10).isoformat(),
         }
     }
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state=state, now=now)
@@ -368,7 +391,7 @@ async def test_evaluate_holds_when_spot_move_is_under_100_points(db_session: Asy
 async def test_evaluate_skips_outside_entry_window(db_session: AsyncSession):
     ctx_data = await _setup(db_session)
     tick_engine.set_real_price(ctx_data["underlying"].id, 25000.0, "test")
-    now = datetime(2026, 9, 17, 9, 0, tzinfo=IST)  # before 9:45
+    now = _at(_session_day(), 9)  # before 9:45
     ctx = NativeContext(db=db_session, portfolio=ctx_data["portfolio"], deployment=ctx_data["deployment"], state={}, now=now)
 
     await evaluate(ctx)
