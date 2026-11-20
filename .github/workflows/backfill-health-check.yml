@@ -58,6 +58,10 @@ on:
         description: "Instead of the check: backtest trailing stops on OI Change Buy 15 MIN over the stored change-in-OI records and 15-min NIFTY option candles; counts and % of premium here, rupees and every trade to the private Telegram chat only (backend/scripts/oi_trail_backtest.py)"
         type: boolean
         default: false
+      cc_rule_backtest:
+        description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
+        type: boolean
+        default: false
       cc_day_review:
         description: "Instead of the check: read-only review of one day's Conti Calendar 15 MIN trades (DAY in the script) against every session it traded -- times, strikes, counts, exit reasons and NIFTY market data here; rupees to the private Telegram chat only (backend/scripts/conti_calendar_day_review.py)"
         type: boolean
@@ -101,6 +105,7 @@ jobs:
           KOTAK_HOLDINGS_CHECK: ${{ inputs.kotak_holdings_check }}
           OI_TRAIL_BACKTEST: ${{ inputs.oi_trail_backtest }}
           CC_DAY_REVIEW: ${{ inputs.cc_day_review }}
+          CC_RULE_BACKTEST: ${{ inputs.cc_rule_backtest }}
         run: |
           set -euo pipefail
           umask 077
@@ -517,6 +522,13 @@ jobs:
           if [ "${OI_TRAIL_BACKTEST:-false}" = "true" ]; then
             echo "== OI Change Buy 15 MIN trailing-stop backtest (counts and % of premium here; rupees and trades to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/oitrail-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/oi_trail_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
+            echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
+            py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
             remote py "$py_file"
             exit 0
           fi
