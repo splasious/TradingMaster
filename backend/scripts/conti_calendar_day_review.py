@@ -26,6 +26,7 @@ check's `cc_day_review` input pipes it to `python -`).
 
 import asyncio
 import hashlib
+import itertools
 import math
 import traceback
 from collections import Counter, defaultdict
@@ -207,6 +208,39 @@ def years_to(expiry: date, at: datetime, trading: bool) -> float:
     return left
 
 
+def momentum(s: "Session", sc: "Session | None", t, strike: float) -> dict:
+    """NIFTY around a trade, from the 15-minute records: before entry (the
+    opening gap, the move since 09:15 and over the last 30 minutes, the
+    range so far, PCR and its 30-minute change) and while open (the net
+    move, the furthest NIFTY got from the strike, 15-minute moves of 50+
+    points, and how straight the path was: |net| / the moves added up)."""
+    entry = floor_mark(t.opened_at)
+    marks = sorted(m for m in s.snaps if m <= entry)
+    if not marks:
+        return {}
+    at, first = s.snaps[marks[-1]], s.snaps[marks[0]]
+    back = [m for m in marks if (datetime.combine(s.day, entry) - datetime.combine(s.day, m)) >= timedelta(minutes=30)]
+    before = s.snaps[back[-1]] if back else (first if marks[0] != marks[-1] else None)  # at 09:30: since the 09:15 record
+    spots = [s.snaps[m].spot for m in marks if s.snaps[m].spot]
+    path = [s.snaps[m] for m in sorted(s.snaps) if m >= marks[-1] and (sc is not s or m <= floor_mark(t.closed_at))]
+    if sc is not None and sc is not s:
+        path += [sc.snaps[m] for m in sorted(sc.snaps) if m <= floor_mark(t.closed_at)]
+    path_spots = [x.spot for x in path if x.spot]
+    steps = [abs(b - a) for a, b in itertools.pairwise(path_spots)]
+    during = path_spots[-1] - path_spots[0] if len(path_spots) > 1 else 0.0
+    out = {
+        "gap": first.spot_change if marks[0] == dtime(9, 15) else None,
+        "since_open": at.spot - first.spot if at.spot and first.spot else None,
+        "m30": at.spot - before.spot if before and at.spot and before.spot else None,
+        "range_so_far": max(spots) - min(spots) if spots else None,
+        "pcr": at.pcr, "pcr_chg30": at.pcr - before.pcr if before and at.pcr is not None and before.pcr is not None else None,
+        "during": during, "excursion": max((abs(x - strike) for x in path_spots), default=None),
+        "big_moves": sum(1 for x in steps if x >= 50), "efficiency": abs(during) / sum(steps) if sum(steps) else None,
+    }
+    out.update({f"abs_{k}": abs(out[k]) if out[k] is not None else None for k in ("m30", "since_open", "during")})
+    return out
+
+
 async def premium_ratios(db, trades: list, candles: Candles, version_at, private: list[str]) -> None:
     """Every trade: the weekly straddle sold and the monthly bought (per
     unit), their sizes against NIFTY, the monthly / weekly ratio at entry
@@ -241,9 +275,14 @@ async def premium_ratios(db, trades: list, candles: Candles, version_at, private
             rel_t = r_in / fair_t if fair_t else None
             held = (t.closed_at - t.opened_at).total_seconds() / 60
             gain = (w_in - w_out) + (m_out - m_in)
+            cd = ist(t.closed_at).date()
+            if cd not in sessions:
+                sessions[cd] = await load_session(db, cd, candles)
+            mo = momentum(s, sessions[cd], t, strike) if s and strike is not None else {}
             row = {"n": n, "day": d, "tp": t.exit_reason == "take_profit", "win": net_of(t) > 0, "r_in": r_in, "r_out": r_out, "rel_c": rel_c,
-                       "rel_t": rel_t, "held": held, "w_pct": 100 * w_in / spot if spot else None, "m_pct": 100 * m_in / spot if spot else None,
-                       "w_pts": w_in - w_out, "m_pts": m_out - m_in, "gain": gain, "wt": wt}
+                   "rel_t": rel_t, "held": held, "w_pct": 100 * w_in / spot if spot else None, "m_pct": 100 * m_in / spot if spot else None,
+                   "w_pts": w_in - w_out, "m_pts": m_out - m_in, "gain": gain, "wt": wt,
+                   "fast": t.exit_reason == "take_profit" and held <= 120, **mo}
             rows.append(row)
             print(f"  #{n:<2} {ist(t.opened_at):%d %b %a %H:%M} -> {ist(t.closed_at):%d %b %H:%M} ({held:,.0f} min) {version_at(t.opened_at)} "
                   f"{t.exit_reason}; strike {fmt(strike, ',.0f')}" + (f" (NIFTY {spot:,.0f})" if spot else ""))
@@ -252,6 +291,11 @@ async def premium_ratios(db, trades: list, candles: Candles, version_at, private
                   + f", {mc:.1f}d / {mt:.1f} trading")
             print(f"      M/W {r_in:.2f} at entry -> {fmt(r_out)} at exit; fair {fmt(fair_c)} (calendar) / {fmt(fair_t)} (trading); "
                   f"rel {fmt(rel_c)} / {fmt(rel_t)}; from W {w_in - w_out:+,.2f}, from M {m_out - m_in:+,.2f}, total {gain:+,.2f} pts")
+            if mo:
+                print(f"      NIFTY before: gap {fmt(mo['gap'], '+,.0f')}, since 09:15 {fmt(mo['since_open'], '+,.0f')}, last 30 min (15 at 09:30) "
+                      f"{fmt(mo['m30'], '+,.0f')}, range so far {fmt(mo['range_so_far'], ',.0f')}; PCR {fmt(mo['pcr'], '.3f')} "
+                      f"({fmt(mo['pcr_chg30'], '+.3f')} in 30 min); during: net {fmt(mo['during'], '+,.0f')}, furthest from strike "
+                      f"{fmt(mo['excursion'], ',.0f')}, 15-min moves of 50+ {mo['big_moves']}, path efficiency {fmt(mo['efficiency'], '.2f')}")
             private.append(f"#{n} {ist(t.opened_at):%d %b %H:%M} {t.exit_reason}: W {w_in:,.2f} M {m_in:,.2f} M/W {r_in:.2f} "
                            f"(rel {fmt(rel_c)}); net Rs {net_of(t):+,.0f}")
         except Exception as exc:  # noqa: BLE001
@@ -260,11 +304,16 @@ async def premium_ratios(db, trades: list, candles: Candles, version_at, private
     def summary(label: str, group: list[dict]) -> None:
         if not group:
             return
-        avg = lambda k: sum(r[k] for r in group if r[k] is not None) / max(1, sum(1 for r in group if r[k] is not None))
-        print(f"  {label}: {len(group)} trades, {sum(r['tp'] for r in group)} take-profits, {sum(r['win'] for r in group)} winners; "
+        avg = lambda k: sum(r[k] for r in group if r.get(k) is not None) / max(1, sum(1 for r in group if r.get(k) is not None))
+        print(f"  {label}: {len(group)} trades, {sum(r['tp'] for r in group)} take-profits ({sum(r['fast'] for r in group)} within 2 h), "
+              f"{sum(r['win'] for r in group)} winners; "
               f"average M/W at entry {avg('r_in'):.2f} (exit {avg('r_out'):.2f}), rel {avg('rel_c'):.2f} calendar / {avg('rel_t'):.2f} trading; "
               f"W {avg('w_pct'):.2f}% / M {avg('m_pct'):.2f}% of NIFTY; weekly trading days left {avg('wt'):.1f}; "
               f"held {avg('held'):,.0f} min; from W {avg('w_pts'):+.1f}, from M {avg('m_pts'):+.1f} pts")
+        if any("abs_m30" in r for r in group):
+            print(f"      NIFTY: |last 30 min| {avg('abs_m30'):,.0f}, |since 09:15| {avg('abs_since_open'):,.0f}, range so far {avg('range_so_far'):,.0f} "
+                  f"before entry; during: |net| {avg('abs_during'):,.0f}, furthest from strike {avg('excursion'):,.0f}, "
+                  f"path efficiency {avg('efficiency'):.2f}; PCR {avg('pcr'):.3f}")
 
     print()
     print("Groups (averages per trade):")
@@ -272,6 +321,11 @@ async def premium_ratios(db, trades: list, candles: Candles, version_at, private
     summary("every other day", [r for r in rows if r["day"] != DAY])
     summary("take-profits", [r for r in rows if r["tp"]])
     summary("not take-profits", [r for r in rows if not r["tp"]])
+    summary("take-profits within 2 h", [r for r in rows if r["fast"]])
+    summary("weekly 2 trading days or less", [r for r in rows if r["wt"] <= 2.0])
+    summary("weekly more than 2 trading days", [r for r in rows if r["wt"] > 2.0])
+    summary("NIFTY moved 50+ in the 30 min before (15 at 09:30)", [r for r in rows if (r.get("abs_m30") or 0) >= 50])
+    summary("NIFTY moved under 50 in the 30 min before", [r for r in rows if r.get("abs_m30") is not None and r["abs_m30"] < 50])
     ranked = sorted((r for r in rows if r["rel_c"] is not None), key=lambda r: r["rel_c"])
     third = max(1, len(ranked) // 3)
     for label, group in (("lowest rel third", ranked[:third]), ("middle third", ranked[third:-third]), ("highest rel third", ranked[-third:])):
