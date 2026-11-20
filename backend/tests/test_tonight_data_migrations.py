@@ -1082,9 +1082,35 @@ async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
+async def test_conti_calendar_400_moves_onto_the_restarted_target_keeping_its_shifted_position(db_engine, db_session):
+    """20 Nov: Conti Calendar 400 15 MIN version 7 -- the take-profit restarts at Rs 14,000 after each shift."""
+    migration = _load("b4d6f8a0c2e9_conti_calendar_400_target_restarts")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a2c4e6f8b0d7"
+    assert "booked_outside_target" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v6 = "# Conti Calendar 400 15 MIN, version 6: the side shift\n"
+    migration.FROM_MD5S = {_md5_text(v6)}
+    running = await _deployment(db_session, "c400v7_a@tradingmaster.internal", v6)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    state = {"position": {"strike_ce": 25700, "strike_pe": 25450, "legs": {}, "shifts": 1, "booked_net": -34000.0,
+                          "monthly_rule": "ask 2.5-3x the weekly's bid"}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
 async def test_conti_calendar_400_moves_onto_the_side_shift_keeping_its_position(db_engine, db_session):
     """20 Nov: Conti Calendar 400 15 MIN version 6 -- 20 lots a leg and the side shift."""
     migration = _load("a2c4e6f8b0d7_conti_calendar_400_side_shift")
+    assert _load("b4d6f8a0c2e9_conti_calendar_400_target_restarts").FROM_MD5S == {migration.TO_MD5}  # version 7 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f0b2d4a6c8e1"
     code = migration.BUILT_IN.read_text(encoding="utf-8")
     assert "LOTS_PER_LEG = 20" in code and "SHIFT_IN_LOSS = 150.0" in code and "SHIFT_IN_PROFIT = 200.0" in code

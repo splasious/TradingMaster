@@ -6,7 +6,7 @@ Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
 11 Nov: the pause after a close cut to 1 minute; version 3, 12 Nov: the
 strikes by premium, not 400 points out; version 4, 16 Nov: the next weekly
 when the nearest has no Rs 100 strike; version 6, 20 Nov: 20 lots a leg and
-the strike shift below): instead of one strike's straddle calendar, a call
+the strike shift below; version 7, 20 Nov: the target restarts at a shift): instead of one strike's straddle calendar, a call
 calendar on an OTM call and a put calendar on an OTM put, LOTS_PER_LEG (20;
 16 before version 6) lots each, every fill at the order book's best price (a
 sell at the bid, a buy at the ask):
@@ -63,12 +63,19 @@ Held overnight -- no daily close -- until the take-profit:
                opening charges) plus what the weekly rolls have booked
                (their P&L less both their orders' charges). At TAKE_PROFIT
                (Rs 14,000) or more, every open leg closes at those prices;
-               the next opens once the pause is up. No stop-loss.
+               the next opens once the pause is up. No stop-loss. After a
+               strike shift (version 7, 20 Nov) the target restarts: what
+               was booked up to the shift (booked_outside_target) is left
+               out, and it closes once the legs held since -- with anything
+               booked after, a weekly roll's or a later shift's being
+               left out in turn -- make Rs 14,000 (net_toward_target); the
+               trade's own P&L is still the whole position's.
   Strike shift (version 6) NIFTY gone more than SHIFT_IN_LOSS (150) points
                toward a side -- up for the call side, down for the put
                side -- from where NIFTY was when that side was opened or
                last shifted, the position in loss ("Net if closed now" as
-               the take-profit reads it, under Rs 0); SHIFT_IN_PROFIT (200)
+               the take-profit reads it -- since the last shift, version 7 --
+               under Rs 0); SHIFT_IN_PROFIT (200)
                points when in profit but short of the target: that side's
                sold weekly and bought monthly close at bid / ask, their
                result booked into the position as a roll's is, and the side
@@ -235,9 +242,18 @@ def shift_ref(position: dict, option_type: str, spot: float) -> float:
     return float(position.get(f"shift_ref_{option_type.lower()}") or position.get("entry_spot") or spot)
 
 
+def outside_target(position: dict) -> float:
+    """Version 7: what was booked up to the last shift -- left out of the take-profit,
+    which restarts at Rs 14,000 at every shift. A position shifted under version 6
+    (no rolls since): everything it has booked."""
+    if position.get("booked_outside_target") is None and position.get("shifts"):
+        position["booked_outside_target"] = round(float(position.get("booked_net") or 0.0), 2)
+    return float(position.get("booked_outside_target") or 0.0)
+
+
 def shift_text(position: dict) -> str:
     """The levels that shift a side, for the card."""
-    net = position.get("net_if_closed_now") or 0.0
+    net = position.get("net_toward_target", position.get("net_if_closed_now")) or 0.0
     trigger = SHIFT_IN_LOSS if net < 0 else SHIFT_IN_PROFIT
     spot = position.get("entry_spot") or 0.0
     text = (f"shifts the call side over NIFTY {shift_ref(position, 'CE', spot) + trigger:,.0f}, the put side under "
@@ -451,6 +467,7 @@ async def evaluate(ctx) -> None:
         booked = {"gross": round(booked["gross"], 2), "charges": round(booked["charges"], 2)}
         position.update({
             "booked": booked, "closed_legs": closed, "booked_net": round(booked_net({"booked": booked}), 2),
+            "booked_outside_target": round(booked_net({"booked": booked}), 2),  # version 7: the target restarts here
             f"strike_{lower}": strike, f"monthly_strike_{lower}": m_strike, f"monthly_ratio_{lower}": round(ratio, 2),
             f"shift_ref_{lower}": spot, "shifts": int(position.get("shifts", 0)) + 1, "shifted_at": now_utc.isoformat(),
         })
@@ -491,13 +508,17 @@ async def evaluate(ctx) -> None:
         if not missing:
             net, prices = if_closed_now(position, quotes)
             position["net_if_closed_now"] = round(net, 2)
+            toward = net - outside_target(position)  # version 7: since the last shift, its booked loss left out
+            position["net_toward_target"] = round(toward, 2)
             position["checked_at"] = now_ist.strftime("%d %b %H:%M:%S IST")
             track_extremes(position, net, now_ist)
-            if net >= TAKE_PROFIT:
+            if toward >= TAKE_PROFIT:
                 ext = extremes_text()
                 pnl = await close_all("take_profit", prices)
+                since = (f" since the last shift (the whole position Rs {net:,.0f}, Rs {outside_target(position):,.0f} booked before it)"
+                         if outside_target(position) else "")
                 ctx.note("exited", signal="COVER", reason=(
-                    f"take-profit: Rs {net:,.0f} after charges at bid/ask (target Rs {TAKE_PROFIT:,.0f}); "
+                    f"take-profit: Rs {toward:,.0f} after charges at bid/ask{since} (target Rs {TAKE_PROFIT:,.0f}); "
                     f"P&L {pnl:+,.0f} before charges{ext}; next entry from {now_ist + PAUSE_AFTER_CLOSE:%H:%M:%S}"
                 ))
                 ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)
@@ -561,7 +582,7 @@ async def evaluate(ctx) -> None:
                 return
         else:
             if not missing and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
-                shifted = await maybe_shift(position["net_if_closed_now"])
+                shifted = await maybe_shift(position["net_toward_target"])
                 if shifted is not None:
                     ctx.note("entered", signal="SHIFT", reason=shifted)
                     ctx.wake_at(now_utc + RECHECK)
@@ -574,7 +595,10 @@ async def evaluate(ctx) -> None:
                 ctx.note("hold", reason=(
                     f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE{cover} "
                     f"(sold {weekly:%d %b}, bought {monthly:%d %b}): Rs {position['net_if_closed_now']:,.0f} if closed now "
-                    f"at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; weeklies roll {weekly:%d %b} {ROLL_TIME:%H:%M}"
+                    f"at bid/ask after charges"
+                    + (f", Rs {position['net_toward_target']:,.0f} since the last shift" if outside_target(position) else "")
+                    + f"; take-profit at Rs {TAKE_PROFIT:,.0f}{' from the last shift' if outside_target(position) else ''}; "
+                    f"weeklies roll {weekly:%d %b} {ROLL_TIME:%H:%M}"
                     f"; {shift_text(position)}"
                 ))
             ctx.wake_at(now_utc + RECHECK)

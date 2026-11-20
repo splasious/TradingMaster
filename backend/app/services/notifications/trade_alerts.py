@@ -121,6 +121,9 @@ def entry_message(
         lines += _double_calendar_setup(legs, position)
     if shifted:
         lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
+        target = position.get("take_profit")
+        if isinstance(target, (int, float)):
+            lines.append(f"Target +{target:,.0f} from here")
         title = f"{VIEW_MARKS[view]} {strategy}: strike shifted"
     elif rolled:
         lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
