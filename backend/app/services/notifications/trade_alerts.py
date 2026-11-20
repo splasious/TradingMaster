@@ -83,6 +83,9 @@ def _view(position: dict | None) -> str | None:
     return (position or {}).get("bias") or (position or {}).get("regime")
 
 
+SILENT_EXITS = {"strike_shift"}  # Conti Calendar 400's shift legs (version 8): recorded as a trade, no Telegram alert for it
+
+
 def _net(trade: dict) -> float:
     return trade["pnl"] - trade["charges"] if trade.get("charges") is not None else trade["pnl"]
 
@@ -120,7 +123,8 @@ def entry_message(
     if double and not rolled and not shifted:
         lines += _double_calendar_setup(legs, position)
     if shifted:
-        lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
+        if isinstance(position.get("last_shift_pnl"), (int, float)):
+            lines.append(f"Closed legs {position['last_shift_pnl']:+,.0f}")
         target = position.get("take_profit")
         if isinstance(target, (int, float)):
             lines.append(f"Target +{target:,.0f} from here")
@@ -406,6 +410,8 @@ async def send_trade_alerts(db, deployment, ctx, position_before: dict | None = 
             session = None
         nifty_now = session.live if session is not None else None  # where an exit is marked (not an MA exit)
         for trade in ctx.closed_trades:
+            if trade.get("exit_reason") in SILENT_EXITS:
+                continue  # recorded, not alerted
             day_net, day_trades = await _day_net(db, deployment.id, trade["closed_at"])
             photo = await _picture(lambda: exit_chart(name, session, trade, position_before, nifty_now)) if session else None
             await send_telegram(*exit_message(name, trade, day_net, day_trades), to_group=True, photo=photo)

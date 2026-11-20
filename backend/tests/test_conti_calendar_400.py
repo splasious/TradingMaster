@@ -408,8 +408,10 @@ async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(ma
     assert p["legs"]["short_ce"]["expiry"] == W1.isoformat() and p["legs"]["long_ce"]["expiry"] == opened["monthly_expiry"]
     assert 2.5 <= p["monthly_ratio_ce"] <= 3.0 and p["legs"]["long_ce"]["strike"] == p["monthly_strike_ce"]
     assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
-    assert p["shift_ref_ce"] == 23615.0 and len(p["closed_legs"]) == 2 and {leg["side"] for leg in p["closed_legs"]} == {"short", "long"}
-    assert p["booked"]["charges"] > 0 and await market.trades() == []  # the position carries on
+    assert p["shift_ref_ce"] == 23615.0 and p["closed_legs"] == [] and p["booked"] == {"gross": 0.0, "charges": 0.0}
+    [shift] = await market.trades()  # version 8: the closed legs are a trade of their own; the position carries on
+    assert shift.exit_reason == "strike_shift" and [leg["side"] for leg in shift.legs] == ["short", "long"]
+    assert shift.pnl == pytest.approx(p["last_shift_pnl"], abs=0.01) and shift.charges > 0
     assert [leg["side"] for leg in shifted.opened_legs] == ["sell", "buy"]
     assert all(leg["quantity"] == 20 * 65 for leg in p["legs"].values())
     again = await market.check(at(4, 10, 2), spot=23700.0)  # 85 over the new reference: held
@@ -453,7 +455,7 @@ async def test_a_shift_sends_a_strike_shifted_alert(market):
     title, body = entry_message("Conti Calendar 400 15 MIN", shifted.opened_legs, shifted.state["position"], shifted.now)
     lines = body.split("\n")
     assert title == "📅 Conti Calendar 400 15 MIN: strike shifted" and "Call side shifted" in lines
-    assert any(line.startswith("Booked so far ") for line in lines) and max(len(line) for line in lines) <= WIDTH
+    assert any(line.startswith("Closed legs ") for line in lines) and max(len(line) for line in lines) <= WIDTH
 
 
 
@@ -476,8 +478,9 @@ async def test_after_a_shift_the_target_restarts_at_14000_from_there(market):
     p = await _shifted_with_a_booked_loss(market, -1_000_000.0)
     market.premium[(W1, p["strike_ce"], "CE")] = 1.0  # the new sold call nearly worthless: the legs held since well up
     out = await market.check(at(4, 10, 5), spot=23620.0)
-    [trade] = await market.trades()
-    assert trade.exit_reason == "take_profit" and "since the last shift" in out._last_reason
+    [trade] = [t for t in await market.trades() if t.exit_reason == "take_profit"]
+    assert "since the last shift" in out._last_reason
+    assert len(trade.legs) == 4  # the shift's two legs are in their own trade, not this one
     assert trade.pnl < -800_000  # the trade's own P&L is still the whole position's, the booked loss in it
 
 
@@ -488,10 +491,11 @@ async def test_after_a_shift_the_loss_or_profit_for_the_next_shift_counts_from_i
     market.deployment.state = {**market.deployment.state, "position": p}  # in profit from the shift, the whole position deep in loss
     held = await market.check(at(4, 10, 5), spot=23790.0)  # 170 over the call side's new 23,620: under 200 -- held
     assert held._last_action == "hold" and "200 points, in profit" in held._last_reason and "since the last shift" in held._last_reason
-    assert held.state["position"]["net_if_closed_now"] < 0 < held.state["position"]["net_toward_target"]
+    assert held.state["position"]["net_if_closed_now"] > 0  # from the shift: the roll's Rs 2 lakh and the legs held since
     again = await market.check(at(4, 10, 6), spot=23830.0)  # 210: shifted again, and the target restarts again
     q = again.state["position"]
-    assert again._last_signal == "SHIFT" and q["shifts"] == 2 and q["booked_outside_target"] == q["booked_net"] != -800_000.0
+    assert again._last_signal == "SHIFT" and q["shifts"] == 2 and q["booked_outside_target"] == q["booked_net"] == -800_000.0
+    assert [t.exit_reason for t in await market.trades()] == ["strike_shift", "strike_shift"]
 
 
 async def test_a_position_shifted_under_version_6_gets_the_restart_from_what_it_booked(market):
@@ -508,3 +512,43 @@ async def test_the_shift_alert_says_the_target_restarts(market):
     shifted = await market.check(at(4, 10, 0), spot=23620.0)
     _, body = entry_message("Conti Calendar 400 15 MIN", shifted.opened_legs, shifted.state["position"], shifted.now)
     assert "Target +14,000 from here" in body.split("\n")
+
+
+async def test_a_shift_made_by_version_7_is_written_as_its_trade_once(market):
+    """Version 8, on a position shifted before it (no roll since): the closed legs kept in it become a
+    strike_shift trade at the shift's time, and Net if closed now counts from the shift."""
+    ctx = await market.check(at(4, 9, 30))
+    p = ctx.state["position"]
+    legs = [{"instrument_id": p["legs"][n]["instrument_id"], "side": side, "quantity": p["legs"][n]["quantity"],
+             "entry_price": price, "exit_price": out} for n, side, price, out in (("short_ce", "short", 105.9, 201.3), ("long_ce", "long", 314.15, 377.4))]
+    shifted_at = at(4, 9, 50).astimezone(timezone.utc).isoformat()
+    p.update(shifts=1, shifted_at=shifted_at, closed_legs=legs, booked={"gross": -33_436.0, "charges": 600.0}, booked_net=-34_036.0,
+             booked_outside_target=-34_036.0)
+    market.deployment.state = ctx.state
+    after = await market.check(at(4, 10, 0))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "strike_shift" and trade.pnl == -33_436.0 and len(trade.legs) == 2
+    assert trade.closed_at.replace(tzinfo=timezone.utc).isoformat() == shifted_at
+    q = after.state["position"]
+    assert q["closed_legs"] == [] and q["booked_net"] == 0.0 and q["booked_outside_target"] == 0.0 and q["shift_trades"] is True
+    await market.check(at(4, 10, 1))
+    assert len(await market.trades()) == 1  # once
+
+
+async def test_a_strike_shift_trade_sends_no_telegram_alert(market, monkeypatch):
+    from app.services.notifications import trade_alerts
+
+    sent = []
+
+    async def fake_send(subject, body, **kw):
+        sent.append(subject)
+
+    monkeypatch.setattr(trade_alerts, "send_telegram", fake_send)
+    monkeypatch.setattr(trade_alerts, "alerted_strategies", lambda: {"conti calendar 15 min", "conti calendar 400 15 min"})
+    await market.check(at(4, 9, 30))
+    market.premium[(W1, PE, "PE")] = 400.0
+    shifted = await market.check(at(4, 10, 0), spot=23620.0)
+    assert [t["exit_reason"] for t in shifted.closed_trades] == ["strike_shift"]
+    await trade_alerts.send_trade_alerts(market.db, market.deployment, shifted, None)
+    assert len(sent) == 1 and sent[0].endswith(": strike shifted")  # the shift's entry alert only, not its trade
+

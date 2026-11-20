@@ -1082,9 +1082,35 @@ async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
+async def test_conti_calendar_400_moves_onto_shift_trades_keeping_its_shifted_position(db_engine, db_session):
+    """20 Nov: Conti Calendar 400 15 MIN version 8 -- each strike shift a closed trade of its own."""
+    migration = _load("c6e8a0b2d4f1_conti_calendar_400_shift_trades")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "b4d6f8a0c2e9"
+    assert 'SHIFT_EXIT = "strike_shift"' in migration.BUILT_IN.read_text(encoding="utf-8")
+    v7 = "# Conti Calendar 400 15 MIN, version 7: the target restarting\n"
+    migration.FROM_MD5S = {_md5_text(v7)}
+    running = await _deployment(db_session, "c400v8_a@tradingmaster.internal", v7)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    state = {"position": {"strike_ce": 25700, "strike_pe": 25450, "legs": {}, "shifts": 1, "closed_legs": [{"side": "short"}],
+                          "booked_net": -34000.0, "booked_outside_target": -34000.0, "monthly_rule": "ask 2.5-3x the weekly's bid"}}
+    running.state = state
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    await db_session.refresh(running)
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == running.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
+
+
 async def test_conti_calendar_400_moves_onto_the_restarted_target_keeping_its_shifted_position(db_engine, db_session):
     """20 Nov: Conti Calendar 400 15 MIN version 7 -- the take-profit restarts at Rs 14,000 after each shift."""
     migration = _load("b4d6f8a0c2e9_conti_calendar_400_target_restarts")
+    assert _load("c6e8a0b2d4f1_conti_calendar_400_shift_trades").FROM_MD5S == {migration.TO_MD5}  # version 8 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a2c4e6f8b0d7"
     assert "booked_outside_target" in migration.BUILT_IN.read_text(encoding="utf-8")
     v6 = "# Conti Calendar 400 15 MIN, version 6: the side shift\n"
