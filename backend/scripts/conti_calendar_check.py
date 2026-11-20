@@ -34,7 +34,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
-         "Conti Calendar 400 15 MIN": "ed2551591a7b70175321e4b45ea2a28f",
+         "Conti Calendar 400 15 MIN": "0aa22c92cb68d26ec8669ff5c8820c9a",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "b395b4fa5853f753a2454e674530749a"}
 LISTEN_SECONDS = 6
@@ -77,6 +77,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     print(f"    monthly covers: {position.get('monthly_strike_ce', 'same strike')} CE "
                           f"({position.get('monthly_ratio_ce', '-')}x), {position.get('monthly_strike_pe', 'same strike')} PE "
                           f"({position.get('monthly_ratio_pe', '-')}x); rule: {position.get('monthly_rule', 'version 4')}")
+                    print(f"    shifts: {position.get('shifts', 0)}; call side from NIFTY {position.get('shift_ref_ce') or position.get('entry_spot')}, "
+                          f"put side from {position.get('shift_ref_pe') or position.get('entry_spot')}; waiting: {bool(position.get('shift_waits'))}")
                     for name, leg in position["legs"].items():
                         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
                         print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")

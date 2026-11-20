@@ -4,7 +4,8 @@ sold and the monthly CE bought at an OTM call strike, the weekly PE sold
 and the monthly PE bought at an OTM put strike (since version 3, 12 Nov:
 on each side the furthest OTM 50-point strike whose weekly bid is still
 Rs 100 or more; ATM+-400 before; since version 4, 16 Nov: the next expiry
-when the nearest has no such strike on a side), 16 lots a leg at bid / ask -- held overnight, the sold weeklies rolled at 15:00 on their expiry
+when the nearest has no such strike on a side), 20 lots a leg at bid / ask (16 before version 6, 20 Nov,
+which also shifts the side NIFTY moves toward: 150 points in loss, 200 in profit) -- held overnight, the sold weeklies rolled at 15:00 on their expiry
 day (all four reopened on next month's monthly in the month's last week),
 closed at Rs 14,000 after charges, every trade keeping the most profit and
 loss it reached."""
@@ -164,7 +165,7 @@ async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
     monthly = premium(23460.0, MCE, "CE", (W3 - date(2026, 11, 4)).days / 7)
     assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(premium(23460.0, CE, "CE", 1) - SPREAD)  # sold at the bid
     assert p["legs"]["long_ce"]["entry_price"] == pytest.approx(monthly + SPREAD)  # bought at the ask
-    assert all(leg["quantity"] == 16 * 65 for leg in p["legs"].values())
+    assert all(leg["quantity"] == 20 * 65 for leg in p["legs"].values())  # version 6: 20 lots a leg
     assert p["take_profit"] == 14_000.0 and p["entry_charges"] > 0 and ctx._last_signal == "CALENDAR"
     assert ctx._wake_at == at(4, 9, 30) + timedelta(seconds=1)
 
@@ -218,7 +219,7 @@ async def test_the_sold_weeklies_roll_at_1500_on_their_expiry_at_the_same_strike
     assert p["booked"]["charges"] > 0 and p["booked_net"] == pytest.approx(p["booked"]["gross"] - p["booked"]["charges"], abs=0.01)
     assert [leg["side"] for leg in rolled.opened_legs] == ["sell", "sell"]
     assert await market.trades() == []  # a roll isn't a closed trade: the position carries on
-    held = await market.check(at(11, 10, 0), spot=23700.0)
+    held = await market.check(at(11, 10, 0), spot=23590.0)  # 130 points up: inside both shift levels
     assert held._last_action == "hold" and held.state["position"]["rolls"] == 1
 
 
@@ -268,7 +269,7 @@ async def test_the_telegram_alerts_show_the_setup_the_roll_and_the_extremes(mark
     title, body = entry_message("Conti Calendar 400 15 MIN", opened.opened_legs, opened.state["position"], opened.now)
     lines = body.split("\n")
     assert title == "📅 Conti Calendar 400 15 MIN: trade taken"
-    assert lines[0] == "Double Calendar" and "23,750 CE / 23,200 PE" in lines and "16 lots a leg" in lines
+    assert lines[0] == "Double Calendar" and "23,750 CE / 23,200 PE" in lines and "20 lots a leg" in lines
     assert "Target +14,000 after costs" in lines and "Held overnight; weeklies" in lines
     assert max(len(line) for line in lines) <= WIDTH
 
@@ -388,3 +389,69 @@ async def test_a_same_strike_position_from_before_is_closed_and_reopened_by_the_
     p = ctx.state["position"]
     assert trade.exit_reason == "rule_change" and p["monthly_rule"] == c400.MONTHLY_RULE
     assert ctx._last_reason.startswith("the monthly cover rule changed (version 5)") and "reopen_due" not in ctx.state
+
+
+async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(market):
+    """20 Nov (version 6): the side NIFTY moves toward, 150 points past where it was opened, in loss: that side's
+    weekly and monthly closed at bid / ask, booked, and opened again at NIFTY's Rs 100 strike now with its 2.5-3x
+    monthly, the same expiries; the other side kept. In profit it takes 200 points."""
+    assert (c400.LOTS_PER_LEG, c400.SHIFT_IN_LOSS, c400.SHIFT_IN_PROFIT) == (20, 150.0, 200.0)
+    opened = (await market.check(at(4, 9, 30))).state["position"]
+    put_side = {n: opened["legs"][n] for n in ("short_pe", "long_pe")}
+    market.premium[(W1, PE, "PE")] = 400.0  # the sold weekly put dear: the position well in loss
+    inside = await market.check(at(4, 10, 0), spot=23605.0)  # 145 up: not yet
+    assert inside._last_action == "hold" and "shifts the call side over NIFTY 23,610" in inside._last_reason
+    shifted = await market.check(at(4, 10, 1), spot=23615.0)  # 155 up: the call side shifted
+    p = shifted.state["position"]
+    assert shifted._last_signal == "SHIFT" and shifted._last_reason.startswith("strike shift, in loss")
+    assert p["strike_ce"] > CE and p["legs"]["short_ce"]["strike"] == p["strike_ce"] and p["shifts"] == 1
+    assert p["legs"]["short_ce"]["expiry"] == W1.isoformat() and p["legs"]["long_ce"]["expiry"] == opened["monthly_expiry"]
+    assert 2.5 <= p["monthly_ratio_ce"] <= 3.0 and p["legs"]["long_ce"]["strike"] == p["monthly_strike_ce"]
+    assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
+    assert p["shift_ref_ce"] == 23615.0 and len(p["closed_legs"]) == 2 and {leg["side"] for leg in p["closed_legs"]} == {"short", "long"}
+    assert p["booked"]["charges"] > 0 and await market.trades() == []  # the position carries on
+    assert [leg["side"] for leg in shifted.opened_legs] == ["sell", "buy"]
+    assert all(leg["quantity"] == 20 * 65 for leg in p["legs"].values())
+    again = await market.check(at(4, 10, 2), spot=23700.0)  # 85 over the new reference: held
+    assert again._last_action == "hold" and again.state["position"]["shifts"] == 1
+
+
+async def test_in_profit_short_of_the_target_it_takes_200_points_and_a_fall_shifts_the_put_side(market, monkeypatch):
+    monkeypatch.setattr(c400, "TAKE_PROFIT", 10_000_000.0)  # in profit, never at the target here
+    ctx = await market.check(at(4, 9, 30))
+    ctx.state["position"]["booked"] = {"gross": 500_000.0, "charges": 0.0}  # earlier rolls booked well up: in profit
+    market.deployment.state = ctx.state
+    held = await market.check(at(4, 10, 0), spot=23290.0)  # 170 down: past 150 but in profit -- held
+    assert held._last_action == "hold" and "200 points, in profit" in held._last_reason
+    shifted = await market.check(at(4, 10, 1), spot=23250.0)  # 210 down: the put side shifted
+    p = shifted.state["position"]
+    assert shifted._last_signal == "SHIFT" and shifted._last_reason.startswith("strike shift, in profit")
+    assert p["strike_pe"] < PE and p["strike_ce"] == CE and p["shift_ref_pe"] == 23250.0 and "shift_ref_ce" not in p
+
+
+async def test_a_16_lot_position_from_version_5_is_shifted_at_its_own_16_lots(market):
+    ctx = await market.check(at(4, 9, 30))
+    for leg in ctx.state["position"]["legs"].values():
+        leg["quantity"] = 16 * 65.0  # as version 5 opened it
+    market.deployment.state = ctx.state
+    market.premium[(W1, PE, "PE")] = 400.0
+    shifted = await market.check(at(4, 10, 0), spot=23620.0)
+    assert shifted._last_signal == "SHIFT" and all(leg["quantity"] == 16 * 65 for leg in shifted.state["position"]["legs"].values())
+
+
+async def test_no_shift_outside_0930_1500(market):
+    await market.check(at(4, 9, 30))
+    market.premium[(W1, PE, "PE")] = 400.0
+    late = await market.check(at(4, 15, 5), spot=23700.0)
+    assert late._last_action == "hold" and late.state["position"].get("shifts") is None
+
+
+async def test_a_shift_sends_a_strike_shifted_alert(market):
+    await market.check(at(4, 9, 30))
+    market.premium[(W1, PE, "PE")] = 400.0
+    shifted = await market.check(at(4, 10, 0), spot=23620.0)
+    title, body = entry_message("Conti Calendar 400 15 MIN", shifted.opened_legs, shifted.state["position"], shifted.now)
+    lines = body.split("\n")
+    assert title == "📅 Conti Calendar 400 15 MIN: strike shifted" and "Call side shifted" in lines
+    assert any(line.startswith("Booked so far ") for line in lines) and max(len(line) for line in lines) <= WIDTH
+

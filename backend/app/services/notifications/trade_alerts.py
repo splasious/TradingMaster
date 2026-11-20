@@ -99,13 +99,17 @@ def entry_message(
     calendar = view == "calendar"
     double = view == "double calendar"
     rolled = double and position.get("rolled_at") == as_aware_utc(at).isoformat()  # a weekly roll, not a new trade
+    shifted = double and not rolled and position.get("shifted_at") == as_aware_utc(at).isoformat()  # one side moved (version 6)
     lots = {_lots(leg["quantity"], leg.get("lot_size")) for leg in legs}
     if calendar and position.get("strike") is not None:
         lines.append(f"Strike {position['strike']:,.0f}" + (f" · {lots.pop()} a leg" if len(lots) == 1 else ""))
     if double and not rolled and position.get("strike_ce") is not None:
-        lines.append(f"{position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE")
-        if len(lots) == 1:
+        lines.append(f"{position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE" + (" now" if shifted else ""))
+        if len(lots) == 1 and not shifted:
             lines.append(f"{lots.pop()} a leg")
+    if shifted:
+        sides = {"call" if str(leg.get("symbol", "")).endswith("CE") else "put" for leg in legs}
+        lines.append(f"{' and '.join(sorted(sides)).capitalize()} side shifted")
     if rolled:
         lines.append(f"Weeklies rolled to {date.fromisoformat(position['weekly_expiry']):%d %b}")
     for leg in legs:
@@ -113,9 +117,12 @@ def entry_message(
         lines.append(f"  {_lots(leg['quantity'], leg.get('lot_size'))} @ {leg['price']:,.2f}")
     if calendar:
         lines += _calendar_setup(legs, position, payoff)
-    if double and not rolled:
+    if double and not rolled and not shifted:
         lines += _double_calendar_setup(legs, position)
-    if rolled:
+    if shifted:
+        lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
+        title = f"{VIEW_MARKS[view]} {strategy}: strike shifted"
+    elif rolled:
         lines.append(f"Booked so far {position.get('booked_net', 0.0):+,.0f}")
         title = f"{VIEW_MARKS[view]} {strategy}: weekly rolled"
     else:

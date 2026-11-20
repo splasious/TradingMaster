@@ -5,9 +5,10 @@ Conti Calendar 400 15 MIN -- a double calendar on the OTM strikes nearest a Rs 1
 Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
 11 Nov: the pause after a close cut to 1 minute; version 3, 12 Nov: the
 strikes by premium, not 400 points out; version 4, 16 Nov: the next weekly
-when the nearest has no Rs 100 strike): instead of one strike's straddle
-calendar, a call calendar on an OTM call and a put calendar on an OTM put,
-LOTS_PER_LEG (16) lots each, every fill at the order book's best price (a
+when the nearest has no Rs 100 strike; version 6, 20 Nov: 20 lots a leg and
+the strike shift below): instead of one strike's straddle calendar, a call
+calendar on an OTM call and a put calendar on an OTM put, LOTS_PER_LEG (20;
+16 before version 6) lots each, every fill at the order book's best price (a
 sell at the bid, a buy at the ask):
 
   sell  the weekly CE at the call strike   buy  the monthly CE at it
@@ -63,6 +64,23 @@ Held overnight -- no daily close -- until the take-profit:
                (their P&L less both their orders' charges). At TAKE_PROFIT
                (Rs 14,000) or more, every open leg closes at those prices;
                the next opens once the pause is up. No stop-loss.
+  Strike shift (version 6) NIFTY gone more than SHIFT_IN_LOSS (150) points
+               toward a side -- up for the call side, down for the put
+               side -- from where NIFTY was when that side was opened or
+               last shifted, the position in loss ("Net if closed now" as
+               the take-profit reads it, under Rs 0); SHIFT_IN_PROFIT (200)
+               points when in profit but short of the target: that side's
+               sold weekly and bought monthly close at bid / ask, their
+               result booked into the position as a roll's is, and the side
+               opens again at NIFTY's Rs 100 strike now with its 2.5-3x
+               monthly cover, on the position's same weekly and monthly
+               expiries and at its own lots (a 16-lot position stays 16);
+               the other side is left as it is, and the shifted side's
+               reference is NIFTY at the shift. Only from 09:30 to 15:00,
+               read every second; a shift that can't be had (no Rs 100
+               strike, no 2.5-3x cover, a leg unquoted) waits and is tried
+               again, and one whose Rs 100 strike hasn't moved just moves
+               the reference.
   Weekly roll  at ROLL_TIME (15:00) on the sold weeklies' expiry day -- or
                at the first check after, if the app was down then -- the
                two sold weeklies are bought back at the ask and next week's
@@ -110,7 +128,11 @@ MIN_PREMIUM = 100.0  # rupees: the furthest OTM strike whose sold weekly's bid i
 MAX_STEPS = 40  # how many strikes out it looks on a side: 2,000 points
 MONTHLY_RATIO = (2.5, 3.0)  # version 5: the bought monthly's ask over the sold weekly's bid, nearest the top
 MONTHLY_RULE = "ask 2.5-3x the weekly's bid"  # kept on a position opened by version 5's rule
-LOTS_PER_LEG = 16
+LOTS_PER_LEG = 20  # version 6 (20 Nov); 16 before
+SHIFT_IN_LOSS = 150.0  # version 6: NIFTY points toward a side, from its reference, that shift it -- the position in loss
+SHIFT_IN_PROFIT = 200.0  # the same, in profit but short of the take-profit
+SIDE_LEGS = {"CE": ("short_ce", "long_ce"), "PE": ("short_pe", "long_pe")}
+SIDE_NAME = {"CE": "call", "PE": "put"}
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
@@ -208,6 +230,91 @@ async def monthly_after(ctx, underlying_id: uuid.UUID, weekly: date) -> date | N
     return next((expiry for expiry, symbol in rows if is_monthly(symbol)), None)
 
 
+def shift_ref(position: dict, option_type: str, spot: float) -> float:
+    """Where NIFTY was when that side was opened or last shifted (version 6)."""
+    return float(position.get(f"shift_ref_{option_type.lower()}") or position.get("entry_spot") or spot)
+
+
+def shift_text(position: dict) -> str:
+    """The levels that shift a side, for the card."""
+    net = position.get("net_if_closed_now") or 0.0
+    trigger = SHIFT_IN_LOSS if net < 0 else SHIFT_IN_PROFIT
+    spot = position.get("entry_spot") or 0.0
+    text = (f"shifts the call side over NIFTY {shift_ref(position, 'CE', spot) + trigger:,.0f}, the put side under "
+            f"{shift_ref(position, 'PE', spot) - trigger:,.0f} ({trigger:,.0f} points, {'in loss' if net < 0 else 'in profit'})")
+    return text + (f"; {position['shift_waits']}" if position.get("shift_waits") else "")
+
+
+async def side_strike(ctx, underlying_id: uuid.UUID, expiry: date, spot: float, option_type: str) -> tuple[float | None, str, bool]:
+    """(the furthest OTM `option_type` strike whose `expiry` bid is still
+    MIN_PREMIUM or more, "", False) -- walked out from the first OTM strike
+    until a bid falls under it -- or (None, why not, whether it was a strike
+    with no book yet)."""
+    found, step = None, STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
+    for k in range(MAX_STEPS):
+        strike = first_otm(spot, option_type) + k * step
+        instrument = await ctx.find_option(underlying_id, expiry, strike, option_type)
+        if instrument is None:
+            break  # past the catalog's last strike
+        quote = await bid_ask(ctx, instrument.id)
+        if quote is None:
+            return None, f"no bid/ask for the {expiry:%d %b} {strike:,.0f} {option_type} yet", True
+        if quote[0] < MIN_PREMIUM:
+            break
+        found = strike
+    if found is None:
+        return None, f"no OTM {expiry:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more", False
+    return found, "", False
+
+
+async def monthly_cover(ctx, underlying_id: uuid.UUID, monthly: date, weekly: date, option_type: str, weekly_strike: float,
+                    weekly_bid: float) -> tuple[tuple | None, str]:
+    """((the monthly instrument, its ask, ask / weekly bid, its strike), "") --
+    the strike whose ask is MONTHLY_RATIO times `weekly_bid`, nearest the
+    top -- or (None, why not). The premium falls moving OTM, so it walks
+    OTM from the weekly strike while the ratio is over the range, ITM
+    while it's under (and on through the range for the highest in it)."""
+    lo, hi = MONTHLY_RATIO
+    otm = STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
+    seen: dict[float, tuple | str | None] = {}
+
+    async def at(strike: float):
+        if strike not in seen:
+            instrument = await ctx.find_option(underlying_id, monthly, strike, option_type)
+            quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
+            seen[strike] = None if instrument is None else ("no book" if quote is None else (instrument, quote[1], quote[1] / weekly_bid))
+        return seen[strike]
+
+    k = weekly_strike
+    r = await at(k)
+    if r is None:
+        return None, f"no {monthly:%d %b} {k:,.0f} {option_type} in the catalog"
+    if r == "no book":
+        return None, f"no bid/ask for the {monthly:%d %b} {k:,.0f} {option_type} yet"
+    direction = otm if r[2] > hi else -otm
+    best = (k, r) if lo <= r[2] <= hi else None
+    for _ in range(MAX_STEPS):
+        if best is not None and direction == otm:
+            break  # walking OTM, the first in range is the nearest 3x
+        nk = k + direction
+        nr = await at(nk)
+        if nr is None:
+            break  # past the catalog's last strike
+        if nr == "no book":
+            return None, f"no bid/ask for the {monthly:%d %b} {nk:,.0f} {option_type} yet"
+        if lo <= nr[2] <= hi and best is not None and nr[2] <= best[1][2]:
+            break  # no more premium a strike further: the one before stands
+        k, r = nk, nr
+        if lo <= r[2] <= hi:
+            best = (k, r)
+        elif best is not None or (direction == otm and r[2] < lo) or (direction != otm and r[2] > hi):
+            break  # past the range (or jumped over it)
+    if best is None:
+        return None, (f"no {monthly:%d %b} {option_type} with an ask {lo:g}-{hi:g}x the {weekly:%d %b} "
+                      f"{weekly_strike:,.0f} {option_type}'s bid of {weekly_bid:,.2f}")
+    return (best[1][0], best[1][1], best[1][2], best[0]), ""
+
+
 async def evaluate(ctx) -> None:
     now_utc = ctx.now
     now_ist = now_utc.astimezone(IST)
@@ -272,6 +379,89 @@ async def evaluate(ctx) -> None:
             return ""
         return (f"; max profit reached {e['max_profit_reached']:+,.0f} ({e['max_profit_at']}), "
                 f"max loss reached {e['max_loss_reached']:+,.0f} ({e['max_loss_at']})")
+
+    async def maybe_shift(net: float) -> str | None:
+        """Version 6: the side NIFTY has moved toward, SHIFT_IN_LOSS (in loss) or
+        SHIFT_IN_PROFIT (in profit) points past its reference, shifted; the note,
+        or None (nothing due, or a shift that can't be had this check)."""
+        position.pop("shift_waits", None)  # read afresh each check
+        spot = await ctx.get_price(underlying.id)
+        if spot is None:
+            return None
+        trigger = SHIFT_IN_LOSS if net < 0 else SHIFT_IN_PROFIT
+        for option_type in ("CE", "PE"):
+            ref = shift_ref(position, option_type, spot)
+            moved = spot - ref if option_type == "CE" else ref - spot
+            if moved > trigger:
+                note = await shift_side(option_type, spot, ref, moved, net, trigger)
+                if note is not None:
+                    return note
+        return None
+
+    async def shift_side(option_type: str, spot: float, ref: float, moved: float, net: float, trigger: float) -> str | None:
+        """That side's sold weekly and bought monthly closed at bid / ask, their
+        result booked into the position, and the side opened again at NIFTY's
+        Rs 100 strike now with its 2.5-3x monthly, on the same expiries."""
+        lower, side = option_type.lower(), SIDE_NAME[option_type]
+        weekly_name, monthly_name = SIDE_LEGS[option_type]
+        weekly = date.fromisoformat(position["weekly_expiry"])
+        monthly = date.fromisoformat(position["monthly_expiry"])
+        old_w = position["legs"][weekly_name]
+        strike, why, _ = await side_strike(ctx, underlying.id, weekly, spot, option_type)
+        if strike is not None and strike == old_w["strike"]:  # the Rs 100 strike hasn't moved: nothing to shift, the reference does
+            position[f"shift_ref_{lower}"] = spot
+            return None
+        w_instrument = await ctx.find_option(underlying.id, weekly, strike, option_type) if strike is not None else None
+        w_quote = await bid_ask(ctx, w_instrument.id) if w_instrument is not None else None
+        cover = None
+        if strike is not None and w_quote is None:
+            why = f"no bid/ask for the {weekly:%d %b} {strike:,.0f} {option_type} yet"
+        elif strike is not None:
+            cover, why = await monthly_cover(ctx, underlying.id, monthly, weekly, option_type, strike, w_quote[0])
+        if cover is None:
+            position["shift_waits"] = f"shifting the {side} side waits: {why}"
+            return None
+        m_instrument, m_ask, ratio, m_strike = cover
+        replaced = [weekly_name] + ([monthly_name] if m_strike != position["legs"][monthly_name]["strike"] else [])  # the same cover: kept
+        booked = dict(position.get("booked") or {"gross": 0.0, "charges": 0.0})
+        closed = list(position.get("closed_legs") or [])
+        out = []
+        for name in replaced:
+            leg = position["legs"][name]
+            exit_price = await quote_or_last(leg)
+            old = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+            await ctx.close_leg(old, "buy" if leg["side"] == "sell" else "sell", leg["quantity"], exit_price)
+            booked["gross"] = booked.get("gross", 0.0) + leg_pnl(leg, exit_price)
+            booked["charges"] = (booked.get("charges", 0.0) + leg.get("entry_charges", 0.0)
+                                 + charges_of(leg, exit_price, buying=leg["side"] == "sell"))
+            closed.append(trade_leg(leg, exit_price))
+            position["entry_charges"] = round(position["entry_charges"] - leg.get("entry_charges", 0.0), 2)
+            out.append(f"{date.fromisoformat(leg['expiry']):%d %b} {leg['strike']:,.0f} {option_type} {exit_price:,.2f}")
+        for name, instrument, price, k, order_side, expiry in (
+                (weekly_name, w_instrument, w_quote[0], strike, "sell", weekly), (monthly_name, m_instrument, m_ask, m_strike, "buy", monthly)):
+            if name not in replaced:
+                continue
+            quantity = position["legs"][name]["quantity"]  # the position's own lots, whatever LOTS_PER_LEG is now
+            await ctx.open_leg(instrument, order_side, quantity, price)
+            leg = {"instrument_id": str(instrument.id), "strike": k, "option_type": option_type, "side": order_side,
+                   "expiry": expiry.isoformat(), "quantity": quantity, "entry_price": price}
+            leg["entry_charges"] = round(charges_of(leg, price, buying=order_side == "buy"), 2)
+            position["entry_charges"] = round(position["entry_charges"] + leg["entry_charges"], 2)
+            position["legs"][name] = leg
+        booked = {"gross": round(booked["gross"], 2), "charges": round(booked["charges"], 2)}
+        position.update({
+            "booked": booked, "closed_legs": closed, "booked_net": round(booked_net({"booked": booked}), 2),
+            f"strike_{lower}": strike, f"monthly_strike_{lower}": m_strike, f"monthly_ratio_{lower}": round(ratio, 2),
+            f"shift_ref_{lower}": spot, "shifts": int(position.get("shifts", 0)) + 1, "shifted_at": now_utc.isoformat(),
+        })
+        position.pop("shift_waits", None)
+        return (f"strike shift, {'in loss' if net < 0 else 'in profit'} (Rs {net:,.0f} if closed now): NIFTY {spot:,.1f} is "
+                f"{moved:,.0f} points {'above' if option_type == 'CE' else 'below'} the {side} side's {ref:,.1f}, past {trigger:,.0f} -- "
+                f"{' and '.join(out)} closed at bid/ask; {weekly:%d %b} {strike:,.0f} {option_type} sold at the bid {w_quote[0]:,.2f} "
+                + (f"and {monthly:%d %b} {m_strike:,.0f} {option_type} bought at the ask {m_ask:,.2f} ({ratio:.2f}x)" if monthly_name in replaced
+                   else f"its {monthly:%d %b} {m_strike:,.0f} {option_type} cover kept (now {ratio:.2f}x)")
+                + "; the other side kept; "
+                f"booked so far Rs {position['booked_net']:,.0f} after charges")
 
     rolled_note = ""
     if (position is not None and not force_exit and position.get("monthly_rule") != MONTHLY_RULE
@@ -370,6 +560,12 @@ async def evaluate(ctx) -> None:
                 ctx.wake_at(now_utc + RECHECK)
                 return
         else:
+            if not missing and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
+                shifted = await maybe_shift(position["net_if_closed_now"])
+                if shifted is not None:
+                    ctx.note("entered", signal="SHIFT", reason=shifted)
+                    ctx.wake_at(now_utc + RECHECK)
+                    return
             if missing:
                 ctx.note("hold", reason=f"double calendar open; no bid/ask for {', '.join(missing)} -- take-profit checked once all four have one")
             else:
@@ -379,6 +575,7 @@ async def evaluate(ctx) -> None:
                     f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE{cover} "
                     f"(sold {weekly:%d %b}, bought {monthly:%d %b}): Rs {position['net_if_closed_now']:,.0f} if closed now "
                     f"at bid/ask after charges; take-profit at Rs {TAKE_PROFIT:,.0f}; weeklies roll {weekly:%d %b} {ROLL_TIME:%H:%M}"
+                    f"; {shift_text(position)}"
                 ))
             ctx.wake_at(now_utc + RECHECK)
             return
@@ -421,20 +618,9 @@ async def evaluate(ctx) -> None:
         MIN_PREMIUM, None when it was a strike with no book yet)."""
         strikes: dict[str, float] = {}
         for option_type in ("CE", "PE"):
-            found, step = None, STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
-            for k in range(MAX_STEPS):
-                strike = first_otm(spot, option_type) + k * step
-                instrument = await ctx.find_option(underlying.id, expiry, strike, option_type)
-                if instrument is None:
-                    break  # past the catalog's last strike
-                quote = await bid_ask(ctx, instrument.id)
-                if quote is None:
-                    return None, f"no bid/ask for the {expiry:%d %b} {strike:,.0f} {option_type} yet", None
-                if quote[0] < MIN_PREMIUM:
-                    break
-                found = strike
+            found, why, no_book = await side_strike(ctx, underlying.id, expiry, spot, option_type)
             if found is None:
-                return None, f"no OTM {expiry:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more", option_type
+                return None, why, None if no_book else option_type
             strikes[option_type] = found
         return strikes, "", None
 
@@ -460,52 +646,6 @@ async def evaluate(ctx) -> None:
         if reopening:
             ctx.wake_at(now_utc + RECHECK)
         return
-    async def monthly_cover(option_type: str, weekly_strike: float, weekly_bid: float) -> tuple[tuple | None, str]:
-        """((the monthly instrument, its ask, ask / weekly bid, its strike), "") --
-        the strike whose ask is MONTHLY_RATIO times `weekly_bid`, nearest the
-        top -- or (None, why not). The premium falls moving OTM, so it walks
-        OTM from the weekly strike while the ratio is over the range, ITM
-        while it's under (and on through the range for the highest in it)."""
-        lo, hi = MONTHLY_RATIO
-        otm = STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
-        seen: dict[float, tuple | str | None] = {}
-
-        async def at(strike: float):
-            if strike not in seen:
-                instrument = await ctx.find_option(underlying.id, monthly, strike, option_type)
-                quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
-                seen[strike] = None if instrument is None else ("no book" if quote is None else (instrument, quote[1], quote[1] / weekly_bid))
-            return seen[strike]
-
-        k = weekly_strike
-        r = await at(k)
-        if r is None:
-            return None, f"no {monthly:%d %b} {k:,.0f} {option_type} in the catalog"
-        if r == "no book":
-            return None, f"no bid/ask for the {monthly:%d %b} {k:,.0f} {option_type} yet"
-        direction = otm if r[2] > hi else -otm
-        best = (k, r) if lo <= r[2] <= hi else None
-        for _ in range(MAX_STEPS):
-            if best is not None and direction == otm:
-                break  # walking OTM, the first in range is the nearest 3x
-            nk = k + direction
-            nr = await at(nk)
-            if nr is None:
-                break  # past the catalog's last strike
-            if nr == "no book":
-                return None, f"no bid/ask for the {monthly:%d %b} {nk:,.0f} {option_type} yet"
-            if lo <= nr[2] <= hi and best is not None and nr[2] <= best[1][2]:
-                break  # no more premium a strike further: the one before stands
-            k, r = nk, nr
-            if lo <= r[2] <= hi:
-                best = (k, r)
-            elif best is not None or (direction == otm and r[2] < lo) or (direction != otm and r[2] > hi):
-                break  # past the range (or jumped over it)
-        if best is None:
-            return None, (f"no {monthly:%d %b} {option_type} with an ask {lo:g}-{hi:g}x the {weekly:%d %b} "
-                          f"{weekly_strike:,.0f} {option_type}'s bid of {weekly_bid:,.2f}")
-        return (best[1][0], best[1][1], best[1][2], best[0]), ""
-
     chosen: dict[str, tuple[Instrument, float]] = {}
     leg_strikes: dict[str, float] = {}
     ratios: dict[str, float] = {}
@@ -519,7 +659,7 @@ async def evaluate(ctx) -> None:
         cover = None
         if not why:
             chosen[weekly_name], leg_strikes[weekly_name] = (instrument, quote[0]), strikes[option_type]
-            cover, why = await monthly_cover(option_type, strikes[option_type], quote[0])
+            cover, why = await monthly_cover(ctx, underlying.id, monthly, weekly, option_type, strikes[option_type], quote[0])
         if cover is None:
             ctx.note("skipped", reason=why)
             if reopening:
