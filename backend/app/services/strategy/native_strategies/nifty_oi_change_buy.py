@@ -53,9 +53,17 @@ TRAIL_START (15%) above the price paid; from then the stop sits TRAIL (5%)
 below the highest bid since, only ever moving up -- at least +9.25% over
 cost the moment it starts. The bid at or under the stop: sold at the bid
 ("trailing_stop"), and nothing more until the next 15-minute close, which
-buys whatever side it reads -- the same one again included. No take-profit
-or stop-loss besides; a loser still runs to the flip or 15:29. In a backtest there is no order book (ctx.is_backtest): the
-last price stands for both bid and ask.
+buys whatever side it reads -- the same one again included.
+
+The stop-loss (version 5, 20 Nov): until the trail is on, the held option
+is sold at the bid ("stop_loss") once selling it there would lose
+STOP_LOSS_PER_LOT (Rs 1,200) a lot or more -- on the price alone, the bid
+against the price paid, charges not counted: 18.46 points under cost for
+a lot of 65. Read every second with the trail; after it, as after a trail
+exit, nothing until the next 15-minute close. Once the trail is on (the
+bid +15% over cost) the trail alone stands. No take-profit. In a backtest
+there is no order book (ctx.is_backtest): the last price stands for both
+bid and ask.
 
 Paper only, no Telegram alerts. Runs through
 services/paper_trading/native_runner.py.
@@ -88,6 +96,7 @@ FIRST_BUY_BY = dtime(9, 16)  # and its option bought by then, or not at all (the
 RECHECK = timedelta(seconds=1)
 TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
 TRAIL = 0.05  # then the stop sits this far below the highest bid since, only moving up
+STOP_LOSS_PER_LOT = 1_200.0  # version 5: rupees a lot, the bid against the price paid (no charges), until the trail is on
 SIDE_NAME = {"CE": "call", "PE": "put"}
 
 
@@ -124,6 +133,15 @@ def next_mark(now_ist: datetime) -> datetime | None:
 
 def leg_pnl(leg: dict, exit_price: float) -> float:
     return (exit_price - leg["entry_price"]) * leg["quantity"]
+
+
+def stop_loss_price(leg: dict) -> float:
+    """The bid at which selling loses STOP_LOSS_PER_LOT a lot (for the card's text; the check is on the rupees)."""
+    return leg["entry_price"] - STOP_LOSS_PER_LOT * LOTS / leg["quantity"]
+
+
+def stop_loss_hit(leg: dict, bid: float) -> bool:
+    return leg_pnl(leg, bid) <= -STOP_LOSS_PER_LOT * LOTS
 
 
 async def first_minute_reading(now_utc: datetime) -> tuple[dict | None, str | None]:
@@ -191,7 +209,8 @@ async def evaluate(ctx) -> None:
         if position.get("trail_stop") is not None:
             return f"{text}; trailing stop {position['trail_stop']:,.2f} (5% under the highest bid {position['peak_bid']:,.2f})"
         if position.get("trail_starts_at") is not None:
-            return f"{text}; trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)"
+            return (f"{text}; stop-loss at a bid of {stop_loss_price(position['legs']['long']):,.2f} "
+                    f"(Rs {STOP_LOSS_PER_LOT:,.0f} a lot); trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)")
         return text
 
     first_read = datetime.combine(today, FIRST_READ, tzinfo=IST)
@@ -230,10 +249,11 @@ async def evaluate(ctx) -> None:
         return
     if now_ist >= day_close:
         state.pop("pending", None)
-        ctx.note("skipped", reason=f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision at {FIRST_MARK:%H:%M}")
+        ctx.note("skipped", reason=(f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision tomorrow at "
+                                    f"{FIRST_READ:%H:%M:%S} (the first minute), else the {FIRST_MARK:%H:%M} close"))
         return
 
-    # -- the trailing stop (version 3): on the bid, every second while something is held
+    # -- the trailing stop (version 3) and the stop-loss before it (version 5): on the bid, every second while held
     if position is not None:
         leg = position["legs"]["long"]
         quote = await bid_ask(ctx, uuid.UUID(leg["instrument_id"]))
@@ -243,6 +263,20 @@ async def evaluate(ctx) -> None:
             position["peak_bid"] = round(max(position.get("peak_bid") or bid_now, bid_now), 2)
             if position.get("trail_stop") is not None or position["peak_bid"] >= position["trail_starts_at"]:
                 position["trail_stop"] = round(max(position.get("trail_stop") or 0.0, position["peak_bid"] * (1 - TRAIL)), 2)
+            if position.get("trail_stop") is None and stop_loss_hit(leg, bid_now):
+                option = position["option"]
+                price, pnl = await close("stop_loss")
+                position = None
+                state.pop("pending", None)
+                current = latest_mark(now_ist)
+                if current is not None:
+                    state["last_mark"] = current.isoformat()  # flat until the next close, whatever this one reads
+                ctx.note("exited", signal="SELL", reason=(
+                    f"stop-loss: {option} sold at {price:,.2f} (the bid), Rs {STOP_LOSS_PER_LOT:,.0f} a lot or more under the price "
+                    f"paid before the trail started; P&L {pnl:+,.0f} before charges; next decision {next_text()}"
+                ))
+                wake_for_next()
+                return
             if position.get("trail_stop") is not None and bid_now <= position["trail_stop"]:
                 option, peak, stop = position["option"], position["peak_bid"], position["trail_stop"]
                 price, pnl = await close("trailing_stop")
@@ -375,6 +409,7 @@ async def evaluate(ctx) -> None:
             "put_change_15m": pending.get("put_change_15m"),
             "call_change_15m": pending.get("call_change_15m"),
             "trail_starts_at": round(price * (1 + TRAIL_START), 2),
+            "stop_loss_at": round(price - STOP_LOSS_PER_LOT * LOTS / quantity, 2),
             "peak_bid": None,
             "trail_stop": None,
             "legs": {"long": {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": "buy",
@@ -383,8 +418,9 @@ async def evaluate(ctx) -> None:
         }
         state.pop("pending", None)
         ctx.note("entered", signal="BUY", reason=(
-            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; trail from a bid of "
-            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), {TRAIL * 100:g}% under its peak; sold at 15:29 or when the side flips"
+            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; stop-loss at a bid of "
+            f"{price - STOP_LOSS_PER_LOT * LOTS / quantity:,.2f} (Rs {STOP_LOSS_PER_LOT:,.0f} a lot) until the trail starts at "
+            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; sold at 15:29 or when the side flips"
         ))
         wake_for_next()
         return
@@ -404,4 +440,4 @@ def as_ist_hhmm(ts) -> str:
 
 def _next_text(now_ist: datetime) -> str:
     mark = next_mark(now_ist)
-    return f"at the {mark:%H:%M} close" if mark is not None else "tomorrow at 09:30"
+    return f"at the {mark:%H:%M} close" if mark is not None else f"tomorrow at {FIRST_READ:%H:%M:%S} (the first minute)"

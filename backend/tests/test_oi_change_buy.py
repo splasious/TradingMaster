@@ -234,6 +234,56 @@ async def test_a_stop_hit_at_a_close_waits_for_the_next_one(market):
     assert (await market.check(at(4, 9, 45, 5))).state.get("position") is None
 
 
+async def test_a_stop_loss_of_rs_1200_a_lot_until_the_trail_starts(market):
+    """20 Nov (version 5): before the trail is on, sold at the bid once that loses Rs 1,200 a lot -- the
+    price alone (18.46 points on a lot of 65), charges not counted; then flat until the next close."""
+    assert oib.STOP_LOSS_PER_LOT == 1_200.0
+    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
+    bought = await market.check(at(4, 9, 30, 4))
+    p = bought.state["position"]
+    cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    assert p["stop_loss_at"] == pytest.approx(cost - 1_200 / 65, abs=0.01) and "stop-loss at a bid of" in bought._last_reason
+    market.premium[key] = cost - 18.40 + SPREAD  # Rs 1,196 down at the bid: held
+    held = await market.check(at(4, 9, 35))
+    assert held.state["position"] is not None and await market.trades() == []
+    assert f"stop-loss at a bid of {cost - 1_200 / 65:,.2f}" in held._last_reason
+    market.premium[key] = cost - 18.50 + SPREAD  # Rs 1,202.50 down: sold at the bid
+    out = await market.check(at(4, 9, 36))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "stop_loss" and trade.legs[0]["exit_price"] == pytest.approx(cost - 18.50, abs=0.01)
+    assert trade.pnl == pytest.approx(-18.50 * 65, abs=1) and out.state.get("position") is None
+    assert out._last_reason.startswith("stop-loss:")
+    again = await market.check(at(4, 9, 40))  # flat until the next close
+    assert again.state.get("position") is None and "next decision at the 09:45 close" in again._last_reason
+    await market.record(at(4, 9, 45), put_day=5_00_000, call_day=1_00_000)
+    market.premium.clear()
+    assert (await market.check(at(4, 9, 45, 4))).state["position"]["option_type"] == "CE"
+
+
+async def test_once_the_trail_is_on_the_stop_loss_no_longer_applies(market):
+    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
+    p = (await market.check(at(4, 9, 30, 4))).state["position"]
+    cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    market.premium[key] = cost * 1.20 + SPREAD  # +20%: the trail on
+    assert (await market.check(at(4, 9, 31))).state["position"]["trail_stop"] is not None
+    market.premium[key] = cost - 30 + SPREAD  # far under cost: out by the trail, not the stop-loss
+    await market.check(at(4, 9, 32))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "trailing_stop"
+
+
+async def test_a_position_from_version_4_gets_the_stop_loss_too(market):
+    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
+    ctx = await market.check(at(4, 9, 30, 4))
+    ctx.state["position"].pop("stop_loss_at")  # as version 4 left it
+    market.deployment.state = ctx.state
+    cost, key = ctx.state["position"]["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    market.premium[key] = cost - 25 + SPREAD
+    await market.check(at(4, 9, 33))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "stop_loss"
+
+
 async def test_at_091550_the_first_minutes_change_in_oi_buys_before_0916(market, monkeypatch):
     """18 Nov (version 4): the live change in OI since the 09:15 record, read at 09:15:50."""
     readings = []

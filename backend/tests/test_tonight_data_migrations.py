@@ -1137,9 +1137,39 @@ async def test_conti_calendar_moves_onto_20_lots_keeping_its_position(db_engine,
     assert (await db_session.get(PaperNativeDeployment, ids["reverse"])).strategy_version_id == before  # another strategy: left alone
 
 
+async def test_oi_change_buy_moves_onto_the_stop_loss_keeping_its_option(db_engine, db_session):
+    """20 Nov: OI Change Buy 15 MIN version 5 -- a fixed Rs 1,200 a lot stop-loss until the trail starts."""
+    migration = _load("f0b2d4a6c8e1_oi_change_buy_stop_loss")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e8a0c2e4f6b3"
+    assert "STOP_LOSS_PER_LOT = 1_200.0" in migration.BUILT_IN.read_text(encoding="utf-8")
+    v4 = "# OI Change Buy 15 MIN, version 4: the first minute\n"
+    migration.FROM_MD5S = {_md5_text(v4)}
+    running = await _deployment(db_session, "oib5_a@tradingmaster.internal", v4)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib5_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    state = {"last_mark": "2026-11-20T10:15:00+05:30", "position": {"option": "24 Nov 25,500 CE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
 async def test_oi_change_buy_moves_onto_the_first_minute(db_engine, db_session):
     """18 Nov: OI Change Buy 15 MIN version 4 -- the first trade before 09:16."""
     migration = _load("b2d4f6a8c0e7_oi_change_buy_first_minute")
+    assert _load("f0b2d4a6c8e1_oi_change_buy_stop_loss").FROM_MD5S == {migration.TO_MD5}  # version 5 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a0c2e4f6b8d5"
     assert "FIRST_READ = dtime(9, 15, 50)" in migration.BUILT_IN.read_text(encoding="utf-8")
     v3 = "# OI Change Buy 15 MIN, version 3: from the 09:30 close\n"
