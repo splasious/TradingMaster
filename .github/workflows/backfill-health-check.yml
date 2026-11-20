@@ -62,6 +62,10 @@ on:
         description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
         type: boolean
         default: false
+      synthetic_payoff:
+        description: "Instead of the check: read-only -- Synthetic Calendar 15 MIN and its Reverse, each open position's profit or loss at its 15:00 close on the weekly's expiry day across NIFTY levels, and its greeks now; points per unit here, rupees to the private Telegram chat only (backend/scripts/synthetic_calendar_payoff.py)"
+        type: boolean
+        default: false
       cc_day_review:
         description: "Instead of the check: read-only review of one day's Conti Calendar 15 MIN trades (DAY in the script) against every session it traded -- times, strikes, counts, exit reasons and NIFTY market data here; rupees to the private Telegram chat only (backend/scripts/conti_calendar_day_review.py)"
         type: boolean
@@ -106,6 +110,7 @@ jobs:
           OI_TRAIL_BACKTEST: ${{ inputs.oi_trail_backtest }}
           CC_DAY_REVIEW: ${{ inputs.cc_day_review }}
           CC_RULE_BACKTEST: ${{ inputs.cc_rule_backtest }}
+          SYNTHETIC_PAYOFF: ${{ inputs.synthetic_payoff }}
         run: |
           set -euo pipefail
           umask 077
@@ -529,6 +534,13 @@ jobs:
           if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
             echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${SYNTHETIC_PAYOFF:-false}" = "true" ]; then
+            echo "== Synthetic Calendars: payoff at the weekly's 15:00 close and greeks now (points per unit here; rupees to the private Telegram chat only)"
+            py_file=$(vps 'f=$(mktemp /tmp/synpay-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/synthetic_calendar_payoff.py)
             remote py "$py_file"
             exit 0
           fi
