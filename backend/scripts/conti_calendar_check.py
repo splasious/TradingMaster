@@ -77,8 +77,15 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     print(f"    monthly covers: {position.get('monthly_strike_ce', 'same strike')} CE "
                           f"({position.get('monthly_ratio_ce', '-')}x), {position.get('monthly_strike_pe', 'same strike')} PE "
                           f"({position.get('monthly_ratio_pe', '-')}x); rule: {position.get('monthly_rule', 'version 4')}")
-                    print(f"    shifts: {position.get('shifts', 0)}; call side from NIFTY {position.get('shift_ref_ce') or position.get('entry_spot')}, "
+                    print(f"    shifts: {position.get('shifts', 0)}" + (f" (last {datetime.fromisoformat(position['shifted_at']).astimezone(IST):%d-%b %H:%M:%S})"
+                          if position.get("shifted_at") else "") + f"; call side from NIFTY {position.get('shift_ref_ce') or position.get('entry_spot')}, "
                           f"put side from {position.get('shift_ref_pe') or position.get('entry_spot')}; waiting: {bool(position.get('shift_waits'))}")
+                    for leg in position.get("closed_legs") or []:  # rolled or shifted out, kept in the position: strikes and prices only
+                        instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
+                        print(f"    closed inside the position: {leg['side']} {instrument.symbol if instrument else '?'} "
+                              f"{leg['entry_price']:,.2f} -> {leg['exit_price']:,.2f}")
+                    print(f"    booked inside the position: {'yes' if position.get('closed_legs') else 'nothing yet'}; "
+                          f"booked figure kept on the position: {'booked_net' in position}")
                     for name, leg in position["legs"].items():
                         instrument = await db.get(Instrument, uuid.UUID(leg["instrument_id"]))
                         print(f"    {name}: {leg['side']} {instrument.symbol if instrument else '?'} {leg['quantity'] / 65:g} lots at {leg['entry_price']:,.2f}")
