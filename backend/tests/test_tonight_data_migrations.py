@@ -1001,6 +1001,33 @@ async def test_conti_reverse_calendar_is_created_with_its_pool_and_card_for_cont
     assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
 
 
+async def test_the_synthetic_calendars_are_created_with_their_pools_and_cards_for_conti_calendars_owner(db_engine, db_session):
+    """20 Nov: Synthetic Calendar 15 MIN and its Reverse (native_strategies/nifty_synthetic_calendar*.py)."""
+    from app.models.audit import AuditLog as Log
+
+    calendar = await _amop_pool(db_session, "Conti Calendar 15 MIN", "Conti Calendar 15 MIN", 2_000_000.0, 2_041_000.0)
+    stranger = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_000_000.0)  # no Conti Calendar
+    migration = _load("e0a2c4e6f8b1_synthetic_calendars")
+    assert migration.down_revision == "c6e8a0b2d4f1"
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+
+    native = VERSIONS.parent.parent / "app/services/strategy/native_strategies"
+    for name, file in (("Synthetic Calendar 15 MIN", "nifty_synthetic_calendar.py"),
+                       ("Synthetic Calendar Reverse 15 MIN", "nifty_synthetic_calendar_reverse.py")):
+        [strategy] = (await db_session.execute(select(Strategy).where(Strategy.name == name))).scalars().all()
+        assert (strategy.owner_id, strategy.code_type, strategy.status) == (calendar.user_id, "native", "paper_trading")
+        [version] = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))).scalars().all()
+        assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", (native / file).read_text(encoding="utf-8"))
+        [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == name))).scalars().all()
+        assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (calendar.user_id, "INR", 2_000_000.0, 2_000_000.0)
+        [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()
+        assert (card.portfolio_id, card.strategy_version_id, card.status, card.state) == (pool.id, version.id, "active", None)
+    actions = (await db_session.execute(select(Log.action).where(Log.user_id == calendar.user_id))).scalars().all()
+    assert sorted(actions) == sorted(["PAPER_NATIVE_TRADING_STARTED", "PAPER_PORTFOLIO_CREATED", "STRATEGY_CREATED"] * 2)
+    assert not (await db_session.execute(select(Log.action).where(Log.user_id == stranger.user_id))).scalars().all()
+
+
 async def test_oi_change_buy_is_created_with_its_pool_and_card_for_conti_calendars_owner(db_engine, db_session):
     """16 Nov: OI Change Buy 15 MIN (native_strategies/nifty_oi_change_buy.py)."""
     from app.models.audit import AuditLog as Log

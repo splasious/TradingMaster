@@ -113,6 +113,12 @@ def test_structure_names(legs, structure):
         ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-24")], "Call Diagonal"),  # other strikes: a diagonal (19 Nov)
         ([("short", "CE", 23500, "2026-11-17"), ("long", "CE", 23600, "2026-11-17"),
           ("short", "PE", 23300, "2026-11-17"), ("long", "PE", 23200, "2026-11-17")], "Iron Condor"),
+        ([("long", "CE", 23500, "2026-11-23"), ("short", "PE", 23500, "2026-11-23"),  # Synthetic Calendar 15 MIN (20 Nov)
+          ("long", "PE", 23500, "2026-12-29"), ("short", "CE", 23500, "2026-12-29")], "Synthetic Calendar"),
+        ([("short", "CE", 23500, "2026-11-23"), ("long", "PE", 23500, "2026-11-23"),  # and its Reverse
+          ("short", "PE", 23500, "2026-12-29"), ("long", "CE", 23500, "2026-12-29")], "Reverse Synthetic Calendar"),
+        ([("short", "CE", 23500, "2026-11-23"), ("long", "PE", 23500, "2026-11-23"),  # both one way: not one
+          ("long", "PE", 23500, "2026-12-29"), ("short", "CE", 23500, "2026-12-29")], "Iron Butterfly"),
     ],
 )
 def test_calendar_structure_names(legs, structure):

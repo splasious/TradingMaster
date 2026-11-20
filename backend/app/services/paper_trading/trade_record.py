@@ -249,6 +249,31 @@ def _diagonal_of(near: list[dict], far: list[dict], legs: list[dict]) -> str | N
     return "Call Diagonal" if types == {"CE"} else "Put Diagonal"
 
 
+def _synthetic_calendar(legs: list[dict]) -> str | None:
+    """Two synthetic futures on two expiries, opposite ways (20 Nov: the
+    Synthetic Calendars): at each expiry a CE and a PE at one strike, one
+    bought and one sold -- the near one long (its CE bought) and the far one
+    short, "Synthetic Calendar"; the other way round, "Reverse Synthetic
+    Calendar"; None for anything else."""
+    if len(legs) != 4 or any(leg.get("expiry") is None or leg.get("option_type") is None for leg in legs):
+        return None
+    by_expiry: dict[str, list[dict]] = {}
+    for leg in legs:
+        by_expiry.setdefault(str(leg["expiry"]), []).append(leg)
+    if len(by_expiry) != 2:
+        return None
+    directions = []
+    for expiry in sorted(by_expiry):
+        pair = by_expiry[expiry]
+        if (len(pair) != 2 or {leg["option_type"] for leg in pair} != {"CE", "PE"} or len({leg["side"] for leg in pair}) != 2
+                or len({leg.get("strike") for leg in pair}) != 1):
+            return None
+        directions.append(next(leg for leg in pair if leg["option_type"] == "CE")["side"])  # long when its CE is bought
+    if directions == ["long", "short"]:
+        return "Synthetic Calendar"
+    return "Reverse Synthetic Calendar" if directions == ["short", "long"] else None
+
+
 def _calendar_of(shorts: list[dict], longs: list[dict], legs: list[dict]) -> str | None:
     """`shorts` (the near legs) each matched by one of `longs` (the far legs)."""
     if not shorts or not longs or any(leg.get("expiry") is None or leg.get("strike") is None for leg in legs):
@@ -277,7 +302,7 @@ def _structure(legs: list[dict], is_credit: bool) -> str:
         side = "Short" if leg["side"] == "short" else "Long"
         return f"{side} {leg['option_type']}" if leg.get("option_type") else side
 
-    calendar = _calendar(legs)
+    calendar = _calendar(legs) or _synthetic_calendar(legs)
     if calendar is not None:
         return calendar
     option_types = [leg.get("option_type") for leg in legs]
