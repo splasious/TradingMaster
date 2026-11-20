@@ -316,3 +316,26 @@ class NativeEvaluationOut(BaseModel):
     action: str
     signal: str | None
     reason: str | None
+
+
+class NextInLineRowOut(BaseModel):
+    """One stock 52 Week High Breakout's Friday check would take next (20 Nov)."""
+
+    symbol: str
+    price: float
+    level: float  # the highest weekly high of the 52 completed weeks before this one
+    gap_pct: float  # price against that level, %: over 0 a breakout
+    breakout: bool
+
+
+class NextInLineOut(BaseModel):
+    """52 Week High Breakout's "next in line" panel (services/strategy/week_high_scanner.py)."""
+
+    slots_total: int
+    slots_free: int
+    next_check: str
+    as_of: datetime
+    price_source: Literal["live", "close"]
+    note: str | None
+    breakouts_now: int
+    rows: list[NextInLineRowOut]

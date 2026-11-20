@@ -1530,3 +1530,26 @@ export interface OiChartOut {
   expiries: string[];
   contracts: OiChartContractOut[];
 }
+
+/** One stock 52 Week High Breakout's Friday check would take next (20 Nov). */
+export interface NextInLineRowOut {
+  symbol: string;
+  price: number;
+  /** The highest weekly high of the 52 completed weeks before this one. */
+  level: number;
+  /** Price against that level, %: over 0 a breakout. */
+  gap_pct: number;
+  breakout: boolean;
+}
+
+/** 52 Week High Breakout's "next in line" panel under its holdings (20 Nov). */
+export interface NextInLineOut {
+  slots_total: number;
+  slots_free: number;
+  next_check: string;
+  as_of: string;
+  price_source: "live" | "close";
+  note: string | null;
+  breakouts_now: number;
+  rows: NextInLineRowOut[];
+}

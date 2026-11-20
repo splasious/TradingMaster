@@ -38,6 +38,7 @@ import type {
   NativeBacktestTradeOut,
   NativeDeploymentOut,
   NativePositionOut,
+  NextInLineOut,
   NativeTradeOut,
   LiveNativeTradeOut,
   LiveRunOut,
@@ -456,6 +457,16 @@ export function useNativePosition(deploymentId: string, enabled: boolean) {
     queryFn: () => apiFetch<NativePositionOut | null>(`/api/v1/paper-trading/native-deployments/${deploymentId}/position`),
     enabled,
     refetchInterval: 1000,
+  });
+}
+
+/** 52 Week High Breakout's next-in-line panel: re-read every minute (its quotes are kept a minute on the server). */
+export function useNextInLine(deploymentId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["next-in-line", deploymentId],
+    queryFn: () => apiFetch<NextInLineOut>(`/api/v1/paper-trading/native-deployments/${deploymentId}/next-in-line`),
+    enabled,
+    refetchInterval: 60_000,
   });
 }
 

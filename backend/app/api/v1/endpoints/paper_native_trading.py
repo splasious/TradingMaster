@@ -24,6 +24,7 @@ from app.schemas.paper_trading import (
     NativeLegOut,
     NativePositionOut,
     NativeTradeOut,
+    NextInLineOut,
     PayoffOut,
     PayoffPointOut,
 )
@@ -39,6 +40,7 @@ from app.services.paper_trading.native_runner import exit_native_deployment_now,
 from app.services.paper_trading.scheduler import paper_trading_scheduler
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
+from app.services.strategy.week_high_scanner import is_scanned, next_in_line
 
 router = APIRouter()
 
@@ -487,6 +489,21 @@ async def native_deployment_position(
     fetching every card each time."""
     deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
     return await _build_position_out(db, deployment.state)
+
+
+@router.get("/native-deployments/{deployment_id}/next-in-line", response_model=NextInLineOut)
+async def native_deployment_next_in_line(
+    deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> NextInLineOut:
+    """52 Week High Breakout's panel under its holdings (20 Nov): the stocks
+    its Friday check would take next -- breakouts strongest first, then the
+    nearest below their 52-week high -- with the slots free. Read-only."""
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    if strategy is None or not is_scanned(strategy.name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No next-in-line scanner for this strategy.")
+    panel = await next_in_line(db, (deployment.state or {}).get("holdings") or {}, datetime.now(timezone.utc))
+    return NextInLineOut(**panel)
 
 
 @router.post("/native-deployments/{deployment_id}/use-latest-version", response_model=NativeDeploymentOut)
