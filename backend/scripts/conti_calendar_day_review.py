@@ -25,9 +25,8 @@ import hashlib
 import math
 import traceback
 from collections import Counter, defaultdict
-from datetime import date, datetime, time as dtime, timedelta, timezone
-
-from sqlalchemy import func, select
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
@@ -37,6 +36,7 @@ from app.models.pcr import PcrSnapshot, PcrStrikeOi
 from app.models.strategy import Strategy, StrategyVersion
 from app.services.broker.zerodha_broker import IST
 from app.services.notifications.telegram import send_telegram
+from sqlalchemy import func, select
 
 NAME = "Conti Calendar 15 MIN"
 DAY = date(2026, 11, 6)
