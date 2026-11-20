@@ -11,7 +11,11 @@ traded:
 - DAY's trades one by one: times, minutes held, the wait after the last
   close, strike against NIFTY, exit reason, version, each leg's price in
   and out, and DAY's 15-minute records (NIFTY, PCR, change in OI, both
-  straddles).
+  straddles);
+- with RATIOS_ONLY (20 Nov), instead: every trade's weekly and monthly
+  straddle premiums, the monthly / weekly ratio at entry and exit, that
+  ratio against the one time alone would give, and the groups compared
+  (DAY against the other days, take-profits against the rest).
 
 The public log gets times, strikes, counts, exit reasons, versions and
 NIFTY market data (option prices included) -- no quantities, no rupees.
@@ -28,15 +32,17 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 
+from sqlalchemy import func, select
+
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
 from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade
 from app.models.pcr import PcrSnapshot, PcrStrikeOi
 from app.models.strategy import Strategy, StrategyVersion
+from app.services.backfill_platform.coverage import is_trading_day
 from app.services.broker.zerodha_broker import IST
 from app.services.notifications.telegram import send_telegram
-from sqlalchemy import func, select
 
 NAME = "Conti Calendar 15 MIN"
 DAY = date(2026, 11, 6)
@@ -44,6 +50,7 @@ UNDERLYING = "NIFTY"
 STEP = 50.0
 OPEN_MARK, LATE_MARK = dtime(9, 30), dtime(15, 15)
 EXPIRY_CLOSE = dtime(15, 30)
+RATIOS_ONLY = True  # 20 Nov: only every trade's monthly / weekly premium ratio (the day sections were read on 20 Nov)
 
 
 def ist(dt: datetime) -> datetime:
@@ -183,6 +190,94 @@ async def straddle_move(s: Session, expiry: date, a: dtime, b: dtime) -> dict:
     }
 
 
+def years_to(expiry: date, at: datetime, trading: bool) -> float:
+    """Time left to `expiry`'s 15:30, in calendar days or in trading sessions
+    (what's left of today's 09:15-15:30 plus each trading day after it)."""
+    at = ist(at)
+    if not trading:
+        return max((datetime.combine(expiry, EXPIRY_CLOSE, IST) - at).total_seconds() / 86400, 0.0)
+    open_, close = datetime.combine(at.date(), dtime(9, 15), IST), datetime.combine(at.date(), EXPIRY_CLOSE, IST)
+    left = 0.0
+    if is_trading_day(at.date()):
+        left = min(max((close - max(at, open_)).total_seconds() / (close - open_).total_seconds(), 0.0), 1.0)
+    d = at.date() + timedelta(days=1)
+    while d <= expiry:
+        left += 1.0 if is_trading_day(d) else 0.0
+        d += timedelta(days=1)
+    return left
+
+
+async def premium_ratios(db, trades: list, candles: Candles, version_at, private: list[str]) -> None:
+    """Every trade: the weekly straddle sold and the monthly bought (per
+    unit), their sizes against NIFTY, the monthly / weekly ratio at entry
+    and exit, and that ratio against the one time alone would give
+    (sqrt of the days left, calendar and trading) -- the rest is the
+    monthly's IV against the weekly's."""
+    sessions: dict[date, Session | None] = {}
+    rows = []
+    print()
+    print("Every trade (per unit; W = weekly straddle sold, M = monthly straddle bought; days left in calendar / trading days;")
+    print("  fair = sqrt(M days / W days), what the ratio would be with both at the same IV; rel = M/W / fair ~ monthly IV / weekly IV)")
+    for n, t in enumerate(trades, 1):
+        try:
+            sold = [leg for leg in t.legs if is_short(leg)]
+            bought = [leg for leg in t.legs if not is_short(leg)]
+            w_in, w_out = sum(leg["entry_price"] for leg in sold), sum(leg["exit_price"] for leg in sold)
+            m_in, m_out = sum(leg["entry_price"] for leg in bought), sum(leg["exit_price"] for leg in bought)
+            weekly, monthly = date.fromisoformat(str(sold[0]["expiry"])), date.fromisoformat(str(bought[0]["expiry"]))
+            strike = sold[0].get("strike")
+            d = ist(t.opened_at).date()
+            if d not in sessions:
+                sessions[d] = await load_session(db, d, candles)
+            s = sessions[d]
+            so = s.last_at_or_before(floor_mark(t.opened_at)) if s else None
+            spot = so.spot if so and so.spot else None
+            wc, mc = years_to(weekly, t.opened_at, False), years_to(monthly, t.opened_at, False)
+            wt, mt = years_to(weekly, t.opened_at, True), years_to(monthly, t.opened_at, True)
+            r_in, r_out = m_in / w_in, (m_out / w_out if w_out else None)
+            fair_c = math.sqrt(mc / wc) if wc > 0 else None
+            fair_t = math.sqrt(mt / wt) if wt > 0 else None
+            rel_c = r_in / fair_c if fair_c else None
+            rel_t = r_in / fair_t if fair_t else None
+            held = (t.closed_at - t.opened_at).total_seconds() / 60
+            gain = (w_in - w_out) + (m_out - m_in)
+            row = {"n": n, "day": d, "tp": t.exit_reason == "take_profit", "win": net_of(t) > 0, "r_in": r_in, "r_out": r_out, "rel_c": rel_c,
+                       "rel_t": rel_t, "held": held, "w_pct": 100 * w_in / spot if spot else None, "m_pct": 100 * m_in / spot if spot else None,
+                       "w_pts": w_in - w_out, "m_pts": m_out - m_in, "gain": gain, "wt": wt}
+            rows.append(row)
+            print(f"  #{n:<2} {ist(t.opened_at):%d %b %a %H:%M} -> {ist(t.closed_at):%d %b %H:%M} ({held:,.0f} min) {version_at(t.opened_at)} "
+                  f"{t.exit_reason}; strike {fmt(strike, ',.0f')}" + (f" (NIFTY {spot:,.0f})" if spot else ""))
+            print(f"      W {weekly:%d %b} {w_in:,.2f}" + (f" ({row['w_pct']:.2f}% of NIFTY)" if spot else "")
+                  + f", {wc:.1f}d / {wt:.1f} trading;  M {monthly:%d %b} {m_in:,.2f}" + (f" ({row['m_pct']:.2f}%)" if spot else "")
+                  + f", {mc:.1f}d / {mt:.1f} trading")
+            print(f"      M/W {r_in:.2f} at entry -> {fmt(r_out)} at exit; fair {fmt(fair_c)} (calendar) / {fmt(fair_t)} (trading); "
+                  f"rel {fmt(rel_c)} / {fmt(rel_t)}; from W {w_in - w_out:+,.2f}, from M {m_out - m_in:+,.2f}, total {gain:+,.2f} pts")
+            private.append(f"#{n} {ist(t.opened_at):%d %b %H:%M} {t.exit_reason}: W {w_in:,.2f} M {m_in:,.2f} M/W {r_in:.2f} "
+                           f"(rel {fmt(rel_c)}); net Rs {net_of(t):+,.0f}")
+        except Exception as exc:  # noqa: BLE001
+            failed(f"trade #{n}", exc)
+
+    def summary(label: str, group: list[dict]) -> None:
+        if not group:
+            return
+        avg = lambda k: sum(r[k] for r in group if r[k] is not None) / max(1, sum(1 for r in group if r[k] is not None))
+        print(f"  {label}: {len(group)} trades, {sum(r['tp'] for r in group)} take-profits, {sum(r['win'] for r in group)} winners; "
+              f"average M/W at entry {avg('r_in'):.2f} (exit {avg('r_out'):.2f}), rel {avg('rel_c'):.2f} calendar / {avg('rel_t'):.2f} trading; "
+              f"W {avg('w_pct'):.2f}% / M {avg('m_pct'):.2f}% of NIFTY; weekly trading days left {avg('wt'):.1f}; "
+              f"held {avg('held'):,.0f} min; from W {avg('w_pts'):+.1f}, from M {avg('m_pts'):+.1f} pts")
+
+    print()
+    print("Groups (averages per trade):")
+    summary(f"{DAY:%d %b}", [r for r in rows if r["day"] == DAY])
+    summary("every other day", [r for r in rows if r["day"] != DAY])
+    summary("take-profits", [r for r in rows if r["tp"]])
+    summary("not take-profits", [r for r in rows if not r["tp"]])
+    ranked = sorted((r for r in rows if r["rel_c"] is not None), key=lambda r: r["rel_c"])
+    third = max(1, len(ranked) // 3)
+    for label, group in (("lowest rel third", ranked[:third]), ("middle third", ranked[third:-third]), ("highest rel third", ranked[-third:])):
+        summary(f"{label} (rel {group[0]['rel_c']:.2f}-{group[-1]['rel_c']:.2f})" if group else label, group)
+
+
 def monthly_after(weekly: date, expiries: list[date]) -> date | None:
     last_of_month = {}
     for e in expiries:
@@ -214,6 +309,14 @@ async def main() -> None:
         candles = Candles(db)
         await candles.load()
         expiries = sorted({k[0] for k in candles.ids})
+
+        if RATIOS_ONLY:
+            await premium_ratios(db, trades, candles, version_at, private)
+            await send_telegram(f"{NAME}: each trade's premium ratio and net (private)",
+                                "Each trade (W/M premium per unit, M/W ratio at entry, net after charges):\n\n" + "\n".join(private))
+            print()
+            print("sent to the private Telegram chat: each trade's rupees, yes")
+            return
 
         by_day: dict[date, list] = defaultdict(list)
         for t in trades:
