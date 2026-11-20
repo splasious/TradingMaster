@@ -236,6 +236,21 @@ async def main() -> None:
 
         await stored_data(db)
 
+        try:  # 52 Week High Breakout's "Next in line" panel (20 Nov): counts only -- no stock names in this public log
+            from app.services.strategy.week_high_scanner import next_in_line
+
+            card = (await db.execute(
+                select(PaperNativeDeployment).join(Strategy, Strategy.id == PaperNativeDeployment.strategy_id)
+                .where(func.trim(Strategy.name) == "52 Week High Breakout", PaperNativeDeployment.status == "active")
+            )).scalars().first()
+            if card is not None:
+                panel = await next_in_line(db, (card.state or {}).get("holdings") or {}, datetime.now(timezone.utc))
+                print(f"52 Week High Breakout next in line: {len(panel['rows'])} rows, {panel['breakouts_now']} breakouts now, "
+                      f"{panel['slots_free']} of {panel['slots_total']} slots free, next check {panel['next_check']}, "
+                      f"prices {panel['price_source']}, gaps {[r['gap_pct'] for r in panel['rows']]}")
+        except Exception as exc:  # noqa: BLE001 -- the kind only
+            print(f"52 Week High Breakout next in line: not read ({type(exc).__name__})")
+
         nifty = (await db.execute(select(Instrument).where(Instrument.symbol == "NIFTY 50", Instrument.exchange == "NSE"))).scalars().first()
         rows = (await db.execute(
             select(Instrument.expiry, func.count(), func.min(Instrument.strike), func.max(Instrument.strike), func.max(Instrument.lot_size))
