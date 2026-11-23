@@ -1553,3 +1553,25 @@ export interface NextInLineOut {
   breakouts_now: number;
   rows: NextInLineRowOut[];
 }
+
+/** One 15-minute candle on OI Change Buy 15 MIN's chart (24 Nov). */
+export interface OiChangeCandleOut {
+  /** The candle's close. */
+  at: string;
+  session: string;
+  spot: number | null;
+  put_change: number;
+  call_change: number;
+  /** Over the last `average_candles` candles, this one included. */
+  put_avg: number;
+  call_avg: number;
+  /** The side the average picks at a close the strategy reads; null otherwise, or equal. */
+  side: "CE" | "PE" | null;
+}
+
+/** OI Change Buy 15 MIN's change-in-OI chart under its card (24 Nov). */
+export interface OiChangeOut {
+  average_candles: number;
+  session: string | null;
+  candles: OiChangeCandleOut[];
+}

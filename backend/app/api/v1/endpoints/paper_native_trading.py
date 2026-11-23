@@ -25,6 +25,7 @@ from app.schemas.paper_trading import (
     NativePositionOut,
     NativeTradeOut,
     NextInLineOut,
+    OiChangeOut,
     PayoffOut,
     PayoffPointOut,
 )
@@ -40,6 +41,7 @@ from app.services.paper_trading.native_runner import exit_native_deployment_now,
 from app.services.paper_trading.scheduler import paper_trading_scheduler
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
+from app.services.strategy.oi_change_series import is_charted, oi_change_series
 from app.services.strategy.week_high_scanner import is_scanned, next_in_line
 
 router = APIRouter()
@@ -504,6 +506,21 @@ async def native_deployment_next_in_line(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No next-in-line scanner for this strategy.")
     panel = await next_in_line(db, (deployment.state or {}).get("holdings") or {}, datetime.now(timezone.utc))
     return NextInLineOut(**panel)
+
+
+@router.get("/native-deployments/{deployment_id}/oi-change", response_model=OiChangeOut)
+async def native_deployment_oi_change(
+    deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> OiChangeOut:
+    """OI Change Buy 15 MIN's chart under its card (24 Nov): each 15-minute
+    candle's Put and Call dOI, the average its side comes from and the side
+    picked at each close -- the latest session, and the candles before it
+    that its first averages use. Read-only."""
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    if strategy is None or not is_charted(strategy.name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No change-in-OI chart for this strategy.")
+    return OiChangeOut(**await oi_change_series(db, datetime.now(timezone.utc)))
 
 
 @router.post("/native-deployments/{deployment_id}/use-latest-version", response_model=NativeDeploymentOut)

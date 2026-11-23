@@ -36,7 +36,7 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
          "Conti Calendar 400 15 MIN": "fb8fb6d81210ce26ba1dbc69f98ab8fe",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
-         "OI Change Buy 15 MIN": "b395b4fa5853f753a2454e674530749a",
+         "OI Change Buy 15 MIN": "20d71d3fcb3e4681656522e74fa159d4",
          "Synthetic Calendar 15 MIN": "e0d721147e24c1d645183180d405c2cf", "Synthetic Calendar Reverse 15 MIN": "3e54d82c71c29ea1ff19edf999c15c4a"}
 LISTEN_SECONDS = 6
 
@@ -108,6 +108,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 print(f"    last 15-min close read: {state.get('last_mark', '-')}; change in OI then (15 min / day): "
                       f"put {oi.get('put_change_15m', '-')} / {oi.get('put_change_day', '-')}, "
                       f"call {oi.get('call_change_15m', '-')} / {oi.get('call_change_day', '-')}; buy pending: {bool(state.get('pending'))}")
+                print(f"    version 6's average (candles to {oi.get('candles', '-')}): put {oi.get('put_avg', '-')}, "
+                      f"call {oi.get('call_avg', '-')}")
                 if position:
                     opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
                     leg = position["legs"]["long"]

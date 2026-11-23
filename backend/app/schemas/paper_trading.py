@@ -318,6 +318,25 @@ class NativeEvaluationOut(BaseModel):
     reason: str | None
 
 
+class OiChangeCandleOut(BaseModel):
+    """One 15-minute candle on OI Change Buy 15 MIN's chart (24 Nov)."""
+
+    at: datetime  # the candle's close
+    session: date
+    spot: float | None
+    put_change: float
+    call_change: float
+    put_avg: float  # over the last `average_candles` candles, this one included
+    call_avg: float
+    side: str | None  # "CE" / "PE" the average picks at a close the strategy reads; None otherwise, or equal
+
+
+class OiChangeOut(BaseModel):
+    average_candles: int
+    session: date | None
+    candles: list[OiChangeCandleOut]
+
+
 class NextInLineRowOut(BaseModel):
     """One stock 52 Week High Breakout's Friday check would take next (20 Nov)."""
 

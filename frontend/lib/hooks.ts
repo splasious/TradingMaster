@@ -39,6 +39,7 @@ import type {
   NativeDeploymentOut,
   NativePositionOut,
   NextInLineOut,
+  OiChangeOut,
   NativeTradeOut,
   LiveNativeTradeOut,
   LiveRunOut,
@@ -467,6 +468,16 @@ export function useNextInLine(deploymentId: string, enabled: boolean) {
     queryFn: () => apiFetch<NextInLineOut>(`/api/v1/paper-trading/native-deployments/${deploymentId}/next-in-line`),
     enabled,
     refetchInterval: 60_000,
+  });
+}
+
+/** OI Change Buy 15 MIN's change-in-OI chart: re-read every 30 s (a record lands a few seconds after each 15-minute close). */
+export function useOiChange(deploymentId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["oi-change", deploymentId],
+    queryFn: () => apiFetch<OiChangeOut>(`/api/v1/paper-trading/native-deployments/${deploymentId}/oi-change`),
+    enabled,
+    refetchInterval: 30_000,
   });
 }
 

@@ -1,17 +1,23 @@
 """
-OI Change Buy 15 MIN -- one NIFTY option bought on the last 15 minutes' change in OI (native)
-============================================================================================
+OI Change Buy 15 MIN -- one NIFTY option bought on the 15-minute change in OI, 2 candles averaged (native)
+==========================================================================================================
 
 Agreed 16 Nov (version 2, the same day: the last 15 minutes' change, not
-the day's). At every 15-minute close from FIRST_MARK (09:30) to LAST_MARK
-(15:15), the PCR Analysis tab's record for that close (models/pcr.py,
-services/options/pcr_snapshots.py: NIFTY, its 4 expiries, ATM +-40
-strikes) gives the change in OI over that 15-minute candle -- since the
-record before, that close's row's Put dOI and Call dOI:
+the day's); version 6, 24 Nov: the average of the last AVERAGE_CANDLES (2)
+fifteen-minute candles, picked on the backtest of 40 stored sessions
+(scripts/oi_avg_optimise.py: 1-12 candles, with and without the trail).
+At every 15-minute close from FIRST_MARK (09:30) to LAST_MARK (15:15), the
+PCR Analysis tab's records (models/pcr.py, services/options/pcr_snapshots.py:
+NIFTY, its 4 expiries, ATM +-40 strikes) give each candle's change in OI --
+since the record before, a row's Put dOI and Call dOI. The candles are the
+records closing a trading candle, CANDLES_FROM (09:30) to CANDLES_TO
+(15:30): that close's and the one before -- at 09:30 the previous session's
+last (15:15-15:30) candle, the overnight 09:00 and pre-open 09:15 records
+left out. Averaged over those candles:
 
-  Put dOI (15 min) higher than Call dOI (15 min)   buy a CALL
-  Call dOI (15 min) higher than Put dOI (15 min)   buy a PUT
-  equal                                           no change
+  Put dOI higher than Call dOI     buy a CALL
+  Call dOI higher than Put dOI     buy a PUT
+  equal                            no change
 
 The two are compared as they are, a fall in OI (unwinding) a negative
 change: call unwinding with puts building, a call; put unwinding with
@@ -26,15 +32,8 @@ At each later close: the same side wanted, the option held is kept (the
 same contract, wherever NIFTY has gone since); the other side wanted, the
 held option is sold at the bid and, FLIP_GAP (5 seconds) later, the other
 side's ATM option is bought at the ask. Nothing held and a side wanted,
-it's bought at once.
-
-The first minute (version 4, 18 Nov): before the first close, at
-FIRST_READ (09:15:50) the live change in OI since the 09:15 record -- the
-PCR Analysis tab's LIVE row (services/options/pcr_live.py), so the first
-minute's build-up -- picks the side the same way, and its ATM option is
-bought at once; not had by FIRST_BUY_BY (09:16:00) -- no reading, no ask --
-nothing is bought until the 09:30 close, which then reads its 15 minutes as
-any close. Live only (a backtest has no live reading).
+it's bought at once. The first decision of the day is the 09:30 close
+(version 6: the 09:15:50 first-minute buy of version 4 is gone).
 
 The record lands a few seconds after its close; it's looked for every
 RECHECK (1 second) until it does, for up to RECORD_WAIT (2 minutes) -- a
@@ -47,23 +46,16 @@ nothing more is bought that day. A buy that can't be had -- no ask yet --
 is tried again every second until it is, or until 15:29.
 
 The trailing stop (version 3, 17 Nov; +15% / 5% picked on the backtest of
-the 36 stored sessions, scripts/oi_trail_backtest.py): the held option's
-bid, read every RECHECK (1 second), switches the trail on once it reaches
-TRAIL_START (15%) above the price paid; from then the stop sits TRAIL (5%)
-below the highest bid since, only ever moving up -- at least +9.25% over
-cost the moment it starts. The bid at or under the stop: sold at the bid
-("trailing_stop"), and nothing more until the next 15-minute close, which
-buys whatever side it reads -- the same one again included.
-
-The stop-loss (version 5, 20 Nov): until the trail is on, the held option
-is sold at the bid ("stop_loss") once selling it there would lose
-STOP_LOSS_PER_LOT (Rs 1,200) a lot or more -- on the price alone, the bid
-against the price paid, charges not counted: 18.46 points under cost for
-a lot of 65. Read every second with the trail; after it, as after a trail
-exit, nothing until the next 15-minute close. Once the trail is on (the
-bid +15% over cost) the trail alone stands. No take-profit. In a backtest
-there is no order book (ctx.is_backtest): the last price stands for both
-bid and ask.
+the 36 stored sessions, scripts/oi_trail_backtest.py, and kept in version
+6): the held option's bid, read every RECHECK (1 second), switches the
+trail on once it reaches TRAIL_START (15%) above the price paid; from then
+the stop sits TRAIL (5%) below the highest bid since, only ever moving up
+-- at least +9.25% over cost the moment it starts. The bid at or under the
+stop: sold at the bid ("trailing_stop"), and nothing more until the next
+15-minute close, which buys whatever side it reads -- the same one again
+included. No stop-loss before the trail (version 6: version 5's Rs 1,200 a
+lot is gone) and no take-profit. In a backtest there is no order book
+(ctx.is_backtest): the last price stands for both bid and ask.
 
 Paper only, no Telegram alerts. Runs through
 services/paper_trading/native_runner.py.
@@ -91,12 +83,11 @@ MARK_STEP = timedelta(minutes=15)
 DAY_CLOSE = dtime(15, 29)
 FLIP_GAP = timedelta(seconds=5)
 RECORD_WAIT = timedelta(minutes=2)
-FIRST_READ = dtime(9, 15, 50)  # version 4: the first minute's live change in OI read then
-FIRST_BUY_BY = dtime(9, 16)  # and its option bought by then, or not at all (the 09:30 close decides)
+AVERAGE_CANDLES = 2  # version 6: the side from the average change in OI over this many 15-minute candles
+CANDLES_FROM, CANDLES_TO = dtime(9, 30), dtime(15, 30)  # the records closing a trading candle
 RECHECK = timedelta(seconds=1)
 TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
 TRAIL = 0.05  # then the stop sits this far below the highest bid since, only moving up
-STOP_LOSS_PER_LOT = 1_200.0  # version 5: rupees a lot, the bid against the price paid (no charges), until the trail is on
 SIDE_NAME = {"CE": "call", "PE": "put"}
 
 
@@ -135,21 +126,29 @@ def leg_pnl(leg: dict, exit_price: float) -> float:
     return (exit_price - leg["entry_price"]) * leg["quantity"]
 
 
-def stop_loss_price(leg: dict) -> float:
-    """The bid at which selling loses STOP_LOSS_PER_LOT a lot (for the card's text; the check is on the rupees)."""
-    return leg["entry_price"] - STOP_LOSS_PER_LOT * LOTS / leg["quantity"]
+def closes_a_candle(ts: datetime) -> bool:
+    """A record at a close from 09:30 to 15:30 (IST): one 15-minute trading candle's change in OI."""
+    return CANDLES_FROM <= as_aware_utc(ts).astimezone(IST).time() <= CANDLES_TO
 
 
-def stop_loss_hit(leg: dict, bid: float) -> bool:
-    return leg_pnl(leg, bid) <= -STOP_LOSS_PER_LOT * LOTS
-
-
-async def first_minute_reading(now_utc: datetime) -> tuple[dict | None, str | None]:
-    """(the PCR Analysis tab's live row -- every record field against the latest
-    record, the 09:15 one now -- None) or (None, why there isn't one)."""
-    from app.services.options.pcr_live import live_row
-
-    return await live_row(PCR_UNDERLYING, now_utc)
+async def candle_average(db, mark_utc: datetime) -> tuple[float, float, list[datetime]] | None:
+    """(average Put dOI, average Call dOI, the candles' closes in IST, oldest first) over the last
+    AVERAGE_CANDLES records closing a trading candle at or before `mark_utc` -- the session before
+    filling in at 09:30 -- or None without one."""
+    rows = (
+        await db.execute(
+            select(PcrSnapshot).where(
+                PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts <= mark_utc,
+                PcrSnapshot.put_oi_change.is_not(None), PcrSnapshot.call_oi_change.is_not(None),
+            ).order_by(PcrSnapshot.ts.desc()).limit(AVERAGE_CANDLES + 4)  # the overnight 09:00 and 09:15 records in between
+        )
+    ).scalars().all()
+    candles = [snap for snap in rows if closes_a_candle(snap.ts)][:AVERAGE_CANDLES]
+    if not candles:
+        return None
+    put = sum(snap.put_oi_change for snap in candles) / len(candles)
+    call = sum(snap.call_oi_change for snap in candles) / len(candles)
+    return put, call, [as_aware_utc(snap.ts).astimezone(IST) for snap in reversed(candles)]
 
 
 async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
@@ -209,26 +208,17 @@ async def evaluate(ctx) -> None:
         if position.get("trail_stop") is not None:
             return f"{text}; trailing stop {position['trail_stop']:,.2f} (5% under the highest bid {position['peak_bid']:,.2f})"
         if position.get("trail_starts_at") is not None:
-            return (f"{text}; stop-loss at a bid of {stop_loss_price(position['legs']['long']):,.2f} "
-                    f"(Rs {STOP_LOSS_PER_LOT:,.0f} a lot); trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)")
+            return f"{text}; trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)"
         return text
 
-    first_read = datetime.combine(today, FIRST_READ, tzinfo=IST)
-    first_buy_by = datetime.combine(today, FIRST_BUY_BY, tzinfo=IST)
-    first_due = state.get("first_minute") != today.isoformat() and now_ist < first_buy_by and not getattr(ctx, "is_backtest", False)
-
     def next_text() -> str:
-        if first_due and position is None:
-            return f"at {FIRST_READ:%H:%M:%S} (the first minute's change in OI)"
         return _next_text(now_ist)
 
     def wake_for_next() -> None:
-        """Run again at the next 15-minute close (09:15:50 first, its day), or at 15:29 while something is held."""
+        """Run again at the next 15-minute close, or at 15:29 while something is held."""
         mark = next_mark(now_ist)
         if mark is not None:
             ctx.wake_at(mark)
-        if first_due and now_ist < first_read:
-            ctx.wake_at(first_read)
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
             ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
@@ -249,11 +239,10 @@ async def evaluate(ctx) -> None:
         return
     if now_ist >= day_close:
         state.pop("pending", None)
-        ctx.note("skipped", reason=(f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision tomorrow at "
-                                    f"{FIRST_READ:%H:%M:%S} (the first minute), else the {FIRST_MARK:%H:%M} close"))
+        ctx.note("skipped", reason=f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision tomorrow at the {FIRST_MARK:%H:%M} close")
         return
 
-    # -- the trailing stop (version 3) and the stop-loss before it (version 5): on the bid, every second while held
+    # -- the trailing stop (version 3): on the bid, every second while held
     if position is not None:
         leg = position["legs"]["long"]
         quote = await bid_ask(ctx, uuid.UUID(leg["instrument_id"]))
@@ -263,20 +252,6 @@ async def evaluate(ctx) -> None:
             position["peak_bid"] = round(max(position.get("peak_bid") or bid_now, bid_now), 2)
             if position.get("trail_stop") is not None or position["peak_bid"] >= position["trail_starts_at"]:
                 position["trail_stop"] = round(max(position.get("trail_stop") or 0.0, position["peak_bid"] * (1 - TRAIL)), 2)
-            if position.get("trail_stop") is None and stop_loss_hit(leg, bid_now):
-                option = position["option"]
-                price, pnl = await close("stop_loss")
-                position = None
-                state.pop("pending", None)
-                current = latest_mark(now_ist)
-                if current is not None:
-                    state["last_mark"] = current.isoformat()  # flat until the next close, whatever this one reads
-                ctx.note("exited", signal="SELL", reason=(
-                    f"stop-loss: {option} sold at {price:,.2f} (the bid), Rs {STOP_LOSS_PER_LOT:,.0f} a lot or more under the price "
-                    f"paid before the trail started; P&L {pnl:+,.0f} before charges; next decision {next_text()}"
-                ))
-                wake_for_next()
-                return
             if position.get("trail_stop") is not None and bid_now <= position["trail_stop"]:
                 option, peak, stop = position["option"], position["peak_bid"], position["trail_stop"]
                 price, pnl = await close("trailing_stop")
@@ -312,14 +287,20 @@ async def evaluate(ctx) -> None:
         else:
             state["last_mark"] = mark.isoformat()
             put_15m, call_15m = snap.put_oi_change, snap.call_oi_change  # since the record before (version 2)
-            state["last_oi"] = {"at": f"{mark:%H:%M}", "put_change_15m": put_15m, "call_change_15m": call_15m}
-            side = wanted_side(put_15m, call_15m)
-            reading = (f"{mark:%H:%M} change in OI over the last 15 minutes: put {put_15m:+,.0f}, call {call_15m:+,.0f}"
-                       if put_15m is not None and call_15m is not None else f"{mark:%H:%M}: no 15-minute change in OI on the record")
+            average = await candle_average(ctx.db, mark_utc) if put_15m is not None and call_15m is not None else None
+            put_avg, call_avg = (average[0], average[1]) if average else (None, None)
+            closes = ", ".join(f"{c:%H:%M}" if c.date() == today else f"{c:%d %b %H:%M}" for c in average[2]) if average else ""
+            state["last_oi"] = {"at": f"{mark:%H:%M}", "put_change_15m": put_15m, "call_change_15m": call_15m,
+                                "put_avg": put_avg, "call_avg": call_avg, "candles": closes}
+            side = wanted_side(put_avg, call_avg)  # version 6: the average of the last AVERAGE_CANDLES candles
+            reading = (f"{mark:%H:%M} change in OI, average of the candles to {closes}: put {put_avg:+,.0f}, call {call_avg:+,.0f} "
+                       f"(this candle: put {put_15m:+,.0f}, call {call_15m:+,.0f})"
+                       if average else f"{mark:%H:%M}: no 15-minute change in OI on the record")
             if position is not None:
-                for old_key in ("put_change_day", "call_change_day"):  # version 1's reading, on a position carried over
+                for old_key in ("put_change_day", "call_change_day", "stop_loss_at"):  # earlier versions' fields, on a position carried over
                     position.pop(old_key, None)
                 position["put_change_15m"], position["call_change_15m"], position["oi_read_at"] = put_15m, call_15m, f"{mark:%H:%M}"
+                position["put_avg"], position["call_avg"] = put_avg, call_avg
             if side is None:
                 decided = f"{reading} -- no change; "
             elif position is not None and position["option_type"] == side:
@@ -330,7 +311,7 @@ async def evaluate(ctx) -> None:
                 position = None
                 due = now_utc + FLIP_GAP
                 state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
-                                    "call_change_15m": call_15m}
+                                    "call_change_15m": call_15m, "put_avg": put_avg, "call_avg": call_avg}
                 ctx.note("exited", signal="SELL", reason=(
                     f"{reading} -- now a {SIDE_NAME[side]}: {old} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
                     f"the {SIDE_NAME[side]} bought at {due.astimezone(IST):%H:%M:%S}"
@@ -339,34 +320,11 @@ async def evaluate(ctx) -> None:
                 return
             else:
                 state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
-                                    "call_change_15m": call_15m}
+                                    "call_change_15m": call_15m, "put_avg": put_avg, "call_avg": call_avg}
                 decided = f"{reading} -- a {SIDE_NAME[side]}; "
-
-    # -- the first minute (version 4): at 09:15:50 the live change in OI since the 09:15 record
-    if first_due and position is None and state.get("pending") is None and first_read <= now_ist:
-        row, why = await first_minute_reading(now_utc)
-        if row is None:
-            ctx.note("skipped", reason=f"first minute: no live change in OI yet ({why}); tried again until {FIRST_BUY_BY:%H:%M:%S}")
-            ctx.wake_at(now_utc + RECHECK)
-            return
-        state["first_minute"] = today.isoformat()
-        put_1m, call_1m = row.get("put_oi_change"), row.get("call_oi_change")
-        state["last_oi"] = {"at": "first minute", "put_change_15m": put_1m, "call_change_15m": call_1m}
-        side = wanted_side(put_1m, call_1m)
-        if side is None:
-            decided = "first minute: no side in the change in OI; "
-        else:
-            state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": "09:15 first minute",
-                                "put_change_15m": put_1m, "call_change_15m": call_1m, "buy_by": first_buy_by.isoformat()}
-            decided = (f"first minute's change in OI (since the {as_ist_hhmm(row.get('prev_ts'))} record): put {put_1m:+,.0f}, "
-                       f"call {call_1m:+,.0f} -- a {SIDE_NAME[side]}; ")
 
     # -- a buy due: at once, or 5 seconds after a flip's sale
     pending = state.get("pending")
-    if pending is not None and pending.get("buy_by") and now_utc >= datetime.fromisoformat(pending["buy_by"]):
-        state.pop("pending", None)  # the first minute's buy not had by 09:16: the 09:30 close decides
-        pending = None
-        decided += f"the first minute's buy wasn't had by {FIRST_BUY_BY:%H:%M} -- dropped; "
     if pending is not None and position is None:
         due = datetime.fromisoformat(pending["due"])
         if now_utc < due:
@@ -408,8 +366,9 @@ async def evaluate(ctx) -> None:
             "decided_at": pending.get("mark"),
             "put_change_15m": pending.get("put_change_15m"),
             "call_change_15m": pending.get("call_change_15m"),
+            "put_avg": pending.get("put_avg"),
+            "call_avg": pending.get("call_avg"),
             "trail_starts_at": round(price * (1 + TRAIL_START), 2),
-            "stop_loss_at": round(price - STOP_LOSS_PER_LOT * LOTS / quantity, 2),
             "peak_bid": None,
             "trail_stop": None,
             "legs": {"long": {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": "buy",
@@ -418,9 +377,9 @@ async def evaluate(ctx) -> None:
         }
         state.pop("pending", None)
         ctx.note("entered", signal="BUY", reason=(
-            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; stop-loss at a bid of "
-            f"{price - STOP_LOSS_PER_LOT * LOTS / quantity:,.2f} (Rs {STOP_LOSS_PER_LOT:,.0f} a lot) until the trail starts at "
-            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; sold at 15:29 or when the side flips"
+            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; the trail starts at a bid of "
+            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; no stop-loss; "
+            f"sold at 15:29 or when the side flips"
         ))
         wake_for_next()
         return
@@ -432,12 +391,6 @@ async def evaluate(ctx) -> None:
     wake_for_next()
 
 
-def as_ist_hhmm(ts) -> str:
-    if isinstance(ts, str):
-        ts = datetime.fromisoformat(ts)
-    return as_aware_utc(ts).astimezone(IST).strftime("%H:%M") if isinstance(ts, datetime) else "latest"
-
-
 def _next_text(now_ist: datetime) -> str:
     mark = next_mark(now_ist)
-    return f"at the {mark:%H:%M} close" if mark is not None else f"tomorrow at {FIRST_READ:%H:%M:%S} (the first minute)"
+    return f"at the {mark:%H:%M} close" if mark is not None else f"tomorrow at the {FIRST_MARK:%H:%M} close"

@@ -10,6 +10,7 @@ import { CalendarPayoff } from "@/components/trading/calendar-payoff";
 import { GoLiveModal, LiveBar, LiveOffModal, LiveRunSection, LiveSwitch, brokerText, rupees } from "@/components/trading/live-run";
 import { MarketContextBar, type DataStatus } from "@/components/trading/market-context-bar";
 import { NextInLine } from "@/components/trading/next-in-line";
+import { OiChangeChart } from "@/components/trading/oi-change-chart";
 import { StrategyInstrumentPicker } from "@/components/trading/strategy-instrument-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -2288,6 +2289,7 @@ function NativeDeploymentCard({
         )}
 
         {deployment.strategy_name.trim().toLowerCase() === "52 week high breakout" && <NextInLine deploymentId={deployment.id} />}
+        {deployment.strategy_name.trim().toLowerCase() === "oi change buy 15 min" && <OiChangeChart deploymentId={deployment.id} />}
 
         <div className="text-xs text-text-muted">
           <span className="font-medium uppercase tracking-wide">Last Signal: </span>
