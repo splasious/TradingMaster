@@ -62,6 +62,10 @@ on:
         description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
         type: boolean
         default: false
+      oi_sl_optimise:
+        description: "Instead of the check: OI Change Buy 15 MIN's 2-candle average with a stop-loss of Rs 500-2,000 a lot (Rs 100 apart) stepping up Rs 250 for every Rs 1,000 of profit, alone and with the trail; points per unit and the best run's trades here, rupees to the private Telegram chat only (backend/scripts/oi_sl_optimise.py)"
+        type: boolean
+        default: false
       oi_avg_optimise:
         description: "Instead of the check: OI Change Buy 15 MIN's candle average optimised over 2 to 12 candles, each with no stops and with the trail, over the stored change-in-OI records and 15-min NIFTY option candles; points per unit and every trade of the best two here, rupees to the private Telegram chat only (backend/scripts/oi_avg_optimise.py)"
         type: boolean
@@ -126,6 +130,7 @@ jobs:
           OI_AVG_REVIEW: ${{ inputs.oi_avg_review }}
           OI_AVG_BACKTEST: ${{ inputs.oi_avg_backtest }}
           OI_AVG_OPTIMISE: ${{ inputs.oi_avg_optimise }}
+          OI_SL_OPTIMISE: ${{ inputs.oi_sl_optimise }}
         run: |
           set -euo pipefail
           umask 077
@@ -549,6 +554,13 @@ jobs:
           if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
             echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${OI_SL_OPTIMISE:-false}" = "true" ]; then
+            echo "== OI Change Buy 15 MIN: stop-loss Rs 500-2,000 with a Rs 250 step-up per Rs 1,000, 2-candle average (points per unit here; rupees to the private Telegram chat only)"
+            py_file=$(vps 'f=$(mktemp /tmp/oislopt-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/oi_sl_optimise.py)
             remote py "$py_file"
             exit 0
           fi
