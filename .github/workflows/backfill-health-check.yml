@@ -62,6 +62,10 @@ on:
         description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
         type: boolean
         default: false
+      oi_avg_review:
+        description: "Instead of the check: read-only -- the last 6 NIFTY sessions' 15-minute Put and Call change in OI (09:30-15:30 records) and NIFTY, for OI Change Buy 15 MIN's 5-candle average review; market data only (backend/scripts/oi_change_avg_review.py)"
+        type: boolean
+        default: false
       synthetic_payoff:
         description: "Instead of the check: read-only -- Synthetic Calendar 15 MIN and its Reverse, each open position's profit or loss at its 15:00 close on the weekly's expiry day across NIFTY levels, and its greeks now; points per unit here, rupees to the private Telegram chat only (backend/scripts/synthetic_calendar_payoff.py)"
         type: boolean
@@ -111,6 +115,7 @@ jobs:
           CC_DAY_REVIEW: ${{ inputs.cc_day_review }}
           CC_RULE_BACKTEST: ${{ inputs.cc_rule_backtest }}
           SYNTHETIC_PAYOFF: ${{ inputs.synthetic_payoff }}
+          OI_AVG_REVIEW: ${{ inputs.oi_avg_review }}
         run: |
           set -euo pipefail
           umask 077
@@ -534,6 +539,13 @@ jobs:
           if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
             echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${OI_AVG_REVIEW:-false}" = "true" ]; then
+            echo "== OI Change Buy 15 MIN: the last sessions' 15-minute change in OI (market data only)"
+            py_file=$(vps 'f=$(mktemp /tmp/oiavg-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/oi_change_avg_review.py)
             remote py "$py_file"
             exit 0
           fi
