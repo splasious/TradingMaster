@@ -5,8 +5,10 @@ in versions 2-5, the day's in version 1) -- put side higher, one lot of the
 ATM NIFTY call bought; call side higher, the ATM put -- on the nearest
 weekly (next week's on its expiry day) at the ask; the side flipping, the
 held option sold at the bid and the other bought 5 seconds later; the
-+15% / 5% trailing stop; everything sold at 15:29. No stop-loss and no
-09:15:50 first-minute buy since version 6."""
++15% / 5% trailing stop. No stop-loss and no 09:15:50 first-minute buy since
+version 6; since version 7 (25 Nov) nothing is sold at 15:29 -- what's held is
+carried overnight, and rolled to next week's weekly at 12:00 on its expiry
+day."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -124,26 +126,80 @@ async def test_an_equal_change_keeps_what_is_held_and_a_missing_record_is_passed
     assert await market.trades() == []
 
 
-async def test_at_1529_it_is_sold_at_the_bid_and_nothing_more_is_bought_that_day(market):
+async def test_at_1529_nothing_is_sold_it_is_carried_overnight_and_nothing_more_is_bought(market):
+    """25 Nov (version 7): no 15:29 sale -- carried to the next session, the trail from its 09:15 open."""
+    from app.services.backfill_platform.coverage import next_trading_day
+
     await market.record(at(4, 15, 15), put_day=1_00_000, call_day=4_00_000)
     market.deployment.state = {"last_mark": at(4, 15, 0).isoformat()}
     bought = await market.check(at(4, 15, 15, 4))
     assert bought.state["position"]["option_type"] == "PE" and bought._wake_at == at(4, 15, 15, 5)
-    closed = await market.check(at(4, 15, 29))
-    [trade] = await market.trades()
-    assert trade.exit_reason == "time_cutoff_329pm" and closed.state.get("position") is None
-    assert trade.legs[0]["exit_price"] == market.ltp(W1, 23450.0, "PE", at(4, 15, 29), 23460.0) - SPREAD
-    after = await market.check(at(4, 15, 30))
-    assert after.state.get("position") is None and after._last_reason.startswith("day done")
+    carried = await market.check(at(4, 15, 29))
+    nxt = next_trading_day(at(4, 15, 29).date())
+    open_next = datetime.combine(nxt, oib.SESSION_OPEN, tzinfo=at(4, 9, 15).tzinfo)
+    assert await market.trades() == [] and carried.state["position"]["option_type"] == "PE"
+    assert carried._last_reason.startswith("carried overnight:") and carried._wake_at == open_next
+    assert f"the trail from the 09:15 open {nxt:%a %d %b}" in carried._last_reason
+    assert oib.next_session_open(at(4, 15, 29)) == open_next and oib.next_session_open(at(5, 9, 0)) == at(5, 9, 15)
+    later = await market.check(at(4, 15, 30))
+    assert later.state["position"] is not None and await market.trades() == []
+    morning = await market.check(at(5, 9, 16))
+    assert morning.state["position"]["option_type"] == "PE" and "on 04 Nov" in morning._last_reason
+    assert "next decision at the 09:30 close" in morning._last_reason and morning._wake_at == at(5, 9, 16, 1)
+    await market.record(at(5, 9, 30), put_day=1_00_000, call_day=2_00_000)  # still the put side: kept
+    kept = await market.check(at(5, 9, 30, 4))
+    assert kept.state["position"]["option_type"] == "PE" and await market.trades() == []
 
 
-async def test_a_position_left_from_an_earlier_day_is_sold_at_the_first_check(market):
+async def test_a_carried_option_gapping_under_its_trail_is_sold_at_the_first_check(market):
     await market.record(at(4, 14, 0), put_day=4_00_000, call_day=1_00_000)
     market.deployment.state = {"last_mark": at(4, 13, 45).isoformat()}
-    await market.check(at(4, 14, 0, 4))
-    late = await market.check(at(5, 9, 20))  # the app was down at 15:29
+    p = (await market.check(at(4, 14, 0, 4))).state["position"]
+    cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
+    market.premium[key] = cost * 1.30 + SPREAD  # +30%: the trail on
+    await market.check(at(4, 14, 30))
+    await market.check(at(4, 15, 29))  # carried
+    assert await market.trades() == []
+    market.premium[key] = cost * 1.05 + SPREAD  # a gap open under the stop
+    out = await market.check(at(5, 9, 15, 1))
     [trade] = await market.trades()
-    assert trade.exit_reason == "time_cutoff_329pm" and late.state.get("position") is None
+    assert trade.exit_reason == "trailing_stop" and out.state.get("position") is None
+
+
+async def test_on_its_expiry_day_the_held_option_is_rolled_to_next_weeks_at_noon(market):
+    """25 Nov (version 7): carried into its expiry day (9 Nov), it's sold at 12:00 and the same side bought on next week's."""
+    await market.record(at(6, 15, 15), put_day=4_00_000, call_day=1_00_000)
+    market.deployment.state = {"last_mark": at(6, 15, 0).isoformat()}
+    p = (await market.check(at(6, 15, 15, 4))).state["position"]
+    assert p["weekly_expiry"] == W1.isoformat() and p["option_type"] == "CE"
+    await market.check(at(6, 15, 29))  # carried over the weekend
+    before = await market.check(at(9, 11, 59, 59))
+    assert before.state["position"]["weekly_expiry"] == W1.isoformat() and await market.trades() == []
+    assert "expires today: rolled to next week's at 12:00" in before._last_reason
+    rolled = await market.check(at(9, 12, 0))
+    [trade] = await market.trades()
+    assert trade.exit_reason == "expiry_rollover" and rolled.state.get("position") is None
+    assert rolled._last_reason.startswith("expiry rollover:") and rolled._wake_at == at(9, 12, 0, 5)
+    await market.record(at(9, 12, 0), put_day=4_00_000, call_day=1_00_000)
+    bought = await market.check(at(9, 12, 0, 5))
+    q = bought.state["position"]
+    assert (q["weekly_expiry"], q["option_type"], q["option"]) == (W2.isoformat(), "CE", "17 Nov 23,450 CE")
+
+
+async def test_an_option_found_expired_is_rolled_at_the_first_check_and_one_held_at_1529_on_its_expiry_day_is_sold(market):
+    await market.record(at(6, 15, 15), put_day=4_00_000, call_day=1_00_000)
+    market.deployment.state = {"last_mark": at(6, 15, 0).isoformat()}
+    ctx = await market.check(at(6, 15, 15, 4))
+    saved = {**ctx.state, "position": {**ctx.state["position"]}}
+    late = await market.check(at(11, 9, 20))  # the app down from Friday to Wednesday: 9 Nov's option has expired
+    [trade] = await market.trades()
+    assert trade.exit_reason == "expiry_rollover" and late.state["pending"]["option_type"] == "CE"
+
+    market.deployment.state = saved  # the same option, the app down at 12:00 on its expiry day
+    closed = await market.check(at(9, 15, 29))
+    reasons = sorted(t.exit_reason for t in await market.trades())
+    assert reasons == ["expiry_day_close", "expiry_rollover"] and closed.state.get("position") is None
+    assert closed._last_reason.startswith("15:29 on its expiry day, not rolled at 12:00")
 
 
 async def test_on_the_weeklys_expiry_day_it_buys_next_weeks(market):
@@ -302,7 +358,7 @@ async def test_no_first_minute_buy_the_first_decision_is_the_0930_close(market):
     assert early.state.get("position") is None and early._wake_at == at(4, 9, 30)
     assert "next decision at the 09:30 close" in early._last_reason
     day_done = await market.check(at(4, 15, 30))
-    assert "next decision tomorrow at the 09:30 close" in day_done._last_reason
+    assert day_done._last_reason.startswith("day done") and "at the 09:30 close" in day_done._last_reason
 
 
 async def test_the_cards_chart_the_candles_their_2_candle_average_and_the_side_at_each_close(market, db_session):

@@ -1247,12 +1247,42 @@ async def test_conti_calendar_moves_onto_20_lots_keeping_its_position(db_engine,
     assert (await db_session.get(PaperNativeDeployment, ids["reverse"])).strategy_version_id == before  # another strategy: left alone
 
 
+async def test_oi_change_buy_moves_onto_holding_overnight_keeping_its_option(db_engine, db_session):
+    """25 Nov: OI Change Buy 15 MIN version 7 -- held overnight, rolled at 12:00 on its expiry day."""
+    migration = _load("a6c8e0b2d4f5_oi_change_buy_overnight")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f2b4d6a8c0e3"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "ROLL_AT = dtime(12, 0)" in code and "AVERAGE_CANDLES = 2" in code
+    assert migration.FROM_MD5S == {_load("f2b4d6a8c0e3_oi_change_buy_two_candle_average").TO_MD5}  # moves on from version 6
+    v6 = "# OI Change Buy 15 MIN, version 6: the 2-candle average\n"
+    migration.FROM_MD5S = {_md5_text(v6)}
+    running = await _deployment(db_session, "oib7_a@tradingmaster.internal", v6)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib7_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    state = {"last_mark": "2026-11-25T11:30:00+05:30", "position": {"option": "01 Dec 25,500 CE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
 async def test_oi_change_buy_moves_onto_the_two_candle_average_keeping_its_option(db_engine, db_session):
     """24 Nov: OI Change Buy 15 MIN version 6 -- the last 2 candles' average change in OI, the trail only."""
     migration = _load("f2b4d6a8c0e3_oi_change_buy_two_candle_average")
+    assert _load("a6c8e0b2d4f5_oi_change_buy_overnight").FROM_MD5S == {migration.TO_MD5}  # version 7 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "e0a2c4e6f8b1"
-    code = migration.BUILT_IN.read_text(encoding="utf-8")
-    assert "AVERAGE_CANDLES = 2" in code and "STOP_LOSS_PER_LOT" not in code and "FIRST_READ" not in code
     assert migration.FROM_MD5S == {_load("f0b2d4a6c8e1_oi_change_buy_stop_loss").TO_MD5}  # moves on from version 5
     v5 = "# OI Change Buy 15 MIN, version 5: the stop-loss\n"
     migration.FROM_MD5S = {_md5_text(v5)}

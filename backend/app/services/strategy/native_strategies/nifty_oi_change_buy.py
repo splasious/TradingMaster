@@ -1,6 +1,6 @@
 """
-OI Change Buy 15 MIN -- one NIFTY option bought on the 15-minute change in OI, 2 candles averaged (native)
-==========================================================================================================
+OI Change Buy 15 MIN -- one NIFTY option bought on the 15-minute change in OI, 2 candles averaged, held overnight (native)
+==========================================================================================================================
 
 Agreed 16 Nov (version 2, the same day: the last 15 minutes' change, not
 the day's); version 6, 24 Nov: the average of the last AVERAGE_CANDLES (2)
@@ -40,10 +40,19 @@ RECHECK (1 second) until it does, for up to RECORD_WAIT (2 minutes) -- a
 close whose record isn't in by then is passed over, what's held kept. A
 card started between two closes begins at the next one.
 
-At DAY_CLOSE (15:29) whatever is held is sold at the bid (a position left
-from an earlier day, the app down at 15:29, at the first check after) and
-nothing more is bought that day. A buy that can't be had -- no ask yet --
-is tried again every second until it is, or until 15:29.
+Held overnight (version 7, 25 Nov; backtested in scripts/oi_overnight_backtest.py):
+nothing is sold at DAY_CLOSE (15:29) -- whatever is held then is carried to
+the next session, and nothing more is bought that day. From the next
+session's SESSION_OPEN (09:15) the trail reads its bid every second again
+-- a gap open under the stop sells at once -- and the 09:30 close keeps it
+or flips it as any close. The rollover: on the held option's own expiry
+day, at ROLL_AT (12:00), it is sold at the bid ("expiry_rollover") and,
+FLIP_GAP later, the same side's ATM option on next week's weekly is bought
+at the ask -- unless a flip or the trail has sold it first. One found
+expired (the app down on its expiry day) is rolled at the first check; one
+still held at 15:29 on its expiry day is sold then, not carried. A buy that
+can't be had -- no ask yet -- is tried again every second until it is, or
+until 15:29.
 
 The trailing stop (version 3, 17 Nov; +15% / 5% picked on the backtest of
 the 36 stored sessions, scripts/oi_trail_backtest.py, and kept in version
@@ -62,13 +71,14 @@ services/paper_trading/native_runner.py.
 """
 
 import uuid
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 from sqlalchemy import select
 
 from app.core.time import as_aware_utc
 from app.models.instrument import Instrument
 from app.models.pcr import PcrSnapshot
+from app.services.backfill_platform.coverage import is_trading_day, next_trading_day
 from app.services.broker.zerodha_broker import IST
 
 UNDERLYING_SYMBOL = "NIFTY 50"
@@ -80,7 +90,9 @@ DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when 
 FIRST_MARK = dtime(9, 30)
 LAST_MARK = dtime(15, 15)
 MARK_STEP = timedelta(minutes=15)
-DAY_CLOSE = dtime(15, 29)
+DAY_CLOSE = dtime(15, 29)  # version 7: no sale then -- nothing bought after it, what's held carried overnight
+SESSION_OPEN = dtime(9, 15)  # version 7: the trail on a carried option from the next session's open
+ROLL_AT = dtime(12, 0)  # version 7: on the held option's expiry day, rolled to next week's weekly then
 FLIP_GAP = timedelta(seconds=5)
 RECORD_WAIT = timedelta(minutes=2)
 AVERAGE_CANDLES = 2  # version 6: the side from the average change in OI over this many 15-minute candles
@@ -126,6 +138,14 @@ def leg_pnl(leg: dict, exit_price: float) -> float:
     return (exit_price - leg["entry_price"]) * leg["quantity"]
 
 
+def next_session_open(now_ist: datetime) -> datetime:
+    """09:15 (IST) of the next NSE session -- today's, before its open."""
+    today = now_ist.date()
+    if is_trading_day(today) and now_ist.time() < SESSION_OPEN:
+        return datetime.combine(today, SESSION_OPEN, tzinfo=IST)
+    return datetime.combine(next_trading_day(today), SESSION_OPEN, tzinfo=IST)
+
+
 def closes_a_candle(ts: datetime) -> bool:
     """A record at a close from 09:30 to 15:30 (IST): one 15-minute trading candle's change in OI."""
     return CANDLES_FROM <= as_aware_utc(ts).astimezone(IST).time() <= CANDLES_TO
@@ -164,6 +184,7 @@ async def evaluate(ctx) -> None:
     now_ist = now_utc.astimezone(IST)
     today = now_ist.date()
     day_close = datetime.combine(today, DAY_CLOSE, tzinfo=IST)
+    roll_at = datetime.combine(today, ROLL_AT, tzinfo=IST)
 
     underlying = (
         await ctx.db.execute(select(Instrument).where(Instrument.symbol == UNDERLYING_SYMBOL))
@@ -205,6 +226,11 @@ async def evaluate(ctx) -> None:
 
     def held_text() -> str:
         text = f"{position['option']} bought at {position['legs']['long']['entry_price']:,.2f}"
+        opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST)
+        if opened.date() < today:
+            text += f" on {opened:%d %b}"
+        if position["weekly_expiry"] == today.isoformat() and now_ist < roll_at:
+            text += f"; expires today: rolled to next week's at {ROLL_AT:%H:%M}"
         if position.get("trail_stop") is not None:
             return f"{text}; trailing stop {position['trail_stop']:,.2f} (5% under the highest bid {position['peak_bid']:,.2f})"
         if position.get("trail_starts_at") is not None:
@@ -215,7 +241,7 @@ async def evaluate(ctx) -> None:
         return _next_text(now_ist)
 
     def wake_for_next() -> None:
-        """Run again at the next 15-minute close, or at 15:29 while something is held."""
+        """Run again at the next 15-minute close, and every second until 15:29 while something is held."""
         mark = next_mark(now_ist)
         if mark is not None:
             ctx.wake_at(mark)
@@ -223,23 +249,35 @@ async def evaluate(ctx) -> None:
             ctx.wake_at(day_close)
             ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
 
-    # -- a manual exit, and 15:29 (or a position left from an earlier day)
+    # -- a manual exit
     if position is not None and force_exit:
         price, pnl = await close("manual")
         state.pop("pending", None)
         ctx.note("exited", signal="SELL", reason=f"manual exit: sold at {price:,.2f}; P&L {pnl:+,.0f} before charges")
         wake_for_next()
         return
-    opened_day = datetime.fromisoformat(position["opened_at"]).astimezone(IST).date() if position else None
-    if position is not None and (now_ist >= day_close or opened_day < today):
-        option = position["option"]
-        price, pnl = await close("time_cutoff_329pm")
-        state.pop("pending", None)
-        ctx.note("exited", signal="SELL", reason=f"15:29 close: {option} sold at {price:,.2f}; P&L {pnl:+,.0f} before charges")
-        return
+    # -- from 15:29: nothing bought; what's held carried overnight (version 7) -- unless it expires today
+    expiry = date.fromisoformat(position["weekly_expiry"]) if position is not None else None
     if now_ist >= day_close:
         state.pop("pending", None)
-        ctx.note("skipped", reason=f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision tomorrow at the {FIRST_MARK:%H:%M} close")
+        next_open = next_session_open(now_ist)
+        if position is not None and expiry <= today:
+            option = position["option"]
+            price, pnl = await close("expiry_day_close")
+            ctx.note("exited", signal="SELL", reason=(
+                f"15:29 on its expiry day, not rolled at {ROLL_AT:%H:%M}: {option} sold at {price:,.2f}; P&L {pnl:+,.0f} before "
+                f"charges; next decision {next_open:%a %d %b} at the {FIRST_MARK:%H:%M} close"
+            ))
+            return
+        if position is not None:
+            ctx.note("hold", reason=(
+                f"carried overnight: {held_text()}; the trail from the {SESSION_OPEN:%H:%M} open {next_open:%a %d %b}, "
+                f"next decision at its {FIRST_MARK:%H:%M} close"
+            ))
+            ctx.wake_at(next_open)
+            return
+        ctx.note("skipped", reason=(f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision {next_open:%a %d %b} at the "
+                                    f"{FIRST_MARK:%H:%M} close"))
         return
 
     # -- the trailing stop (version 3): on the bid, every second while held
@@ -266,6 +304,20 @@ async def evaluate(ctx) -> None:
                 ))
                 wake_for_next()
                 return
+
+    # -- the rollover (version 7): on the held option's expiry day at 12:00 (or found expired), to next week's, same side
+    if position is not None and (expiry < today or (expiry == today and now_ist >= roll_at)):
+        option, side = position["option"], position["option_type"]
+        price, pnl = await close("expiry_rollover")
+        position = None
+        due = now_utc + FLIP_GAP
+        state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": f"{ROLL_AT:%H:%M} rollover"}
+        ctx.note("exited", signal="SELL", reason=(
+            f"expiry rollover: {option} sold at {price:,.2f} (the bid), P&L {pnl:+,.0f} before charges; the same side's ATM "
+            f"{SIDE_NAME[side]} on next week's weekly bought at {due.astimezone(IST):%H:%M:%S}"
+        ))
+        ctx.wake_at(due)
+        return
 
     # -- the 15-minute close: that candle's change in OI decides the side
     mark = latest_mark(now_ist)
@@ -379,13 +431,13 @@ async def evaluate(ctx) -> None:
         ctx.note("entered", signal="BUY", reason=(
             f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; the trail starts at a bid of "
             f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; no stop-loss; "
-            f"sold at 15:29 or when the side flips"
+            f"held overnight; sold when the side flips, rolled at {ROLL_AT:%H:%M} on its expiry day"
         ))
         wake_for_next()
         return
 
     if position is not None:
-        ctx.note("hold", reason=f"{decided}{held_text()}; next decision {next_text()}; sold at {DAY_CLOSE:%H:%M}")
+        ctx.note("hold", reason=f"{decided}{held_text()}; next decision {next_text()}; held overnight")
     else:
         ctx.note("skipped", reason=f"{decided}nothing held; next decision {next_text()}")
     wake_for_next()
@@ -393,4 +445,4 @@ async def evaluate(ctx) -> None:
 
 def _next_text(now_ist: datetime) -> str:
     mark = next_mark(now_ist)
-    return f"at the {mark:%H:%M} close" if mark is not None else f"tomorrow at the {FIRST_MARK:%H:%M} close"
+    return f"at the {mark:%H:%M} close" if mark is not None else f"{next_trading_day(now_ist.date()):%a %d %b} at the {FIRST_MARK:%H:%M} close"

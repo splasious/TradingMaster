@@ -176,7 +176,7 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
             <div className="flex justify-between gap-3"><span className="text-text-secondary">Call ΔOI</span><span className="font-financial">{lakh(h.call_change)}</span></div>
             <div className="flex justify-between gap-3"><span className="text-text-secondary">Put average</span><span className="font-financial">{lakh(h.put_avg)}</span></div>
             <div className="flex justify-between gap-3"><span className="text-text-secondary">Call average</span><span className="font-financial">{lakh(h.call_avg)}</span></div>
-            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">Side</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : hhmm(h.at) === "15:30" ? "out at 15:29" : "no change")}</span></div>
+            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">Side</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : hhmm(h.at) === "15:30" ? "no decision; held overnight" : "no change")}</span></div>
           </div>
         )}
       </div>
