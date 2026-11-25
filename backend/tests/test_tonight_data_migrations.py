@@ -1247,6 +1247,45 @@ async def test_conti_calendar_moves_onto_20_lots_keeping_its_position(db_engine,
     assert (await db_session.get(PaperNativeDeployment, ids["reverse"])).strategy_version_id == before  # another strategy: left alone
 
 
+async def test_oi_change_buy_trades_closed_on_or_before_23_nov_are_deleted_the_cash_left_alone(db_engine, db_session):
+    """25 Nov: OI Change Buy 15 MIN's paper trades closed by 23 Nov (IST) go; later ones, other cards' and the cash stay."""
+    from app.models.paper_trading import PaperNativeTrade
+
+    migration = _load("c8e0a2b4d6f7_oi_change_buy_trades_to_23_nov_removed")
+    assert migration.down_revision == "a6c8e0b2d4f5"
+    oib = await _amop_pool(db_session, "OI Change Buy 15 MIN", " OI Change Buy 15 MIN ", 2_000_000.0, 2_003_000.0)
+    other = await _amop_pool(db_session, "Conti Calendar 15 MIN", "Conti Calendar 15 MIN", 2_000_000.0, 2_041_000.0)
+    oib_id, other_id = oib.id, other.id
+    cards = {pool_id: (await db_session.execute(select(PaperNativeDeployment.id).where(PaperNativeDeployment.portfolio_id == pool_id)))
+             .scalar_one() for pool_id in (oib_id, other_id)}
+    ist = timezone(timedelta(hours=5, minutes=30))
+    closes = {
+        "16 Nov": datetime(2026, 11, 16, 10, 0, tzinfo=ist), "23 Nov 15:29": datetime(2026, 11, 23, 15, 29, tzinfo=ist),
+        "23 Nov 23:59": datetime(2026, 11, 23, 23, 59, tzinfo=ist), "24 Nov 09:45": datetime(2026, 11, 24, 9, 45, tzinfo=ist),
+        "25 Nov 11:22": datetime(2026, 11, 25, 11, 22, tzinfo=ist),
+    }
+    for label, closed in closes.items():
+        closed = closed.astimezone(timezone.utc)  # stored in UTC, as the runner writes it
+        db_session.add(PaperNativeTrade(deployment_id=cards[oib_id], opened_at=closed - timedelta(minutes=15), closed_at=closed,
+                                        legs=[], pnl=100.0, pnl_pct=1.0, charges=40.0, exit_reason=label))
+    db_session.add(PaperNativeTrade(deployment_id=cards[other_id], opened_at=closes["16 Nov"].astimezone(timezone.utc),
+                                    closed_at=closes["23 Nov 15:29"].astimezone(timezone.utc),
+                                    legs=[], pnl=500.0, pnl_pct=1.0, charges=40.0, exit_reason="take_profit"))
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    left = (await db_session.execute(select(PaperNativeTrade.deployment_id, PaperNativeTrade.exit_reason))).all()
+    assert sorted(r for d, r in left if d == cards[oib_id]) == ["24 Nov 09:45", "25 Nov 11:22"]
+    assert [r for d, r in left if d == cards[other_id]] == ["take_profit"]  # another strategy's: left alone
+    assert (await db_session.get(PaperPortfolio, oib_id)).cash == 2_003_000.0  # the cash as it was
+    [log] = (await db_session.execute(select(AuditLog).where(AuditLog.action == "PAPER_NATIVE_TRADES_DELETED"))).scalars().all()
+    assert log.object_id == str(cards[oib_id]) and log.previous_value["trades"] == 3 and log.previous_value["pnl"] == 300.0
+    assert log.new_value["pool_cash_changed"] is False
+
+
 async def test_oi_change_buy_moves_onto_holding_overnight_keeping_its_option(db_engine, db_session):
     """25 Nov: OI Change Buy 15 MIN version 7 -- held overnight, rolled at 12:00 on its expiry day."""
     migration = _load("a6c8e0b2d4f5_oi_change_buy_overnight")

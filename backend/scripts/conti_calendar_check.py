@@ -122,6 +122,12 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
                     .where(PaperNativeTrade.deployment_id == card.id).order_by(PaperNativeTrade.closed_at.desc()).limit(8)
                 )).all()
+                before_24, since_24 = (await db.execute(
+                    select(func.count().filter(PaperNativeTrade.closed_at < datetime(2026, 11, 23, 18, 30, tzinfo=timezone.utc)),
+                           func.count().filter(PaperNativeTrade.closed_at >= datetime(2026, 11, 23, 18, 30, tzinfo=timezone.utc)))
+                    .where(PaperNativeTrade.deployment_id == card.id)
+                )).one()
+                print(f"    trades on the card: closed by 23 Nov {before_24}, since {since_24} (25 Nov: those by 23 Nov deleted)")
                 for reason, opened_at, closed_at, legs in closes:
                     held = ", ".join(f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs)
                     print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
