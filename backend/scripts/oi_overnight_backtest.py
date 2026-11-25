@@ -16,6 +16,9 @@ bought at its own; the +15% / 5% trail on the bid. Agreed 25 Nov:
      open the trail watches it again -- a gap open under its stop sells at
      the open -- and the 09:30 close keeps it or flips it as any close. An
      option expiring that day is still sold at 15:29: it can't be carried.
+  C  as B, but an option expiring at the next session (or before it) is sold
+     at 15:29 instead of carried into its expiry day (agreed 25 Nov, after B
+     lost 287 points on the 9 nights into an expiry day).
 
 Every overnight carry in B is a gap: the price the 15:29 exit would have
 had (the 15:15 candle's close, at the bid) against the next 09:15 open (at
@@ -53,7 +56,8 @@ DEFAULT_LOT = 65
 TRAIL_START, TRAIL = 0.15, 0.05
 PATHS = {"high first": ("open", "high", "low", "close"), "low first": ("open", "low", "high", "close")}
 WINDOW = 2  # version 6
-VARIANTS = (("A. v6 as live: sold at 15:29", False), ("B. no 15:29 exit: carried overnight", True))
+VARIANTS = (("A. v6 as live: sold at 15:29", "none"), ("B. no 15:29 exit: carried overnight", "all"),
+            ("C. carried, but not into expiry day", "not_into_expiry"))
 
 
 def marks_of(day: date) -> list[datetime]:
@@ -162,7 +166,7 @@ def middle(a: dict, b: dict) -> dict:
 
 
 
-async def run(data: Data, days: list[date], candles, index, records, carry: bool, order: str):
+async def run(data: Data, days: list[date], candles, index, records, carry: str, order: str):
     """(trades, overnight gaps, entries passed over) for one candle order."""
     trades, gaps, no_price, pos = [], [], 0, None
 
@@ -205,7 +209,8 @@ async def run(data: Data, days: list[date], candles, index, records, carry: bool
                     return
 
     previous_day = None
-    for day in days:
+    for n_day, day in enumerate(days):
+        next_day = days[n_day + 1] if n_day + 1 < len(days) else None
         if pos is not None:  # carried overnight (B): the gap, then the trail from 09:15
             open_price = await price_at(pos["key"], day, time(9, 15))
             if open_price is not None:
@@ -236,9 +241,12 @@ async def run(data: Data, days: list[date], candles, index, records, carry: bool
         if pos is not None:
             close_price = await price_at(pos["key"], day, LAST_MARK, "close")
             close_bid = bid(close_price if close_price is not None else pos["entry"])
-            if not carry or pos["key"][0] <= day or day == days[-1]:
-                book(close_bid, "time_cutoff_329pm" if not carry or day == days[-1] else "expiry_day_329pm",
-                     datetime.combine(day, time(15, 29), tzinfo=IST), day)
+            if carry == "none" or next_day is None:
+                book(close_bid, "time_cutoff_329pm", datetime.combine(day, time(15, 29), tzinfo=IST), day)
+            elif pos["key"][0] <= day:
+                book(close_bid, "expiry_day_329pm", datetime.combine(day, time(15, 29), tzinfo=IST), day)
+            elif carry == "not_into_expiry" and pos["key"][0] <= next_day:
+                book(close_bid, "before_expiry_329pm", datetime.combine(day, time(15, 29), tzinfo=IST), day)
             else:
                 pos["carried_at"] = close_bid
         previous_day = day
@@ -285,31 +293,34 @@ async def main() -> None:
         print(f"  {r['name']:<40} {m['points']:>+8.1f} {m['on_premium']:>+9.2f} {m['first_half_pts']:>+8.1f} {m['second_half_pts']:>+8.1f} "
               f"{m['win']:>5.1f} {m['trades']:>6.0f} {m['stops']:>5.0f} {m['days_up']:>4.0f}/{len(days):<3} {m['avg_hold']:>6.0f}m"
               f"  ({a['points']:+.1f} .. {b['points']:+.1f})")
-    carry = results[1]
-    for order, run_ in carry["runs"].items():
-        g = gap_summary(run_["gaps"])
-        wk = gap_summary([x for x in run_["gaps"] if x["weekend"]])
-        wd = gap_summary([x for x in run_["gaps"] if not x["weekend"]])
-        at_open = sum(t["reason"] == "trailing_stop_at_open" for t in run_["trade_list"])
-        carried = [t for t in run_["trade_list"] if t["nights"]]
-        print(f"overnight gaps, {order}: {g['n']} carries, {g['up']} opened higher, {g['down']} lower; gap points per unit: "
-              f"sum {g['sum']:+.1f}, average {g['avg']:+.2f} ({g['pct']:+.1f}% of the price), best {g['best']:+.1f}, worst {g['worst']:+.1f}")
-        print(f"  weeknights: {wd['n']} carries, average {wd['avg']:+.2f}, sum {wd['sum']:+.1f}; over weekends / holidays: "
-              f"{wk['n']}, average {wk['avg']:+.2f}, sum {wk['sum']:+.1f}")
-        print(f"  carried in profit: {sum(x['in_profit'] for x in run_['gaps'])}, average gap "
-              f"{gap_summary([x for x in run_['gaps'] if x['in_profit']])['avg']:+.2f}; in loss: "
-              f"{sum(not x['in_profit'] for x in run_['gaps'])}, average gap {gap_summary([x for x in run_['gaps'] if not x['in_profit']])['avg']:+.2f}")
-        print(f"  sold by the trail at the next open: {at_open}; trades carried at least one night: {len(carried)}, "
-              f"their points {sum(t['points'] for t in carried):+.1f}; sold at 15:29 on the option's expiry day: "
-              f"{sum(t['reason'] == 'expiry_day_329pm' for t in run_['trade_list'])}")
-    low = min(carry["runs"].values(), key=lambda x: x["points"])
-    print("every overnight carry (the lower reading): G,from,to,option,15:29 bid,09:15 open bid,gap points,weekend,days to expiry")
+    for carry in results[1:]:
+        print(f"{carry['name']}:")
+        for order, run_ in carry["runs"].items():
+            g = gap_summary(run_["gaps"])
+            wk = gap_summary([x for x in run_["gaps"] if x["weekend"]])
+            wd = gap_summary([x for x in run_["gaps"] if not x["weekend"]])
+            at_open = sum(t["reason"] == "trailing_stop_at_open" for t in run_["trade_list"])
+            carried = [t for t in run_["trade_list"] if t["nights"]]
+            print(f"overnight gaps, {order}: {g['n']} carries, {g['up']} opened higher, {g['down']} lower; gap points per unit: "
+                  f"sum {g['sum']:+.1f}, average {g['avg']:+.2f} ({g['pct']:+.1f}% of the price), best {g['best']:+.1f}, worst {g['worst']:+.1f}")
+            print(f"  weeknights: {wd['n']} carries, average {wd['avg']:+.2f}, sum {wd['sum']:+.1f}; over weekends / holidays: "
+                  f"{wk['n']}, average {wk['avg']:+.2f}, sum {wk['sum']:+.1f}")
+            print(f"  carried in profit: {sum(x['in_profit'] for x in run_['gaps'])}, average gap "
+                  f"{gap_summary([x for x in run_['gaps'] if x['in_profit']])['avg']:+.2f}; in loss: "
+                  f"{sum(not x['in_profit'] for x in run_['gaps'])}, average gap {gap_summary([x for x in run_['gaps'] if not x['in_profit']])['avg']:+.2f}")
+            print(f"  sold by the trail at the next open: {at_open}; trades carried at least one night: {len(carried)}, "
+                  f"their points {sum(t['points'] for t in carried):+.1f}; sold at 15:29 on the option's expiry day: "
+                  f"{sum(t['reason'] == 'expiry_day_329pm' for t in run_['trade_list'])}; sold at 15:29 the day before its expiry: "
+                  f"{sum(t['reason'] == 'before_expiry_329pm' for t in run_['trade_list'])}")
+    low = min(results[2]["runs"].values(), key=lambda x: x["points"])
+    print(f"every overnight carry of {results[2]['name']} (the lower reading): G,from,to,option,15:29 bid,09:15 open bid,gap points,"
+          "weekend,days to expiry")
     for g in low["gaps"]:
         print(f"  G,{g['from']:%d %b},{g['to']:%d %b},{g['option']},{g['close']:.2f},{g['open']:.2f},{g['points']:+.2f},"
               f"{'yes' if g['weekend'] else 'no'},{g['expiry_days']}")
-    print("points per unit by day (A, B; the middle):")
+    print("points per unit by day (A, B, C; the middle):")
     for d in days:
-        print(f"  D,{d:%d %b},{results[0]['mid']['points_day'].get(d, 0.0):+.1f},{results[1]['mid']['points_day'].get(d, 0.0):+.1f}")
+        print(f"  D,{d:%d %b}," + ",".join(f"{r['mid']['points_day'].get(d, 0.0):+.1f}" for r in results))
 
     lines = []
     for r in results:
@@ -318,10 +329,10 @@ async def main() -> None:
                      f"{m['second_half']:+,.0f}; {m['trades']:.0f} trades, win {m['win']:.0f}%; max drawdown {m['drawdown']:,.0f}")
     gap_rows = [f"{g['from']:%d %b} -> {g['to']:%d %b} {g['option']}: {g['close']:.2f} -> {g['open']:.2f}, "
                 f"Rs {g['points'] * 65:+,.0f} a lot{' (weekend)' if g['weekend'] else ''}" for g in low["gaps"]]
-    await send_telegram("OI Change Buy 15 MIN: v6 with and without the 15:29 exit",
+    await send_telegram("OI Change Buy 15 MIN: v6 with and without the 15:29 exit, and not into expiry day",
                         f"{len(days)} sessions ({days[0]:%d %b} - {days[-1]:%d %b}), 1 lot, stored 15-min candles, 0.1% half-spread "
                         f"and charges; the middle of the two candle orders (both in brackets).\n\n" + "\n\n".join(lines)
-                        + "\n\nEvery overnight gap (the lower reading), 15:29 bid -> next 09:15 open bid:\n" + "\n".join(gap_rows))
+                        + "\n\nEvery overnight gap of C (the lower reading), 15:29 bid -> next 09:15 open bid:\n" + "\n".join(gap_rows))
     print("sent to the private Telegram chat: rupees and every carry, yes")
 
 
