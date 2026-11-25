@@ -62,6 +62,10 @@ on:
         description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
         type: boolean
         default: false
+      oi_overnight_backtest:
+        description: "Instead of the check: OI Change Buy 15 MIN version 6 with and without its 15:29 exit (held overnight), and every overnight gap; counts and points per unit here, rupees and every carry to the private Telegram chat only (backend/scripts/oi_overnight_backtest.py)"
+        type: boolean
+        default: false
       oi_sl_optimise:
         description: "Instead of the check: OI Change Buy 15 MIN's 2-candle average with a stop-loss of Rs 500-2,000 a lot (Rs 100 apart) stepping up Rs 250 for every Rs 1,000 of profit, alone and with the trail; points per unit and the best run's trades here, rupees to the private Telegram chat only (backend/scripts/oi_sl_optimise.py)"
         type: boolean
@@ -131,6 +135,7 @@ jobs:
           OI_AVG_BACKTEST: ${{ inputs.oi_avg_backtest }}
           OI_AVG_OPTIMISE: ${{ inputs.oi_avg_optimise }}
           OI_SL_OPTIMISE: ${{ inputs.oi_sl_optimise }}
+          OI_OVERNIGHT_BACKTEST: ${{ inputs.oi_overnight_backtest }}
         run: |
           set -euo pipefail
           umask 077
@@ -554,6 +559,13 @@ jobs:
           if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
             echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${OI_OVERNIGHT_BACKTEST:-false}" = "true" ]; then
+            echo "== OI Change Buy 15 MIN: version 6 with and without the 15:29 exit, and the overnight gaps (points per unit here; rupees to the private Telegram chat only)"
+            py_file=$(vps 'f=$(mktemp /tmp/oiovernight-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/oi_overnight_backtest.py)
             remote py "$py_file"
             exit 0
           fi
