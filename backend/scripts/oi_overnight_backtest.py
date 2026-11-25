@@ -22,6 +22,9 @@ bought at its own; the +15% / 5% trail on the bid. Agreed 25 Nov:
   D  as B, and on the held option's expiry day at 12:00 it is rolled: sold
      at the 12:00 candle's open and the same side's ATM option on next
      week's weekly bought at its own (version 7, agreed 25 Nov).
+  E  as D with no trail -- no stop at all: out only on a flip or the
+     expiry-day roll (asked 25 Nov).
+  F  as A with no trail: out on a flip or at 15:29.
 
 Every overnight carry in B is a gap: the price the 15:29 exit would have
 had (the 15:15 candle's close, at the bid) against the next 09:15 open (at
@@ -60,8 +63,11 @@ TRAIL_START, TRAIL = 0.15, 0.05
 PATHS = {"high first": ("open", "high", "low", "close"), "low first": ("open", "low", "high", "close")}
 WINDOW = 2  # version 6
 ROLL_AT = time(12, 0)  # D: the roll on the held option's expiry day
-VARIANTS = (("A. v6 as live: sold at 15:29", "none"), ("B. no 15:29 exit: carried overnight", "all"),
-            ("C. carried, but not into expiry day", "not_into_expiry"), ("D. carried, rolled at 12:00 on expiry day", "roll_noon"))
+VARIANTS = (  # name, carry, trail
+    ("A. v6: sold at 15:29", "none", True), ("B. no 15:29 exit: carried overnight", "all", True),
+    ("C. carried, but not into expiry day", "not_into_expiry", True), ("D. v7: carried, rolled at 12:00", "roll_noon", True),
+    ("E. v7 with no trail: flips and roll only", "roll_noon", False), ("F. sold at 15:29, no trail", "none", False),
+)
 
 
 def marks_of(day: date) -> list[datetime]:
@@ -170,7 +176,7 @@ def middle(a: dict, b: dict) -> dict:
 
 
 
-async def run(data: Data, days: list[date], candles, index, records, carry: str, order: str):
+async def run(data: Data, days: list[date], candles, index, records, carry: str, order: str, trail: bool = True):
     """(trades, overnight gaps, entries passed over) for one candle order."""
     trades, gaps, no_price, pos = [], [], 0, None
 
@@ -194,7 +200,7 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
 
     async def walk(day: date, t: time) -> None:
         """The trail along the held option's candle starting at `t`."""
-        if pos is None:
+        if pos is None or not trail:
             return
         bar = (await data.day_bars(pos["key"], day)).get(t)
         if bar is None:
@@ -288,12 +294,12 @@ async def main() -> None:
         days = [d for d in sorted(records) if d < now.date() or now.time() > time(15, 30)][1:]
         print(f"sessions: {len(days)} ({days[0]} -> {days[-1]}); candles with a 15-min change: {len(candles)}")
         results = []
-        for name, carry in VARIANTS:
+        for name, carry, trail in VARIANTS:
             runs = {}
             for order in PATHS:
-                trades, gaps, missing = await run(data, days, candles, index, records, carry, order)
+                trades, gaps, missing = await run(data, days, candles, index, records, carry, order, trail)
                 runs[order] = {**summary(trades, days), "trade_list": trades, "gaps": gaps, "missing": missing}
-            results.append({"name": name, "carry": carry, "runs": runs, "mid": middle(*runs.values())})
+            results.append({"name": name, "carry": carry, "trail": trail, "runs": runs, "mid": middle(*runs.values())})
 
     print("1 lot, net of the 0.1% half-spread and charges; points per unit summed; the middle of the two candle orders "
           "(both readings in brackets):")
@@ -304,7 +310,7 @@ async def main() -> None:
         print(f"  {r['name']:<40} {m['points']:>+8.1f} {m['on_premium']:>+9.2f} {m['first_half_pts']:>+8.1f} {m['second_half_pts']:>+8.1f} "
               f"{m['win']:>5.1f} {m['trades']:>6.0f} {m['stops']:>5.0f} {m['days_up']:>4.0f}/{len(days):<3} {m['avg_hold']:>6.0f}m"
               f"  ({a['points']:+.1f} .. {b['points']:+.1f})")
-    for carry in results[1:]:
+    for carry in (r for r in results if r["carry"] != "none"):
         print(f"{carry['name']}:")
         for order, run_ in carry["runs"].items():
             g = gap_summary(run_["gaps"])
@@ -330,7 +336,7 @@ async def main() -> None:
     for g in low["gaps"]:
         print(f"  G,{g['from']:%d %b},{g['to']:%d %b},{g['option']},{g['close']:.2f},{g['open']:.2f},{g['points']:+.2f},"
               f"{'yes' if g['weekend'] else 'no'},{g['expiry_days']}")
-    print("points per unit by day (A, B, C, D; the middle):")
+    print("points per unit by day (A, B, C, D, E, F; the middle):")
     for d in days:
         print(f"  D,{d:%d %b}," + ",".join(f"{r['mid']['points_day'].get(d, 0.0):+.1f}" for r in results))
 
