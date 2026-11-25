@@ -19,6 +19,9 @@ bought at its own; the +15% / 5% trail on the bid. Agreed 25 Nov:
   C  as B, but an option expiring at the next session (or before it) is sold
      at 15:29 instead of carried into its expiry day (agreed 25 Nov, after B
      lost 287 points on the 9 nights into an expiry day).
+  D  as B, and on the held option's expiry day at 12:00 it is rolled: sold
+     at the 12:00 candle's open and the same side's ATM option on next
+     week's weekly bought at its own (version 7, agreed 25 Nov).
 
 Every overnight carry in B is a gap: the price the 15:29 exit would have
 had (the 15:15 candle's close, at the bid) against the next 09:15 open (at
@@ -56,8 +59,9 @@ DEFAULT_LOT = 65
 TRAIL_START, TRAIL = 0.15, 0.05
 PATHS = {"high first": ("open", "high", "low", "close"), "low first": ("open", "low", "high", "close")}
 WINDOW = 2  # version 6
+ROLL_AT = time(12, 0)  # D: the roll on the held option's expiry day
 VARIANTS = (("A. v6 as live: sold at 15:29", "none"), ("B. no 15:29 exit: carried overnight", "all"),
-            ("C. carried, but not into expiry day", "not_into_expiry"))
+            ("C. carried, but not into expiry day", "not_into_expiry"), ("D. carried, rolled at 12:00 on expiry day", "roll_noon"))
 
 
 def marks_of(day: date) -> list[datetime]:
@@ -227,6 +231,13 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
                 price = await price_at(pos["key"], day, m.time())
                 if price is not None:
                     book(bid(price), "oi_flip", m, day)
+            rolled = None
+            if carry == "roll_noon" and pos is not None and pos["key"][0] <= day and m.time() >= ROLL_AT:
+                price = await price_at(pos["key"], day, m.time())
+                if price is not None:
+                    rolled = pos["key"][2]
+                    book(bid(price), "expiry_rollover", m, day)
+            side = side if side is not None else rolled
             if pos is None and side is not None and rec is not None and rec.spot:
                 expiries = [e for e in (date.fromisoformat(x) for x in (rec.expiries or [])) if e >= day]
                 weekly = (expiries[1] if expiries[0] == day and len(expiries) > 1 else expiries[0]) if expiries else None
@@ -311,14 +322,15 @@ async def main() -> None:
             print(f"  sold by the trail at the next open: {at_open}; trades carried at least one night: {len(carried)}, "
                   f"their points {sum(t['points'] for t in carried):+.1f}; sold at 15:29 on the option's expiry day: "
                   f"{sum(t['reason'] == 'expiry_day_329pm' for t in run_['trade_list'])}; sold at 15:29 the day before its expiry: "
-                  f"{sum(t['reason'] == 'before_expiry_329pm' for t in run_['trade_list'])}")
-    low = min(results[2]["runs"].values(), key=lambda x: x["points"])
-    print(f"every overnight carry of {results[2]['name']} (the lower reading): G,from,to,option,15:29 bid,09:15 open bid,gap points,"
+                  f"{sum(t['reason'] == 'before_expiry_329pm' for t in run_['trade_list'])}; rolled at 12:00 on its expiry day: "
+                  f"{sum(t['reason'] == 'expiry_rollover' for t in run_['trade_list'])}")
+    low = min(results[3]["runs"].values(), key=lambda x: x["points"])
+    print(f"every overnight carry of {results[3]['name']} (the lower reading): G,from,to,option,15:29 bid,09:15 open bid,gap points,"
           "weekend,days to expiry")
     for g in low["gaps"]:
         print(f"  G,{g['from']:%d %b},{g['to']:%d %b},{g['option']},{g['close']:.2f},{g['open']:.2f},{g['points']:+.2f},"
               f"{'yes' if g['weekend'] else 'no'},{g['expiry_days']}")
-    print("points per unit by day (A, B, C; the middle):")
+    print("points per unit by day (A, B, C, D; the middle):")
     for d in days:
         print(f"  D,{d:%d %b}," + ",".join(f"{r['mid']['points_day'].get(d, 0.0):+.1f}" for r in results))
 
@@ -332,7 +344,7 @@ async def main() -> None:
     await send_telegram("OI Change Buy 15 MIN: v6 with and without the 15:29 exit, and not into expiry day",
                         f"{len(days)} sessions ({days[0]:%d %b} - {days[-1]:%d %b}), 1 lot, stored 15-min candles, 0.1% half-spread "
                         f"and charges; the middle of the two candle orders (both in brackets).\n\n" + "\n\n".join(lines)
-                        + "\n\nEvery overnight gap of C (the lower reading), 15:29 bid -> next 09:15 open bid:\n" + "\n".join(gap_rows))
+                        + "\n\nEvery overnight gap of D (the lower reading), 15:29 bid -> next 09:15 open bid:\n" + "\n".join(gap_rows))
     print("sent to the private Telegram chat: rupees and every carry, yes")
 
 
