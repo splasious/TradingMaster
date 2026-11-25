@@ -25,6 +25,13 @@ bought at its own; the +15% / 5% trail on the bid. Agreed 25 Nov:
   E  as D with no trail -- no stop at all: out only on a flip or the
      expiry-day roll (asked 25 Nov).
   F  as A with no trail: out on a flip or at 15:29.
+  G  as D, and a trailing-stop exit above the price paid is followed at once
+     by the same side's ATM option bought again with a fresh trail; one at
+     or below it waits for the next close, as now (asked 25 Nov). Live that
+     is 2 seconds after the sale, at the ATM strike then; the stored candles
+     have no time or NIFTY inside a 15-minute candle, so here the same
+     contract is bought back at the moment and price the trail sold it (its
+     bid there, plus the half-spread both ways), and held from there.
 
 Every overnight carry in B is a gap: the price the 15:29 exit would have
 had (the 15:15 candle's close, at the bid) against the next 09:15 open (at
@@ -67,6 +74,7 @@ VARIANTS = (  # name, carry, trail
     ("A. v6: sold at 15:29", "none", True), ("B. no 15:29 exit: carried overnight", "all", True),
     ("C. carried, but not into expiry day", "not_into_expiry", True), ("D. v7: carried, rolled at 12:00", "roll_noon", True),
     ("E. v7 with no trail: flips and roll only", "roll_noon", False), ("F. sold at 15:29, no trail", "none", False),
+    ("G. v7 + re-buy after a trail exit in profit", "roll_noon", "reenter"),
 )
 
 
@@ -179,6 +187,7 @@ def middle(a: dict, b: dict) -> dict:
 async def run(data: Data, days: list[date], candles, index, records, carry: str, order: str, trail: bool = True):
     """(trades, overnight gaps, entries passed over) for one candle order."""
     trades, gaps, no_price, pos = [], [], 0, None
+    reenter = trail == "reenter"
 
     def book(exit_price: float, reason: str, at: datetime, day: date) -> None:
         nonlocal pos
@@ -187,7 +196,8 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
         net = (exit_price - entry) * qty - cost
         trades.append({"day": day, "opened": pos["opened"], "closed": at, "entry": entry, "exit": exit_price, "qty": qty,
                        "option": f"{pos['key'][0]:%d %b} {pos['key'][1]:,.0f} {option_type}", "reason": reason, "net": net,
-                       "points": net / qty, "pct": net / (entry * qty) * 100, "nights": pos["nights"]})
+                       "points": net / qty, "pct": net / (entry * qty) * 100, "nights": pos["nights"],
+                       "rebought": pos.get("rebought", False), "exit_vs_paid": exit_price - entry})
         pos = None
 
     async def price_at(key, day: date, t: time, field: str = "open") -> float | None:
@@ -198,13 +208,13 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
         earlier = [x for x in bars if x < t]
         return bars[max(earlier)]["close"] if earlier else None
 
-    async def walk(day: date, t: time) -> None:
-        """The trail along the held option's candle starting at `t`."""
+    async def walk(day: date, t: time) -> dict | None:
+        """The trail along the held option's candle starting at `t`; what it sold, if it fired above the price paid."""
         if pos is None or not trail:
-            return
+            return None
         bar = (await data.day_bars(pos["key"], day)).get(t)
         if bar is None:
-            return
+            return None
         for i, field in enumerate(PATHS[order]):
             p = bid(bar[field])
             pos["peak"] = max(pos["peak"], p)
@@ -214,9 +224,18 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
                 pos["stop"] = max(pos["stop"], pos["peak"] * (1 - TRAIL))
                 if p <= pos["stop"]:
                     at = datetime.combine(day, t, tzinfo=IST) + MARK_STEP / 2
-                    book(p if i == 0 else pos["stop"], "trailing_stop_at_open" if (i == 0 and t == time(9, 15)) else "trailing_stop",
-                         at if i else datetime.combine(day, t, tzinfo=IST), day)
-                    return
+                    fill = p if i == 0 else pos["stop"]
+                    in_profit = fill > pos["entry"]
+                    sold = {"key": pos["key"], "qty": pos["qty"], "fill": fill, "at": at if i else datetime.combine(day, t, tzinfo=IST)}
+                    book(fill, "trailing_stop_at_open" if (i == 0 and t == time(9, 15)) else "trailing_stop", sold["at"], day)
+                    return sold if in_profit else None
+        return None
+
+    def rebuy(sold: dict) -> None:
+        """G: the same contract bought back where the trail sold it -- its bid there, plus the half-spread both ways."""
+        nonlocal pos
+        pos = {"key": sold["key"], "entry": ask(sold["fill"] / (1 - HALF_SPREAD)), "qty": sold["qty"], "opened": sold["at"],
+               "peak": sold["fill"], "stop": None, "nights": 0, "rebought": True}
 
     previous_day = None
     for n_day, day in enumerate(days):
@@ -229,7 +248,9 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
                              "weekend": (day - previous_day).days > 1, "expiry_days": (pos["key"][0] - day).days,
                              "in_profit": pos["carried_at"] > pos["entry"]})
             pos["nights"] += 1
-            await walk(day, time(9, 15))
+            sold = await walk(day, time(9, 15))
+            if sold and reenter:
+                rebuy(sold)
         for m in marks_of(day):
             rec = records.get(day, {}).get(m.time())
             side = side_at(candles, index, m, WINDOW)
@@ -254,7 +275,9 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
                 else:
                     pos = {"key": key, "entry": ask(bar["open"]), "qty": float(data.contracts[key][1]), "opened": m,
                            "peak": bid(bar["open"]), "stop": None, "nights": 0}
-            await walk(day, m.time())
+            sold = await walk(day, m.time())
+            if sold and reenter and pos is None:
+                rebuy(sold)
         if pos is not None:
             close_price = await price_at(pos["key"], day, LAST_MARK, "close")
             close_bid = bid(close_price if close_price is not None else pos["entry"])
@@ -330,6 +353,16 @@ async def main() -> None:
                   f"{sum(t['reason'] == 'expiry_day_329pm' for t in run_['trade_list'])}; sold at 15:29 the day before its expiry: "
                   f"{sum(t['reason'] == 'before_expiry_329pm' for t in run_['trade_list'])}; rolled at 12:00 on its expiry day: "
                   f"{sum(t['reason'] == 'expiry_rollover' for t in run_['trade_list'])}")
+    for r in results:
+        if r["trail"] != "reenter":
+            continue
+        for order, run_ in r["runs"].items():
+            tl = run_["trade_list"]
+            trail_exits = [t for t in tl if t["reason"].startswith("trailing_stop")]
+            again = [t for t in tl if t["rebought"]]
+            print(f"{r['name']}, {order}: trail exits {len(trail_exits)} -- above the price paid {sum(t['exit_vs_paid'] > 0 for t in trail_exits)}, "
+                  f"at or below {sum(t['exit_vs_paid'] <= 0 for t in trail_exits)}; bought again at once: {len(again)}, those trades "
+                  f"{sum(t['points'] for t in again):+.1f} points per unit, won {sum(t['points'] > 0 for t in again)}")
     low = min(results[3]["runs"].values(), key=lambda x: x["points"])
     print(f"every overnight carry of {results[3]['name']} (the lower reading): G,from,to,option,15:29 bid,09:15 open bid,gap points,"
           "weekend,days to expiry")
