@@ -106,6 +106,7 @@ class Market:
         self.bars: dict[tuple, dict[dtime, float]] = {}
         self.source = Counter()
         self.lot = DEFAULT_LOT
+        self.candles_only = False  # True: every price from the stored 15-minute candles' closes, all on one minute
 
     async def load(self, before: date) -> None:
         snaps = (await self.db.execute(
@@ -180,9 +181,9 @@ class Market:
 
     async def price(self, d: date, t: dtime, rec: PcrSnapshot, e: date, k: float, typ: str) -> float | None:
         key = (rec.id, e, float(k), typ)
-        if key not in self.px:
+        if key not in self.px and not self.candles_only:
             await self._lazy(d, e, float(k))
-        found = self.px.get(key)
+        found = None if self.candles_only else self.px.get(key)
         if found:
             self.source["record"] += 1
             return float(found)
@@ -463,7 +464,7 @@ async def main() -> None:
         print(f"sessions: {len(sessions)} ({sessions[0]:%d %b} - {sessions[-1]:%d %b}; 2nd half from {sessions[len(sessions) // 2]:%d %b}); "
               f"records: {sum(len(v) for v in m.by_day.values())}; expiries known: {len(m.expiries)}; lot {m.lot}")
         print()
-        for cls in (Steady, Run):
+        for cls in (Run,):
             for reverse in (False, True):
                 for hedge in HEDGES:
                     r = cls(m, reverse, hedge)
@@ -481,6 +482,29 @@ async def main() -> None:
                 await parity_noise(m, hedge)
             except Exception as exc:  # noqa: BLE001
                 failed(f"parity noise {hedge}", exc)
+        print()
+        m.candles_only, m.source = True, Counter()
+        print("Check 1b -- the same, every price from the stored 15-minute candles' closes (one minute for every expiry):")
+        for hedge in HEDGES:
+            try:
+                await parity_noise(m, hedge)
+            except Exception as exc:  # noqa: BLE001
+                failed(f"parity noise {hedge} (candles)", exc)
+        print(f"  prices read: {m.source['candle']} from candles, {m.source['none']} not found")
+        print()
+        print("Backtest again, every price from the candles:")
+        for reverse in (False, True):
+            for hedge in HEDGES:
+                r = Run(m, reverse, hedge)
+                r.name += " -- candle closes"
+                try:
+                    await r.go()
+                    report(r, sessions, units)
+                except Exception as exc:  # noqa: BLE001
+                    failed(r.name, exc)
+                print()
+        print(f"prices read: {m.source['candle']} from candles, {m.source['none']} not found")
+        m.candles_only = False
         print()
         print("Check 2 -- the paper cards' own trades (live bid/ask, checked every second), net of charges:")
         try:
