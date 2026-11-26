@@ -140,8 +140,12 @@ def _schedule_for(leg: dict, intraday: bool) -> _ChargeSchedule | None:
 CHARGE_PARTS = ("brokerage", "stt", "exchange", "sebi", "stamp", "gst")
 
 
-def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime) -> dict[str, float] | None:
-    """estimate_charges() split into its parts (CHARGE_PARTS, plus "total")."""
+def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime,
+                     brokerage_per_order: float | None = None) -> dict[str, float] | None:
+    """estimate_charges() split into its parts (CHARGE_PARTS, plus "total").
+    `brokerage_per_order`: a strategy's own flat brokerage on every order in
+    place of the schedule's (26 Nov: OI Change Buy 15 MIN's 0 -- no
+    brokerage, as Kotak's intraday); the taxes and fees as always."""
     if not legs:
         return None
     intraday = as_aware_utc(opened_at).astimezone(IST).date() == as_aware_utc(closed_at).astimezone(IST).date()
@@ -157,7 +161,9 @@ def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime)
 
         brokerage = 0.0
         for turnover in (entry_turnover, exit_turnover):
-            if schedule.brokerage_pct is None:
+            if brokerage_per_order is not None:
+                brokerage += brokerage_per_order
+            elif schedule.brokerage_pct is None:
                 brokerage += schedule.brokerage_flat
             else:
                 brokerage += min(schedule.brokerage_flat, turnover * schedule.brokerage_pct / 100)
@@ -174,7 +180,7 @@ def charge_breakdown(legs: list[dict], opened_at: datetime, closed_at: datetime)
     return out
 
 
-def order_charges(leg: dict, price: float, buying: bool, intraday: bool) -> float | None:
+def order_charges(leg: dict, price: float, buying: bool, intraday: bool, brokerage_per_order: float | None = None) -> float | None:
     """One executed order's share of charge_breakdown(): `leg`'s quantity
     bought (`buying`) or sold at `price` -- a trade's opening and closing
     orders add up to its estimate, so each can be booked on the day it
@@ -184,7 +190,9 @@ def order_charges(leg: dict, price: float, buying: bool, intraday: bool) -> floa
     if schedule is None:
         return None
     turnover = float(price) * abs(float(leg["quantity"]))
-    if schedule.brokerage_pct is None:
+    if brokerage_per_order is not None:
+        brokerage = brokerage_per_order
+    elif schedule.brokerage_pct is None:
         brokerage = schedule.brokerage_flat
     else:
         brokerage = min(schedule.brokerage_flat, turnover * schedule.brokerage_pct / 100)
@@ -195,13 +203,14 @@ def order_charges(leg: dict, price: float, buying: bool, intraday: bool) -> floa
     return brokerage + stt + exchange + sebi + stamp + (brokerage + exchange + sebi) * _GST_PCT / 100
 
 
-def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime) -> float | None:
+def estimate_charges(legs: list[dict], opened_at: datetime, closed_at: datetime,
+                     brokerage_per_order: float | None = None) -> float | None:
     """Brokerage + STT + exchange + SEBI + stamp duty + GST for opening
     and closing every leg (two executed orders per leg). None when any leg
     isn't an NSE/BSE/NFO contract this schedule covers (e.g. a Delta
     Exchange perpetual) or its details aren't known -- no charges beats a
     wrong figure. Legs need resolve_leg_details()'s keys."""
-    breakdown = charge_breakdown(legs, opened_at, closed_at)
+    breakdown = charge_breakdown(legs, opened_at, closed_at, brokerage_per_order)
     return breakdown["total"] if breakdown else None
 
 

@@ -1367,12 +1367,45 @@ async def test_oi_change_buy_trades_closed_on_or_before_23_nov_are_deleted_the_c
     assert log.new_value["pool_cash_changed"] is False
 
 
+async def test_oi_change_buy_moves_onto_the_live_candle_keeping_its_option(db_engine, db_session):
+    """26 Nov: OI Change Buy 15 MIN version 8 -- the side on the live candle, no brokerage on its trades."""
+    migration = _load("a8c0e2b4d6f9_oi_change_buy_live_candle")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f4d6b8a0c2e7"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "AVERAGE_CANDLES = 1" in code and "BROKERAGE_PER_ORDER = 0.0" in code and "ROLL_AT = dtime(12, 0)" in code
+    assert migration.FROM_MD5S == {_load("a6c8e0b2d4f5_oi_change_buy_overnight").TO_MD5}  # moves on from version 7
+    v7 = "# OI Change Buy 15 MIN, version 7: held overnight\n"
+    migration.FROM_MD5S = {_md5_text(v7)}
+    running = await _deployment(db_session, "oib8_a@tradingmaster.internal", v7)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib8_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    state = {"last_mark": "2026-11-26T14:30:00+05:30", "position": {"option": "01 Dec 26,200 CE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
 async def test_oi_change_buy_moves_onto_holding_overnight_keeping_its_option(db_engine, db_session):
     """25 Nov: OI Change Buy 15 MIN version 7 -- held overnight, rolled at 12:00 on its expiry day."""
     migration = _load("a6c8e0b2d4f5_oi_change_buy_overnight")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f2b4d6a8c0e3"
+    assert _load("a8c0e2b4d6f9_oi_change_buy_live_candle").FROM_MD5S == {migration.TO_MD5}  # version 8 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
+    assert migration.down_revision == "f2b4d6a8c0e3"
     code = migration.BUILT_IN.read_text(encoding="utf-8")
-    assert "ROLL_AT = dtime(12, 0)" in code and "AVERAGE_CANDLES = 2" in code
+    assert "ROLL_AT = dtime(12, 0)" in code
     assert migration.FROM_MD5S == {_load("f2b4d6a8c0e3_oi_change_buy_two_candle_average").TO_MD5}  # moves on from version 6
     v6 = "# OI Change Buy 15 MIN, version 6: the 2-candle average\n"
     migration.FROM_MD5S = {_md5_text(v6)}
@@ -1518,7 +1551,8 @@ async def test_oi_change_buy_moves_onto_the_15_minute_change_keeping_its_option(
     assert _load("a0c2e4f6b8d5_oi_change_buy_trailing_stop").FROM_MD5S == {migration.TO_MD5}  # version 3 moves on from it
     migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d4f6a8c0e2b9"
-    assert "snap.put_oi_change, snap.call_oi_change" in migration.BUILT_IN.read_text(encoding="utf-8")
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "put_oi_change" in code and "put_oi_change_day" not in code  # the 15 minutes' change (live since version 8), never the day's
     v1 = "# OI Change Buy 15 MIN, version 1: the day's change in OI\n"
     migration.FROM_MD5S = {_md5_text(v1)}
     running = await _deployment(db_session, "oib2_a@tradingmaster.internal", v1)

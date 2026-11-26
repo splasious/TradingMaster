@@ -1,6 +1,25 @@
 """
-OI Change Buy 15 MIN -- one NIFTY option bought on the 15-minute change in OI, 2 candles averaged, held overnight (native)
-==========================================================================================================================
+OI Change Buy 15 MIN -- one NIFTY option bought on the live 15-minute candle's change in OI, held overnight (native)
+===================================================================================================================
+
+Version 8 (26 Nov): the side follows the LIVE candle -- the one forming
+now -- instead of being picked at each 15-minute close; and its trades are
+charged no brokerage (BROKERAGE_PER_ORDER 0, as Kotak's intraday: STT,
+exchange, SEBI, stamp duty and GST as always). From the 09:30 close until
+DAY_CLOSE (15:29), every few seconds (the PCR Analysis tab's LIVE row,
+services/options/pcr_live.py, one Kite reading every 15 seconds shared by
+every reader): that candle's Put dOI and Call dOI so far -- since the
+latest 15-minute record -- decide as below, the moment the higher one
+changes; no average (AVERAGE_CANDLES 1: a candle is its own). Nothing read
+before the 09:30 record is in (the pre-open and 09:15-09:30 candles), and
+no live reading (Zerodha not logged in, Kite down) means what's held is
+kept. In a backtest, with no live reading, each candle decides at its
+close. The rest -- the ATM weekly bought at the ask, a flip sold at the bid
+and the other side bought FLIP_GAP later, the trail, flat after a trailing
+stop until the next 15-minute close, held overnight, the 12:00 expiry-day
+roll -- as version 7, below.
+
+Before version 8:
 
 Agreed 16 Nov (version 2, the same day: the last 15 minutes' change, not
 the day's); version 6, 24 Nov: the average of the last AVERAGE_CANDLES (2)
@@ -36,7 +55,7 @@ it's bought at once. The first decision of the day is the 09:30 close
 (version 6: the 09:15:50 first-minute buy of version 4 is gone).
 
 The record lands a few seconds after its close; it's looked for every
-RECHECK (1 second) until it does, for up to RECORD_WAIT (2 minutes) -- a
+RECHECK (1 second) until it does, for up to 2 minutes -- a
 close whose record isn't in by then is passed over, what's held kept. A
 card started between two closes begins at the next one.
 
@@ -94,8 +113,9 @@ DAY_CLOSE = dtime(15, 29)  # version 7: no sale then -- nothing bought after it,
 SESSION_OPEN = dtime(9, 15)  # version 7: the trail on a carried option from the next session's open
 ROLL_AT = dtime(12, 0)  # version 7: on the held option's expiry day, rolled to next week's weekly then
 FLIP_GAP = timedelta(seconds=5)
-RECORD_WAIT = timedelta(minutes=2)
-AVERAGE_CANDLES = 2  # version 6: the side from the average change in OI over this many 15-minute candles
+AVERAGE_CANDLES = 1  # version 8: a candle is its own (2 in versions 6-7: the side from the average over this many candles)
+LIVE_CHECK = timedelta(seconds=15)  # version 8: how often the live candle's reading is new (pcr_live.LIVE_TTL)
+BROKERAGE_PER_ORDER = 0.0  # version 8: no brokerage, as Kotak's intraday; the taxes and fees as always (trade_record)
 CANDLES_FROM, CANDLES_TO = dtime(9, 30), dtime(15, 30)  # the records closing a trading candle
 RECHECK = timedelta(seconds=1)
 TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
@@ -171,6 +191,39 @@ async def candle_average(db, mark_utc: datetime) -> tuple[float, float, list[dat
     return put, call, [as_aware_utc(snap.ts).astimezone(IST) for snap in reversed(candles)]
 
 
+async def live_row(now_utc: datetime) -> tuple[dict | None, str | None]:
+    """The PCR Analysis tab's LIVE row now: (the row, None), or (None, why there isn't one)."""
+    # imported here: it reaches for Kite only when run live
+    from app.services.options.pcr_live import live_row as read
+
+    return await read(PCR_UNDERLYING, now_utc)
+
+
+async def read_change(ctx, now_utc: datetime) -> tuple[dict | None, str]:
+    """Version 8: ({"put", "call", "label", "since"}, "") -- the live candle's Put and Call dOI so far,
+    since the latest 15-minute record -- or (None, why not). In a backtest, the latest closed candle."""
+    now_ist = now_utc.astimezone(IST)
+    first = datetime.combine(now_ist.date(), FIRST_MARK, tzinfo=IST)
+    if getattr(ctx, "is_backtest", False):
+        average = await candle_average(ctx.db, now_utc)
+        if average is None or average[2][-1] < first:
+            return None, f"no {FIRST_MARK:%H:%M} change-in-OI record yet"
+        return {"put": average[0], "call": average[1], "label": f"the {average[2][-1]:%H:%M} candle",
+                "since": average[2][-1].isoformat()}, ""
+    row, why = await live_row(now_utc)
+    if row is None:
+        return None, why or "no live reading"
+    put, call, prev = row.get("put_oi_change"), row.get("call_oi_change"), row.get("prev_ts")
+    if put is None or call is None or prev is None:
+        return None, "the live reading has no change in OI yet"
+    since = as_aware_utc(prev if isinstance(prev, datetime) else datetime.fromisoformat(str(prev))).astimezone(IST)
+    if since < first:
+        return None, f"waiting for the {FIRST_MARK:%H:%M} record: the live candle starts there"
+    read_at = as_aware_utc(row["ts"] if isinstance(row.get("ts"), datetime) else now_utc).astimezone(IST)
+    return {"put": float(put), "call": float(call), "label": f"live {read_at:%H:%M:%S} (since {since:%H:%M})",
+            "since": since.isoformat()}, ""
+
+
 async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
     getter = None if getattr(ctx, "is_backtest", False) else getattr(ctx, "get_bid_ask", None)
     if getter is None:  # a backtest: no order book, the last price both ways
@@ -194,6 +247,7 @@ async def evaluate(ctx) -> None:
         return
 
     state = ctx.state
+    state["brokerage_per_order"] = BROKERAGE_PER_ORDER  # version 8: what its trades are charged (paper_trading/native_runner.py)
     force_exit = state.pop("force_exit", False)
     position = state.get("position")
 
@@ -241,10 +295,13 @@ async def evaluate(ctx) -> None:
         return _next_text(now_ist)
 
     def wake_for_next() -> None:
-        """Run again at the next 15-minute close, and every second until 15:29 while something is held."""
+        """Run again at the next 15-minute close, every LIVE_CHECK while the live candle decides, and every
+        second until 15:29 while something is held."""
         mark = next_mark(now_ist)
         if mark is not None:
             ctx.wake_at(mark)
+        if datetime.combine(today, FIRST_MARK, tzinfo=IST) <= now_ist < day_close:
+            ctx.wake_at(now_utc + LIVE_CHECK)  # version 8: the live candle
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
             ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
@@ -295,9 +352,8 @@ async def evaluate(ctx) -> None:
                 price, pnl = await close("trailing_stop")
                 position = None
                 state.pop("pending", None)
-                current = latest_mark(now_ist)
-                if current is not None:
-                    state["last_mark"] = current.isoformat()  # flat until the next close, whatever this one reads
+                until = next_mark(now_ist) or day_close  # flat until the next close, whatever the live candle reads
+                state["flat_until"] = until.astimezone(timezone.utc).isoformat()
                 ctx.note("exited", signal="SELL", reason=(
                     f"trailing stop: {option} sold at {price:,.2f} (the bid), its stop {stop:,.2f} -- {TRAIL * 100:g}% under the "
                     f"highest bid {peak:,.2f}; P&L {pnl:+,.0f} before charges; next decision {next_text()}"
@@ -319,61 +375,55 @@ async def evaluate(ctx) -> None:
         ctx.wake_at(due)
         return
 
-    # -- the 15-minute close: that candle's change in OI decides the side
-    mark = latest_mark(now_ist)
+    # -- version 8: the live candle decides the side, from the 09:30 close to 15:29
     decided = ""
-    if mark is not None and "last_mark" not in state and now_ist - mark >= RECORD_WAIT:
-        state["last_mark"] = mark.isoformat()  # a card started between closes begins at the next one
-    if mark is not None and state.get("last_mark") != mark.isoformat():
-        mark_utc = mark.astimezone(timezone.utc)
-        snap = (
-            await ctx.db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts == mark_utc))
-        ).scalar_one_or_none()
-        if snap is None:
-            if now_ist - mark < RECORD_WAIT:
-                ctx.note("hold" if position else "skipped", reason=f"waiting for the {mark:%H:%M} change-in-OI record")
-                ctx.wake_at(now_utc + RECHECK)
-                return
-            state["last_mark"] = mark.isoformat()
-            decided = f"no {mark:%H:%M} change-in-OI record in {RECORD_WAIT.seconds // 60} minutes: passed over; "
+    live_now = datetime.combine(today, FIRST_MARK, tzinfo=IST) <= now_ist < day_close
+    flat_until = state.get("flat_until")
+    if flat_until and now_utc < datetime.fromisoformat(flat_until):
+        live_now = False
+        decided = f"flat after the trailing stop until the {datetime.fromisoformat(flat_until).astimezone(IST):%H:%M} close; "
+    elif flat_until:
+        state.pop("flat_until", None)
+    for old_key in ("last_mark",):  # version 7's: the close it last read
+        state.pop(old_key, None)
+    if live_now:
+        reading, why = await read_change(ctx, now_utc)
+        if reading is None:
+            decided = f"no live change-in-OI reading ({why}): what's held kept; "
         else:
-            state["last_mark"] = mark.isoformat()
-            put_15m, call_15m = snap.put_oi_change, snap.call_oi_change  # since the record before (version 2)
-            average = await candle_average(ctx.db, mark_utc) if put_15m is not None and call_15m is not None else None
-            put_avg, call_avg = (average[0], average[1]) if average else (None, None)
-            closes = ", ".join(f"{c:%H:%M}" if c.date() == today else f"{c:%d %b %H:%M}" for c in average[2]) if average else ""
-            state["last_oi"] = {"at": f"{mark:%H:%M}", "put_change_15m": put_15m, "call_change_15m": call_15m,
-                                "put_avg": put_avg, "call_avg": call_avg, "candles": closes}
-            side = wanted_side(put_avg, call_avg)  # version 6: the average of the last AVERAGE_CANDLES candles
-            reading = (f"{mark:%H:%M} change in OI, average of the candles to {closes}: put {put_avg:+,.0f}, call {call_avg:+,.0f} "
-                       f"(this candle: put {put_15m:+,.0f}, call {call_15m:+,.0f})"
-                       if average else f"{mark:%H:%M}: no 15-minute change in OI on the record")
+            put, call, label = reading["put"], reading["call"], reading["label"]
+            state["last_oi"] = {"at": label, "put_change": put, "call_change": call, "since": reading["since"]}
+            side = wanted_side(put, call)
+            text = f"{label} change in OI: put {put:+,.0f}, call {call:+,.0f}"
             if position is not None:
-                for old_key in ("put_change_day", "call_change_day", "stop_loss_at"):  # earlier versions' fields, on a position carried over
+                for old_key in ("put_change_day", "call_change_day", "stop_loss_at", "put_change_15m", "call_change_15m",
+                                "put_avg", "call_avg"):  # earlier versions' fields, on a position carried over
                     position.pop(old_key, None)
-                position["put_change_15m"], position["call_change_15m"], position["oi_read_at"] = put_15m, call_15m, f"{mark:%H:%M}"
-                position["put_avg"], position["call_avg"] = put_avg, call_avg
+                position["put_change_live"], position["call_change_live"], position["oi_read_at"] = put, call, label
+            pending = state.get("pending")
             if side is None:
-                decided = f"{reading} -- no change; "
+                decided = f"{text} -- no change; "
+            elif pending is not None and position is None:
+                if pending["option_type"] != side and pending.get("mark") != f"{ROLL_AT:%H:%M} rollover":
+                    pending.update(option_type=side, put_change=put, call_change=call, mark=label)  # the side when it's bought
+                decided = f"{text} -- a {SIDE_NAME[side]}; "
             elif position is not None and position["option_type"] == side:
-                decided = f"{reading} -- still a {SIDE_NAME[side]}: held; "
+                decided = f"{text} -- still a {SIDE_NAME[side]}: held; "
             elif position is not None:
                 old = position["option"]
                 price, pnl = await close("oi_flip")
                 position = None
                 due = now_utc + FLIP_GAP
-                state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
-                                    "call_change_15m": call_15m, "put_avg": put_avg, "call_avg": call_avg}
+                state["pending"] = {"option_type": side, "due": due.isoformat(), "mark": label, "put_change": put, "call_change": call}
                 ctx.note("exited", signal="SELL", reason=(
-                    f"{reading} -- now a {SIDE_NAME[side]}: {old} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
+                    f"{text} -- now a {SIDE_NAME[side]}: {old} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
                     f"the {SIDE_NAME[side]} bought at {due.astimezone(IST):%H:%M:%S}"
                 ))
                 ctx.wake_at(due)
                 return
             else:
-                state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": f"{mark:%H:%M}", "put_change_15m": put_15m,
-                                    "call_change_15m": call_15m, "put_avg": put_avg, "call_avg": call_avg}
-                decided = f"{reading} -- a {SIDE_NAME[side]}; "
+                state["pending"] = {"option_type": side, "due": now_utc.isoformat(), "mark": label, "put_change": put, "call_change": call}
+                decided = f"{text} -- a {SIDE_NAME[side]}; "
 
     # -- a buy due: at once, or 5 seconds after a flip's sale
     pending = state.get("pending")
@@ -416,10 +466,8 @@ async def evaluate(ctx) -> None:
             "weekly_expiry": weekly.isoformat(),
             "entry_spot": spot,
             "decided_at": pending.get("mark"),
-            "put_change_15m": pending.get("put_change_15m"),
-            "call_change_15m": pending.get("call_change_15m"),
-            "put_avg": pending.get("put_avg"),
-            "call_avg": pending.get("call_avg"),
+            "put_change_live": pending.get("put_change"),
+            "call_change_live": pending.get("call_change"),
             "trail_starts_at": round(price * (1 + TRAIL_START), 2),
             "peak_bid": None,
             "trail_stop": None,
@@ -431,7 +479,7 @@ async def evaluate(ctx) -> None:
         ctx.note("entered", signal="BUY", reason=(
             f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; the trail starts at a bid of "
             f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; no stop-loss; "
-            f"held overnight; sold when the side flips, rolled at {ROLL_AT:%H:%M} on its expiry day"
+            f"held overnight; sold when the live candle's side flips, rolled at {ROLL_AT:%H:%M} on its expiry day"
         ))
         wake_for_next()
         return
@@ -444,5 +492,9 @@ async def evaluate(ctx) -> None:
 
 
 def _next_text(now_ist: datetime) -> str:
-    mark = next_mark(now_ist)
-    return f"at the {mark:%H:%M} close" if mark is not None else f"{next_trading_day(now_ist.date()):%a %d %b} at the {FIRST_MARK:%H:%M} close"
+    first = datetime.combine(now_ist.date(), FIRST_MARK, tzinfo=IST)
+    if now_ist < first and is_trading_day(now_ist.date()):
+        return f"from the {FIRST_MARK:%H:%M} close, on the live candle"
+    if first <= now_ist < datetime.combine(now_ist.date(), DAY_CLOSE, tzinfo=IST):
+        return f"on the live candle until {DAY_CLOSE:%H:%M}"
+    return f"{next_trading_day(now_ist.date()):%a %d %b} from the {FIRST_MARK:%H:%M} close, on the live candle"

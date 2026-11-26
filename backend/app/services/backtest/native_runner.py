@@ -32,7 +32,7 @@ from app.services.market_data.bar_periods import load_closed_candles
 from app.services.market_data.hours import nse_market_open
 from app.services.backtest.native_metrics import compute_native_metrics
 from app.services.options.pcr import compute_effective_pcr
-from app.services.paper_trading.native_runner import NativeContext
+from app.services.paper_trading.native_runner import NativeContext, brokerage_of
 from app.services.paper_trading.trade_record import charge_breakdown, resolve_leg_details
 from app.services.strategy.state_machine import StrategyStatus, can_transition
 
@@ -111,7 +111,7 @@ class BacktestNativeContext(NativeContext):
         closed_at = closed_at or self.now
         [resolved] = await resolve_leg_details(self.db, [legs])
         try:
-            breakdown = charge_breakdown(resolved, opened_at, closed_at)
+            breakdown = charge_breakdown(resolved, opened_at, closed_at, brokerage_of(self.state))
         except (KeyError, TypeError, ValueError):  # a leg without prices/quantity: no estimate rather than a failed run
             breakdown = None
         self.trades.append({

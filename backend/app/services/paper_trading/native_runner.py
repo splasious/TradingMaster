@@ -48,6 +48,12 @@ from app.services.notifications.trade_alerts import send_trade_alerts
 from app.services.options.pcr import compute_effective_pcr
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
+
+def brokerage_of(state: dict | None) -> float | None:
+    """A strategy's own flat brokerage per order, kept in its state (26 Nov: OI Change Buy 15 MIN's 0), else None."""
+    value = (state or {}).get("brokerage_per_order")
+    return float(value) if isinstance(value, (int, float)) else None
+
 logger = logging.getLogger(__name__)
 
 
@@ -305,7 +311,7 @@ class NativeContext:
         charges = None
         try:
             [legs] = await resolve_leg_details(self.db, [legs])
-            charges = estimate_charges(legs, opened_at, closed_at)
+            charges = estimate_charges(legs, opened_at, closed_at, brokerage_of(self.state))
         except Exception:
             logger.exception("Could not resolve trade record details for deployment %s", self.deployment.id)
         self.db.add(

@@ -2,11 +2,12 @@
 
 /**
  * OI Change Buy 15 MIN's change in OI (24 Nov), under its card: each
- * 15-minute candle's Put and Call ΔOI as bars, the average the strategy
- * decides on (version 6: the last 2 candles) as two lines, and the side
- * that average picks at each close it reads (09:30-15:15) as a strip.
- * The latest session, and the candles before it that its first averages
- * use (shaded). Read-only; re-read every 30 s.
+ * 15-minute candle's Put and Call ΔOI as bars and the side as a strip.
+ * Versions 6-7 decided at each close on the last 2 candles' average (two
+ * lines); since version 8 (26 Nov) the strategy follows the forming candle
+ * live, so the strip shows the side each candle ended on and there are no
+ * average lines. The latest session, and the candles before it (shaded).
+ * Read-only; re-read every 30 s.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -70,6 +71,7 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
   const path = (key: "put_avg" | "call_avg") => candles.map((c, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(c[key]).toFixed(1)}`).join("");
   const step = W < 520 ? 4 : 2;
   const h = hover !== null ? candles[hover] : null;
+  const live = data?.average_candles === 1; // version 8: the live candle, no average
 
   return (
     <div className="space-y-2" aria-label="Change in OI">
@@ -77,15 +79,20 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
         <h4 className="text-sm font-semibold text-text-primary">Change in OI, 15-minute candles</h4>
         {data && (
           <span className="text-xs text-text-secondary">
-            side from the last {data.average_candles} candles&apos; average{session ? ` · ${dayLabel(session)}` : ""}
+            {live ? "side from the live candle" : `side from the last ${data.average_candles} candles' average`}
+            {session ? ` · ${dayLabel(session)}` : ""}
           </span>
         )}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-secondary">
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-3 w-2.5 rounded-sm opacity-45" style={{ background: PUT }} />Put ΔOI</span>
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-3 w-2.5 rounded-sm opacity-45" style={{ background: CALL }} />Call ΔOI</span>
-        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-0.5 w-4 rounded" style={{ background: PUT }} />Put average</span>
-        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-0.5 w-4 rounded" style={{ background: CALL }} />Call average</span>
+        {!live && (
+          <>
+            <span className="inline-flex items-center gap-1.5"><i className="inline-block h-0.5 w-4 rounded" style={{ background: PUT }} />Put average</span>
+            <span className="inline-flex items-center gap-1.5"><i className="inline-block h-0.5 w-4 rounded" style={{ background: CALL }} />Call average</span>
+          </>
+        )}
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-3 w-3.5 rounded-sm opacity-35" style={{ background: PUT }} />CE</span>
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-3 w-3.5 rounded-sm opacity-35" style={{ background: CALL }} />PE</span>
       </div>
@@ -98,7 +105,8 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
             viewBox={`0 0 ${W} ${H}`}
             className="block h-auto w-full overflow-visible"
             role="img"
-            aria-label={`Put and Call change in OI every 15 minutes with their ${data?.average_candles}-candle averages and the side picked at each close`}
+            aria-label={live ? "Put and Call change in OI every 15 minutes and the side each candle ended on"
+              : `Put and Call change in OI every 15 minutes with their ${data?.average_candles}-candle averages and the side picked at each close`}
             onMouseLeave={() => setHover(null)}
           >
             {firstToday > 0 && (
@@ -127,7 +135,7 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
                 />
               )),
             )}
-            {(["put_avg", "call_avg"] as const).map((key) => (
+            {!live && (["put_avg", "call_avg"] as const).map((key) => (
               <g key={key}>
                 <path d={path(key)} fill="none" stroke="var(--surface)" strokeWidth={5} strokeLinejoin="round" />
                 <path d={path(key)} fill="none" stroke={key === "put_avg" ? PUT : CALL} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
@@ -174,15 +182,21 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
             )}
             <div className="flex justify-between gap-3"><span className="text-text-secondary">Put ΔOI</span><span className="font-financial">{lakh(h.put_change)}</span></div>
             <div className="flex justify-between gap-3"><span className="text-text-secondary">Call ΔOI</span><span className="font-financial">{lakh(h.call_change)}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-text-secondary">Put average</span><span className="font-financial">{lakh(h.put_avg)}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-text-secondary">Call average</span><span className="font-financial">{lakh(h.call_avg)}</span></div>
-            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">Side</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : hhmm(h.at) === "15:30" ? "no decision; held overnight" : "no change")}</span></div>
+            {!live && (
+              <>
+                <div className="flex justify-between gap-3"><span className="text-text-secondary">Put average</span><span className="font-financial">{lakh(h.put_avg)}</span></div>
+                <div className="flex justify-between gap-3"><span className="text-text-secondary">Call average</span><span className="font-financial">{lakh(h.call_avg)}</span></div>
+              </>
+            )}
+            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">{live ? "Ended on" : "Side"}</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : live && hhmm(h.at) === "09:30" ? "before the live candle starts" : !live && hhmm(h.at) === "15:30" ? "no decision; held overnight" : "no change")}</span></div>
           </div>
         )}
       </div>
       {data && n > 0 && (
         <p className="text-xs text-text-muted">
-          At each close from 09:30 to 15:15 the strategy holds the CE while the put average is higher and the PE while the call average is; the shaded candles are the session before, which the first averages use.
+          {live
+            ? "From the 09:30 close to 15:29 the strategy follows the forming candle live: the CE while its Put ΔOI is higher, the PE while its Call ΔOI is. The strip shows the side each candle ended on; the shaded candles are the session before."
+            : "At each close from 09:30 to 15:15 the strategy holds the CE while the put average is higher and the PE while the call average is; the shaded candles are the session before, which the first averages use."}
         </p>
       )}
     </div>

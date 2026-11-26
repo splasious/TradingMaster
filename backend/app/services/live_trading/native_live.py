@@ -89,7 +89,7 @@ from app.services.live_trading.native_gateway import Fill, product_for
 from app.services.live_trading.order_state_machine import LiveOrderStatus
 from app.services.market_data.live_price import live_price
 from app.services.market_data.tick_engine import tick_engine
-from app.services.paper_trading.native_runner import NativeContext
+from app.services.paper_trading.native_runner import NativeContext, brokerage_of
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details
 
 logger = logging.getLogger(__name__)
@@ -351,7 +351,7 @@ async def _save_trade(db: AsyncSession, deployment: LiveNativeDeployment, closes
     charges = None
     try:
         [legs] = await resolve_leg_details(db, [legs])
-        charges = estimate_charges(legs, opened, now)
+        charges = estimate_charges(legs, opened, now, brokerage_of(deployment.state))  # a strategy's own brokerage (26 Nov)
     except Exception:
         logger.exception("Could not resolve live trade details for %s", deployment.id)
     db.add(LiveNativeTrade(
