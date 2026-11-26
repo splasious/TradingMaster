@@ -5,15 +5,21 @@ Conti Calendar 400 15 MIN -- a double calendar on the OTM strikes nearest a Rs 1
 Conti Calendar 15 MIN copied with the amendments agreed 11 Nov (version 2,
 11 Nov: the pause after a close cut to 1 minute; version 3, 12 Nov: the
 strikes by premium, not 400 points out; version 4, 16 Nov: the next weekly
-when the nearest has no Rs 100 strike; version 6, 20 Nov: 20 lots a leg and
-the strike shift below; version 7, 20 Nov: the target restarts at a shift;
-version 8, 20 Nov: a shift's closed legs a trade of their own): instead of one strike's straddle calendar, a call
-calendar on an OTM call and a put calendar on an OTM put, LOTS_PER_LEG (20;
-16 before version 6) lots each, every fill at the order book's best price (a
-sell at the bid, a buy at the ask):
+when the nearest has no Rs 100 strike; version 5, 19 Nov: a monthly cover
+2.5-3x the weekly's bid; version 6, 20 Nov: 20 lots a leg and the strike
+shift below; version 7, 20 Nov: the target restarts at a shift; version 8,
+20 Nov: a shift's closed legs a trade of their own; version 9, 26 Nov: the
+hedge a weekly two weeks out at the same strike, the roll at 15:00 the day
+before expiry, and the shift at the profit chart's peak): instead of one
+strike's straddle calendar, a call calendar on an OTM call and a put
+calendar on an OTM put, LOTS_PER_LEG (20; 16 before version 6) lots each,
+every fill at the order book's best price (a sell at the bid, a buy at the
+ask):
 
-  sell  the weekly CE at the call strike   buy  the monthly CE at it
-  sell  the weekly PE at the put strike    buy  the monthly PE at it
+  sell  this week's weekly CE at the call strike   buy  the weekly two weeks out CE at it
+  sell  this week's weekly PE at the put strike    buy  the weekly two weeks out PE at it
+
+-- e.g. sell the 1 Dec weeklies, buy the 15 Dec ones at the same strikes.
 
 The strikes (version 3; ATM+-400 in hundreds before): on each side, the
 furthest OTM strike -- any STRIKE_STEP (50-point) strike, calls above NIFTY
@@ -24,32 +30,27 @@ Rs 100, close to each other. NIFTY 25,300 with the 25,600 CE bid 118 and
 the 25,650 CE 96, the 25,000 PE 104 and the 24,950 PE 88: the 25,600 CE
 and the 25,000 PE. A strike on the way with no book yet means no entry that
 check (the next tries again); none at Rs 100 or more on a side, none at all.
-Every new position is picked so -- the monthly roll's reopen too; a weekly
+Every new position is picked so -- the hedge roll's reopen too; a weekly
 roll keeps its position's strikes.
 
-The monthly cover (version 5, 19 Nov): each bought monthly is no longer at
-its weekly's strike. On each side it is the monthly strike -- any 50-point
-strike of the same type -- whose ask (what it is bought at) is between
-MONTHLY_RATIO (2.5 and 3) times the sold weekly's bid; of those in range,
-the one nearest 3x (the most premium, closest to the weekly strike): walked
-from the weekly strike outward while the ratio is over 3, inward while
-under 2.5. None in range on a side, or a strike on the way with no book: no
-entry that check. Every new position, the monthly roll's reopen too; a
-weekly roll keeps both its weekly and its monthly strikes. A position from
-before (same-strike monthlies, no "monthly_rule") is closed at bid / ask at
-the first check inside the entry window ("rule_change") and a new one opened
-at once by the new rule.
+The hedge (version 9, 26 Nov; a monthly before -- at the same strike, then
+from version 5 at the strike whose ask was 2.5-3x the weekly's bid): the
+weekly two weeks after the sold one -- the listed expiry HEDGE_DAYS (11 to
+17) days after it, nearest 14, so an expiry brought forward by a holiday
+still counts -- at the sold leg's own strike, bought at the ask. None
+listed, or one of its strikes with no book, means no entry that check. A
+position from before (a monthly hedge: no "hedge_rule") is closed at bid /
+ask at the first check inside the entry window ("rule_change") and a new
+one opened at once by the new rule.
 
-Weekly: the nearest weekly expiry, next week's on an expiry day itself --
-or (version 4) the expiry after it when the nearest has, on either side, no
-OTM strike whose bid is still MIN_PREMIUM (the day before an expiry, its
-calls or puts worth little more than their last day): both sides then sold
-on that later expiry at its Rs 100 strikes. Only that one step: none there
+Weekly: the nearest weekly expiry whose roll day (ROLL_TIME's day: the
+trading day before it, version 9) is still to come -- on that day and on
+the expiry day itself, the one after -- or (version 4) the expiry after it
+when that one has, on either side, no OTM strike whose bid is still
+MIN_PREMIUM: both sides then sold on that later expiry at its Rs 100
+strikes, the hedge two weeks after it. Only that one step: none there
 either, no entry that check. A strike on the way with no book is no reason
 to move on -- the next check tries the nearest again.
-Monthly: the nearest monthly expiry after that weekly -- this month's, or
-next month's in the month's last week (or when the later expiry is this
-month's monthly itself).
 
 Opened from 09:30 (ENTRY_TIME) to 15:00 whenever none is open, and never
 within PAUSE_AFTER_CLOSE (1 minute; 5 in version 1) of the last one closing (kept in the
@@ -76,12 +77,13 @@ Held overnight -- no daily close -- until the take-profit:
                last shifted, the position in loss ("Net if closed now" as
                the take-profit reads it -- since the last shift, version 7 --
                under Rs 0); SHIFT_IN_PROFIT (200)
-               points when in profit but short of the target: that side's
-               sold weekly and bought monthly close at bid / ask, their
-               result booked into the position as a roll's is, and the side
-               opens again at NIFTY's Rs 100 strike now with its 2.5-3x
-               monthly cover, on the position's same weekly and monthly
-               expiries and at its own lots (a 16-lot position stays 16);
+               points when in profit but short of the target -- or
+               (version 9) NIFTY at that side's peak of the profit chart,
+               below: that side's sold weekly and bought hedge close at
+               bid / ask and the side opens again at NIFTY's Rs 100 strike
+               now, its hedge at the same strike, on the position's same
+               weekly and hedge expiries and at its own lots (a 16-lot
+               position stays 16);
                the other side is left as it is, and the shifted side's
                reference is NIFTY at the shift. The closed legs (version 8,
                20 Nov) are written at once as a trade of their own
@@ -89,21 +91,34 @@ Held overnight -- no daily close -- until the take-profit:
                Telegram alert for it) -- in the trade history then, and no
                longer part of the position or its final trade. Only from 09:30 to 15:00,
                read every second; a shift that can't be had (no Rs 100
-               strike, no 2.5-3x cover, a leg unquoted) waits and is tried
+               strike, a leg unquoted) waits and is tried
                again, and one whose Rs 100 strike hasn't moved just moves
                the reference.
-  Weekly roll  at ROLL_TIME (15:00) on the sold weeklies' expiry day -- or
-               at the first check after, if the app was down then -- the
-               two sold weeklies are bought back at the ask and next week's
-               sold at the bid at the SAME strikes; the bought monthlies
-               stay. Their result is booked into the position.
-  Monthly roll when next week's weekly would be the bought monthlies'
-               own expiry (the month's last week), the roll instead closes
-               all four ("monthly_roll") and opens a fresh double calendar
-               at once -- at that moment's Rs 100 strikes, selling that week and
-               buying next month's monthly -- whatever the time and pause
-               (state reopen_due: a reopen that can't be had at once, a
-               leg unquoted, is tried again at every check until it is).
+  Chart peak   (version 9, 26 Nov) each side's own profit chart (the
+               card's way, options/calendar_payoff.py: that side's two legs'
+               profit after charges at ROLL_TIME on the roll day across
+               NIFTY levels, each leg repriced at its implied volatility now
+               and closed at bid / ask) peaks near its sold strike -- the
+               two sides together, the hedges two weeks out keeping them
+               wide, mostly make one hump between the strikes. NIFTY at or
+               over the call side's peak shifts the call side, at or under
+               the put side's the put side, in profit or in loss. Worked
+               out at every check from 09:30 to 15:00 (chart_peaks) and
+               kept on the position for the card (peak_ce / peak_pe).
+  Weekly roll  at ROLL_TIME (15:00) on the trading day before the sold
+               weeklies' expiry (version 9; on the expiry day itself
+               before) -- or at the first check after, if the app was down
+               then -- the two sold weeklies are bought back at the ask and
+               the next weekly sold at the bid at the SAME strikes; the
+               bought hedges stay. Their result is booked into the position.
+  Hedge roll   (version 9; the monthly roll before) when the next weekly
+               would be the bought hedges' own expiry -- every second week
+               -- the roll instead closes all four ("hedge_roll") and opens
+               a fresh double calendar at once -- at that moment's Rs 100
+               strikes, selling the next weekly and buying two weeks after
+               it -- whatever the time and pause (state reopen_due: a
+               reopen that can't be had at once, a leg unquoted, is tried
+               again at every check until it is).
 
 A trade record is the whole position (less its strike shifts' legs, each
 shift a trade of its own, version 8): every leg it held, rolled ones
@@ -114,22 +129,19 @@ kept on the position for the card (max_profit_reached / max_loss_reached).
 Checked every RECHECK (1 second) while a position is open (ctx.wake_at),
 on top of the scheduler's 10-second cycle. A leg with no bid or no ask
 means no take-profit reading that check. In a backtest there is no order
-book (ctx.is_backtest): the last price stands for both bid and ask.
-
-A monthly is told by Zerodha's tradingsymbol -- NIFTY26NOV23700CE (a
-month's three letters) against a weekly's NIFTY26N1723700CE. Runs through
-services/paper_trading/native_runner.py.
+book (ctx.is_backtest): the last price stands for both bid and ask. Runs
+through services/paper_trading/native_runner.py.
 """
 
 import inspect
 import math
-import re
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.models.instrument import Instrument
+from app.services.backfill_platform.coverage import previous_trading_day
 from app.services.broker.zerodha_broker import IST
 from app.services.paper_trading.trade_record import order_charges
 
@@ -138,27 +150,28 @@ REGIME = "double calendar"
 STRIKE_STEP = 50  # any 50-point strike (version 3; hundreds, ATM+-400, before)
 MIN_PREMIUM = 100.0  # rupees: the furthest OTM strike whose sold weekly's bid is still this much (version 3)
 MAX_STEPS = 40  # how many strikes out it looks on a side: 2,000 points
-MONTHLY_RATIO = (2.5, 3.0)  # version 5: the bought monthly's ask over the sold weekly's bid, nearest the top
-MONTHLY_RULE = "ask 2.5-3x the weekly's bid"  # kept on a position opened by version 5's rule
+HEDGE_DAYS = (11, 17)  # version 9: the bought hedge's expiry this many days after the sold weekly's, nearest 14
+HEDGE_RULE = "the weekly two weeks out, same strike"  # kept on a position opened by version 9's rule
+EXPIRIES_READ = 8  # listed expiries read: the sold weekly's, the next, and two weeks past either
 LOTS_PER_LEG = 20  # version 6 (20 Nov); 16 before
 SHIFT_IN_LOSS = 150.0  # version 6: NIFTY points toward a side, from its reference, that shift it -- the position in loss
 SHIFT_IN_PROFIT = 200.0  # the same, in profit but short of the take-profit
 SIDE_LEGS = {"CE": ("short_ce", "long_ce"), "PE": ("short_pe", "long_pe")}
 SIDE_NAME = {"CE": "call", "PE": "put"}
 SHIFT_EXIT = "strike_shift"  # version 8: a shift's closed legs, a trade of their own (no Telegram alert)
+HEDGE_EXIT = "hedge_roll"  # version 9: every second week all four close and a fresh one opens ("monthly_roll" before)
 DEFAULT_LOT_SIZE = 65  # fallback only -- real Instrument.lot_size is used when present
 ENTRY_TIME = dtime(9, 30)
 ENTRY_UNTIL = dtime(15, 0)
-ROLL_TIME = dtime(15, 0)  # on the sold weeklies' expiry day
+ROLL_TIME = dtime(15, 0)  # on the trading day before the sold weeklies' expiry (version 9; on the expiry day before)
 RECHECK = timedelta(seconds=1)  # while a position is open: how soon it's checked again
 PAUSE_AFTER_CLOSE = timedelta(minutes=1)  # no new position this soon after one closes (version 2; 5 minutes in 1)
 TAKE_PROFIT = 14_000.0  # rupees, the whole position after charges, at bid / ask
-MONTHLY_SYMBOL = re.compile(r"^NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d+(\.\d+)?(CE|PE)$")
 LEGS = (  # name, option type, side at entry, which expiry
     ("short_ce", "CE", "sell", "weekly"),
-    ("long_ce", "CE", "buy", "monthly"),
+    ("long_ce", "CE", "buy", "hedge"),
     ("short_pe", "PE", "sell", "weekly"),
-    ("long_pe", "PE", "buy", "monthly"),
+    ("long_pe", "PE", "buy", "hedge"),
 )
 WEEKLY_LEGS = ("short_ce", "short_pe")
 
@@ -170,8 +183,26 @@ def first_otm(spot: float, option_type: str) -> float:
     return (math.ceil(spot / STRIKE_STEP) - 1) * STRIKE_STEP
 
 
-def is_monthly(tradingsymbol: str | None) -> bool:
-    return bool(tradingsymbol) and MONTHLY_SYMBOL.match(tradingsymbol) is not None
+def roll_day(weekly: date) -> date:
+    """Version 9: the trading day before `weekly` -- the weeklies sold on it roll at ROLL_TIME that day."""
+    return previous_trading_day(weekly)
+
+
+def roll_moment(weekly: date) -> datetime:
+    """When the weeklies sold on `weekly` roll: ROLL_TIME (IST) on its roll day."""
+    return datetime.combine(roll_day(weekly), ROLL_TIME, tzinfo=IST)
+
+
+def hedge_after(expiries: list[date], weekly: date) -> date | None:
+    """Version 9: the listed expiry two weeks after `weekly` -- HEDGE_DAYS (11 to 17) days on, nearest 14 -- or None."""
+    lo, hi = HEDGE_DAYS
+    near = [e for e in expiries if lo <= (e - weekly).days <= hi]
+    return min(near, key=lambda e: abs((e - weekly).days - 14)) if near else None
+
+
+def hedge_of(position: dict) -> date:
+    """The bought legs' expiry (a position from before version 9: its monthly's)."""
+    return date.fromisoformat(position.get("hedge_expiry") or position["monthly_expiry"])
 
 
 def closing_price(leg: dict, bid: float, ask: float) -> float:
@@ -207,6 +238,42 @@ def if_closed_now(position: dict, quotes: dict[str, tuple[float, float]]) -> tup
     return booked_net(position) + gross - position["entry_charges"] - exit_charges, prices
 
 
+def chart_peaks(position: dict, quotes: dict[str, tuple[float, float]], spot: float, now_utc: datetime) -> dict[str, float]:
+    """Version 9: {"CE": NIFTY level, "PE": NIFTY level} -- where each side's
+    own profit chart at the roll peaks: the call calendar's two legs alone,
+    the put calendar's alone, each worked out the card's way
+    (options/calendar_payoff.py: every leg at its implied volatility now,
+    closed at bid / ask less charges). The two together, the hedges two
+    weeks out keeping them wide, mostly make one hump between the strikes;
+    each side's own chart peaks near its sold strike. A side whose highest
+    point is at its chart's edge has none; no chart (the roll passed, a leg
+    unpriced), neither."""
+    # imported here: that module imports this one
+    from app.services.options.calendar_payoff import PayoffLeg, calendar_payoff
+
+    def charges(leg: PayoffLeg, price: float, buying: bool) -> float:
+        return charges_of({"option_type": leg.option_type, "quantity": leg.quantity}, price, buying)
+
+    peaks = {}
+    try:
+        horizon = roll_moment(date.fromisoformat(position["weekly_expiry"]))
+        for option_type, names in SIDE_LEGS.items():
+            legs = [PayoffLeg(name=name, option_type=leg["option_type"], strike=float(leg["strike"]),
+                              expiry=date.fromisoformat(leg["expiry"]), side=leg["side"], quantity=float(leg["quantity"]),
+                              entry_price=float(leg["entry_price"]), mid=(quotes[name][0] + quotes[name][1]) / 2,
+                              half_spread=(quotes[name][1] - quotes[name][0]) / 2)
+                    for name, leg in ((name, position["legs"][name]) for name in names)]
+            payoff = calendar_payoff(legs, spot, now_utc, horizon, 0.0, charges)
+            if payoff is None:
+                continue
+            i = max(range(len(payoff.points)), key=lambda j: payoff.points[j][1])
+            if 0 < i < len(payoff.points) - 1:  # inside the chart: a peak, not an edge
+                peaks[option_type] = payoff.points[i][0]
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return {}
+    return peaks
+
+
 def track_extremes(position: dict, net: float, now_ist: datetime) -> None:
     """The most profit and the most loss "if closed now" reached so far, with when."""
     when, net = now_ist.strftime("%d %b %H:%M:%S IST"), round(net, 2)  # to the paisa, as kept: an equal reading isn't a new extreme
@@ -230,19 +297,6 @@ async def bid_ask(ctx, instrument_id: uuid.UUID) -> tuple[float, float] | None:
     return await getter(instrument_id)
 
 
-async def monthly_after(ctx, underlying_id: uuid.UUID, weekly: date) -> date | None:
-    """The nearest monthly expiry after `weekly` the catalog holds."""
-    rows = (
-        await ctx.db.execute(
-            select(Instrument.expiry, func.min(Instrument.external_ref))
-            .where(Instrument.underlying_instrument_id == underlying_id, Instrument.instrument_type == "option",
-                   Instrument.expiry > weekly)
-            .group_by(Instrument.expiry).order_by(Instrument.expiry)
-        )
-    ).all()
-    return next((expiry for expiry, symbol in rows if is_monthly(symbol)), None)
-
-
 def shift_ref(position: dict, option_type: str, spot: float) -> float:
     """Where NIFTY was when that side was opened or last shifted (version 6)."""
     return float(position.get(f"shift_ref_{option_type.lower()}") or position.get("entry_spot") or spot)
@@ -264,6 +318,9 @@ def shift_text(position: dict) -> str:
     spot = position.get("entry_spot") or 0.0
     text = (f"shifts the call side over NIFTY {shift_ref(position, 'CE', spot) + trigger:,.0f}, the put side under "
             f"{shift_ref(position, 'PE', spot) - trigger:,.0f} ({trigger:,.0f} points, {'in loss' if net < 0 else 'in profit'})")
+    peaks = [f"{SIDE_NAME[t]} side {position[f'peak_{t.lower()}']:,.0f}" for t in ("CE", "PE") if position.get(f"peak_{t.lower()}") is not None]
+    if peaks:
+        text += f" or at its profit chart's peak ({', '.join(peaks)})"
     return text + (f"; {position['shift_waits']}" if position.get("shift_waits") else "")
 
 
@@ -287,54 +344,6 @@ async def side_strike(ctx, underlying_id: uuid.UUID, expiry: date, spot: float, 
     if found is None:
         return None, f"no OTM {expiry:%d %b} {option_type} with a bid of Rs {MIN_PREMIUM:,.0f} or more", False
     return found, "", False
-
-
-async def monthly_cover(ctx, underlying_id: uuid.UUID, monthly: date, weekly: date, option_type: str, weekly_strike: float,
-                    weekly_bid: float) -> tuple[tuple | None, str]:
-    """((the monthly instrument, its ask, ask / weekly bid, its strike), "") --
-    the strike whose ask is MONTHLY_RATIO times `weekly_bid`, nearest the
-    top -- or (None, why not). The premium falls moving OTM, so it walks
-    OTM from the weekly strike while the ratio is over the range, ITM
-    while it's under (and on through the range for the highest in it)."""
-    lo, hi = MONTHLY_RATIO
-    otm = STRIKE_STEP if option_type == "CE" else -STRIKE_STEP
-    seen: dict[float, tuple | str | None] = {}
-
-    async def at(strike: float):
-        if strike not in seen:
-            instrument = await ctx.find_option(underlying_id, monthly, strike, option_type)
-            quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
-            seen[strike] = None if instrument is None else ("no book" if quote is None else (instrument, quote[1], quote[1] / weekly_bid))
-        return seen[strike]
-
-    k = weekly_strike
-    r = await at(k)
-    if r is None:
-        return None, f"no {monthly:%d %b} {k:,.0f} {option_type} in the catalog"
-    if r == "no book":
-        return None, f"no bid/ask for the {monthly:%d %b} {k:,.0f} {option_type} yet"
-    direction = otm if r[2] > hi else -otm
-    best = (k, r) if lo <= r[2] <= hi else None
-    for _ in range(MAX_STEPS):
-        if best is not None and direction == otm:
-            break  # walking OTM, the first in range is the nearest 3x
-        nk = k + direction
-        nr = await at(nk)
-        if nr is None:
-            break  # past the catalog's last strike
-        if nr == "no book":
-            return None, f"no bid/ask for the {monthly:%d %b} {nk:,.0f} {option_type} yet"
-        if lo <= nr[2] <= hi and best is not None and nr[2] <= best[1][2]:
-            break  # no more premium a strike further: the one before stands
-        k, r = nk, nr
-        if lo <= r[2] <= hi:
-            best = (k, r)
-        elif best is not None or (direction == otm and r[2] < lo) or (direction != otm and r[2] > hi):
-            break  # past the range (or jumped over it)
-    if best is None:
-        return None, (f"no {monthly:%d %b} {option_type} with an ask {lo:g}-{hi:g}x the {weekly:%d %b} "
-                      f"{weekly_strike:,.0f} {option_type}'s bid of {weekly_bid:,.2f}")
-    return (best[1][0], best[1][1], best[1][2], best[0]), ""
 
 
 async def evaluate(ctx) -> None:
@@ -402,51 +411,59 @@ async def evaluate(ctx) -> None:
         return (f"; max profit reached {e['max_profit_reached']:+,.0f} ({e['max_profit_at']}), "
                 f"max loss reached {e['max_loss_reached']:+,.0f} ({e['max_loss_at']})")
 
-    async def maybe_shift(net: float) -> str | None:
+    async def maybe_shift(net: float, quotes: dict[str, tuple[float, float]]) -> str | None:
         """Version 6: the side NIFTY has moved toward, SHIFT_IN_LOSS (in loss) or
-        SHIFT_IN_PROFIT (in profit) points past its reference, shifted; the note,
-        or None (nothing due, or a shift that can't be had this check)."""
-        position.pop("shift_waits", None)  # read afresh each check
+        SHIFT_IN_PROFIT (in profit) points past its reference -- or (version 9)
+        whose peak of the profit chart NIFTY has reached -- shifted; the note, or
+        None (nothing due, or a shift that can't be had this check)."""
         spot = await ctx.get_price(underlying.id)
         if spot is None:
             return None
         trigger = SHIFT_IN_LOSS if net < 0 else SHIFT_IN_PROFIT
+        peaks = chart_peaks(position, quotes, spot, now_utc)
+        position.update(peak_ce=peaks.get("CE"), peak_pe=peaks.get("PE"))
         for option_type in ("CE", "PE"):
-            ref = shift_ref(position, option_type, spot)
+            side, ref, peak = SIDE_NAME[option_type], shift_ref(position, option_type, spot), peaks.get(option_type)
             moved = spot - ref if option_type == "CE" else ref - spot
             if moved > trigger:
-                note = await shift_side(option_type, spot, ref, moved, net, trigger)
-                if note is not None:
-                    return note
+                why = (f"NIFTY {spot:,.1f} is {moved:,.0f} points {'above' if option_type == 'CE' else 'below'} the {side} side's "
+                       f"{ref:,.1f}, past {trigger:,.0f}")
+            elif peak is not None and (spot >= peak if option_type == "CE" else spot <= peak):
+                why = f"NIFTY {spot:,.1f} has reached the {side} side's profit chart peak, {peak:,.0f}"
+            else:
+                continue
+            note = await shift_side(option_type, spot, net, why)
+            if note is not None:
+                return note
         return None
 
-    async def shift_side(option_type: str, spot: float, ref: float, moved: float, net: float, trigger: float) -> str | None:
-        """That side's sold weekly and bought monthly closed at bid / ask, their
-        result booked into the position, and the side opened again at NIFTY's
-        Rs 100 strike now with its 2.5-3x monthly, on the same expiries."""
+    async def shift_side(option_type: str, spot: float, net: float, why: str) -> str | None:
+        """That side's sold weekly and bought hedge closed at bid / ask -- a trade
+        of their own -- and the side opened again at NIFTY's Rs 100 strike now,
+        its hedge at the same strike (version 9), on the same expiries."""
         lower, side = option_type.lower(), SIDE_NAME[option_type]
-        weekly_name, monthly_name = SIDE_LEGS[option_type]
-        weekly = date.fromisoformat(position["weekly_expiry"])
-        monthly = date.fromisoformat(position["monthly_expiry"])
-        old_w = position["legs"][weekly_name]
-        strike, why, _ = await side_strike(ctx, underlying.id, weekly, spot, option_type)
-        if strike is not None and strike == old_w["strike"]:  # the Rs 100 strike hasn't moved: nothing to shift, the reference does
+        weekly_name, hedge_name = SIDE_LEGS[option_type]
+        weekly, hedge = date.fromisoformat(position["weekly_expiry"]), hedge_of(position)
+        strike, why_not, _ = await side_strike(ctx, underlying.id, weekly, spot, option_type)
+        if strike is not None and strike == position["legs"][weekly_name]["strike"]:  # the Rs 100 strike hasn't moved: nothing to shift, the reference does
             position[f"shift_ref_{lower}"] = spot
             return None
-        w_instrument = await ctx.find_option(underlying.id, weekly, strike, option_type) if strike is not None else None
-        w_quote = await bid_ask(ctx, w_instrument.id) if w_instrument is not None else None
-        cover = None
-        if strike is not None and w_quote is None:
-            why = f"no bid/ask for the {weekly:%d %b} {strike:,.0f} {option_type} yet"
-        elif strike is not None:
-            cover, why = await monthly_cover(ctx, underlying.id, monthly, weekly, option_type, strike, w_quote[0])
-        if cover is None:
-            position["shift_waits"] = f"shifting the {side} side waits: {why}"
+        fills: dict[str, tuple[Instrument, float]] = {}
+        for name, expiry, at_ask in ((weekly_name, weekly, False), (hedge_name, hedge, True)):
+            if strike is None:
+                break
+            instrument = await ctx.find_option(underlying.id, expiry, strike, option_type)
+            quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
+            if quote is None:
+                why_not = (f"no {expiry:%d %b} {strike:,.0f} {option_type} in the catalog" if instrument is None
+                           else f"no bid/ask for the {expiry:%d %b} {strike:,.0f} {option_type} yet")
+                break
+            fills[name] = (instrument, quote[1] if at_ask else quote[0])
+        if len(fills) < 2:
+            position["shift_waits"] = f"shifting the {side} side waits: {why_not}"
             return None
-        m_instrument, m_ask, ratio, m_strike = cover
-        replaced = [weekly_name] + ([monthly_name] if m_strike != position["legs"][monthly_name]["strike"] else [])  # the same cover: kept
         out, shift_legs, shift_pnl = [], [], 0.0
-        for name in replaced:
+        for name in (weekly_name, hedge_name):
             leg = position["legs"][name]
             exit_price = await quote_or_last(leg)
             old = await ctx.db.get(Instrument, uuid.UUID(leg["instrument_id"]))
@@ -461,13 +478,11 @@ async def evaluate(ctx) -> None:
             legs=shift_legs, pnl=shift_pnl, pnl_pct=(shift_pnl / outlay * 100) if outlay else 0.0, exit_reason=SHIFT_EXIT,
             opened_at=datetime.fromisoformat(position.get(f"side_opened_at_{lower}") or position["opened_at"]), closed_at=now_utc,
         )
-        for name, instrument, price, k, order_side, expiry in (
-                (weekly_name, w_instrument, w_quote[0], strike, "sell", weekly), (monthly_name, m_instrument, m_ask, m_strike, "buy", monthly)):
-            if name not in replaced:
-                continue
+        for name, order_side, expiry in ((weekly_name, "sell", weekly), (hedge_name, "buy", hedge)):
+            instrument, price = fills[name]
             quantity = position["legs"][name]["quantity"]  # the position's own lots, whatever LOTS_PER_LEG is now
             await ctx.open_leg(instrument, order_side, quantity, price)
-            leg = {"instrument_id": str(instrument.id), "strike": k, "option_type": option_type, "side": order_side,
+            leg = {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": order_side,
                    "expiry": expiry.isoformat(), "quantity": quantity, "entry_price": price}
             leg["entry_charges"] = round(charges_of(leg, price, buying=order_side == "buy"), 2)
             position["entry_charges"] = round(position["entry_charges"] + leg["entry_charges"], 2)
@@ -475,17 +490,15 @@ async def evaluate(ctx) -> None:
         position.update({
             "booked_outside_target": round(booked_net(position), 2),  # version 7: the target restarts here (rolls before it left out)
             "shift_trades": True, f"side_opened_at_{lower}": now_utc.isoformat(), "last_shift_pnl": round(shift_pnl, 2),
-            f"strike_{lower}": strike, f"monthly_strike_{lower}": m_strike, f"monthly_ratio_{lower}": round(ratio, 2),
-            f"shift_ref_{lower}": spot, "shifts": int(position.get("shifts", 0)) + 1, "shifted_at": now_utc.isoformat(),
+            f"strike_{lower}": strike, f"shift_ref_{lower}": spot, "shifts": int(position.get("shifts", 0)) + 1,
+            "shifted_at": now_utc.isoformat(), "last_shift_by": "chart peak" if "profit chart peak" in why else "points",
         })
         position.pop("shift_waits", None)
-        return (f"strike shift, {'in loss' if net < 0 else 'in profit'} (Rs {net:,.0f} if closed now): NIFTY {spot:,.1f} is "
-                f"{moved:,.0f} points {'above' if option_type == 'CE' else 'below'} the {side} side's {ref:,.1f}, past {trigger:,.0f} -- "
-                f"{' and '.join(out)} closed at bid/ask; {weekly:%d %b} {strike:,.0f} {option_type} sold at the bid {w_quote[0]:,.2f} "
-                + (f"and {monthly:%d %b} {m_strike:,.0f} {option_type} bought at the ask {m_ask:,.2f} ({ratio:.2f}x)" if monthly_name in replaced
-                   else f"its {monthly:%d %b} {m_strike:,.0f} {option_type} cover kept (now {ratio:.2f}x)")
-                + "; the other side kept; "
-                f"the closed legs P&L {shift_pnl:+,.0f} before charges, recorded as a trade; the take-profit restarts at Rs {TAKE_PROFIT:,.0f}")
+        return (f"strike shift, {'in loss' if net < 0 else 'in profit'} (Rs {net:,.0f} if closed now): {why} -- "
+                f"{' and '.join(out)} closed at bid/ask; {weekly:%d %b} {strike:,.0f} {option_type} sold at the bid "
+                f"{fills[weekly_name][1]:,.2f} and {hedge:%d %b} {strike:,.0f} {option_type} bought at the ask {fills[hedge_name][1]:,.2f}; "
+                f"the other side kept; the closed legs P&L {shift_pnl:+,.0f} before charges, recorded as a trade; "
+                f"the take-profit restarts at Rs {TAKE_PROFIT:,.0f}")
 
     if position is not None and position.get("shifts") and not position.get("shift_trades"):
         # versions 6-7 kept a shift's closed legs inside the position: with no roll since, they're all the shifts'
@@ -503,15 +516,18 @@ async def evaluate(ctx) -> None:
         position["shift_trades"] = True
 
     rolled_note = ""
-    if (position is not None and not force_exit and position.get("monthly_rule") != MONTHLY_RULE
+    if (position is not None and not force_exit and position.get("hedge_rule") != HEDGE_RULE
             and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL):
-        # version 5: a same-strike position from before closes and a new one opens at once by the new monthly rule
+        # version 9: a position from before -- a monthly hedge -- closes and a new one opens at once by the new hedge rule
         pnl = await close_all("rule_change", await forced_prices())
         ctx.state.pop("paused_until", None)
         ctx.state["reopen_due"] = True
-        rolled_note = f"the monthly cover rule changed (version 5): the same-strike position closed, P&L {pnl:+,.0f} before charges; "
+        rolled_note = (f"the hedge rule changed (version 9: the weekly two weeks out at the same strike, not a monthly): "
+                       f"the position closed, P&L {pnl:+,.0f} before charges; ")
         position = None
     if position is not None:
+        for key in ("shift_waits", "peak_ce", "peak_pe"):  # read afresh each check
+            position.pop(key, None)
         if force_exit:
             pnl = await close_all("manual", await forced_prices())
             ctx.note("exited", signal="COVER", reason=(
@@ -545,20 +561,22 @@ async def evaluate(ctx) -> None:
                 ctx.wake_at(now_utc + PAUSE_AFTER_CLOSE)
                 return
 
-        weekly = date.fromisoformat(position["weekly_expiry"])
-        monthly = date.fromisoformat(position["monthly_expiry"])
-        if weekly < today or (weekly == today and now_ist.time() >= ROLL_TIME):
-            # the next weekly after today's (or, rolling late, after today): never one expiring today
-            following = next((e for e in await ctx.list_weekly_expiries(underlying.id, today) if e > today), None)
+        weekly, hedge = date.fromisoformat(position["weekly_expiry"]), hedge_of(position)
+        rolls_at = roll_moment(weekly)
+        if now_ist >= rolls_at:
+            # version 9: the next weekly whose own roll is still to come -- never one expiring today or tomorrow
+            following = next((e for e in await ctx.list_weekly_expiries(underlying.id, today, EXPIRIES_READ)
+                              if e > weekly and roll_moment(e) > now_ist), None)
             if following is None:
                 ctx.note("hold", reason=f"double calendar: the {weekly:%d %b} weeklies are due to roll but no later weekly is listed yet")
                 ctx.wake_at(now_utc + RECHECK)
                 return
-            if following >= monthly:  # the month's last week: everything rolls onto next month
-                pnl = await close_all("monthly_roll", await forced_prices())
+            if following >= hedge:  # every second week: the next sold weekly would be the hedges' own -- everything afresh
+                pnl = await close_all(HEDGE_EXIT, await forced_prices())
                 ctx.state.pop("paused_until", None)
                 ctx.state["reopen_due"] = True  # kept: a reopen that can't be had now is tried again, whatever the time
-                rolled_note = f"monthly roll: all four closed, P&L {pnl:+,.0f} before charges; "
+                rolled_note = (f"hedge roll: the next weekly, {following:%d %b}, is the bought hedges' own expiry -- all four closed, "
+                               f"P&L {pnl:+,.0f} before charges; ")
             else:
                 new_legs = {}
                 for name in WEEKLY_LEGS:
@@ -596,14 +614,15 @@ async def evaluate(ctx) -> None:
                                 rolls=int(position.get("rolls", 0)) + 1, rolled_at=now_utc.isoformat(),
                                 booked_net=round(booked_net({"booked": booked}), 2))
                 ctx.note("entered", signal="ROLL", reason=(
-                    f"weekly roll {weekly:%d %b} -> {following:%d %b} at the same strikes: {'; '.join(rolled)} "
-                    f"(bought back at the ask, sold at the bid); booked so far Rs {position['booked_net']:,.0f} after charges"
+                    f"weekly roll {weekly:%d %b} -> {following:%d %b} at the same strikes, the {hedge:%d %b} hedges kept: "
+                    f"{'; '.join(rolled)} (bought back at the ask, sold at the bid); booked so far Rs {position['booked_net']:,.0f} "
+                    f"after charges; next roll {roll_moment(following):%d %b %H:%M}"
                 ))
                 ctx.wake_at(now_utc + RECHECK)
                 return
         else:
             if not missing and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
-                shifted = await maybe_shift(position["net_if_closed_now"])
+                shifted = await maybe_shift(position["net_if_closed_now"], quotes)
                 if shifted is not None:
                     ctx.note("entered", signal="SHIFT", reason=shifted)
                     ctx.wake_at(now_utc + RECHECK)
@@ -611,14 +630,12 @@ async def evaluate(ctx) -> None:
             if missing:
                 ctx.note("hold", reason=f"double calendar open; no bid/ask for {', '.join(missing)} -- take-profit checked once all four have one")
             else:
-                cover = (f" covered by {position['monthly_strike_ce']:,.0f} CE / {position['monthly_strike_pe']:,.0f} PE"
-                         if position.get("monthly_strike_ce") is not None else "")
                 ctx.note("hold", reason=(
-                    f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE{cover} "
-                    f"(sold {weekly:%d %b}, bought {monthly:%d %b}): Rs {position['net_if_closed_now']:,.0f} if closed now "
+                    f"double calendar {position['strike_ce']:,.0f} CE / {position['strike_pe']:,.0f} PE "
+                    f"(sold {weekly:%d %b}, bought {hedge:%d %b}): Rs {position['net_if_closed_now']:,.0f} if closed now "
                     f"at bid/ask after charges{' since the last shift' if position.get('shifts') else ''}"
                     + f"; take-profit at Rs {TAKE_PROFIT:,.0f}; "
-                    f"weeklies roll {weekly:%d %b} {ROLL_TIME:%H:%M}"
+                    f"weeklies roll {rolls_at:%d %b %H:%M}"
                     f"; {shift_text(position)}"
                 ))
             ctx.wake_at(now_utc + RECHECK)
@@ -642,17 +659,19 @@ async def evaluate(ctx) -> None:
     if spot is None:
         ctx.note("skipped", reason="no live NIFTY spot price available")
         return
-    expiries = await ctx.list_weekly_expiries(underlying.id, today)
+    expiries = await ctx.list_weekly_expiries(underlying.id, today, EXPIRIES_READ)
     if not expiries:
         ctx.note("skipped", reason="no live NIFTY option expiries found")
         return
-    weekly = expiries[1] if today == expiries[0] and len(expiries) > 1 else expiries[0]
-    if weekly == today:
-        ctx.note("skipped", reason="only today's expiry is listed -- nothing to sell for a later week")
-        return
-    monthly = await monthly_after(ctx, underlying.id, weekly)
-    if monthly is None:
-        ctx.note("skipped", reason=f"no monthly NIFTY expiry after {weekly:%d %b} in the catalog yet")
+    weekly = next((e for e in expiries if roll_day(e) > today), None)  # version 9: not on its roll day or after
+    hedge = hedge_after(expiries, weekly) if weekly is not None else None
+    if hedge is None:
+        ctx.note("skipped", reason=(
+            "no NIFTY weekly listed whose roll day is still to come" if weekly is None
+            else f"no NIFTY expiry listed two weeks after {weekly:%d %b} yet to buy"
+        ))
+        if reopening:
+            ctx.wake_at(now_utc + RECHECK)
         return
 
     async def premium_strikes(expiry: date) -> tuple[dict[str, float] | None, str, str | None]:
@@ -672,11 +691,11 @@ async def evaluate(ctx) -> None:
     passed_note = ""  # version 4: the nearest weekly had no Rs 100 strike on a side, the next expiry sold instead
     if strikes is None and short_side is not None:
         later = next((e for e in expiries if e > weekly), None)
-        later_monthly = await monthly_after(ctx, underlying.id, later) if later is not None else None
+        later_hedge = hedge_after(expiries, later) if later is not None else None
         if later is None:
             why += "; no later expiry listed to sell instead"
-        elif later_monthly is None:
-            why += f"; no monthly NIFTY expiry after {later:%d %b} in the catalog yet to buy against the {later:%d %b}"
+        elif later_hedge is None:
+            why += f"; no NIFTY expiry listed two weeks after {later:%d %b} yet to buy against the {later:%d %b}"
         else:
             later_strikes, later_why, _ = await premium_strikes(later)
             if later_strikes is None:
@@ -684,41 +703,34 @@ async def evaluate(ctx) -> None:
             else:
                 passed_note = (f" (the {weekly:%d %b} weekly had no OTM {short_side} with a bid of Rs {MIN_PREMIUM:,.0f} or more: "
                                f"the next expiry instead)")
-                weekly, monthly, strikes = later, later_monthly, later_strikes
+                weekly, hedge, strikes = later, later_hedge, later_strikes
     if strikes is None:
         ctx.note("skipped", reason=why)
         if reopening:
             ctx.wake_at(now_utc + RECHECK)
         return
     chosen: dict[str, tuple[Instrument, float]] = {}
-    leg_strikes: dict[str, float] = {}
-    ratios: dict[str, float] = {}
     for option_type in ("CE", "PE"):
-        weekly_name = next(n for n, t, _, w in LEGS if t == option_type and w == "weekly")
-        monthly_name = next(n for n, t, _, w in LEGS if t == option_type and w == "monthly")
-        instrument = await ctx.find_option(underlying.id, weekly, strikes[option_type], option_type)
-        quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
-        why = (f"no {weekly:%d %b} {strikes[option_type]:,.0f} {option_type} in the catalog" if instrument is None
-               else f"no bid/ask for the {weekly:%d %b} {strikes[option_type]:,.0f} {option_type} yet" if quote is None else "")
-        cover = None
-        if not why:
-            chosen[weekly_name], leg_strikes[weekly_name] = (instrument, quote[0]), strikes[option_type]
-            cover, why = await monthly_cover(ctx, underlying.id, monthly, weekly, option_type, strikes[option_type], quote[0])
-        if cover is None:
-            ctx.note("skipped", reason=why)
-            if reopening:
-                ctx.wake_at(now_utc + RECHECK)
-            return
-        m_instrument, m_ask, ratio, m_strike = cover
-        chosen[monthly_name], leg_strikes[monthly_name], ratios[option_type] = (m_instrument, m_ask), m_strike, round(ratio, 2)
+        for name, expiry, at_ask in zip(SIDE_LEGS[option_type], (weekly, hedge), (False, True)):  # the hedge at the same strike
+            instrument = await ctx.find_option(underlying.id, expiry, strikes[option_type], option_type)
+            quote = await bid_ask(ctx, instrument.id) if instrument is not None else None
+            if quote is None:
+                ctx.note("skipped", reason=(
+                    f"no {expiry:%d %b} {strikes[option_type]:,.0f} {option_type} in the catalog" if instrument is None
+                    else f"no bid/ask for the {expiry:%d %b} {strikes[option_type]:,.0f} {option_type} yet"
+                ))
+                if reopening:
+                    ctx.wake_at(now_utc + RECHECK)
+                return
+            chosen[name] = (instrument, quote[1] if at_ask else quote[0])
 
     legs, entry_charges = {}, 0.0
     for name, option_type, order_side, which in LEGS:
         instrument, price = chosen[name]
         quantity = float(LOTS_PER_LEG * (instrument.lot_size or DEFAULT_LOT_SIZE))
         await ctx.open_leg(instrument, order_side, quantity, price)
-        leg = {"instrument_id": str(instrument.id), "strike": leg_strikes[name], "option_type": option_type, "side": order_side,
-               "expiry": (weekly if which == "weekly" else monthly).isoformat(), "quantity": quantity, "entry_price": price}
+        leg = {"instrument_id": str(instrument.id), "strike": strikes[option_type], "option_type": option_type, "side": order_side,
+               "expiry": (weekly if which == "weekly" else hedge).isoformat(), "quantity": quantity, "entry_price": price}
         leg["entry_charges"] = round(charges_of(leg, price, buying=order_side == "buy"), 2)
         legs[name] = leg
         entry_charges += leg["entry_charges"]
@@ -728,14 +740,10 @@ async def evaluate(ctx) -> None:
         "min_premium": MIN_PREMIUM,
         "strike_ce": strikes["CE"],
         "strike_pe": strikes["PE"],
-        "monthly_strike_ce": leg_strikes["long_ce"],
-        "monthly_strike_pe": leg_strikes["long_pe"],
-        "monthly_ratio_ce": ratios["CE"],
-        "monthly_ratio_pe": ratios["PE"],
-        "monthly_rule": MONTHLY_RULE,
+        "hedge_rule": HEDGE_RULE,
         "entry_spot": spot,
         "weekly_expiry": weekly.isoformat(),
-        "monthly_expiry": monthly.isoformat(),
+        "hedge_expiry": hedge.isoformat(),
         "take_profit": TAKE_PROFIT,
         "entry_charges": round(entry_charges, 2),
         "booked": {"gross": 0.0, "charges": 0.0},
@@ -749,12 +757,12 @@ async def evaluate(ctx) -> None:
     ctx.state.pop("reopen_due", None)
     debit = sum(leg["entry_price"] * leg["quantity"] * (1 if leg["side"] == "buy" else -1) for leg in legs.values())
     ctx.note("entered", signal="CALENDAR", reason=(
-        (rolled_note or ("monthly roll's reopen: " if reopening else ""))
+        (rolled_note or ("reopen: " if reopening else ""))
         + f"double calendar opened, NIFTY {spot:,.1f}: {strikes['CE']:,.0f} CE (bid {chosen['short_ce'][1]:,.2f}) and "
         f"{strikes['PE']:,.0f} PE (bid {chosen['short_pe'][1]:,.2f}), the furthest OTM with a weekly bid of Rs {MIN_PREMIUM:,.0f} or more, "
-        f"sell {weekly:%d %b} at the bid{passed_note}, buy {monthly:%d %b} {leg_strikes['long_ce']:,.0f} CE (ask {chosen['long_ce'][1]:,.2f}, "
-        f"{ratios['CE']:g}x) and {leg_strikes['long_pe']:,.0f} PE (ask {chosen['long_pe'][1]:,.2f}, {ratios['PE']:g}x) at the ask; "
+        f"sell {weekly:%d %b} at the bid{passed_note}, buy {hedge:%d %b} at the same strikes at the ask "
+        f"(CE {chosen['long_ce'][1]:,.2f}, PE {chosen['long_pe'][1]:,.2f}); "
         f"net debit Rs {debit:,.0f}; {LOTS_PER_LEG} lots a leg; "
-        f"take-profit Rs {TAKE_PROFIT:,.0f}"
+        f"take-profit Rs {TAKE_PROFIT:,.0f}; weeklies roll {roll_moment(weekly):%d %b %H:%M}"
     ))
     ctx.wake_at(now_utc + RECHECK)

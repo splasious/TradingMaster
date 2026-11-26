@@ -1109,11 +1109,45 @@ async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
+async def test_conti_calendar_400_moves_onto_the_weekly_hedge_keeping_its_position(db_engine, db_session):
+    """26 Nov: Conti Calendar 400 15 MIN version 9 -- the hedge the weekly two weeks out, the roll the day before
+    expiry, the chart-peak shift. The open position is kept as it is: the strategy closes it at 09:30 itself."""
+    migration = _load("d2b4f6a8c0e5_conti_calendar_400_weekly_hedge")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c8e0a2b4d6f7"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert 'HEDGE_RULE = "the weekly two weeks out, same strike"' in code and "HEDGE_DAYS = (11, 17)" in code
+    assert migration.FROM_MD5S == {_load("c6e8a0b2d4f1_conti_calendar_400_shift_trades").TO_MD5}  # moves on from version 8
+    v8 = "# Conti Calendar 400 15 MIN, version 8: the monthly hedge\n"
+    migration.FROM_MD5S = {_md5_text(v8)}
+    running = await _deployment(db_session, "c400v9_a@tradingmaster.internal", v8)
+    (await db_session.get(Strategy, running.strategy_id)).name = "Conti Calendar 400 15 MIN"
+    edited = await _deployment(db_session, "c400v9_b@tradingmaster.internal", "# Conti Calendar 400 15 MIN, edited by hand\n")
+    state = {"position": {"strike_ce": 26350, "strike_pe": 25700, "legs": {}, "weekly_expiry": "2026-12-01",
+                          "monthly_expiry": "2026-12-29", "monthly_rule": "ask 2.5-3x the weekly's bid"}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
 async def test_conti_calendar_400_moves_onto_shift_trades_keeping_its_shifted_position(db_engine, db_session):
     """20 Nov: Conti Calendar 400 15 MIN version 8 -- each strike shift a closed trade of its own."""
     migration = _load("c6e8a0b2d4f1_conti_calendar_400_shift_trades")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "b4d6f8a0c2e9"
-    assert 'SHIFT_EXIT = "strike_shift"' in migration.BUILT_IN.read_text(encoding="utf-8")
+    assert _load("d2b4f6a8c0e5_conti_calendar_400_weekly_hedge").FROM_MD5S == {migration.TO_MD5}  # version 9 moves on from it
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
+    assert migration.down_revision == "b4d6f8a0c2e9"
     v7 = "# Conti Calendar 400 15 MIN, version 7: the target restarting\n"
     migration.FROM_MD5S = {_md5_text(v7)}
     running = await _deployment(db_session, "c400v8_a@tradingmaster.internal", v7)
@@ -1195,8 +1229,7 @@ async def test_conti_calendar_400_moves_onto_the_monthly_cover_ratio(db_engine, 
     migration = _load("d6f8a0c2e4b1_conti_calendar_400_monthly_cover_ratio")
     assert _load("a2c4e6f8b0d7_conti_calendar_400_side_shift").FROM_MD5S == {migration.TO_MD5}  # version 6 moves on from it
     migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c4e6a8b0d2f9"
-    assert "MONTHLY_RATIO = (2.5, 3.0)" in migration.BUILT_IN.read_text(encoding="utf-8")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c4e6a8b0d2f9"  # (version 9 dropped its ratio)
     v4 = "# Conti Calendar 400 15 MIN, version 4: same-strike monthlies\n"
     migration.FROM_MD5S = {_md5_text(v4)}
     running = await _deployment(db_session, "c400v5_a@tradingmaster.internal", v4)

@@ -8,7 +8,11 @@ when the nearest has no such strike on a side), 20 lots a leg at bid / ask (16 b
 which also shifts the side NIFTY moves toward: 150 points in loss, 200 in profit) -- held overnight, the sold weeklies rolled at 15:00 on their expiry
 day (all four reopened on next month's monthly in the month's last week),
 closed at Rs 14,000 after charges, every trade keeping the most profit and
-loss it reached."""
+loss it reached. Since version 9 (26 Nov) the bought hedge is the weekly two
+weeks after the sold one at the same strike (a monthly before), the sold
+weeklies roll at 15:00 on the trading day before their expiry -- every
+second week all four close and reopen ("hedge_roll") -- and a side also
+shifts when NIFTY reaches its peak of the profit chart."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -17,6 +21,7 @@ import pytest
 from sqlalchemy import select
 
 import app.services.strategy.native_strategies.nifty_conti_calendar_400 as c400
+from app.models.instrument import Instrument
 from app.models.paper_trading import PaperNativeTrade
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.trade_alerts import entry_message, exit_message
@@ -32,7 +37,7 @@ def premium(spot: float, strike: float, option_type: str, weeks: float) -> float
 
 
 CE, PE = 23750.0, 23200.0  # NIFTY 23,460's strikes in this market
-MCE, MPE = 23550.0, 23400.0  # version 5: the 23 Nov monthlies covering them from 4 Nov -- asks 2.93x and 2.80x the weekly bids
+D1, D8 = date(2026, 12, 1), date(2026, 12, 8)  # version 9: weeklies after November's -- hedges two weeks out
 
 
 class Market400(Market):
@@ -40,7 +45,22 @@ class Market400(Market):
     option's time value falls 0.40 a point from 220 at the money (to 5 at
     least), times the square root of its weeks to expiry, plus what's in the
     money. NIFTY 23,460: the 23,750 CE's weekly bid 103.5 (the 23,800's
-    83.5), the 23,200 PE's 115.5 (the 23,150's 95.5)."""
+    83.5), the 23,200 PE's 115.5 (the 23,150's 95.5). Its weeklies run on
+    to 1 and 8 Dec (version 9: the hedges two weeks out)."""
+
+    async def build(self, monkeypatch) -> "Market400":
+        await super().build(monkeypatch)
+        extra = [
+            Instrument(exchange="NFO", symbol=f"{sym}{k}{t}", name="opt", instrument_type="option", data_source="zerodha_kite",
+                       external_ref=f"{sym}{k}{t}", expiry=e, strike=float(k), option_type=t, lot_size=65,
+                       underlying_instrument_id=self.nifty.id)
+            for e, sym in ((D1, "NIFTY26D01"), (D8, "NIFTY26D08")) for k in range(23000, 24001, 50) for t in ("CE", "PE")
+        ]
+        self.db.add_all(extra)
+        await self.db.commit()
+        self.options += extra
+        self.weeklies = [W1, W2, W3, D1, D8]
+        return self
 
     def prices(self, now: datetime, spot: float) -> None:
         tick_engine.set_real_price(self.nifty.id, spot, source="test")
@@ -111,45 +131,69 @@ async def test_each_side_takes_the_furthest_otm_strike_whose_weekly_bid_is_still
 
 
 async def test_with_no_rs_100_strike_on_the_nearest_weekly_it_sells_the_next_expiry(market):
-    """16 Nov (version 4): the day before the 17 Nov expiry no OTM call bid
-    Rs 100 -- both sides then sold on the expiry after it (23 Nov, November's
-    monthly) at its Rs 100 strikes, December's monthly bought."""
-    market.premium = {(W2, k, "CE"): 60.0 for k in range(23000, 24001, 50)}  # the 17 Nov calls, a day from expiry
-    ctx = await market.check(at(16, 9, 30))
+    """16 Nov (version 4): 13 Nov, the 17 Nov calls with no OTM bid of Rs 100
+    -- both sides then sold on the expiry after it (23 Nov) at its Rs 100
+    strikes, the hedges two weeks after that (8 Dec, version 9) at the same strikes."""
+    market.premium = {(W2, k, "CE"): 60.0 for k in range(23000, 24001, 50)}  # the 17 Nov calls cheap
+    ctx = await market.check(at(13, 9, 30))
     p = ctx.state["position"]
-    assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat())
-    assert (p["strike_ce"], p["strike_pe"]) == (CE, PE)  # the 23 Nov's Rs 100 strikes
-    assert _legs(p) == {  # December's covers 2.98x and 2.92x the weekly bids (version 5)
-        "short_ce": ("sell", "CE", CE, W3.isoformat()), "long_ce": ("buy", "CE", 23700.0, DEC.isoformat()),
-        "short_pe": ("sell", "PE", PE, W3.isoformat()), "long_pe": ("buy", "PE", 23250.0, DEC.isoformat()),
+    assert (p["weekly_expiry"], p["hedge_expiry"]) == (W3.isoformat(), D8.isoformat())
+    assert (p["strike_ce"], p["strike_pe"]) == (CE, 23150.0)  # the 23 Nov's Rs 100 strikes, 10 days out
+    assert _legs(p) == {
+        "short_ce": ("sell", "CE", CE, W3.isoformat()), "long_ce": ("buy", "CE", CE, D8.isoformat()),
+        "short_pe": ("sell", "PE", 23150.0, W3.isoformat()), "long_pe": ("buy", "PE", 23150.0, D8.isoformat()),
     }
-    assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(103.5) and ctx._last_signal == "CALENDAR"
+    assert ctx._last_signal == "CALENDAR"
     assert ("sell 23 Nov at the bid (the 17 Nov weekly had no OTM CE with a bid of Rs 100 or more: the next expiry instead), "
-            "buy 29 Dec 23,700 CE (ask") in ctx._last_reason
+            "buy 08 Dec at the same strikes at the ask") in ctx._last_reason
     market.deployment.state = None
 
     market.premium = {(W2, k, "PE"): 60.0 for k in range(23000, 24001, 50)}  # the puts short instead: the same
-    puts = await market.check(at(16, 9, 31))
+    puts = await market.check(at(13, 9, 31))
     assert puts.state["position"]["weekly_expiry"] == W3.isoformat() and "no OTM PE with a bid" in puts._last_reason
     market.deployment.state = None
 
     market.premium = {}
-    near = await market.check(at(16, 9, 32))  # Rs 100 on the nearest: it is sold
-    assert (near.state["position"]["weekly_expiry"], near.state["position"]["monthly_expiry"]) == (W2.isoformat(), W3.isoformat())
+    near = await market.check(at(13, 9, 32))  # Rs 100 on the nearest: it is sold, the hedge 1 Dec
+    assert (near.state["position"]["weekly_expiry"], near.state["position"]["hedge_expiry"]) == (W2.isoformat(), D1.isoformat())
     assert "the next expiry instead" not in near._last_reason
     market.deployment.state = None
 
     market.premium = {(W2, k, "CE"): 60.0 for k in range(23000, 24001, 50)}
     market.no_book = {(W3, 23700.0, "CE")}  # the next has a strike on the way with no book: no entry this check
-    waiting = await market.check(at(16, 9, 33))
+    waiting = await market.check(at(13, 9, 33))
     assert waiting.state.get("position") is None and waiting._last_reason == (
         "no OTM 17 Nov CE with a bid of Rs 100 or more; nor the next: no bid/ask for the 23 Nov 23,700 CE yet")
 
 
 async def test_a_strike_with_no_book_on_the_nearest_weekly_doesnt_move_it_on(market):
     market.no_book = {(W2, 23300.0, "PE")}
-    waiting = await market.check(at(16, 9, 30))
+    waiting = await market.check(at(13, 9, 30))
     assert waiting.state.get("position") is None and waiting._last_reason == "no bid/ask for the 17 Nov 23,300 PE yet"
+
+
+def test_the_hedge_is_the_listed_expiry_two_weeks_after_the_sold_one_and_the_roll_the_trading_day_before_expiry():
+    """26 Nov (version 9)."""
+    tuesdays = [date(2026, 12, 1), date(2026, 12, 8), date(2026, 12, 15), date(2026, 12, 22), date(2026, 12, 29)]
+    assert c400.hedge_after(tuesdays, date(2026, 12, 1)) == date(2026, 12, 15) and c400.HEDGE_DAYS == (11, 17)
+    assert c400.hedge_after([W1, W2, W3, D1], W1) == W3  # 9 Nov (a Monday, 10 Nov a holiday) -> 23 Nov
+    assert c400.hedge_after([W1, W2, W3, D1], W2) == D1  # 17 Nov -> 1 Dec
+    assert c400.hedge_after([W2, W3, D8], W2) is None  # 1 Dec not listed: nothing two weeks on
+    assert c400.hedge_after([date(2026, 12, 1), date(2026, 12, 14)], date(2026, 12, 1)) == date(2026, 12, 14)  # a holiday's Monday
+    assert (c400.roll_day(W1), c400.roll_day(W2), c400.roll_day(W3)) == (date(2026, 11, 6), date(2026, 11, 16), date(2026, 11, 20))
+    assert c400.roll_day(date(2026, 12, 1)) == date(2026, 11, 30) and c400.roll_moment(W2) == at(16, 15, 0)
+
+
+async def test_with_no_expiry_listed_two_weeks_out_there_is_no_entry(market):
+    market.weeklies = [W1, W2]
+    ctx = await market.check(at(4, 9, 30))
+    assert ctx.state.get("position") is None and ctx._last_reason == "no NIFTY expiry listed two weeks after 09 Nov yet to buy"
+
+
+async def test_on_a_roll_day_a_new_position_sells_the_weekly_after(market):
+    """6 Nov, the 9 Nov weeklies' roll day: the 17 Nov sold, the 1 Dec bought."""
+    p = (await market.check(at(6, 10, 0))).state["position"]
+    assert (p["weekly_expiry"], p["hedge_expiry"]) == (W2.isoformat(), D1.isoformat())
 
 
 async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
@@ -158,13 +202,16 @@ async def test_it_opens_a_double_calendar_at_0930_at_bid_and_ask(market):
     ctx = await market.check(at(4, 9, 30))
     p = ctx.state["position"]
     assert p["regime"] == "double calendar" and (p["strike_ce"], p["strike_pe"]) == (CE, PE)
-    assert _legs(p) == {
-        "short_ce": ("sell", "CE", CE, W1.isoformat()), "long_ce": ("buy", "CE", MCE, W3.isoformat()),
-        "short_pe": ("sell", "PE", PE, W1.isoformat()), "long_pe": ("buy", "PE", MPE, W3.isoformat()),
+    assert _legs(p) == {  # version 9: the hedge the weekly two weeks out, at the same strike
+        "short_ce": ("sell", "CE", CE, W1.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W1.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
     }
-    monthly = premium(23460.0, MCE, "CE", (W3 - date(2026, 11, 4)).days / 7)
+    hedge = premium(23460.0, CE, "CE", (W3 - date(2026, 11, 4)).days / 7)
     assert p["legs"]["short_ce"]["entry_price"] == pytest.approx(premium(23460.0, CE, "CE", 1) - SPREAD)  # sold at the bid
-    assert p["legs"]["long_ce"]["entry_price"] == pytest.approx(monthly + SPREAD)  # bought at the ask
+    assert p["legs"]["long_ce"]["entry_price"] == pytest.approx(hedge + SPREAD)  # bought at the ask
+    assert (p["weekly_expiry"], p["hedge_expiry"], p["hedge_rule"]) == (W1.isoformat(), W3.isoformat(), c400.HEDGE_RULE)
+    assert "monthly_expiry" not in p and "buy 23 Nov at the same strikes at the ask" in ctx._last_reason
+    assert "weeklies roll 06 Nov 15:00" in ctx._last_reason
     assert all(leg["quantity"] == 20 * 65 for leg in p["legs"].values())  # version 6: 20 lots a leg
     assert p["take_profit"] == 14_000.0 and p["entry_charges"] > 0 and ctx._last_signal == "CALENDAR"
     assert ctx._wake_at == at(4, 9, 30) + timedelta(seconds=1)
@@ -203,18 +250,20 @@ async def test_it_takes_the_profit_at_14000_then_pauses_5_minutes_and_keeps_the_
     assert again.state["position"] is not None and "max_profit_reached" not in again.state["position"]
 
 
-async def test_the_sold_weeklies_roll_at_1500_on_their_expiry_at_the_same_strikes(market):
+async def test_the_sold_weeklies_roll_at_1500_the_trading_day_before_their_expiry_at_the_same_strikes(market):
+    """Version 9: 6 Nov 15:00, the trading day before the 9 Nov expiry; the 23 Nov hedges stay."""
     await market.check(at(4, 9, 30))
-    before = await market.check(at(9, 14, 59, 59))
-    assert before.state["position"]["weekly_expiry"] == W1.isoformat()
-    rolled = await market.check(at(9, 15, 0), spot=23700.0)  # NIFTY has moved: the strikes don't
+    before = await market.check(at(6, 14, 59, 59))
+    assert before.state["position"]["weekly_expiry"] == W1.isoformat() and "weeklies roll 06 Nov 15:00" in before._last_reason
+    rolled = await market.check(at(6, 15, 0), spot=23700.0)  # NIFTY has moved: the strikes don't
     p = rolled.state["position"]
-    assert rolled._last_signal == "ROLL" and "weekly roll 09 Nov -> 17 Nov at the same strikes" in rolled._last_reason
-    assert _legs(p) == {  # the monthly covers stay where they were bought
-        "short_ce": ("sell", "CE", CE, W2.isoformat()), "long_ce": ("buy", "CE", MCE, W3.isoformat()),
-        "short_pe": ("sell", "PE", PE, W2.isoformat()), "long_pe": ("buy", "PE", MPE, W3.isoformat()),
+    assert rolled._last_signal == "ROLL" and "weekly roll 09 Nov -> 17 Nov at the same strikes, the 23 Nov hedges kept" in rolled._last_reason
+    assert "next roll 16 Nov 15:00" in rolled._last_reason
+    assert _legs(p) == {  # the hedges stay where they were bought
+        "short_ce": ("sell", "CE", CE, W2.isoformat()), "long_ce": ("buy", "CE", CE, W3.isoformat()),
+        "short_pe": ("sell", "PE", PE, W2.isoformat()), "long_pe": ("buy", "PE", PE, W3.isoformat()),
     }
-    assert p["rolls"] == 1 and p["weekly_expiry"] == W2.isoformat() and p["monthly_expiry"] == W3.isoformat()
+    assert p["rolls"] == 1 and p["weekly_expiry"] == W2.isoformat() and p["hedge_expiry"] == W3.isoformat()
     assert len(p["closed_legs"]) == 2 and {leg["side"] for leg in p["closed_legs"]} == {"short"}
     assert p["booked"]["charges"] > 0 and p["booked_net"] == pytest.approx(p["booked"]["gross"] - p["booked"]["charges"], abs=0.01)
     assert [leg["side"] for leg in rolled.opened_legs] == ["sell", "sell"]
@@ -225,32 +274,37 @@ async def test_the_sold_weeklies_roll_at_1500_on_their_expiry_at_the_same_strike
 
 async def test_a_roll_missed_while_the_app_was_down_happens_at_the_first_check_after(market):
     await market.check(at(4, 9, 30))
-    late = await market.check(at(11, 9, 30))  # 10 Nov is an NSE holiday (Diwali Balipratipada)
+    late = await market.check(at(11, 9, 30))  # nothing ran on 6 Nov afternoon or 9 Nov
     assert late._last_signal == "ROLL" and late.state["position"]["weekly_expiry"] == W2.isoformat()
 
 
-async def test_in_the_months_last_week_all_four_close_and_reopen_on_next_months_monthly(market):
+async def test_every_second_week_all_four_close_and_reopen_two_weeks_out(market):
+    """Version 9: at the 17 Nov weeklies' roll (16 Nov 15:00) the next sold weekly would be the 23 Nov hedges' own:
+    all four close ("hedge_roll") and a fresh double calendar opens at once -- sell 23 Nov, buy 8 Dec."""
     await market.check(at(4, 9, 30))
-    await market.check(at(9, 15, 0))  # the first roll, to 17 Nov
-    reopened = await market.check(at(17, 15, 0), spot=23560.0)  # next week's is November's monthly itself
+    await market.check(at(6, 15, 0))  # the first roll, to 17 Nov
+    reopened = await market.check(at(16, 15, 0), spot=23560.0)
     [trade] = await market.trades()
-    assert trade.exit_reason == "monthly_roll" and len(trade.legs) == 6  # the two rolled weeklies and the four closed now
+    assert trade.exit_reason == "hedge_roll" and len(trade.legs) == 6  # the two rolled weeklies and the four closed now
     assert trade.extremes is not None
     p = reopened.state["position"]
-    assert reopened._last_signal == "CALENDAR" and reopened._last_reason.startswith("monthly roll: all four closed")
+    assert reopened._last_signal == "CALENDAR"
+    assert reopened._last_reason.startswith("hedge roll: the next weekly, 23 Nov, is the bought hedges' own expiry -- all four closed")
     assert (p["strike_ce"], p["strike_pe"]) == (23850.0, 23300.0)  # NIFTY 23,560's Rs 100 strikes
-    assert (p["weekly_expiry"], p["monthly_expiry"]) == (W3.isoformat(), DEC.isoformat()) and p["rolls"] == 0
+    assert (p["weekly_expiry"], p["hedge_expiry"]) == (W3.isoformat(), D8.isoformat()) and p["rolls"] == 0
+    assert p["legs"]["long_ce"]["strike"] == 23850.0 and p["legs"]["long_pe"]["strike"] == 23300.0
     assert "reopen_due" not in reopened.state and "paused_until" not in reopened.state
 
 
 async def test_a_reopen_that_cant_be_had_is_tried_again_whatever_the_time(market):
     await market.check(at(4, 9, 30))
-    await market.check(at(9, 15, 0))
-    market.no_book = {(DEC, 23850.0, "CE")}
-    waiting = await market.check(at(17, 15, 0), spot=23560.0)
+    await market.check(at(6, 15, 0))
+    market.no_book = {(D8, 23850.0, "CE")}
+    waiting = await market.check(at(16, 15, 0), spot=23560.0)
     assert waiting.state.get("position") is None and waiting.state.get("reopen_due") and "no bid/ask" in waiting._last_reason
+    assert waiting._last_reason == "no bid/ask for the 08 Dec 23,850 CE yet"
     market.no_book = set()
-    later = await market.check(at(17, 15, 10), spot=23560.0)  # past 15:00 and inside the pause: still reopened
+    later = await market.check(at(16, 15, 10), spot=23560.0)  # past 15:00 and inside the pause: still reopened
     assert later.state["position"] is not None and "reopen_due" not in later.state
 
 
@@ -271,9 +325,10 @@ async def test_the_telegram_alerts_show_the_setup_the_roll_and_the_extremes(mark
     assert title == "📅 Conti Calendar 400 15 MIN: trade taken"
     assert lines[0] == "Double Calendar" and "23,750 CE / 23,200 PE" in lines and "20 lots a leg" in lines
     assert "Target +14,000 after costs" in lines and "Held overnight; weeklies" in lines
+    assert " roll 15:00 a day before expiry" in lines
     assert max(len(line) for line in lines) <= WIDTH
 
-    rolled = await market.check(at(9, 15, 0))
+    rolled = await market.check(at(6, 15, 0))
     title, body = entry_message("Conti Calendar 400 15 MIN", rolled.opened_legs, rolled.state["position"], rolled.now)
     lines = body.split("\n")
     assert title == "📅 Conti Calendar 400 15 MIN: weekly rolled" and "Weeklies rolled to 17 Nov" in lines
@@ -302,25 +357,26 @@ async def test_the_trades_endpoint_shows_the_extremes(market):
 
 async def test_the_card_shows_the_payoff_at_the_weekly_roll_with_what_rolls_booked(market):
     """11 Nov: the payoff panel (services/options/calendar_payoff.py) for the
-    double calendar is at 15:00 on the sold weeklies' expiry day, every point
-    carrying what earlier rolls booked."""
+    double calendar is at the sold weeklies' roll -- 15:00 on the trading day
+    before their expiry since version 9 -- every point carrying what earlier
+    rolls booked."""
     from app.api.v1.endpoints import paper_native_trading as ep
 
     await market.check(at(4, 9, 30))
     market.prices(at(4, 11, 0), 23460.0)
     first = (await ep._build_position_out(market.db, market.deployment.state, at(4, 11, 0).astimezone(timezone.utc))).payoff
-    assert first is not None and first.horizon == at(9, 15, 0) and first.booked == 0.0 and first.target == 14_000.0
+    assert first is not None and first.horizon == at(6, 15, 0) and first.booked == 0.0 and first.target == 14_000.0
     assert first.points[0].spot == 22460.0 and first.points[-1].spot == 24460.0
     inside = max(p.pnl for p in first.points if PE <= p.spot <= CE)
     outside = max(p.pnl for p in first.points if p.spot < 22800.0 or p.spot > 24200.0)
     assert inside > outside  # the tent: best between the strikes
 
-    await market.check(at(9, 15, 0))  # the weeklies roll
+    await market.check(at(6, 15, 0))  # the weeklies roll
     state = market.deployment.state
     booked = state["position"]["booked_net"]
     market.prices(at(11, 10, 0), 23460.0)
     after = (await ep._build_position_out(market.db, state, at(11, 10, 0).astimezone(timezone.utc))).payoff
-    assert after.horizon == at(17, 15, 0) and after.booked == pytest.approx(booked)
+    assert after.horizon == at(16, 15, 0) and after.booked == pytest.approx(booked)
     without = dict(state, position={**state["position"], "booked": {"gross": 0.0, "charges": 0.0}})
     bare = (await ep._build_position_out(market.db, without, at(11, 10, 0).astimezone(timezone.utc))).payoff
     assert [p.pnl for p in after.points] == pytest.approx([p.pnl + booked for p in bare.points], abs=0.02)
@@ -352,49 +408,73 @@ async def test_the_card_values_a_calendars_legs_at_bid_and_ask(market):
     assert all(leg.bid is None and leg.last_price is None for leg in shut.legs)
 
 
-async def test_each_monthly_cover_is_the_strike_whose_ask_is_nearest_3x_the_weekly_bid_within_2_5_to_3(market):
-    """19 Nov (version 5): any strike, its ask 2.5-3x the sold weekly's bid, nearest 3x."""
-    ctx = await market.check(at(4, 9, 30))
-    p = ctx.state["position"]
-    assert c400.MONTHLY_RATIO == (2.5, 3.0) and p["monthly_rule"] == c400.MONTHLY_RULE
-    for side, weekly_leg, monthly_leg in (("ce", "short_ce", "long_ce"), ("pe", "short_pe", "long_pe")):
-        ratio = p["legs"][monthly_leg]["entry_price"] / p["legs"][weekly_leg]["entry_price"]
-        assert 2.5 <= ratio <= 3.0 and p[f"monthly_ratio_{side}"] == pytest.approx(ratio, abs=0.01)
-        nearer = p["legs"][monthly_leg]["strike"] + (-50 if side == "ce" else 50)  # one strike nearer the money: over 3x
-        nearer_ask = premium(23460.0, nearer, side.upper(), (W3 - date(2026, 11, 4)).days / 7) + SPREAD
-        assert nearer_ask / p["legs"][weekly_leg]["entry_price"] > 3.0
-    assert (p["monthly_strike_ce"], p["monthly_strike_pe"]) == (MCE, MPE)
-    assert "23,550 CE (ask" in ctx._last_reason and "x) and 23,400 PE" in ctx._last_reason
-    market.deployment.state = None
-
-    market.premium = {(W3, float(k), "CE"): 260.0 for k in range(23000, 24001, 50)}  # every monthly call 2.51x: one in range
-    flat = await market.check(at(4, 9, 31))
-    assert flat.state["position"]["legs"]["long_ce"]["strike"] == CE  # the walk stops at the first in range
-    market.deployment.state = None
-    market.premium = {(W3, float(k), "CE"): 500.0 for k in range(23000, 24001, 50)}  # every monthly call over 3x: none
-    none = await market.check(at(4, 9, 32))
-    assert none.state.get("position") is None and "with an ask 2.5-3x the 09 Nov 23,750 CE's bid of 103.50" in none._last_reason
-
-
-async def test_a_same_strike_position_from_before_is_closed_and_reopened_by_the_new_rule(market):
-    """19 Nov: the open version 4 position -- same-strike monthlies -- closes at the first check in the entry window."""
+async def test_a_position_with_a_monthly_hedge_from_before_is_closed_and_reopened_by_the_new_rule(market):
+    """26 Nov (version 9): the open version 8 position -- monthly hedges -- closes at the first check in the entry window."""
     old = (await market.check(at(4, 9, 30))).state["position"]
-    for key in ("monthly_rule", "monthly_strike_ce", "monthly_strike_pe", "monthly_ratio_ce", "monthly_ratio_pe"):
-        old.pop(key)
+    old.pop("hedge_rule")
+    old["monthly_expiry"] = old.pop("hedge_expiry")
+    old["monthly_rule"] = "ask 2.5-3x the weekly's bid"
     market.deployment.state = {**market.deployment.state, "position": old}
     night = await market.check(at(4, 16, 0))  # outside the entry window: left as it is
-    assert night.state["position"].get("monthly_rule") is None and await market.trades() == []
+    assert night._last_action == "hold" and night.state["position"].get("hedge_rule") is None and await market.trades() == []
+    early = await market.check(at(5, 9, 20))  # before 09:30: still held, read off its monthly's expiry
+    assert early._last_action == "hold" and "(sold 09 Nov, bought 23 Nov)" in early._last_reason and await market.trades() == []
     ctx = await market.check(at(5, 9, 45))
     [trade] = await market.trades()
     p = ctx.state["position"]
-    assert trade.exit_reason == "rule_change" and p["monthly_rule"] == c400.MONTHLY_RULE
-    assert ctx._last_reason.startswith("the monthly cover rule changed (version 5)") and "reopen_due" not in ctx.state
+    assert trade.exit_reason == "rule_change" and len(trade.legs) == 4 and p["hedge_rule"] == c400.HEDGE_RULE
+    assert ctx._last_signal == "CALENDAR" and ctx._last_reason.startswith("the hedge rule changed (version 9")
+    assert (p["weekly_expiry"], p["hedge_expiry"]) == (W1.isoformat(), W3.isoformat()) and "reopen_due" not in ctx.state
+
+
+async def test_each_sides_chart_peak_is_near_its_sold_strike_worked_out_the_cards_way(market):
+    """Version 9: worked out at every check in the entry window -- each side's own legs' profit chart at the roll, its highest point."""
+    from app.services.options.calendar_payoff import position_payoff
+
+    await market.check(at(4, 9, 30))
+    held = await market.check(at(4, 10, 0))
+    p = held.state["position"]
+    assert abs(p["peak_ce"] - CE) <= 50 and abs(p["peak_pe"] - PE) <= 50
+    assert f"or at its profit chart's peak (call side {p['peak_ce']:,.0f}, put side {p['peak_pe']:,.0f})" in held._last_reason
+    for option_type, names in c400.SIDE_LEGS.items():
+        side = {**p, "legs": {n: p["legs"][n] for n in names}}
+        instruments = {n: await market.db.get(Instrument, uuid.UUID(p["legs"][n]["instrument_id"])) for n in names}
+        chart = position_payoff(side, instruments, {n: 1.0 for n in names}, 23460.0, at(4, 10, 0).astimezone(timezone.utc))
+        assert max(chart.points, key=lambda pt: pt[1])[0] == p[f"peak_{option_type.lower()}"]  # the card's chart of that side's legs
+    late = await market.check(at(4, 15, 5))  # outside 09:30-15:00: not worked out, not shown
+    assert late.state["position"].get("peak_ce") is None and "profit chart's peak" not in late._last_reason
+
+
+async def test_a_side_is_shifted_when_nifty_reaches_its_peak_of_the_profit_chart(market, monkeypatch):
+    """Version 9: NIFTY at or over the call side's peak shifts the call side, at or under the put side's the put side --
+    to NIFTY's Rs 100 strike now, its hedge at the same strike, the same expiries."""
+    monkeypatch.setattr(c400, "chart_peaks", lambda position, quotes, spot, now: {"CE": 23600.0, "PE": 23350.0})
+    opened = (await market.check(at(4, 9, 30))).state["position"]
+    put_side = {n: opened["legs"][n] for n in ("short_pe", "long_pe")}
+    short = await market.check(at(4, 10, 0), spot=23590.0)  # 130 up, under the peak: held
+    assert short._last_action == "hold" and "or at its profit chart's peak (call side 23,600, put side 23,350)" in short._last_reason
+    shifted = await market.check(at(4, 10, 1), spot=23600.0)
+    p = shifted.state["position"]
+    assert shifted._last_signal == "SHIFT" and "NIFTY 23,600.0 has reached the call side's profit chart peak, 23,600" in shifted._last_reason
+    assert p["strike_ce"] == 23850.0 and p["last_shift_by"] == "chart peak" and p["shift_ref_ce"] == 23600.0  # NIFTY 23,600's Rs 100 call
+    assert p["legs"]["short_ce"]["strike"] == p["legs"]["long_ce"]["strike"] == 23850.0
+    assert (p["legs"]["short_ce"]["expiry"], p["legs"]["long_ce"]["expiry"]) == (W1.isoformat(), W3.isoformat())
+    assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
+    [trade] = await market.trades()
+    assert trade.exit_reason == "strike_shift" and [leg["side"] for leg in trade.legs] == ["short", "long"]
+    market.deployment.state = None
+
+    await market.check(at(4, 11, 0))
+    down = await market.check(at(4, 11, 1), spot=23350.0)  # at the put side's peak, 110 down
+    q = down.state["position"]
+    assert down._last_signal == "SHIFT" and "the put side's profit chart peak, 23,350" in down._last_reason
+    assert q["strike_pe"] < PE and q["legs"]["long_pe"]["strike"] == q["strike_pe"] and q["strike_ce"] == CE
 
 
 async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(market):
     """20 Nov (version 6): the side NIFTY moves toward, 150 points past where it was opened, in loss: that side's
     weekly and monthly closed at bid / ask, booked, and opened again at NIFTY's Rs 100 strike now with its 2.5-3x
-    monthly, the same expiries; the other side kept. In profit it takes 200 points."""
+    monthly (version 9: its hedge at the same strike), the same expiries; the other side kept. In profit it takes 200 points."""
     assert (c400.LOTS_PER_LEG, c400.SHIFT_IN_LOSS, c400.SHIFT_IN_PROFIT) == (20, 150.0, 200.0)
     opened = (await market.check(at(4, 9, 30))).state["position"]
     put_side = {n: opened["legs"][n] for n in ("short_pe", "long_pe")}
@@ -405,8 +485,8 @@ async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(ma
     p = shifted.state["position"]
     assert shifted._last_signal == "SHIFT" and shifted._last_reason.startswith("strike shift, in loss")
     assert p["strike_ce"] > CE and p["legs"]["short_ce"]["strike"] == p["strike_ce"] and p["shifts"] == 1
-    assert p["legs"]["short_ce"]["expiry"] == W1.isoformat() and p["legs"]["long_ce"]["expiry"] == opened["monthly_expiry"]
-    assert 2.5 <= p["monthly_ratio_ce"] <= 3.0 and p["legs"]["long_ce"]["strike"] == p["monthly_strike_ce"]
+    assert p["legs"]["short_ce"]["expiry"] == W1.isoformat() and p["legs"]["long_ce"]["expiry"] == opened["hedge_expiry"]
+    assert p["legs"]["long_ce"]["strike"] == p["strike_ce"] and p["last_shift_by"] == "points"
     assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
     assert p["shift_ref_ce"] == 23615.0 and p["closed_legs"] == [] and p["booked"] == {"gross": 0.0, "charges": 0.0}
     [shift] = await market.trades()  # version 8: the closed legs are a trade of their own; the position carries on

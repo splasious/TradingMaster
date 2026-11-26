@@ -55,6 +55,8 @@ EXIT_REASONS = {
     "time_cutoff_3pm": "15:00 close",
     "time_cutoff_329pm": "15:29 close",
     "monthly_roll": "monthly roll",
+    "hedge_roll": "hedge roll",
+    "rule_change": "rule change",
     "expiry_roll": "expiry roll, in loss",
     "weekly_expiry_3pm": "weekly expiry, 15:00",
 }
@@ -146,7 +148,7 @@ def _double_calendar_setup(legs: list[dict], position: dict) -> list[str]:
     if isinstance(target, (int, float)):
         lines.append(f"Target +{target:,.0f} after costs")
     lines.append("Held overnight; weeklies")
-    lines.append(" roll 15:00 on expiry day")
+    lines.append(" roll 15:00 a day before expiry")  # version 9 (26 Nov)
     return lines
 
 

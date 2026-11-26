@@ -17,11 +17,14 @@ largely cancel over days).
 Conti Reverse Calendar 15 MIN's reverse calendar (11 Nov) is shown as Conti
 Calendar's, at today's EXIT_TIME. Also Conti Calendar 400 15 MIN's double
 calendar (11 Nov): held overnight,
-its horizon is ROLL_TIME (15:00) on the sold weeklies' expiry day, when they
-roll, and every point carries what earlier rolls have booked (`booked`).
+its horizon is ROLL_TIME (15:00) on the trading day before the sold
+weeklies' expiry (version 9, 26 Nov; on the expiry day itself before), when
+they roll, and every point carries what earlier rolls have booked (`booked`).
 
 Display only -- the strategies' own take-profit reads the live bid / ask
-(native_strategies/nifty_conti_calendar.py, nifty_conti_calendar_400.py).
+(native_strategies/nifty_conti_calendar.py, nifty_conti_calendar_400.py) --
+except that Conti Calendar 400's version 9 shifts a side when NIFTY reaches
+that side's peak of this chart (calendar_payoff, from the live bid / ask).
 """
 
 import math
@@ -32,7 +35,7 @@ from typing import Callable
 from app.core.time import as_aware_utc
 from app.services.broker.zerodha_broker import IST
 from app.services.strategy.native_strategies.nifty_conti_calendar import DAILY_CLOSE
-from app.services.strategy.native_strategies.nifty_conti_calendar_400 import REGIME as DOUBLE, ROLL_TIME, booked_net
+from app.services.strategy.native_strategies.nifty_conti_calendar_400 import REGIME as DOUBLE, booked_net, roll_moment
 from app.services.strategy.native_strategies.nifty_conti_reverse_calendar import REGIME as REVERSE
 
 EXPIRY_TIME = time(15, 30)  # IST: when an NSE option expires
@@ -220,8 +223,8 @@ def position_payoff(position: dict, instruments: dict, prices: dict[str, float |
     if regime not in ("calendar", DOUBLE, REVERSE) or spot is None or not isinstance(position.get("legs"), dict):
         return None
     at = as_aware_utc(now)
-    if regime == DOUBLE:  # held overnight: at the sold weeklies' roll
-        horizon = datetime.combine(date.fromisoformat(position["weekly_expiry"]), ROLL_TIME, tzinfo=IST)
+    if regime == DOUBLE:  # held overnight: at the sold weeklies' roll, 15:00 the trading day before their expiry
+        horizon = roll_moment(date.fromisoformat(position["weekly_expiry"]))
     else:
         horizon = datetime.combine(at.astimezone(IST).date(), EXIT_TIME, tzinfo=IST)
     legs = []
