@@ -48,7 +48,9 @@ from sqlalchemy import select
 from app.core.time import as_aware_utc
 from app.db.session import AsyncSessionLocal
 from app.models.backfill_platform import BfOhlcvBar, BfSymbol
+from app.models.paper_trading import PaperNativeDeployment, PaperNativeTrade
 from app.models.pcr import PcrSnapshot, PcrStrikeOi
+from app.models.strategy import Strategy
 from app.services.broker.zerodha_broker import IST
 from app.services.paper_trading.trade_record import order_charges
 
@@ -320,6 +322,60 @@ def report(r: Run, sessions: list[date], units: float) -> None:
         print("  no entry: " + "; ".join(f"{k} {v}" for k, v in sorted(r.waits.items())))
 
 
+async def parity_noise(m: Market, hedge: str) -> None:
+    """How much the gap between the hedge's and the weekly's synthetic (CE - PE at the strike nearest NIFTY)
+    moves from one record to the next. In theory it moves with NIFTY times the carry between the two expiries
+    (about 0.002-0.005 a point of NIFTY): a few hundredths of a point a record."""
+    r = Run(m, False, hedge)
+    moves, opens, theory = [], [], []
+    for d in m.sessions:
+        await m.load_day(d)
+        listed = m.listed(d)
+        weekly = (listed[1] if len(listed) > 1 else None) if listed and listed[0] == d else (listed[0] if listed else None)
+        h = r.hedge_for(weekly) if weekly else None
+        if h is None:
+            continue
+        last = None
+        for t, rec in m.by_day[d]:
+            k = atm_strike(rec.spot)
+            px = [await m.price(d, t, rec, e, k, typ) for e in (weekly, h) for typ in ("CE", "PE")]
+            if None in px:
+                last = None
+                continue
+            gap = (px[2] - px[3]) - (px[0] - px[1])  # the hedge's synthetic over the weekly's, same strike
+            if last is not None and last[0] == k:
+                (opens if t == FIRST_RECORD else moves).append(abs(gap - last[1]))
+                theory.append(abs(rec.spot - last[2]) * 0.065 * (h - weekly).days / 365)
+            last = (k, gap, rec.spot)
+    for name, xs in (("record to record", moves), ("into 09:15", opens), ("from NIFTY's move (theory)", theory)):
+        xs = sorted(xs)
+        if xs:
+            print(f"  {hedge:<14} {name:<28} median {xs[len(xs) // 2]:6.2f} pts, 90% under {xs[int(len(xs) * 0.9)]:6.2f}, "
+                  f"largest {xs[-1]:7.2f} ({len(xs)} pairs)")
+
+
+async def live_cards(db, units_default: float) -> None:
+    """The two strategies' paper trades so far (live bid/ask): counts, exit reasons and points per unit."""
+    for name in ("Synthetic Calendar 15 MIN", "Synthetic Calendar Reverse 15 MIN"):
+        rows = (await db.execute(
+            select(PaperNativeTrade.exit_reason, PaperNativeTrade.pnl, PaperNativeTrade.charges, PaperNativeTrade.legs,
+                   PaperNativeTrade.opened_at, PaperNativeTrade.closed_at)
+            .join(PaperNativeDeployment, PaperNativeDeployment.id == PaperNativeTrade.deployment_id)
+            .join(Strategy, Strategy.id == PaperNativeDeployment.strategy_id)
+            .where(Strategy.name == name).order_by(PaperNativeTrade.closed_at)
+        )).all()
+        if not rows:
+            print(f"  {name}: no paper trades yet")
+            continue
+        nets, reasons = [], Counter()
+        for reason, pnl, chg, legs, opened, closed in rows:
+            units = float((legs or [{}])[0].get("quantity") or units_default)
+            nets.append((pnl - (chg or 0.0)) / units)
+            reasons[reason] += 1
+            print(f"    {name[:-7]}: {ist(opened):%d %b %H:%M} -> {ist(closed):%d %b %H:%M} {reason:<18} {nets[-1]:+7.1f} pts a unit")
+        print(f"  {name}: {len(rows)} trades ({', '.join(f'{k} {v}' for k, v in reasons.items())}), net {sum(nets):+.1f} pts a unit")
+
+
 async def main() -> None:
     today = datetime.now(timezone.utc).astimezone(IST).date()
     print("Rules (points per unit after charges and the spread; no rupees here):")
@@ -350,6 +406,19 @@ async def main() -> None:
                     failed(r.name, exc)
                 print()
         print(f"prices read: {m.source['record']} from records, {m.source['candle']} from candles, {m.source['none']} not found")
+        print()
+        print("Check 1 -- the price noise: the gap between the two synthetics, record to record (points):")
+        for hedge in HEDGES:
+            try:
+                await parity_noise(m, hedge)
+            except Exception as exc:  # noqa: BLE001
+                failed(f"parity noise {hedge}", exc)
+        print()
+        print("Check 2 -- the paper cards' own trades (live bid/ask, checked every second), net of charges:")
+        try:
+            await live_cards(db, units)
+        except Exception as exc:  # noqa: BLE001
+            failed("paper trades", exc)
 
 
 if __name__ == "__main__":
