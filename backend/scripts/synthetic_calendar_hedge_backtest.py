@@ -270,6 +270,15 @@ class Run:
         self.position = {"legs": legs, "weekly": weekly, "hedge": hedge, "opened": datetime.combine(d, t, IST), "checked_on": None}
         return True
 
+    async def update(self, d: date, t: dtime, rec) -> int:
+        """Each leg's price at this record; how many have one."""
+        seen = 0
+        for leg in self.position["legs"].values():
+            p = await self.m.price(d, t, rec, leg["expiry"], leg["strike"], leg["type"])
+            if p:
+                leg["last"], seen = p, seen + 1
+        return seen
+
     async def go(self) -> None:
         for d in self.m.sessions:
             await self.m.load_day(d)
@@ -278,11 +287,7 @@ class Run:
                 if self.position is None and t < ENTRY_TIME:
                     continue
                 if self.position is not None:
-                    seen = 0
-                    for leg in self.position["legs"].values():
-                        p = await self.m.price(d, t, rec, leg["expiry"], leg["strike"], leg["type"])
-                        if p:
-                            leg["last"], seen = p, seen + 1
+                    seen = await self.update(d, t, rec)
                     if seen == 4 and self.net() >= TAKE_PROFIT:
                         self.close("take_profit", d, t, at_target=self.position["checked_on"] == d)
                     elif seen == 4:
@@ -296,6 +301,61 @@ class Run:
                     await self.open_position(d, t, rec)
         if self.position is not None:
             self.open_left = self.net()
+
+
+async def forward(m: Market, d: date, t: dtime, rec, expiry: date) -> float | None:
+    """The synthetic's forward price at this record: the median of strike + CE - PE over the 9 strikes
+    nearest NIFTY (each strike's is the same in theory; the median leaves out one stale last trade)."""
+    k0, vals = atm_strike(rec.spot), []
+    for i in range(-4, 5):
+        k = k0 + i * STRIKE_STEP
+        c, p = await m.price(d, t, rec, expiry, k, "CE"), await m.price(d, t, rec, expiry, k, "PE")
+        if c and p:
+            vals.append(k + c - p)
+    if len(vals) < 5:
+        return None
+    vals.sort()
+    return vals[len(vals) // 2]
+
+
+class Steady(Run):
+    """The same rules, the position's value from the two forwards' move (9 strikes' median) instead of
+    its four legs' own last trades: the bought synthetic gains what its forward gains, the sold one
+    loses it. The spread and the charges are still paid on every leg at its own price."""
+
+    def __init__(self, m: Market, reverse: bool, hedge: str):
+        super().__init__(m, reverse, hedge)
+        self.name += " -- steady pricing"
+
+    async def open_position(self, d: date, t: dtime, rec) -> bool:
+        if not await super().open_position(d, t, rec):
+            return False
+        p = self.position
+        fw, fh = await forward(self.m, d, t, rec, p["weekly"]), await forward(self.m, d, t, rec, p["hedge"])
+        if fw is None or fh is None:
+            self.position = None
+            self.waits["no forward"] += 1
+            return False
+        p["f0"] = p["f"] = (fw, fh)
+        p["entry_cost"] = sum(leg["entry_charges"] + abs(leg["entry"] - leg["last"]) * leg["qty"] for leg in p["legs"].values())
+        return True
+
+    async def update(self, d: date, t: dtime, rec) -> int:
+        seen = await super().update(d, t, rec)
+        p = self.position
+        fw, fh = await forward(self.m, d, t, rec, p["weekly"]), await forward(self.m, d, t, rec, p["hedge"])
+        if fw is None or fh is None:
+            return 0
+        p["f"] = (fw, fh)
+        return seen
+
+    def net(self) -> float:
+        p = self.position
+        move = (p["f"][0] - p["f0"][0]) - (p["f"][1] - p["f0"][1])  # the weekly's synthetic bought, the hedge's sold
+        exit_cost = sum(abs(closing(leg, leg["last"]) - leg["last"]) * leg["qty"]
+                        + charges(leg["type"], leg["qty"], closing(leg, leg["last"]), buying=leg["side"] == "sell")
+                        for leg in p["legs"].values())
+        return (-move if self.reverse else move) * self.qty - p["entry_cost"] - exit_cost
 
 
 def report(r: Run, sessions: list[date], units: float) -> None:
@@ -327,7 +387,7 @@ async def parity_noise(m: Market, hedge: str) -> None:
     moves from one record to the next. In theory it moves with NIFTY times the carry between the two expiries
     (about 0.002-0.005 a point of NIFTY): a few hundredths of a point a record."""
     r = Run(m, False, hedge)
-    moves, opens, theory = [], [], []
+    moves, opens, theory, steady = [], [], [], []
     last = None  # carried overnight: the 09:15 record against the day before's last
     for d in m.sessions:
         await m.load_day(d)
@@ -347,8 +407,12 @@ async def parity_noise(m: Market, hedge: str) -> None:
             if last is not None and last[0] == (weekly, h, k):
                 (opens if t == FIRST_RECORD else moves).append(abs(gap - last[1]))
                 theory.append(abs(rec.spot - last[2]) * 0.065 * (h - weekly).days / 365)
-            last = ((weekly, h, k), gap, rec.spot)
-    for name, xs in (("record to record", moves), ("into 09:15", opens), ("from NIFTY's move (theory)", theory)):
+            fw, fh = await forward(m, d, t, rec, weekly), await forward(m, d, t, rec, h)
+            if fw is not None and fh is not None and last is not None and last[0] == (weekly, h, k) and last[3] is not None:
+                steady.append(abs((fh - fw) - last[3]))
+            last = ((weekly, h, k), gap, rec.spot, (fh - fw) if fw is not None and fh is not None else None)
+    for name, xs in (("record to record", moves), ("into 09:15", opens), ("9 strikes' median, steady", steady),
+                     ("from NIFTY's move (theory)", theory)):
         xs = sorted(xs)
         if xs:
             print(f"  {hedge:<14} {name:<28} median {xs[len(xs) // 2]:6.2f} pts, 90% under {xs[int(len(xs) * 0.9)]:6.2f}, "
@@ -386,6 +450,8 @@ async def main() -> None:
     print("    weekly (4-10 days after it), or the weekly two weeks out (11-17 days)")
     print("  exits: Rs 14,000 after charges at bid/ask; else all four at 15:00 on the weekly's expiry day; nothing new that day")
     print(f"  priced at each 15-min record's last price (the candle's close where none) +-{100 * HALF_SPREAD:.1f}%; checked at records only")
+    print("  steady pricing (first): the position valued by its two forwards' move -- the median of strike + CE - PE over the 9")
+    print("    strikes nearest NIFTY -- the spread and charges still paid on each leg; then each leg's own last trade (noisy)")
     async with AsyncSessionLocal() as db:
         m = Market(db)
         await m.load(today)
@@ -397,15 +463,16 @@ async def main() -> None:
         print(f"sessions: {len(sessions)} ({sessions[0]:%d %b} - {sessions[-1]:%d %b}; 2nd half from {sessions[len(sessions) // 2]:%d %b}); "
               f"records: {sum(len(v) for v in m.by_day.values())}; expiries known: {len(m.expiries)}; lot {m.lot}")
         print()
-        for reverse in (False, True):
-            for hedge in HEDGES:
-                r = Run(m, reverse, hedge)
-                try:
-                    await r.go()
-                    report(r, sessions, units)
-                except Exception as exc:  # noqa: BLE001
-                    failed(r.name, exc)
-                print()
+        for cls in (Steady, Run):
+            for reverse in (False, True):
+                for hedge in HEDGES:
+                    r = cls(m, reverse, hedge)
+                    try:
+                        await r.go()
+                        report(r, sessions, units)
+                    except Exception as exc:  # noqa: BLE001
+                        failed(r.name, exc)
+                    print()
         print(f"prices read: {m.source['record']} from records, {m.source['candle']} from candles, {m.source['none']} not found")
         print()
         print("Check 1 -- the price noise: the gap between the two synthetics, record to record (points):")
