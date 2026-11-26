@@ -63,7 +63,7 @@ on:
         type: boolean
         default: false
       cc400_peak_backtest:
-        description: "Instead of the check: Conti Calendar 400 15 MIN version 9 with and without the chart-peak shift -- how often it fires; counts, NIFTY levels and points per unit here, no rupees (backend/scripts/cc400_peak_shift_backtest.py)"
+        description: "Instead of the check: Conti Calendar 400 15 MIN version 8 against version 9 with and without the chart-peak shift -- how often it fires; counts, NIFTY levels and points per unit here, no rupees (backend/scripts/cc400_peak_shift_backtest.py)"
         type: boolean
         default: false
       oi_v7_sl_backtest:
@@ -574,7 +574,7 @@ jobs:
           fi
 
           if [ "${CC400_PEAK_BACKTEST:-false}" = "true" ]; then
-            echo "== Conti Calendar 400 15 MIN: version 9 with and without the chart-peak shift (counts and points per unit here; no rupees)"
+            echo "== Conti Calendar 400 15 MIN: version 8 against version 9, with and without the chart-peak shift (counts and points per unit here; no rupees)"
             py_file=$(vps 'f=$(mktemp /tmp/cc400peak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/cc400_peak_shift_backtest.py)
             remote py "$py_file"
             exit 0

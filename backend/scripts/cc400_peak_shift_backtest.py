@@ -1,9 +1,29 @@
-"""Conti Calendar 400 15 MIN version 9: how often the chart-peak shift fires (26 Nov).
+"""Conti Calendar 400 15 MIN: version 8 against version 9, and how often the chart-peak shift fires (26 Nov).
 
 Read-only. Asked 26 Nov, before version 9 goes live: "Backtest how often the
-peak shift would fire". Version 9's rules replayed over every NIFTY session
-with 15-minute records (pcr_snapshots) before today, twice -- with the
-chart-peak shift (A, as deployed) and without it (B):
+peak shift would fire", then "Which setup is better on backtesting, the
+current existing set up or if shifting done on bi weekly and shifting at
+chart peak". Replayed over every NIFTY session with 15-minute records
+(pcr_snapshots) before today: version 8 (today's, V8), version 9 with the
+chart-peak shift (A, as built) and without it (B).
+
+Version 8 (V8):
+
+  entry    from 09:30 to 15:00 whenever none is open, and at once after a
+           monthly roll: sell the nearest weekly (next week's on an expiry
+           day; the expiry after it when it has no OTM strike bid Rs 100 on
+           a side) at the furthest OTM 50-point strike on each side bid
+           Rs 100 or more; on each side buy the nearest monthly after it at
+           the strike whose ask is 2.5-3x the weekly's bid, nearest 3x
+  target   and shifts as version 9's below, but without the chart peak; a
+           shifted side's monthly re-picked by the same ratio (kept when
+           the same strike)
+  roll     15:00 on the sold weekly's expiry day: the sold legs to next
+           week's at the same strikes; when next week's is the monthly's
+           own (the month's last week), all four closed and a fresh one
+           opened at once
+
+Version 9 (A; B the same without the chart-peak shift):
 
   entry    from 09:30 to 15:00 whenever none is open, and at once after a
            hedge roll: sell the nearest weekly whose roll day (the trading
@@ -62,11 +82,12 @@ from app.services.paper_trading.trade_record import order_charges
 UNDERLYING = "NIFTY"
 HALF_SPREAD = 0.001  # 0.1% of the price each way, as the other calendar backtests
 STRIKE_PAD = 800.0  # points either side of the session's NIFTY range loaded up front
-LOOKAHEAD = timedelta(days=40)  # expiries loaded each session: the sold, the next, two weeks past either
+LOOKAHEAD = timedelta(days=70)  # expiries loaded each session: the sold, the next, two weeks past either, a monthly after them
 FIRST_RECORD, CLOSE_RECORD = dtime(9, 15), dtime(15, 30)
 ENTRY_TIME, ENTRY_UNTIL, ROLL_TIME = dtime(9, 30), dtime(15, 0), dtime(15, 0)
 STRIKE_STEP, MIN_PREMIUM, MAX_STEPS = 50, 100.0, 40
 HEDGE_DAYS = (11, 17)
+MONTHLY_RATIO = (2.5, 3.0)  # version 8: the bought monthly's ask over the sold weekly's bid, nearest the top
 LOTS_PER_LEG, DEFAULT_LOT = 20, 65
 SHIFT_IN_LOSS, SHIFT_IN_PROFIT = 150.0, 200.0
 TAKE_PROFIT = 14_000.0
@@ -130,6 +151,7 @@ class Market:
         self.db = db
         self.by_day: dict[date, list[tuple[dtime, PcrSnapshot]]] = {}
         self.expiries: list[date] = []
+        self.month_last: set[date] = set()
         self.px: dict[tuple, float | None] = {}  # (record id, expiry, strike, type) -> last price
         self.loaded: set[tuple] = set()
         self.symbols: dict[tuple, object] = {}
@@ -162,6 +184,13 @@ class Market:
         if lots:
             self.lot = lots.most_common(1)[0][0]
         self.expiries = sorted(known)
+        last: dict[tuple[int, int], date] = {}
+        for e in self.expiries:
+            last[(e.year, e.month)] = max(e, last.get((e.year, e.month), e))
+        self.month_last = set(last.values())
+
+    def monthly_after(self, weekly: date) -> date | None:
+        return next((e for e in self.expiries if e > weekly and e in self.month_last), None)
 
     @property
     def sessions(self) -> list[date]:
@@ -228,8 +257,8 @@ class Market:
 
 
 class Run:
-    def __init__(self, m: Market, peak_shift: bool, name: str):
-        self.m, self.peak_shift, self.name = m, peak_shift, name
+    def __init__(self, m: Market, version: int, peak_shift: bool, name: str):
+        self.m, self.version, self.peak_shift, self.name = m, version, peak_shift, name
         self.qty = float(LOTS_PER_LEG * m.lot)
         self.position: dict | None = None
         self.reopen_due = False
@@ -281,10 +310,52 @@ class Run:
             found = strike
         return (found, "") if found is not None else (None, "no_100")
 
+    def hedge_for(self, listed: list[date], weekly: date | None) -> date | None:
+        if weekly is None:
+            return None
+        return hedge_after(listed, weekly) if self.version == 9 else self.m.monthly_after(weekly)
+
+    async def monthly_cover(self, d, t, rec, monthly: date, typ: str, weekly_strike: float, weekly_bid: float) -> tuple | None:
+        """Version 8: (strike, mid) of the monthly whose ask is 2.5-3x `weekly_bid`, nearest 3x -- the strategy's walk."""
+        lo, hi = MONTHLY_RATIO
+        otm = STRIKE_STEP if typ == "CE" else -STRIKE_STEP
+        seen: dict[float, tuple | None] = {}
+
+        async def at(k: float):
+            if k not in seen:
+                p = await self.m.price(d, t, rec, monthly, k, typ)
+                seen[k] = None if p is None else (ask(p) / weekly_bid, p)
+            return seen[k]
+
+        k = weekly_strike
+        r = await at(k)
+        if r is None:
+            return None
+        direction = otm if r[0] > hi else -otm
+        best = (k, r) if lo <= r[0] <= hi else None
+        for _ in range(MAX_STEPS):
+            if best is not None and direction == otm:
+                break
+            nk = k + direction
+            nr = await at(nk)
+            if nr is None:
+                break
+            if lo <= nr[0] <= hi and best is not None and nr[0] <= best[1][0]:
+                break
+            k, r = nk, nr
+            if lo <= r[0] <= hi:
+                best = (k, r)
+            elif best is not None or (direction == otm and r[0] < lo) or (direction != otm and r[0] > hi):
+                break
+        return (best[0], best[1][1]) if best is not None else None
+
     async def open_position(self, d: date, t: dtime, rec) -> bool:
         listed = self.m.listed(d)
-        weekly = next((e for e in listed if previous_trading_day(e) > d), None)
-        hedge = hedge_after(listed, weekly) if weekly else None
+        if self.version == 9:
+            weekly = next((e for e in listed if previous_trading_day(e) > d), None)
+        else:  # the nearest, next week's on an expiry day
+            weekly = (listed[1] if len(listed) > 1 else None) if listed and listed[0] == d else (listed[0] if listed else None)
+        hedge = self.hedge_for(listed, weekly)
         if hedge is None:
             self.waits["no hedge expiry"] += 1
             return False
@@ -302,7 +373,7 @@ class Run:
         strikes, why = await strikes_on(weekly)
         if strikes is None and why == "no_100":
             later = next((e for e in listed if e > weekly), None)
-            later_hedge = hedge_after(listed, later) if later else None
+            later_hedge = self.hedge_for(listed, later)
             if later_hedge is not None:
                 strikes, why = await strikes_on(later)
                 if strikes is not None:
@@ -313,12 +384,20 @@ class Run:
             return False
         legs = {}
         for typ, (short, long_) in SIDES.items():
-            for name, side, expiry in ((short, "sell", weekly), (long_, "buy", hedge)):
-                p = await self.m.price(d, t, rec, expiry, strikes[typ], typ)
-                if p is None:
-                    self.waits["entry: a leg unpriced"] += 1
-                    return False
-                legs[name] = self.new_leg(typ, side, expiry, strikes[typ], p)
+            wp = await self.m.price(d, t, rec, weekly, strikes[typ], typ)
+            if wp is None:
+                self.waits["entry: a leg unpriced"] += 1
+                return False
+            if self.version == 9:  # the hedge at the same strike
+                hk, hp = strikes[typ], await self.m.price(d, t, rec, hedge, strikes[typ], typ)
+            else:  # the monthly 2.5-3x the weekly's bid
+                cover = await self.monthly_cover(d, t, rec, hedge, typ, strikes[typ], bid(wp))
+                hk, hp = cover if cover is not None else (None, None)
+            if hp is None:
+                self.waits["entry: no hedge priced" + (" / no 2.5-3x cover" if self.version == 8 else "")] += 1
+                return False
+            legs[short] = self.new_leg(typ, "sell", weekly, strikes[typ], wp)
+            legs[long_] = self.new_leg(typ, "buy", hedge, hk, hp)
         self.position = {"legs": legs, "weekly": weekly, "hedge": hedge, "booked": 0.0, "outside": 0.0,
                          "refs": {"CE": spot, "PE": spot}, "opened": datetime.combine(d, t, IST), "checked_on": None}
         return True
@@ -352,14 +431,21 @@ class Run:
             self.waits[f"shift by {by}: the Rs 100 strike unmoved (reference moved)"] += 1
             return False
         wp = await self.m.price(d, t, rec, p["weekly"], strike, typ)
-        hp = await self.m.price(d, t, rec, p["hedge"], strike, typ)
+        hk, hp = strike, None
+        if wp is not None and self.version == 9:
+            hp = await self.m.price(d, t, rec, p["hedge"], strike, typ)
+        elif wp is not None:
+            cover = await self.monthly_cover(d, t, rec, p["hedge"], typ, strike, bid(wp))
+            hk, hp = cover if cover is not None else (None, None)
         if wp is None or hp is None:
-            self.waits["shift waits: a new leg unpriced"] += 1
+            self.waits["shift waits: a new leg unpriced" + (" / no 2.5-3x cover" if self.version == 8 else "")] += 1
             return False
-        closed = sum(leg_net(p["legs"][n], p["legs"][n]["last"]) for n in (short, long_))
+        replaced = (short, long_) if self.version == 9 or hk != p["legs"][long_]["strike"] else (short,)  # v8: the same cover kept
+        closed = sum(leg_net(p["legs"][n], p["legs"][n]["last"]) for n in replaced)
         self.trades.append({"kind": "strike_shift", "net": closed, "opened": p["opened"], "closed": datetime.combine(d, t, IST)})
         p["legs"][short] = self.new_leg(typ, "sell", p["weekly"], strike, wp)
-        p["legs"][long_] = self.new_leg(typ, "buy", p["hedge"], strike, hp)
+        if long_ in replaced:
+            p["legs"][long_] = self.new_leg(typ, "buy", p["hedge"], hk, hp)
         ref = p["refs"][typ]
         p["refs"][typ], p["outside"] = spot, p["booked"]
         self.shifts.append({"at": datetime.combine(d, t, IST), "side": typ, "by": by, "spot": spot, "ref": ref, "peak": peak,
@@ -368,12 +454,15 @@ class Run:
 
     async def roll(self, d: date, t: dtime, rec, now: datetime) -> None:
         p = self.position
-        following = next((e for e in self.m.listed(d) if e > p["weekly"] and roll_moment(e) > now), None)
+        if self.version == 9:
+            following = next((e for e in self.m.listed(d) if e > p["weekly"] and roll_moment(e) > now), None)
+        else:  # never one expiring today
+            following = next((e for e in self.m.listed(d) if e > d), None)
         if following is None:
             self.waits["roll: no later weekly"] += 1
             return
         if following >= p["hedge"]:
-            self.close_all("hedge_roll", d, t)
+            self.close_all("hedge_roll" if self.version == 9 else "monthly_roll", d, t)
             self.reopen_due = True
             return
         fresh = {}
@@ -409,11 +498,14 @@ class Run:
                     elif full:
                         self.position["checked_on"] = d
                 if self.position is not None:
-                    if now >= roll_moment(self.position["weekly"]):
+                    weekly = self.position["weekly"]
+                    due = (now >= roll_moment(weekly) if self.version == 9
+                           else weekly < d or (weekly == d and t >= ROLL_TIME))  # version 8: on the expiry day
+                    if due:
                         await self.roll(d, t, rec, now)
                     elif full and ENTRY_TIME <= t < ENTRY_UNTIL:
                         trigger = SHIFT_IN_LOSS if figure < 0 else SHIFT_IN_PROFIT
-                        peaks = self.peaks(rec.spot, now)
+                        peaks = self.peaks(rec.spot, now) if self.version == 9 else {}
                         for typ in ("CE", "PE"):
                             ref = self.position["refs"][typ]
                             moved = rec.spot - ref if typ == "CE" else ref - rec.spot
@@ -447,6 +539,7 @@ def report(r: Run, sessions: list[date], units: float) -> None:
         run_ += x
         peak, dd = max(peak, run_), max(dd, peak - run_)
     kinds = Counter(x["kind"] for x in r.trades)
+    whole = [x["net"] for x in r.trades if x["kind"] != "strike_shift"]  # the positions' own trades
     by = Counter(s["by"] for s in r.shifts)
     sides = Counter((s["by"], s["side"]) for s in r.shifts)
     peak_days = len({s["at"].date() for s in r.shifts if s["by"] == "peak"})
@@ -454,8 +547,11 @@ def report(r: Run, sessions: list[date], units: float) -> None:
     print(f"{r.name}")
     print(f"  net {total / units:+.1f} pts a unit (1st half {first / units:+.1f}, 2nd {(total - first) / units:+.1f}); "
           f"max drawdown {dd / units:.1f}" + (f"; still open {r.open_left / units:+.1f}" if r.open_left is not None else ""))
-    print(f"  closed: {kinds['take_profit']} at the target, {kinds['hedge_roll']} hedge rolls, {kinds['strike_shift']} strike shifts "
-          f"(their closed legs {shift_net / units:+.1f} pts a unit); weekly rolls {r.rolls}")
+    print(f"  closed: {kinds['take_profit']} at the target, {kinds['hedge_roll']} hedge rolls, {kinds['monthly_roll']} monthly rolls, "
+          f"{kinds['strike_shift']} strike shifts (their closed legs {shift_net / units:+.1f} pts a unit); weekly rolls {r.rolls}")
+    if whole:
+        print(f"  positions closed: {len(whole)}, {sum(1 for x in whole if x > 0)} in profit; average {sum(whole) / len(whole) / units:+.1f} "
+              f"pts, best {max(whole) / units:+.1f}, worst {min(whole) / units:+.1f} (each without its shifts' legs)")
     print(f"  shifts by the chart peak: {by['peak']} (call {sides[('peak', 'CE')]}, put {sides[('peak', 'PE')]}; on {peak_days} of "
           f"{len(sessions)} sessions); by 150/200 points: {by['points']} (call {sides[('points', 'CE')]}, put {sides[('points', 'PE')]})")
     if by["peak"]:
@@ -475,7 +571,10 @@ def report(r: Run, sessions: list[date], units: float) -> None:
 
 async def main() -> None:
     today = datetime.now(timezone.utc).astimezone(IST).date()
-    print("Rules (version 9 as deployed 26 Nov; points per unit after charges and the spread, no rupees here):")
+    print("Rules (points per unit after charges and the spread, no rupees here):")
+    print("  V8 (today's): sell the nearest weekly (next week's on expiry day) at the Rs 100 strikes; buy the next monthly at the strike")
+    print("    whose ask is 2.5-3x the weekly's bid; roll 15:00 on the expiry day; the month's last week all four afresh; shifts 150/200")
+    print("  version 9 (A with the chart-peak shift, B without):")
     print("  entry 09:30-15:00 when none is open (at once after a hedge roll): sell the nearest weekly whose roll day is still to come")
     print("    (the next expiry when it has no OTM bid Rs 100 on a side) at the furthest OTM 50-pt strikes bid Rs 100+; buy the expiry")
     print("    11-17 days after it at the same strikes; 20 lots a leg; target Rs 14,000 after charges since the last shift")
@@ -493,9 +592,10 @@ async def main() -> None:
         print(f"sessions: {len(sessions)} ({sessions[0]:%d %b} - {sessions[-1]:%d %b}; 2nd half from {sessions[len(sessions) // 2]:%d %b}); "
               f"records: {sum(len(v) for v in m.by_day.values())}; expiries known: {len(m.expiries)}; lot {m.lot}")
         print()
-        for peak_shift, name in ((True, "A: version 9 with the chart-peak shift (as deployed)"),
-                                 (False, "B: version 9 without the chart-peak shift")):
-            r = Run(m, peak_shift, name)
+        for version, peak_shift, name in ((8, False, "V8: version 8, today's (monthly hedge 2.5-3x, roll on expiry day)"),
+                                          (9, True, "A: version 9, the weekly hedge two weeks out and the chart-peak shift"),
+                                          (9, False, "B: version 9 without the chart-peak shift")):
+            r = Run(m, version, peak_shift, name)
             try:
                 await r.go()
                 report(r, sessions, units)
