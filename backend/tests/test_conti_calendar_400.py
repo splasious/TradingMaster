@@ -11,8 +11,9 @@ closed at Rs 14,000 after charges, every trade keeping the most profit and
 loss it reached. Since version 9 (26 Nov) the bought hedge is the weekly two
 weeks after the sold one at the same strike (a monthly before), the sold
 weeklies roll at 15:00 on the trading day before their expiry -- every
-second week all four close and reopen ("hedge_roll") -- and a side also
-shifts when NIFTY reaches its peak of the profit chart."""
+second week all four close and reopen ("hedge_roll") -- and a strike shift
+moves the side's hedge with it (a shift at the profit chart's peak, also
+considered, was left out after the backtest)."""
 
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -26,7 +27,7 @@ from app.models.paper_trading import PaperNativeTrade
 from app.services.market_data.tick_engine import tick_engine
 from app.services.notifications.trade_alerts import entry_message, exit_message
 from app.services.paper_trading.native_runner import NativeContext
-from tests.test_conti_calendar import DEC, SPREAD, W1, W2, W3, Market, at
+from tests.test_conti_calendar import SPREAD, W1, W2, W3, Market, at
 
 WIDTH = 32  # the Telegram group's message block
 
@@ -427,48 +428,18 @@ async def test_a_position_with_a_monthly_hedge_from_before_is_closed_and_reopene
     assert (p["weekly_expiry"], p["hedge_expiry"]) == (W1.isoformat(), W3.isoformat()) and "reopen_due" not in ctx.state
 
 
-async def test_each_sides_chart_peak_is_near_its_sold_strike_worked_out_the_cards_way(market):
-    """Version 9: worked out at every check in the entry window -- each side's own legs' profit chart at the roll, its highest point."""
-    from app.services.options.calendar_payoff import position_payoff
-
+async def test_only_the_150_200_point_rule_shifts_a_side_not_nifty_at_its_sold_strike(market, monkeypatch):
+    """26 Nov: version 9 without the chart-peak shift (left out after the backtest) -- NIFTY at or past a sold
+    strike, short of the point rule, shifts nothing."""
+    assert not hasattr(c400, "chart_peaks")
+    monkeypatch.setattr(c400, "SHIFT_IN_LOSS", 1000.0)
+    monkeypatch.setattr(c400, "SHIFT_IN_PROFIT", 1000.0)
     await market.check(at(4, 9, 30))
-    held = await market.check(at(4, 10, 0))
-    p = held.state["position"]
-    assert abs(p["peak_ce"] - CE) <= 50 and abs(p["peak_pe"] - PE) <= 50
-    assert f"or at its profit chart's peak (call side {p['peak_ce']:,.0f}, put side {p['peak_pe']:,.0f})" in held._last_reason
-    for option_type, names in c400.SIDE_LEGS.items():
-        side = {**p, "legs": {n: p["legs"][n] for n in names}}
-        instruments = {n: await market.db.get(Instrument, uuid.UUID(p["legs"][n]["instrument_id"])) for n in names}
-        chart = position_payoff(side, instruments, {n: 1.0 for n in names}, 23460.0, at(4, 10, 0).astimezone(timezone.utc))
-        assert max(chart.points, key=lambda pt: pt[1])[0] == p[f"peak_{option_type.lower()}"]  # the card's chart of that side's legs
-    late = await market.check(at(4, 15, 5))  # outside 09:30-15:00: not worked out, not shown
-    assert late.state["position"].get("peak_ce") is None and "profit chart's peak" not in late._last_reason
-
-
-async def test_a_side_is_shifted_when_nifty_reaches_its_peak_of_the_profit_chart(market, monkeypatch):
-    """Version 9: NIFTY at or over the call side's peak shifts the call side, at or under the put side's the put side --
-    to NIFTY's Rs 100 strike now, its hedge at the same strike, the same expiries."""
-    monkeypatch.setattr(c400, "chart_peaks", lambda position, quotes, spot, now: {"CE": 23600.0, "PE": 23350.0})
-    opened = (await market.check(at(4, 9, 30))).state["position"]
-    put_side = {n: opened["legs"][n] for n in ("short_pe", "long_pe")}
-    short = await market.check(at(4, 10, 0), spot=23590.0)  # 130 up, under the peak: held
-    assert short._last_action == "hold" and "or at its profit chart's peak (call side 23,600, put side 23,350)" in short._last_reason
-    shifted = await market.check(at(4, 10, 1), spot=23600.0)
-    p = shifted.state["position"]
-    assert shifted._last_signal == "SHIFT" and "NIFTY 23,600.0 has reached the call side's profit chart peak, 23,600" in shifted._last_reason
-    assert p["strike_ce"] == 23850.0 and p["last_shift_by"] == "chart peak" and p["shift_ref_ce"] == 23600.0  # NIFTY 23,600's Rs 100 call
-    assert p["legs"]["short_ce"]["strike"] == p["legs"]["long_ce"]["strike"] == 23850.0
-    assert (p["legs"]["short_ce"]["expiry"], p["legs"]["long_ce"]["expiry"]) == (W1.isoformat(), W3.isoformat())
-    assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
-    [trade] = await market.trades()
-    assert trade.exit_reason == "strike_shift" and [leg["side"] for leg in trade.legs] == ["short", "long"]
-    market.deployment.state = None
-
-    await market.check(at(4, 11, 0))
-    down = await market.check(at(4, 11, 1), spot=23350.0)  # at the put side's peak, 110 down
-    q = down.state["position"]
-    assert down._last_signal == "SHIFT" and "the put side's profit chart peak, 23,350" in down._last_reason
-    assert q["strike_pe"] < PE and q["legs"]["long_pe"]["strike"] == q["strike_pe"] and q["strike_ce"] == CE
+    for when, spot in ((at(4, 10, 0), CE), (at(4, 10, 1), CE + 20), (at(4, 10, 2), PE), (at(4, 10, 3), PE - 20)):
+        held = await market.check(when, spot=spot)
+        assert held._last_action == "hold" and held.state["position"].get("shifts") is None, spot
+        assert "peak" not in held._last_reason and "shifts the call side over NIFTY" in held._last_reason
+    assert await market.trades() == []
 
 
 async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(market):
@@ -486,7 +457,7 @@ async def test_in_loss_the_side_nifty_moves_toward_is_shifted_past_150_points(ma
     assert shifted._last_signal == "SHIFT" and shifted._last_reason.startswith("strike shift, in loss")
     assert p["strike_ce"] > CE and p["legs"]["short_ce"]["strike"] == p["strike_ce"] and p["shifts"] == 1
     assert p["legs"]["short_ce"]["expiry"] == W1.isoformat() and p["legs"]["long_ce"]["expiry"] == opened["hedge_expiry"]
-    assert p["legs"]["long_ce"]["strike"] == p["strike_ce"] and p["last_shift_by"] == "points"
+    assert p["legs"]["long_ce"]["strike"] == p["strike_ce"]
     assert {n: p["legs"][n] for n in ("short_pe", "long_pe")} == put_side  # the other side kept
     assert p["shift_ref_ce"] == 23615.0 and p["closed_legs"] == [] and p["booked"] == {"gross": 0.0, "charges": 0.0}
     [shift] = await market.trades()  # version 8: the closed legs are a trade of their own; the position carries on

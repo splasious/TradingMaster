@@ -1,4 +1,4 @@
-"""Conti Calendar 400 15 MIN: the hedge a weekly two weeks out, the roll the day before expiry, the chart-peak shift (26 Nov).
+"""Conti Calendar 400 15 MIN: the hedge a weekly two weeks out, the roll the day before expiry (26 Nov).
 
 Agreed 26 Nov (native_strategies/nifty_conti_calendar_400.py; TO_MD5):
 
@@ -9,8 +9,9 @@ Agreed 26 Nov (native_strategies/nifty_conti_calendar_400.py; TO_MD5):
   (on the expiry day itself before), the hedges kept; every second week, when
   the next sold weekly would be the hedges' own, all four close
   ("hedge_roll") and a fresh one opens two weeks out;
-- a side also shifts, as the 150 / 200-point shift does, when NIFTY reaches
-  that side's peak of its profit chart at the roll (worked out the card's way);
+- the 150 / 200-point strike shift moves the side's hedge to its new strike
+  too (a shift at the profit chart's peak, also considered, was left out after
+  the backtest of 26 Nov: scripts/cc400_peak_shift_backtest.py);
 - the open position (monthly hedges) closes at the first check from 09:30
   ("rule_change") and the new shape opens at once.
 
@@ -41,9 +42,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 BUILT_IN = pathlib.Path(__file__).resolve().parents[2] / "app/services/strategy/native_strategies/nifty_conti_calendar_400.py"
 FROM_MD5S = {"fb8fb6d81210ce26ba1dbc69f98ab8fe"}  # a shift's closed legs a trade of their own, 20 Nov (c6e8a0b2d4f1): version 8
-TO_MD5 = "a9faae75e6e53ed81489f415ff8ecd31"
-REASON = ("the hedge the weekly two weeks out at the same strike, the roll at 15:00 the day before expiry, "
-          "and a side shifted at its profit chart's peak (agreed 26 Nov)")
+TO_MD5 = "9200a37a0cb1961c9999039f50ee90a8"
+REASON = "the hedge the weekly two weeks out at the same strike, the roll at 15:00 the day before expiry (agreed 26 Nov)"
 
 versions = sa.table(
     "strategy_versions", sa.column("id", sa.Uuid), sa.column("strategy_id", sa.Uuid), sa.column("version_number", sa.Integer),

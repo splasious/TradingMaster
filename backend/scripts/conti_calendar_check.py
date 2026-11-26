@@ -34,7 +34,7 @@ from app.services.broker.zerodha_broker import IST
 from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- not this process's; ticks come over the WebSocket
 
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
-         "Conti Calendar 400 15 MIN": "a9faae75e6e53ed81489f415ff8ecd31",
+         "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "6caa1be2612e96e61327571015f096bc",
          "Synthetic Calendar 15 MIN": "e0d721147e24c1d645183180d405c2cf", "Synthetic Calendar Reverse 15 MIN": "3e54d82c71c29ea1ff19edf999c15c4a"}
@@ -86,8 +86,6 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     if position.get("hedge_rule"):  # version 9: the weekly two weeks out at the same strike
                         print(f"    hedge rule: {position['hedge_rule']}; hedge strikes "
                               f"{position['legs']['long_ce']['strike']:,.0f} CE / {position['legs']['long_pe']['strike']:,.0f} PE")
-                        print(f"    profit chart peaks: call side {position.get('peak_ce')}, put side {position.get('peak_pe')}; "
-                              f"last shift by: {position.get('last_shift_by', '-')}")
                     else:
                         print(f"    monthly covers: {position.get('monthly_strike_ce', 'same strike')} CE "
                               f"({position.get('monthly_ratio_ce', '-')}x), {position.get('monthly_strike_pe', 'same strike')} PE "

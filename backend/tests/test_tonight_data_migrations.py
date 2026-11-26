@@ -1111,11 +1111,12 @@ async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(
 
 async def test_conti_calendar_400_moves_onto_the_weekly_hedge_keeping_its_position(db_engine, db_session):
     """26 Nov: Conti Calendar 400 15 MIN version 9 -- the hedge the weekly two weeks out, the roll the day before
-    expiry, the chart-peak shift. The open position is kept as it is: the strategy closes it at 09:30 itself."""
+    expiry. The open position is kept as it is: the strategy closes it at 09:30 itself."""
     migration = _load("d2b4f6a8c0e5_conti_calendar_400_weekly_hedge")
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c8e0a2b4d6f7"
     code = migration.BUILT_IN.read_text(encoding="utf-8")
     assert 'HEDGE_RULE = "the weekly two weeks out, same strike"' in code and "HEDGE_DAYS = (11, 17)" in code
+    assert "chart_peaks" not in code  # the chart-peak shift left out (26 Nov backtest)
     assert migration.FROM_MD5S == {_load("c6e8a0b2d4f1_conti_calendar_400_shift_trades").TO_MD5}  # moves on from version 8
     v8 = "# Conti Calendar 400 15 MIN, version 8: the monthly hedge\n"
     migration.FROM_MD5S = {_md5_text(v8)}

@@ -22,9 +22,7 @@ weeklies' expiry (version 9, 26 Nov; on the expiry day itself before), when
 they roll, and every point carries what earlier rolls have booked (`booked`).
 
 Display only -- the strategies' own take-profit reads the live bid / ask
-(native_strategies/nifty_conti_calendar.py, nifty_conti_calendar_400.py) --
-except that Conti Calendar 400's version 9 shifts a side when NIFTY reaches
-that side's peak of this chart (calendar_payoff, from the live bid / ask).
+(native_strategies/nifty_conti_calendar.py, nifty_conti_calendar_400.py).
 """
 
 import math

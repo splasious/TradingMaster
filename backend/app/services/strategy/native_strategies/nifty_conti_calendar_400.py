@@ -9,8 +9,9 @@ when the nearest has no Rs 100 strike; version 5, 19 Nov: a monthly cover
 2.5-3x the weekly's bid; version 6, 20 Nov: 20 lots a leg and the strike
 shift below; version 7, 20 Nov: the target restarts at a shift; version 8,
 20 Nov: a shift's closed legs a trade of their own; version 9, 26 Nov: the
-hedge a weekly two weeks out at the same strike, the roll at 15:00 the day
-before expiry, and the shift at the profit chart's peak): instead of one
+hedge a weekly two weeks out at the same strike and the roll at 15:00 the
+day before expiry -- a shift at the profit chart's peak, also considered,
+left out after the backtest of 26 Nov): instead of one
 strike's straddle calendar, a call calendar on an OTM call and a put
 calendar on an OTM put, LOTS_PER_LEG (20; 16 before version 6) lots each,
 every fill at the order book's best price (a sell at the bid, a buy at the
@@ -77,11 +78,10 @@ Held overnight -- no daily close -- until the take-profit:
                last shifted, the position in loss ("Net if closed now" as
                the take-profit reads it -- since the last shift, version 7 --
                under Rs 0); SHIFT_IN_PROFIT (200)
-               points when in profit but short of the target -- or
-               (version 9) NIFTY at that side's peak of the profit chart,
-               below: that side's sold weekly and bought hedge close at
-               bid / ask and the side opens again at NIFTY's Rs 100 strike
-               now, its hedge at the same strike, on the position's same
+               points when in profit but short of the target: that side's
+               sold weekly and bought hedge close at bid / ask and the side
+               opens again at NIFTY's Rs 100 strike now, its hedge at the
+               same strike (version 9), on the position's same
                weekly and hedge expiries and at its own lots (a 16-lot
                position stays 16);
                the other side is left as it is, and the shifted side's
@@ -94,17 +94,6 @@ Held overnight -- no daily close -- until the take-profit:
                strike, a leg unquoted) waits and is tried
                again, and one whose Rs 100 strike hasn't moved just moves
                the reference.
-  Chart peak   (version 9, 26 Nov) each side's own profit chart (the
-               card's way, options/calendar_payoff.py: that side's two legs'
-               profit after charges at ROLL_TIME on the roll day across
-               NIFTY levels, each leg repriced at its implied volatility now
-               and closed at bid / ask) peaks near its sold strike -- the
-               two sides together, the hedges two weeks out keeping them
-               wide, mostly make one hump between the strikes. NIFTY at or
-               over the call side's peak shifts the call side, at or under
-               the put side's the put side, in profit or in loss. Worked
-               out at every check from 09:30 to 15:00 (chart_peaks) and
-               kept on the position for the card (peak_ce / peak_pe).
   Weekly roll  at ROLL_TIME (15:00) on the trading day before the sold
                weeklies' expiry (version 9; on the expiry day itself
                before) -- or at the first check after, if the app was down
@@ -238,42 +227,6 @@ def if_closed_now(position: dict, quotes: dict[str, tuple[float, float]]) -> tup
     return booked_net(position) + gross - position["entry_charges"] - exit_charges, prices
 
 
-def chart_peaks(position: dict, quotes: dict[str, tuple[float, float]], spot: float, now_utc: datetime) -> dict[str, float]:
-    """Version 9: {"CE": NIFTY level, "PE": NIFTY level} -- where each side's
-    own profit chart at the roll peaks: the call calendar's two legs alone,
-    the put calendar's alone, each worked out the card's way
-    (options/calendar_payoff.py: every leg at its implied volatility now,
-    closed at bid / ask less charges). The two together, the hedges two
-    weeks out keeping them wide, mostly make one hump between the strikes;
-    each side's own chart peaks near its sold strike. A side whose highest
-    point is at its chart's edge has none; no chart (the roll passed, a leg
-    unpriced), neither."""
-    # imported here: that module imports this one
-    from app.services.options.calendar_payoff import PayoffLeg, calendar_payoff
-
-    def charges(leg: PayoffLeg, price: float, buying: bool) -> float:
-        return charges_of({"option_type": leg.option_type, "quantity": leg.quantity}, price, buying)
-
-    peaks = {}
-    try:
-        horizon = roll_moment(date.fromisoformat(position["weekly_expiry"]))
-        for option_type, names in SIDE_LEGS.items():
-            legs = [PayoffLeg(name=name, option_type=leg["option_type"], strike=float(leg["strike"]),
-                              expiry=date.fromisoformat(leg["expiry"]), side=leg["side"], quantity=float(leg["quantity"]),
-                              entry_price=float(leg["entry_price"]), mid=(quotes[name][0] + quotes[name][1]) / 2,
-                              half_spread=(quotes[name][1] - quotes[name][0]) / 2)
-                    for name, leg in ((name, position["legs"][name]) for name in names)]
-            payoff = calendar_payoff(legs, spot, now_utc, horizon, 0.0, charges)
-            if payoff is None:
-                continue
-            i = max(range(len(payoff.points)), key=lambda j: payoff.points[j][1])
-            if 0 < i < len(payoff.points) - 1:  # inside the chart: a peak, not an edge
-                peaks[option_type] = payoff.points[i][0]
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
-        return {}
-    return peaks
-
-
 def track_extremes(position: dict, net: float, now_ist: datetime) -> None:
     """The most profit and the most loss "if closed now" reached so far, with when."""
     when, net = now_ist.strftime("%d %b %H:%M:%S IST"), round(net, 2)  # to the paisa, as kept: an equal reading isn't a new extreme
@@ -318,9 +271,6 @@ def shift_text(position: dict) -> str:
     spot = position.get("entry_spot") or 0.0
     text = (f"shifts the call side over NIFTY {shift_ref(position, 'CE', spot) + trigger:,.0f}, the put side under "
             f"{shift_ref(position, 'PE', spot) - trigger:,.0f} ({trigger:,.0f} points, {'in loss' if net < 0 else 'in profit'})")
-    peaks = [f"{SIDE_NAME[t]} side {position[f'peak_{t.lower()}']:,.0f}" for t in ("CE", "PE") if position.get(f"peak_{t.lower()}") is not None]
-    if peaks:
-        text += f" or at its profit chart's peak ({', '.join(peaks)})"
     return text + (f"; {position['shift_waits']}" if position.get("shift_waits") else "")
 
 
@@ -411,27 +361,21 @@ async def evaluate(ctx) -> None:
         return (f"; max profit reached {e['max_profit_reached']:+,.0f} ({e['max_profit_at']}), "
                 f"max loss reached {e['max_loss_reached']:+,.0f} ({e['max_loss_at']})")
 
-    async def maybe_shift(net: float, quotes: dict[str, tuple[float, float]]) -> str | None:
+    async def maybe_shift(net: float) -> str | None:
         """Version 6: the side NIFTY has moved toward, SHIFT_IN_LOSS (in loss) or
-        SHIFT_IN_PROFIT (in profit) points past its reference -- or (version 9)
-        whose peak of the profit chart NIFTY has reached -- shifted; the note, or
-        None (nothing due, or a shift that can't be had this check)."""
+        SHIFT_IN_PROFIT (in profit) points past its reference, shifted; the note,
+        or None (nothing due, or a shift that can't be had this check)."""
         spot = await ctx.get_price(underlying.id)
         if spot is None:
             return None
         trigger = SHIFT_IN_LOSS if net < 0 else SHIFT_IN_PROFIT
-        peaks = chart_peaks(position, quotes, spot, now_utc)
-        position.update(peak_ce=peaks.get("CE"), peak_pe=peaks.get("PE"))
         for option_type in ("CE", "PE"):
-            side, ref, peak = SIDE_NAME[option_type], shift_ref(position, option_type, spot), peaks.get(option_type)
+            side, ref = SIDE_NAME[option_type], shift_ref(position, option_type, spot)
             moved = spot - ref if option_type == "CE" else ref - spot
-            if moved > trigger:
-                why = (f"NIFTY {spot:,.1f} is {moved:,.0f} points {'above' if option_type == 'CE' else 'below'} the {side} side's "
-                       f"{ref:,.1f}, past {trigger:,.0f}")
-            elif peak is not None and (spot >= peak if option_type == "CE" else spot <= peak):
-                why = f"NIFTY {spot:,.1f} has reached the {side} side's profit chart peak, {peak:,.0f}"
-            else:
+            if moved <= trigger:
                 continue
+            why = (f"NIFTY {spot:,.1f} is {moved:,.0f} points {'above' if option_type == 'CE' else 'below'} the {side} side's "
+                   f"{ref:,.1f}, past {trigger:,.0f}")
             note = await shift_side(option_type, spot, net, why)
             if note is not None:
                 return note
@@ -491,7 +435,7 @@ async def evaluate(ctx) -> None:
             "booked_outside_target": round(booked_net(position), 2),  # version 7: the target restarts here (rolls before it left out)
             "shift_trades": True, f"side_opened_at_{lower}": now_utc.isoformat(), "last_shift_pnl": round(shift_pnl, 2),
             f"strike_{lower}": strike, f"shift_ref_{lower}": spot, "shifts": int(position.get("shifts", 0)) + 1,
-            "shifted_at": now_utc.isoformat(), "last_shift_by": "chart peak" if "profit chart peak" in why else "points",
+            "shifted_at": now_utc.isoformat(),
         })
         position.pop("shift_waits", None)
         return (f"strike shift, {'in loss' if net < 0 else 'in profit'} (Rs {net:,.0f} if closed now): {why} -- "
@@ -526,8 +470,7 @@ async def evaluate(ctx) -> None:
                        f"the position closed, P&L {pnl:+,.0f} before charges; ")
         position = None
     if position is not None:
-        for key in ("shift_waits", "peak_ce", "peak_pe"):  # read afresh each check
-            position.pop(key, None)
+        position.pop("shift_waits", None)  # read afresh each check
         if force_exit:
             pnl = await close_all("manual", await forced_prices())
             ctx.note("exited", signal="COVER", reason=(
@@ -622,7 +565,7 @@ async def evaluate(ctx) -> None:
                 return
         else:
             if not missing and ENTRY_TIME <= now_ist.time() < ENTRY_UNTIL:
-                shifted = await maybe_shift(position["net_if_closed_now"], quotes)
+                shifted = await maybe_shift(position["net_if_closed_now"])
                 if shifted is not None:
                     ctx.note("entered", signal="SHIFT", reason=shifted)
                     ctx.wake_at(now_utc + RECHECK)
