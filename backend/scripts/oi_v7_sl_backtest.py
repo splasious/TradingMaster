@@ -18,7 +18,10 @@ the trail (the higher stop wins):
   step-up   for every STEP_EVERY (Rs 1,000) a lot the best bid has made, the
             stop moves up STEP_UP (Rs 250) a lot (as tested 24 Nov).
 
-A carried option opening under its stop is sold at the 09:15 open. After a
+26 Nov, after it: the stop-loss as a % of the price paid instead -- 10, 15,
+20 and 25% -- with the trail, and without it (out on the stop, a flip or
+the expiry roll only); PCT_RUN picks this set. A carried option opening
+under its stop is sold at the 09:15 open. After a
 stop: flat until the next close, then that close's side. A 15-minute candle
 has its high and low but not which came first, so each runs twice -- open ->
 high -> low -> close and open -> low -> high -> close -- and reports the
@@ -54,7 +57,14 @@ WINDOW = 2  # version 6
 ROLL_AT = time(12, 0)  # D: the roll on the held option's expiry day
 STEP_EVERY, STEP_UP = 1_000.0, 250.0  # rupees a lot
 SL_GRID = tuple(range(500, 2001, 100))
-VARIANTS = (  # name, carry, trail, stop-loss rupees a lot, step-up
+PCT_RUN = True  # 26 Nov: the stop-loss as a % of the price paid (False: the rupee grid above)
+PCT_GRID = (0.10, 0.15, 0.20, 0.25)
+VARIANTS = (  # name, carry, trail, stop-loss (rupees a lot, or "15%" as a fraction), step-up
+    ("v7 as live: trail, no stop-loss", "roll_noon", True, None, False),
+    ("v7 without the trail", "roll_noon", False, None, False),
+    *((f"SL {pct:.0%} + trail", "roll_noon", True, f"{pct}", False) for pct in PCT_GRID),
+    *((f"SL {pct:.0%}, no trail", "roll_noon", False, f"{pct}", False) for pct in PCT_GRID),
+) if PCT_RUN else (
     ("v7 as live: trail, no stop-loss", "roll_noon", True, None, False),
     *((f"SL {sl:,} fixed + trail", "roll_noon", True, float(sl), False) for sl in SL_GRID),
     *((f"SL {sl:,} step-up + trail", "roll_noon", True, float(sl), True) for sl in SL_GRID),
@@ -168,7 +178,7 @@ def middle(a: dict, b: dict) -> dict:
 
 
 async def run(data: Data, days: list[date], candles, index, records, carry: str, order: str, trail: bool = True,
-              stop_loss: float | None = None, step_up: bool = False):
+              stop_loss: float | str | None = None, step_up: bool = False):
     """(trades, overnight gaps, entries passed over) for one candle order."""
     trades, gaps, no_price, pos = [], [], 0, None
     reenter = trail == "reenter"
@@ -207,7 +217,9 @@ async def run(data: Data, days: list[date], candles, index, records, carry: str,
             if pos["stop"] is not None:
                 pos["stop"] = max(pos["stop"], pos["peak"] * (1 - TRAIL))
             sl_level = None
-            if stop_loss is not None and (step_up or pos["stop"] is None):
+            if isinstance(stop_loss, str) and pos["stop"] is None:  # a % of the price paid, until the trail is on
+                sl_level = pos["entry"] * (1 - float(stop_loss))
+            elif stop_loss is not None and not isinstance(stop_loss, str) and (step_up or pos["stop"] is None):
                 steps = max(0, int((pos["peak"] - pos["entry"]) * pos["qty"] // STEP_EVERY)) if step_up else 0
                 sl_level = pos["entry"] - (stop_loss - STEP_UP * steps) / pos["qty"]
             levels = [(v, why) for v, why in ((pos["stop"], "trailing_stop"), (sl_level, "stop_loss")) if v is not None]
@@ -333,9 +345,9 @@ async def main() -> None:
         a, b = r["runs"].values()
         print(f"  {r['name']:<32} {a['sl_exits']:>4} / {b['sl_exits']:<4}  at the open {a['sl_at_open']} / {b['sl_at_open']}")
     v7 = results[0]["mid"]["points"]
-    fixed = [r for r in results[1:] if not r["step_up"]]
-    stepped = [r for r in results[1:] if r["step_up"]]
-    for label, group in (("fixed", fixed), ("step-up", stepped)):
+    fixed = [r for r in results[1:] if r["trail"] and r["stop_loss"] is not None]
+    stepped = [r for r in results[1:] if not r["trail"]] if PCT_RUN else [r for r in results[1:] if r["step_up"]]
+    for label, group in (("with the trail", fixed), ("without the trail", stepped)):
         best = max(group, key=lambda r: r["mid"]["points"])
         beats = [r["name"] for r in group if min(x["points"] for x in r["runs"].values()) > max(x["points"] for x in results[0]["runs"].values())]
         print(f"best {label}: {best['name']} {best['mid']['points']:+.1f} against v7 {v7:+.1f}; beating v7 on both readings: "
