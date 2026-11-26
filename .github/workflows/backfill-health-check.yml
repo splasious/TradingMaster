@@ -62,6 +62,10 @@ on:
         description: "Instead of the check: backtest four rules on Conti Calendar 15 MIN (drift guard, entry cut-off, premium-ratio filter, weekly days left) over the stored 15-minute records; counts and points per unit here, rupees to the private Telegram chat only (backend/scripts/conti_calendar_rules_backtest.py)"
         type: boolean
         default: false
+      cc400_peak_backtest:
+        description: "Instead of the check: Conti Calendar 400 15 MIN version 9 with and without the chart-peak shift -- how often it fires; counts, NIFTY levels and points per unit here, no rupees (backend/scripts/cc400_peak_shift_backtest.py)"
+        type: boolean
+        default: false
       oi_v7_sl_backtest:
         description: "Instead of the check: OI Change Buy 15 MIN version 7 with a stop-loss of Rs 500-2,000 a lot (fixed, and stepping up Rs 250 per Rs 1,000), with the trail; points per unit here, rupees to the private Telegram chat only (backend/scripts/oi_v7_sl_backtest.py)"
         type: boolean
@@ -141,6 +145,7 @@ jobs:
           OI_SL_OPTIMISE: ${{ inputs.oi_sl_optimise }}
           OI_OVERNIGHT_BACKTEST: ${{ inputs.oi_overnight_backtest }}
           OI_V7_SL_BACKTEST: ${{ inputs.oi_v7_sl_backtest }}
+          CC400_PEAK_BACKTEST: ${{ inputs.cc400_peak_backtest }}
         run: |
           set -euo pipefail
           umask 077
@@ -564,6 +569,13 @@ jobs:
           if [ "${CC_RULE_BACKTEST:-false}" = "true" ]; then
             echo "== Conti Calendar 15 MIN: four rules backtested (counts and points per unit here; rupees to the private Telegram chat only)"
             py_file=$(vps 'f=$(mktemp /tmp/ccrules-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/conti_calendar_rules_backtest.py)
+            remote py "$py_file"
+            exit 0
+          fi
+
+          if [ "${CC400_PEAK_BACKTEST:-false}" = "true" ]; then
+            echo "== Conti Calendar 400 15 MIN: version 9 with and without the chart-peak shift (counts and points per unit here; no rupees)"
+            py_file=$(vps 'f=$(mktemp /tmp/cc400peak-XXXXXX.py) && cat > "$f" && echo "$f"' < backend/scripts/cc400_peak_shift_backtest.py)
             remote py "$py_file"
             exit 0
           fi
