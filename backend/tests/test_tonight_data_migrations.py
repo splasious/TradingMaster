@@ -1109,6 +1109,53 @@ async def test_conti_calendar_moves_onto_the_most_oi_added_keeping_its_position(
     assert [n for n, _ in numbers] == [11, 12] and running.strategy_version_id == numbers[-1][1] and running.state == state
 
 
+async def test_the_synthetic_calendars_move_onto_the_weekly_hedge_keeping_their_positions(db_engine, db_session):
+    """26 Nov: Synthetic Calendar 15 MIN and its Reverse version 2 -- the hedge the weekly two weeks out at the same
+    strike. Each strategy gets its own new code; the open position is kept (the strategy closes it at 09:30 itself)."""
+    migration = _load("f4d6b8a0c2e7_synthetic_calendars_weekly_hedge")
+    assert migration.down_revision == "d2b4f6a8c0e5"
+    files = {path.name: path for path in migration.FROM_MD5S.values()}
+    assert set(files) == {"nifty_synthetic_calendar.py", "nifty_synthetic_calendar_reverse.py"}
+    for name, path in files.items():
+        code = path.read_text(encoding="utf-8")
+        assert _md5(path) == migration.TO_MD5S[name] and 'HEDGE_RULE = "the weekly two weeks out, same strike"' in code
+    created = _load("e0a2c4e6f8b1_synthetic_calendars")
+    assert set(migration.DESCRIPTIONS) == {description for _, _, description in created.BUILT_INS}  # as created 20 Nov
+    v1 = {"syn": "# Synthetic Calendar 15 MIN, version 1: the monthly hedge\n",
+          "rev": "# Synthetic Calendar Reverse 15 MIN, version 1: the monthly hedge\n"}
+    migration.FROM_MD5S = {_md5_text(v1["syn"]): files["nifty_synthetic_calendar.py"],
+                           _md5_text(v1["rev"]): files["nifty_synthetic_calendar_reverse.py"]}
+    runs, ids = {}, {}
+    for key, (name, description) in {"syn": ("Synthetic Calendar 15 MIN", created.BUILT_INS[0][2]),
+                                      "rev": ("Synthetic Calendar Reverse 15 MIN", created.BUILT_INS[1][2])}.items():
+        runs[key] = await _deployment(db_session, f"syn2_{key}@tradingmaster.internal", v1[key])
+        strategy = await db_session.get(Strategy, runs[key].strategy_id)
+        strategy.name, strategy.description = name, description
+        runs[key].state = {"position": {"strike": 26200.0, "legs": {}, "weekly_expiry": "2026-12-01", "monthly_expiry": "2026-12-29"}}
+        ids[key] = (runs[key].id, runs[key].strategy_id)
+    edited = await _deployment(db_session, "syn2_b@tradingmaster.internal", "# Synthetic Calendar 15 MIN, edited by hand\n")
+    before = (edited.id, edited.strategy_version_id)
+    states = {key: run.state for key, run in runs.items()}
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    for key, file in (("syn", "nifty_synthetic_calendar.py"), ("rev", "nifty_synthetic_calendar_reverse.py")):
+        card_id, strategy_id = ids[key]
+        moved = await db_session.get(PaperNativeDeployment, card_id)
+        numbers = (await db_session.execute(
+            select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == strategy_id)
+            .order_by(StrategyVersion.version_number)
+        )).all()
+        assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == states[key]
+        assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == files[file].read_text(encoding="utf-8")
+        description = (await db_session.get(Strategy, strategy_id)).description
+        assert "the weekly two weeks out" in description and "monthly" not in description
+    assert (await db_session.get(PaperNativeDeployment, before[0])).strategy_version_id == before[1]  # edited by hand: left alone
+
+
 async def test_conti_calendar_400_moves_onto_the_weekly_hedge_keeping_its_position(db_engine, db_session):
     """26 Nov: Conti Calendar 400 15 MIN version 9 -- the hedge the weekly two weeks out, the roll the day before
     expiry. The open position is kept as it is: the strategy closes it at 09:30 itself."""

@@ -37,7 +37,7 @@ NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Cal
          "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "6caa1be2612e96e61327571015f096bc",
-         "Synthetic Calendar 15 MIN": "e0d721147e24c1d645183180d405c2cf", "Synthetic Calendar Reverse 15 MIN": "3e54d82c71c29ea1ff19edf999c15c4a"}
+         "Synthetic Calendar 15 MIN": "1f3213ef89492d5fec775150c2d84f32", "Synthetic Calendar Reverse 15 MIN": "900e45680f84642c4189366a6a2a6ad0"}
 LISTEN_SECONDS = 6
 
 
@@ -69,6 +69,11 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
             print(f"  card {str(card.id)[:8]}: last run {ran}, last signal {card.last_signal or '-'}, "
                   f"position open: {bool((card.state or {}).get('position'))}")
             position = (card.state or {}).get("position")
+            if NAME.startswith("Synthetic Calendar") and position:  # version 2 (26 Nov): the hedge two weeks out
+                print(f"    strike {position.get('strike')}, weekly {position.get('weekly_expiry')}, hedge "
+                      f"{position.get('hedge_expiry') or position.get('monthly_expiry')} "
+                      f"({'version 2 rule' if position.get('hedge_rule') else 'monthly hedge -- closed at 09:30 by version 2'}); "
+                      f"legs: {', '.join(sorted(position.get('legs') or {}))}")
             if NAME == "Conti Calendar 400 15 MIN":
                 nifty = (await db.execute(select(Instrument.id).where(Instrument.symbol == "NIFTY 50"))).scalar_one_or_none()
                 listed = (await db.execute(

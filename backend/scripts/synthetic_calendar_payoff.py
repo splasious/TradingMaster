@@ -76,7 +76,7 @@ def charges(leg: dict, price: float, buying: bool) -> float:
 
 def analyse(pos: dict, live: dict, now: datetime) -> tuple[list[str], list[str]]:
     legs = pos["legs"]
-    weekly, monthly = date.fromisoformat(pos["weekly_expiry"]), date.fromisoformat(pos["monthly_expiry"])
+    weekly, monthly = date.fromisoformat(pos["weekly_expiry"]), date.fromisoformat(pos.get("hedge_expiry") or pos["monthly_expiry"])  # version 2: the hedge
     strike = float(pos["strike"])
     spot = float(live["underlying_price"])
     by_key = {(float(l["strike"]), l["option_type"], "sell" if l["side"] == "short" else "buy"): l for l in live["legs"]}
