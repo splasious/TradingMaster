@@ -328,14 +328,15 @@ async def parity_noise(m: Market, hedge: str) -> None:
     (about 0.002-0.005 a point of NIFTY): a few hundredths of a point a record."""
     r = Run(m, False, hedge)
     moves, opens, theory = [], [], []
+    last = None  # carried overnight: the 09:15 record against the day before's last
     for d in m.sessions:
         await m.load_day(d)
         listed = m.listed(d)
         weekly = (listed[1] if len(listed) > 1 else None) if listed and listed[0] == d else (listed[0] if listed else None)
         h = r.hedge_for(weekly) if weekly else None
         if h is None:
+            last = None
             continue
-        last = None
         for t, rec in m.by_day[d]:
             k = atm_strike(rec.spot)
             px = [await m.price(d, t, rec, e, k, typ) for e in (weekly, h) for typ in ("CE", "PE")]
@@ -343,10 +344,10 @@ async def parity_noise(m: Market, hedge: str) -> None:
                 last = None
                 continue
             gap = (px[2] - px[3]) - (px[0] - px[1])  # the hedge's synthetic over the weekly's, same strike
-            if last is not None and last[0] == k:
+            if last is not None and last[0] == (weekly, h, k):
                 (opens if t == FIRST_RECORD else moves).append(abs(gap - last[1]))
                 theory.append(abs(rec.spot - last[2]) * 0.065 * (h - weekly).days / 365)
-            last = (k, gap, rec.spot)
+            last = ((weekly, h, k), gap, rec.spot)
     for name, xs in (("record to record", moves), ("into 09:15", opens), ("from NIFTY's move (theory)", theory)):
         xs = sorted(xs)
         if xs:
