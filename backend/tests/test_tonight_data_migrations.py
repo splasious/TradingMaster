@@ -2331,3 +2331,33 @@ async def test_oi_change_buy_moves_onto_no_trailing_stop_keeping_its_option(db_e
     assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
     assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
     assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
+async def test_ohlc4_buy_moves_onto_the_flipped_sides_keeping_its_option(db_engine, db_session):
+    """27 Nov: OHLC4 Buy 5 MIN version 2 -- a put above the level, a call under it, a stop at the 15-minute low / high."""
+    migration = _load("e3a5c7b9d1f6_ohlc4_buy_flipped")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "d9f1b3a5c7e4"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "def stop_hit(" in code and 'LEVEL_TIMEFRAME = "15m"' in code and "OHLC4 Buy 5 MIN" in code
+    v1 = "# OHLC4 Buy 5 MIN, version 1: a call above the level\n"
+    migration.FROM_MD5S = {_md5_text(v1)}
+    running = await _deployment(db_session, "ohlc4v2_a@tradingmaster.internal", v1)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OHLC4 Buy 5 MIN"
+    edited = await _deployment(db_session, "ohlc4v2_b@tradingmaster.internal", "# OHLC4 Buy 5 MIN, edited by hand\n")
+    state = {"decided_candle": "2026-11-27T09:05:00+00:00", "position": {"option": "01 Dec 25,650 PE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone

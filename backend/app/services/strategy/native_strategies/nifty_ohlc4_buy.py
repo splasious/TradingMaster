@@ -2,7 +2,18 @@
 OHLC4 Buy 5 MIN -- one NIFTY option, checked every 5 minutes against the previous 15-minute candle's (O+H+L+C)/4 (native)
 =========================================================================================================================
 
-Agreed 27 Nov, as OI Change Buy 15 MIN (nifty_oi_change_buy.py) but with
+Version 2 (27 Nov): the sides flipped (agreed the same day) -- NIFTY above
+the LEVEL holds a PUT, below it a CALL -- with a real stop: a CALL is sold
+when a check comes in under the 15-minute candle's low, a PUT when one comes
+in over its high, and after a stop nothing is bought until the next 15-
+minute candle gives a new LEVEL. Version 1's table and stop note below are
+the other way round; the rest as version 1.
+
+  NIFTY above LEVEL     hold a PUT    -- its stop a check over the 15-minute candle's high
+  NIFTY below LEVEL     hold a CALL   -- its stop a check under the 15-minute candle's low
+  NIFTY at LEVEL        no change
+
+Version 1 (27 Nov): as OI Change Buy 15 MIN (nifty_oi_change_buy.py) but with
 one condition in place of the change in OI; after the backtest the same
 day, checked at each 5-minute close against the 15-minute level (its best
 reading: ohlc4_buy_backtest.py, "15m level, every 5m"):
@@ -90,10 +101,15 @@ def level_of(bar: dict) -> float:
 
 
 def wanted_side(value: float, level: float) -> str | None:
-    """"CE" above the level, "PE" under it, None at it."""
+    """Version 2 (flipped): "PE" above the level, "CE" under it, None at it."""
     if value > level:
-        return "CE"
-    return "PE" if value < level else None
+        return "PE"
+    return "CE" if value < level else None
+
+
+def stop_hit(option_type: str, value: float, low: float, high: float) -> bool:
+    """Version 2: a CALL's stop a check under the 15-minute candle's low, a PUT's a check over its high."""
+    return value < low if option_type == "CE" else value > high
 
 
 def latest_close(now_ist: datetime, first: dtime = FIRST_CLOSE, bar: timedelta = BAR) -> datetime:
@@ -313,22 +329,36 @@ async def evaluate(ctx) -> None:
         if check_key.startswith("open "):
             state["opened_on"] = today.isoformat()
         state["last_level"] = {**rule, "value": value, "checked": check_key, "side": side, "at": now_ist.strftime("%H:%M:%S")}
-        if position is not None and side is not None and side != position["option_type"]:
+        if state.get("stopped_on") not in (None, rule["candle"]):
+            state.pop("stopped_on")  # version 2: a new 15-minute level -- the rule again after a stop
+        if position is not None and stop_hit(position["option_type"], value, low, high):  # version 2: the stop
             held_side, option = position["option_type"], position["option"]
-            stopped = value <= low if held_side == "CE" else value >= high
-            price, pnl = await close("stop_loss" if stopped else "level_flip")
+            price, pnl = await close("stop_loss")
+            position = None
+            state.pop("pending", None)
+            state["stopped_on"] = rule["candle"]
+            ctx.note("exited", signal="SELL", reason=(
+                f"{reading} -- {'under its low' if held_side == 'CE' else 'over its high'}: the stop; {option} sold at "
+                f"{price:,.2f}, P&L {pnl:+,.0f} before charges; nothing bought until the next 15-minute candle's level"
+            ))
+            wake()
+            return
+        if position is not None and side is not None and side != position["option_type"]:
+            option = position["option"]
+            price, pnl = await close("level_flip")
             position = None
             due = now_utc + FLIP_GAP
             state["pending"] = {"option_type": side, "due": due.isoformat(), "why": reading, **rule}
-            crossed = f"past its {'low' if held_side == 'CE' else 'high'}: the stop" if stopped else f"now a {SIDE_NAME[side]}"
             ctx.note("exited", signal="SELL", reason=(
-                f"{reading} -- {crossed}: {option} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
+                f"{reading} -- now a {SIDE_NAME[side]}: {option} sold at {price:,.2f}, P&L {pnl:+,.0f} before charges; "
                 f"the {SIDE_NAME[side]} bought at {due.astimezone(IST):%H:%M:%S}"
             ))
             ctx.wake_at(due)
             return
         if position is not None:
             position.update(rule, stop=low if position["option_type"] == "CE" else high)
+        elif state.get("stopped_on") == rule["candle"]:  # version 2: flat after a stop until a new level
+            reading = f"{reading} -- flat after the stop until the next 15-minute candle's level"
         else:
             pending = state.get("pending")
             if pending is not None and side is not None:
@@ -392,6 +422,9 @@ async def evaluate(ctx) -> None:
     if position is not None:
         ctx.note("hold", reason=((f"{reading} -- still a {SIDE_NAME[position['option_type']]}: " if reading else "")
                                  + f"{held_text()}; {next_text()}"))
+    elif state.get("stopped_on"):  # version 2: flat after a stop
+        ctx.note("skipped", reason=(f"{reading}; " if reading else "flat after the stop until the next 15-minute candle's level; ")
+                 + next_text())
     else:
         ctx.note("skipped", reason=(f"{reading} -- at the level: nothing bought yet; " if reading else "") + next_text())
     wake()

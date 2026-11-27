@@ -272,8 +272,11 @@ def level_stream(data: Data, day: date) -> list[tuple[datetime, float, dict | No
     return out
 
 
-async def simulate(data: Data, days: list[date], mode: str) -> dict:
+async def simulate(data: Data, days: list[date], mode: str, flipped: bool = False) -> dict:
+    """`flipped` (OHLC4 Buy 5 MIN version 2, 27 Nov): a put above the level, a call under it; a call stopped by a check
+    under the 15-minute candle's low, a put by one over its high, then flat until the next 15-minute level."""
     trades, pos, missed, waits = [], None, 0, 0
+    stopped_on = None
 
     def book(price: float, reason: str, moment: datetime) -> None:
         nonlocal pos
@@ -301,12 +304,22 @@ async def simulate(data: Data, days: list[date], mode: str) -> dict:
             _start, bar = candle
             level = level_of(bar)
             side = "CE" if spot > level else ("PE" if spot < level else None)
+            if flipped:
+                side = {"CE": "PE", "PE": "CE"}.get(side)
+                if stopped_on is not None and stopped_on != _start:
+                    stopped_on = None  # a new 15-minute level: the rule again
+                if pos is not None and (spot < bar["low"] if pos["key"][2] == "CE" else spot > bar["high"]):
+                    price = await data.price(pos["key"], moment)
+                    if price is not None:
+                        book(price, "stop_loss", moment)
+                        stopped_on = _start
+                        continue
             if pos is not None and side is not None and side != pos["key"][2]:
                 price = await data.price(pos["key"], moment)
                 if price is not None:
-                    stopped = spot <= bar["low"] if pos["key"][2] == "CE" else spot >= bar["high"]
+                    stopped = (not flipped) and (spot <= bar["low"] if pos["key"][2] == "CE" else spot >= bar["high"])
                     book(price, "stop_loss" if stopped else "level_flip", moment)
-            if pos is None and side is not None:
+            if pos is None and side is not None and not (flipped and stopped_on == _start):
                 weekly = data.weekly(day)
                 key = (weekly, atm(spot), side)
                 price = await data.price(key, moment) if weekly is not None else None
@@ -403,6 +416,13 @@ async def main() -> None:
                 print(f"  {mode}: not run ({type(exc).__name__} at line {lines[-1] if lines else '?'})")
                 continue
             results[mode] = (days, run, summary(run["trades"], days))
+        if fine is not None:  # OHLC4 Buy 5 MIN version 2: the flipped sides with the stop
+            try:
+                run = await simulate(data, days_fine, fine, flipped=True)
+                results["flipped"] = (days_fine, run, summary(run["trades"], days_fine))
+            except Exception as exc:  # noqa: BLE001
+                lines = [f.lineno for f in traceback.extract_tb(exc.__traceback__) if f.filename in ("<stdin>", __file__)]
+                print(f"  flipped: not run ({type(exc).__name__} at line {lines[-1] if lines else '?'})")
         if fine is not None and "15m" in results and set(days_fine) != set(whole):  # the 15-minute reading on the same sessions too
             try:
                 run = await simulate(data, days_fine, "15m")
@@ -414,7 +434,8 @@ async def main() -> None:
 
 def report(data: Data, results: dict, fine: str | None) -> None:
     names = {fine: "15m level, every " + str(fine) + (" (deployed)" if fine == "5m" else ""), "15m": "15m level, 15-min closes",
-             "15m same": "15-min closes, same sessions", "5m level": "5m level, 5-min closes"}
+             "15m same": "15-min closes, same sessions", "5m level": "5m level, 5-min closes",
+             "flipped": "flipped + stop (v2)"}
     print()
     print("1 lot, points per unit, net of the half-spread and charges:")
     print(f"  {'reading':<30} {'sessions':>8} {'net':>8} {'gross':>8} {'taxes':>7} {'1st half':>8} {'2nd half':>8} {'win%':>5} "

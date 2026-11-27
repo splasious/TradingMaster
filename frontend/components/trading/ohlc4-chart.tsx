@@ -210,9 +210,10 @@ export function Ohlc4Chart({ deploymentId }: { deploymentId: string }) {
       </div>
       {data && n > 0 && (
         <p className="text-xs text-text-muted">
-          Checked at the 09:15 open on live NIFTY, then at each 5-minute close from 09:20 to 15:25 on that candle&apos;s close: the CE
-          above the level, the PE below it, flipped at once. The level is the latest finished 15-minute candle&apos;s (O+H+L+C)/4 and the band its
-          low–high: a call&apos;s stop is the low, a put&apos;s the high. The strip shows the side each 5-minute check picks
+          Checked at the 09:15 open on live NIFTY, then at each 5-minute close from 09:20 to 15:25 on that candle&apos;s close: the PE
+          above the level, the CE below it (flipped since version 2), flipped at once. The level is the latest finished 15-minute candle&apos;s
+          (O+H+L+C)/4 and the band its low–high: a call is stopped by a check under the low, a put by one over the high, then flat until the
+          next 15-minute level. The strip shows the side each 5-minute check picks
           {now ? "; the dashed level and the dot are the forming candle's level and NIFTY now" : ""}.
         </p>
       )}

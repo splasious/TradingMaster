@@ -37,7 +37,7 @@ NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Cal
          "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "513aca50c59b9b633236ab57e3642e51",
-         "OHLC4 Buy 5 MIN": "fb75d3f3a81f877f3df4cfdd23982dd5",
+         "OHLC4 Buy 5 MIN": "416c949fd6bf7068e0d4fc971165104a",
          "Synthetic Calendar 15 MIN": "1f3213ef89492d5fec775150c2d84f32", "Synthetic Calendar Reverse 15 MIN": "900e45680f84642c4189366a6a2a6ad0"}
 LISTEN_SECONDS = 6
 
@@ -127,7 +127,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 print(f"    last check at {level.get('at', '-')} ({level.get('checked', '-')}): NIFTY {level.get('value', '-')} against the "
                       f"15-minute candle from {level.get('candle', '-')}: (O+H+L+C)/4 {level.get('level', '-')}, low {level.get('low', '-')}, "
                       f"high {level.get('high', '-')} -> {level.get('side', '-')}; opened on {state.get('opened_on', '-')}; buy pending: "
-                      f"{bool(state.get('pending'))}; brokerage per order: {state.get('brokerage_per_order', 'the schedule')}")
+                      f"{bool(state.get('pending'))}; brokerage per order: {state.get('brokerage_per_order', 'the schedule')}; "
+                      f"version 2, flat after a stop on the level from: {state.get('stopped_on', '-')}")
                 if position:
                     opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
                     print(f"    holding {position['option']} ({position['bias']}), bought {opened} at "
