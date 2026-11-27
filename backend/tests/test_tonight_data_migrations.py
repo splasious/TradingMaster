@@ -2241,23 +2241,23 @@ async def test_macd_live_run_gets_what_to_sell_and_buy_to_match_its_paper_card(d
 
 
 async def test_ohlc4_buy_is_created_with_its_pool_and_card_for_conti_calendars_owner(db_engine, db_session):
-    """27 Nov: OHLC4 Buy 15 MIN (native_strategies/nifty_ohlc4_buy.py)."""
+    """27 Nov: OHLC4 Buy 5 MIN (native_strategies/nifty_ohlc4_buy.py), on 5-minute candles."""
     from app.models.audit import AuditLog as Log
 
     calendar = await _amop_pool(db_session, "Conti Calendar 15 MIN", "Conti Calendar 15 MIN", 2_000_000.0, 2_041_000.0)
     stranger = await _amop_pool(db_session, "AM OP TRD 15 MIN", "AM OP TRD 15 MIN", 2_000_000.0, 2_000_000.0)  # no Conti Calendar
-    migration = _load("a3c5e7b9d1f4_ohlc4_buy_15min")
+    migration = _load("a3c5e7b9d1f4_ohlc4_buy_5min")
     assert migration.down_revision == "e6f8a0c2b4d7"
     await _run(db_engine, migration)
     await _run(db_engine, migration)  # once is all
 
-    name = "OHLC4 Buy 15 MIN"
+    name = "OHLC4 Buy 5 MIN"
     [strategy] = (await db_session.execute(select(Strategy).where(Strategy.name == name))).scalars().all()
     assert (strategy.owner_id, strategy.code_type, strategy.status) == (calendar.user_id, "native", "paper_trading")
     [version] = (await db_session.execute(select(StrategyVersion).where(StrategyVersion.strategy_id == strategy.id))).scalars().all()
     built_in = (VERSIONS.parent.parent / "app/services/strategy/native_strategies/nifty_ohlc4_buy.py").read_text(encoding="utf-8")
-    assert (version.version_number, version.timeframe, version.python_code) == (1, "15m", built_in)
-    assert 'REGIME = "ohlc4 buy"' in built_in and "BROKERAGE_PER_ORDER = 0.0" in built_in
+    assert (version.version_number, version.timeframe, version.python_code) == (1, "5m", built_in)
+    assert 'TIMEFRAME = "5m"' in built_in and 'REGIME = "ohlc4 buy"' in built_in and "BROKERAGE_PER_ORDER = 0.0" in built_in
     [pool] = (await db_session.execute(select(PaperPortfolio).where(PaperPortfolio.name == name))).scalars().all()
     assert (pool.user_id, pool.currency, pool.cash, pool.initial_capital) == (calendar.user_id, "INR", 400_000.0, 400_000.0)  # Rs 4 lakh
     [card] = (await db_session.execute(select(PaperNativeDeployment).where(PaperNativeDeployment.strategy_id == strategy.id))).scalars().all()

@@ -1,16 +1,17 @@
-"""OHLC4 Buy 15 MIN: the strategy, its 4-lakh pool and its paper card (27 Nov).
+"""OHLC4 Buy 5 MIN: the strategy, its 4-lakh pool and its paper card (27 Nov).
 
 A new built-in (native_strategies/nifty_ohlc4_buy.py), as agreed 27 Nov:
-from the 09:15 open to 15:29, live NIFTY against the previous 15-minute
-candle's (open + high + low + close) / 4 -- above it one lot of the ATM
-NIFTY weekly call bought, under it the put, at the ask; the side changing,
-the held option sold at the bid and the other bought 5 seconds later; the
-stop the previous candle's low (call) / high (put), no trailing stop; held
-overnight, rolled to next week's at 12:00 on its expiry day; no brokerage.
-Created for the owner of Conti Calendar 15 MIN: the strategy with version 1
-the built-in's code, its own pool "OHLC4 Buy 15 MIN" of Rs 4,00,000, and an
-active paper card on it -- no live run, no Telegram alerts. Nothing when
-that owner has a strategy of this name already. Recorded in audit_logs.
+at each 5-minute close 09:20-15:25, the NIFTY candle just closed against
+the one before's (open + high + low + close) / 4 -- closed above it, one
+lot of the ATM NIFTY weekly call held; below it, the put; bought at the
+ask; the side changing, the held option sold at the bid and the other
+bought 5 seconds later; the stop the candle before's low (call) / high
+(put), no trailing stop; held overnight, rolled to next week's at 12:00 on
+its expiry day; no brokerage. Created for the owner of Conti Calendar 15
+MIN: the strategy with version 1 the built-in's code (timeframe 5m), its
+own pool "OHLC4 Buy 5 MIN" of Rs 4,00,000, and an active paper card on it
+-- no live run, no Telegram alerts. Nothing when that owner has a strategy
+of this name already. Recorded in audit_logs.
 
 Revision ID: a3c5e7b9d1f4
 Revises: e6f8a0c2b4d7
@@ -30,13 +31,14 @@ down_revision: Union[str, None] = "e6f8a0c2b4d7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-NAME = "OHLC4 Buy 15 MIN"
+NAME = "OHLC4 Buy 5 MIN"
 FROM_STRATEGY = "conti calendar 15 min"
 CAPITAL = 400_000.0
+TIMEFRAME = "5m"
 BUILT_IN = pathlib.Path(__file__).resolve().parents[2] / "app/services/strategy/native_strategies/nifty_ohlc4_buy.py"
-DESCRIPTION = ("NIFTY: 1 lot of the ATM weekly call bought while NIFTY is above the previous 15-minute candle's "
-               "(O+H+L+C)/4, the put while under it -- flipped 5 s after selling, stop the previous candle's low / high, "
-               "held overnight, rolled 12:00 on expiry day (27 Nov)")
+DESCRIPTION = ("NIFTY: 1 lot of the ATM weekly call held while each 5-minute candle closes above the one before's "
+               "(O+H+L+C)/4, the put while below -- flipped 5 s after selling, stop the candle before's low / high, held "
+               "overnight, rolled 12:00 on expiry day (27 Nov)")
 
 strategies = sa.table(
     "strategies", sa.column("id", sa.Uuid), sa.column("name", sa.String), sa.column("description", sa.String),
@@ -80,7 +82,7 @@ def upgrade() -> None:
             id=strategy_id, name=NAME, description=DESCRIPTION, owner_id=owner, code_type="native", status="paper_trading",
         ))
         bind.execute(versions.insert().values(
-            id=version_id, strategy_id=strategy_id, version_number=1, timeframe="15m", instrument_ids=[], parameters={},
+            id=version_id, strategy_id=strategy_id, version_number=1, timeframe=TIMEFRAME, instrument_ids=[], parameters={},
             python_code=code, position_sizing={}, risk_rules={}, created_by=owner,
         ))
         bind.execute(portfolios.insert().values(

@@ -1,4 +1,4 @@
-"""OHLC4 Buy 15 MIN backtested before it goes live (27 Nov). Read-only.
+"""OHLC4 Buy backtested before it goes live (27 Nov): the 15-minute version, and the 5-minute one deployed. Read-only.
 
 Asked 27 Nov: "Backtest OHLC4 first". The new strategy
 (native_strategies/nifty_ohlc4_buy.py, not deployed) replayed over every
@@ -257,6 +257,21 @@ def decision_times(data: Data, day: date, mode: str) -> list[tuple[datetime, flo
     return out
 
 
+def level_stream(data: Data, day: date) -> list[tuple[datetime, float, dict | None]]:
+    """OHLC4 Buy 5 MIN as deployed: (each 5-minute close 09:20-15:25, the candle's close, the candle before it) -- the
+    09:15 candle against the session before's 15:25 one."""
+    bars = data.spot["5m"].get(day, {})
+    before = data.spot["5m"].get(previous_trading_day(day), {})
+    out = []
+    for t in sorted(bars):
+        moment = at(day, t) + FINE["5m"]
+        if moment.time() > time(15, 25):
+            continue
+        prior = before.get(time(15, 25)) if t == SESSION_OPEN else bars.get((at(day, t) - FINE["5m"]).time())
+        out.append((moment, bars[t]["close"], prior))
+    return out
+
+
 async def simulate(data: Data, days: list[date], mode: str) -> dict:
     trades, pos, missed, waits = [], None, 0, 0
 
@@ -273,13 +288,14 @@ async def simulate(data: Data, days: list[date], mode: str) -> dict:
 
     for n, day in enumerate(days):
         follows = n + 1 < len(days) and days[n + 1] == next_trading_day(day)
-        for moment, spot in decision_times(data, day, mode):
+        stream = level_stream(data, day) if mode == "5m level" else [(m, s, None) for m, s in decision_times(data, day, mode)]
+        for moment, spot, prior in stream:
             if pos is not None and pos["key"][0] <= day and moment.time() >= ROLL_AT:
                 price = await data.price(pos["key"], moment)
                 if price is not None:
                     book(price, "expiry_rollover", moment)
-            candle = previous_candle(data, moment, timedelta(0) if mode == "15m" else CANDLE_WAIT)
-            if candle is None:
+            candle = (moment, prior) if mode == "5m level" else previous_candle(data, moment, timedelta(0) if mode == "15m" else CANDLE_WAIT)
+            if candle is None or candle[1] is None:
                 waits += 1
                 continue
             _start, bar = candle
@@ -366,14 +382,20 @@ async def main() -> None:
         else:
             days_fine = []
             print("no 1-minute or 5-minute NIFTY candles over these sessions: only the 15-minute reading runs")
+        days_5m = [d for d in whole if len(data.spot["5m"].get(d, {})) >= 0.9 * 75]
+        if days_5m:
+            modes.insert(0, "5m level")
         print()
+        print("As deployed (OHLC4 Buy 5 MIN): at each 5-minute close 09:20-15:25 the candle's close against the candle before's")
+        print("  (O+H+L+C)/4 -- the option at that close (estimated inside its 15-minute candle; the live trades 10-70 s later,")
+        print("  when the candle is in); the rest as below. The other two readings: the 15-minute version backtested before")
         print("Rules: the previous 15-minute NIFTY candle's (O+H+L+C)/4 the level (09:15-09:30: the session before's last); NIFTY")
         print("  above it the ATM weekly call held, under it the put, flipped on a cross; 'stop_loss' when past the candle's low /")
         print("  high; no trailing stop; held overnight, rolled 12:00 on its expiry day to the side NIFTY is on; 1 lot; bought")
         print("  +0.1%, sold -0.1%, taxes and fees as live, no brokerage")
         results = {}
         for mode in modes:
-            days = days_fine if mode != "15m" else whole
+            days = days_5m if mode == "5m level" else days_fine if mode != "15m" else whole
             try:
                 run = await simulate(data, days, mode)
             except Exception as exc:  # noqa: BLE001 -- the kind and this script's line only, never the message
@@ -391,7 +413,8 @@ async def main() -> None:
 
 
 def report(data: Data, results: dict, fine: str | None) -> None:
-    names = {fine: "every minute (" + str(fine) + ")", "15m": "15-min closes", "15m same": "15-min closes, same sessions"}
+    names = {fine: "15m level, every " + str(fine), "15m": "15m level, 15-min closes", "15m same": "15-min closes, same sessions",
+             "5m level": "5m level, 5-min closes"}
     print()
     print("1 lot, points per unit, net of the half-spread and charges:")
     print(f"  {'reading':<30} {'sessions':>8} {'net':>8} {'gross':>8} {'taxes':>7} {'1st half':>8} {'2nd half':>8} {'win%':>5} "
