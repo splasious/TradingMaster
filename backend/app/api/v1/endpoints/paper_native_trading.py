@@ -194,7 +194,7 @@ CALENDAR_REGIMES = ("calendar", "double calendar", "reverse calendar")
 # Valued at the book on the card (a payoff only for the calendars): the calendars,
 # OI Change Buy 15 MIN's option (nifty_oi_change_buy.py, 16 Nov) and the Synthetic
 # Calendars' four legs (nifty_synthetic_calendar*.py, 20 Nov).
-BOOK_REGIMES = (*CALENDAR_REGIMES, "oi change buy", "synthetic calendar")
+BOOK_REGIMES = (*CALENDAR_REGIMES, "oi change buy", "ohlc4 buy", "synthetic calendar")
 
 # Keys every holding carries (see nifty_rs_rotation.py's holdings shape) --
 # anything else a strategy stores on a holding is its own per-stock metric.

@@ -37,6 +37,7 @@ NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Cal
          "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
          "OI Change Buy 15 MIN": "ebc152cdc4cd2d58ded161518bf7ecd1",
+         "OHLC4 Buy 15 MIN": "947b98b88e3b5c5470a1cb4ccdbf48a1",
          "Synthetic Calendar 15 MIN": "1f3213ef89492d5fec775150c2d84f32", "Synthetic Calendar Reverse 15 MIN": "900e45680f84642c4189366a6a2a6ad0"}
 LISTEN_SECONDS = 6
 
@@ -119,6 +120,26 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     strikes = sorted({f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs if leg.get("strike")})
                     print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
                           f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {len(legs)} legs {', '.join(strikes)}")
+                continue
+            if NAME == "OHLC4 Buy 15 MIN":  # NIFTY levels, sides, strikes and times only -- no P&L
+                state = card.state or {}
+                level, position = state.get("last_level") or {}, state.get("position")
+                print(f"    last level: candle {level.get('candle', '-')}, (O+H+L+C)/4 {level.get('level', '-')}, low {level.get('low', '-')}, "
+                      f"high {level.get('high', '-')}, NIFTY then {level.get('spot', '-')}; buy pending: {bool(state.get('pending'))}; "
+                      f"brokerage per order: {state.get('brokerage_per_order', 'the schedule')}")
+                if position:
+                    opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
+                    print(f"    holding {position['option']} ({position['bias']}), bought {opened} at "
+                          f"{position['legs']['long']['entry_price']:,.2f}; level {position.get('level')}, stop {position.get('stop')}")
+                print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
+                closes = (await db.execute(
+                    select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
+                    .where(PaperNativeTrade.deployment_id == card.id).order_by(PaperNativeTrade.closed_at.desc()).limit(8)
+                )).all()
+                for reason, opened_at, closed_at, legs in closes:
+                    held = ", ".join(f"{leg.get('strike', 0):,.0f} {leg.get('option_type', '')}" for leg in legs)
+                    print(f"    closed trade: {reason}, {as_aware_utc(opened_at).astimezone(IST):%d-%b %H:%M:%S} -> "
+                          f"{as_aware_utc(closed_at).astimezone(IST):%d-%b %H:%M:%S}, {held}")
                 continue
             if NAME == "OI Change Buy 15 MIN":  # sides, strikes, times and the day's change in OI only -- no P&L
                 state = card.state or {}
