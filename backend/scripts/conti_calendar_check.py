@@ -36,7 +36,7 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
          "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
-         "OI Change Buy 15 MIN": "78b095aac8690e6ed0a6c2198c17f40b",
+         "OI Change Buy 15 MIN": "513aca50c59b9b633236ab57e3642e51",
          "OHLC4 Buy 5 MIN": "fb75d3f3a81f877f3df4cfdd23982dd5",
          "Synthetic Calendar 15 MIN": "1f3213ef89492d5fec775150c2d84f32", "Synthetic Calendar Reverse 15 MIN": "900e45680f84642c4189366a6a2a6ad0"}
 LISTEN_SECONDS = 6
@@ -165,8 +165,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     leg = position["legs"]["long"]
                     print(f"    holding {position['option']} ({position['bias']}), bought {opened} at {leg['entry_price']:,.2f}, "
                           f"{leg['quantity'] / 65:g} lot, decided at {position.get('decided_at')}")
-                    print(f"    trail: starts at a bid of {position.get('trail_starts_at')}, highest bid {position.get('peak_bid')}, "
-                          f"stop {position.get('trail_stop')}")
+                    print(f"    version 11, no trailing stop: trail fields left on the position "
+                          f"{any(k in position for k in ('trail_starts_at', 'peak_bid', 'trail_stop'))}")
                 print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
                 closes = (await db.execute(
                     select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)

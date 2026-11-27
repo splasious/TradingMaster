@@ -1555,7 +1555,7 @@ async def test_oi_change_buy_moves_onto_the_trailing_stop_keeping_its_option(db_
     assert _load("b2d4f6a8c0e7_oi_change_buy_first_minute").FROM_MD5S == {migration.TO_MD5}  # version 4 moves on from it
     migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
     assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "f8a0c2e4b6d3"
-    assert "TRAIL_START = 0.15" in migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "trail" in migration.REASON  # version 3's own change (version 11 removed the trail since)
     v2 = "# OI Change Buy 15 MIN, version 2: no trail\n"
     migration.FROM_MD5S = {_md5_text(v2)}
     running = await _deployment(db_session, "oib3_a@tradingmaster.internal", v2)
@@ -2274,7 +2274,9 @@ async def test_ohlc4_buy_is_created_with_its_pool_and_card_for_conti_calendars_o
 async def test_oi_change_buy_moves_onto_the_first_minute_wait_and_the_candle_colour_keeping_its_option(db_engine, db_session):
     """27 Nov: OI Change Buy 15 MIN version 10 -- each candle's first minute waits; a buy only when the candle's colour agrees."""
     migration = _load("c7e9a1b3d5f8_oi_change_buy_first_minute_and_colour")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a3c5e7b9d1f4"
+    assert _load("d9f1b3a5c7e4_oi_change_buy_no_trailing_stop").FROM_MD5S == {migration.TO_MD5}  # version 11 moves on
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
+    assert migration.down_revision == "a3c5e7b9d1f4"
     code = migration.BUILT_IN.read_text(encoding="utf-8")
     assert "WAIT_AFTER_MARK = timedelta(minutes=1)" in code and "def colour_blocks(" in code and "OPEN_RECORD = dtime(9, 0)" in code
     v9 = "# OI Change Buy 15 MIN, version 9: from the 09:15 open\n"
@@ -2283,6 +2285,36 @@ async def test_oi_change_buy_moves_onto_the_first_minute_wait_and_the_candle_col
     (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
     edited = await _deployment(db_session, "oib10_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
     state = {"opened_on": "2026-11-27", "position": {"option": "01 Dec 25,700 PE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone
+
+
+async def test_oi_change_buy_moves_onto_no_trailing_stop_keeping_its_option(db_engine, db_session):
+    """27 Nov: OI Change Buy 15 MIN version 11 -- the trailing stop removed."""
+    migration = _load("d9f1b3a5c7e4_oi_change_buy_no_trailing_stop")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "c7e9a1b3d5f8"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "TRAIL_START = " not in code and 'close("trailing_stop")' not in code and "def colour_blocks(" in code
+    v10 = "# OI Change Buy 15 MIN, version 10: the first minute and the candle colour\n"
+    migration.FROM_MD5S = {_md5_text(v10)}
+    running = await _deployment(db_session, "oib11_a@tradingmaster.internal", v10)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib11_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    state = {"opened_on": "2026-11-27", "position": {"option": "01 Dec 25,700 CE", "trail_starts_at": 183.02, "legs": {}}}
     running.state = state
     ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
     await db_session.commit()

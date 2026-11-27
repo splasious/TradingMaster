@@ -2,11 +2,17 @@
 OI Change Buy 15 MIN -- one NIFTY option bought on the live 15-minute candle's change in OI, held overnight (native)
 ===================================================================================================================
 
+Version 11 (27 Nov): no trailing stop (agreed the same day): the +15% /
+5% trail of version 3 below is gone, and with it the flat wait after a
+trail exit. The option held is sold only on an OI flip, the 12:00 roll on
+its expiry day, at 15:29 on its expiry day if not rolled, or by hand. A
+position carried over loses its trail fields. Everything else as version 10.
+
 Version 10 (27 Nov): two changes, as agreed the same day.
   1. Each 15-minute candle's first minute (WAIT_AFTER_MARK: 09:15-09:16,
      09:30-09:31 ... 15:15-15:16) decides nothing: the live change in OI
      is read from 1 minute in, and no buy is made in it -- a buy due then
-     waits for the minute to pass (the trailing stop still works). The
+     waits for the minute to pass (the trailing stop still worked). The
      09:00 row's decision is so made at 09:16.
   2. The forming 15-minute candle's colour -- live NIFTY against its open,
      the NIFTY of its own 15-minute record -- must agree with the side
@@ -145,8 +151,6 @@ LIVE_CHECK = timedelta(seconds=15)  # version 8: how often the live candle's rea
 BROKERAGE_PER_ORDER = 0.0  # version 8: no brokerage, as Kotak's intraday; the taxes and fees as always (trade_record)
 CANDLES_FROM, CANDLES_TO = dtime(9, 30), dtime(15, 30)  # the records closing a trading candle
 RECHECK = timedelta(seconds=1)
-TRAIL_START = 0.15  # version 3: the trail switches on once the bid is this far above the price paid
-TRAIL = 0.05  # then the stop sits this far below the highest bid since, only moving up
 SIDE_NAME = {"CE": "call", "PE": "put"}
 
 
@@ -361,10 +365,6 @@ async def evaluate(ctx) -> None:
             text += f" on {opened:%d %b}"
         if position["weekly_expiry"] == today.isoformat() and now_ist < roll_at:
             text += f"; expires today: rolled to next week's at {ROLL_AT:%H:%M}"
-        if position.get("trail_stop") is not None:
-            return f"{text}; trailing stop {position['trail_stop']:,.2f} (5% under the highest bid {position['peak_bid']:,.2f})"
-        if position.get("trail_starts_at") is not None:
-            return f"{text}; trail starts at a bid of {position['trail_starts_at']:,.2f} (+{TRAIL_START * 100:g}%)"
         return text
 
     def next_text() -> str:
@@ -386,7 +386,7 @@ async def evaluate(ctx) -> None:
             ctx.wake_at(open_at)  # version 9: the open's decision
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
-            ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
+            ctx.wake_at(now_utc + RECHECK)  # read every second while held (version 11: no trail, the live reading)
 
     # -- a manual exit
     if position is not None and force_exit:
@@ -410,8 +410,8 @@ async def evaluate(ctx) -> None:
             return
         if position is not None:
             ctx.note("hold", reason=(
-                f"carried overnight: {held_text()}; the trail from the {SESSION_OPEN:%H:%M} open {next_open:%a %d %b}, the next "
-                f"decision at {first_decision():%H:%M} (the {OPEN_RECORD:%H:%M} row's change in OI, then the live candle)"
+                f"carried overnight: {held_text()}; the next decision {next_open:%a %d %b} at {first_decision():%H:%M} (the "
+                f"{OPEN_RECORD:%H:%M} row's change in OI, then the live candle); no trailing stop"
             ))
             ctx.wake_at(next_open)
             return
@@ -419,29 +419,11 @@ async def evaluate(ctx) -> None:
                                     f"{SESSION_OPEN:%H:%M} open"))
         return
 
-    # -- the trailing stop (version 3): on the bid, every second while held
+    # -- version 11: no trailing stop -- a position carried over loses version 3's trail fields
     if position is not None:
-        leg = position["legs"]["long"]
-        quote = await bid_ask(ctx, uuid.UUID(leg["instrument_id"]))
-        if quote is not None:
-            bid_now = quote[0]
-            position["trail_starts_at"] = position.get("trail_starts_at") or round(leg["entry_price"] * (1 + TRAIL_START), 2)
-            position["peak_bid"] = round(max(position.get("peak_bid") or bid_now, bid_now), 2)
-            if position.get("trail_stop") is not None or position["peak_bid"] >= position["trail_starts_at"]:
-                position["trail_stop"] = round(max(position.get("trail_stop") or 0.0, position["peak_bid"] * (1 - TRAIL)), 2)
-            if position.get("trail_stop") is not None and bid_now <= position["trail_stop"]:
-                option, peak, stop = position["option"], position["peak_bid"], position["trail_stop"]
-                price, pnl = await close("trailing_stop")
-                position = None
-                state.pop("pending", None)
-                until = next_mark(now_ist) or day_close  # flat until the next close, whatever the live candle reads
-                state["flat_until"] = until.astimezone(timezone.utc).isoformat()
-                ctx.note("exited", signal="SELL", reason=(
-                    f"trailing stop: {option} sold at {price:,.2f} (the bid), its stop {stop:,.2f} -- {TRAIL * 100:g}% under the "
-                    f"highest bid {peak:,.2f}; P&L {pnl:+,.0f} before charges; next decision {next_text()}"
-                ))
-                wake_for_next()
-                return
+        for old_key in ("trail_starts_at", "peak_bid", "trail_stop"):
+            position.pop(old_key, None)
+    state.pop("flat_until", None)  # nor the flat wait after a trail exit
 
     # -- the rollover (version 7): on the held option's expiry day at 12:00 (or found expired), to next week's, same side
     if position is not None and (expiry < today or (expiry == today and now_ist >= roll_at)):
@@ -465,12 +447,6 @@ async def evaluate(ctx) -> None:
         live_now = False
         decided = (f"the first minute of the {candle_start(now_ist):%H:%M} candle: no decision until "
                    f"{quiet_until:%H:%M}; ")
-    flat_until = state.get("flat_until")
-    if flat_until and now_utc < datetime.fromisoformat(flat_until):
-        live_now = False
-        decided = f"flat after the trailing stop until the {datetime.fromisoformat(flat_until).astimezone(IST):%H:%M} close; "
-    elif flat_until:
-        state.pop("flat_until", None)
     for old_key in ("last_mark",):  # version 7's: the close it last read
         state.pop(old_key, None)
     if live_now:
@@ -578,18 +554,14 @@ async def evaluate(ctx) -> None:
             "decided_at": pending.get("mark"),
             "put_change_live": pending.get("put_change"),
             "call_change_live": pending.get("call_change"),
-            "trail_starts_at": round(price * (1 + TRAIL_START), 2),
-            "peak_bid": None,
-            "trail_stop": None,
             "legs": {"long": {"instrument_id": str(instrument.id), "strike": strike, "option_type": option_type, "side": "buy",
                               "expiry": weekly.isoformat(), "quantity": quantity, "entry_price": price}},
             "opened_at": now_utc.isoformat(),
         }
         state.pop("pending", None)
         ctx.note("entered", signal="BUY", reason=(
-            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; the trail starts at a bid of "
-            f"{price * (1 + TRAIL_START):,.2f} (+{TRAIL_START * 100:g}%), then {TRAIL * 100:g}% under its peak; no stop-loss; "
-            f"held overnight; sold when the live candle's side flips, rolled at {ROLL_AT:%H:%M} on its expiry day"
+            f"{decided}bought {LOTS} lot of {option} at {price:,.2f} (the ask), NIFTY {spot:,.1f}; no stop-loss and no trailing "
+            f"stop; held overnight; sold when the live candle's side flips, rolled at {ROLL_AT:%H:%M} on its expiry day"
         ))
         wake_for_next()
         return

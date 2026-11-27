@@ -98,7 +98,8 @@ def test_the_side_and_the_strike():  # unwinding (a negative change) compared as
     assert oib.latest_mark(at(4, 15, 28)) == at(4, 15, 15) and oib.next_mark(at(4, 15, 15)) is None
     assert oib.next_mark(at(4, 9, 0)) == at(4, 9, 30) and oib.next_mark(at(4, 9, 30)) == at(4, 9, 45)
     assert (oib.LOTS, oib.FLIP_GAP, oib.DAY_CLOSE.strftime("%H:%M")) == (1, timedelta(seconds=5), "15:29")
-    assert (oib.AVERAGE_CANDLES, oib.TRAIL_START, oib.TRAIL) == (1, 0.15, 0.05)  # version 8: a candle is its own
+    assert oib.AVERAGE_CANDLES == 1  # version 8: a candle is its own
+    assert not hasattr(oib, "TRAIL_START") and not hasattr(oib, "TRAIL")  # version 11: no trailing stop
     assert (oib.LIVE_CHECK, oib.BROKERAGE_PER_ORDER) == (timedelta(seconds=15), 0.0)
     assert not hasattr(oib, "STOP_LOSS_PER_LOT") and not hasattr(oib, "FIRST_READ") and not hasattr(oib, "RECORD_WAIT")
     assert oib.closes_a_candle(at(4, 9, 30)) and oib.closes_a_candle(at(4, 15, 30))
@@ -117,8 +118,8 @@ async def test_at_the_0915_open_the_0900_row_decides_one_lot_of_the_atm_weekly_a
     leg = p["legs"]["long"]
     assert leg["quantity"] == 65 and leg["entry_price"] == market.ltp(W1, 23450.0, "CE", at(4, 9, 15, 2), 23460.0) + SPREAD  # the ask
     assert ctx._last_signal == "BUY" and "the 09:00 row (overnight) change in OI: put +9,134,190, call +3,296,605" in ctx._last_reason
-    assert ctx._wake_at == at(4, 9, 15, 3)  # version 3: read every second while held, for the trail
-    assert p["trail_starts_at"] == pytest.approx(leg["entry_price"] * 1.15, abs=0.01) and p["trail_stop"] is None
+    assert ctx._wake_at == at(4, 9, 15, 3)  # read every second while held
+    assert not {"trail_starts_at", "peak_bid", "trail_stop"} & set(p) and "no trailing stop" in ctx._last_reason  # version 11
     assert "stop_loss_at" not in p and "no stop-loss" in ctx._last_reason and ctx.state["opened_on"] == "2026-11-04"
     assert (p["put_change_live"], p["call_change_live"]) == (91_34_190, 32_96_605) and ctx.state["brokerage_per_order"] == 0.0
     waits = await market.check(at(4, 9, 15, 4))  # the live row still against 09:00: the 09:15 record not in
@@ -189,7 +190,7 @@ async def test_at_1529_nothing_is_sold_it_is_carried_overnight_and_nothing_more_
     open_next = datetime.combine(nxt, oib.SESSION_OPEN, tzinfo=at(4, 9, 15).tzinfo)
     assert await market.trades() == [] and carried.state["position"]["option_type"] == "PE"
     assert carried._last_reason.startswith("carried overnight:") and carried._wake_at == open_next
-    assert f"the trail from the 09:15 open {nxt:%a %d %b}, the next decision at" in carried._last_reason
+    assert f"the next decision {nxt:%a %d %b} at" in carried._last_reason and "no trailing stop" in carried._last_reason
     assert oib.next_session_open(at(4, 15, 29)) == open_next and oib.next_session_open(at(5, 9, 0)) == at(5, 9, 15)
     later = await market.check(at(4, 15, 30))
     assert later.state["position"] is not None and await market.trades() == []
@@ -201,19 +202,18 @@ async def test_at_1529_nothing_is_sold_it_is_carried_overnight_and_nothing_more_
     assert kept.state["position"]["option_type"] == "PE" and await market.trades() == []
 
 
-async def test_a_carried_option_gapping_under_its_trail_is_sold_at_the_first_check(market):
+async def test_a_carried_option_gapping_down_is_kept_no_trailing_stop(market):
+    """27 Nov (version 11): up 30%, carried, then a gap open back to +5% -- held: no trail."""
     await market.record(at(4, 14, 0), put_day=4_00_000, call_day=1_00_000)
     market.deployment.state = {"last_mark": at(4, 13, 45).isoformat()}
     p = (await market.check(at(4, 14, 0, 4))).state["position"]
     cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
-    market.premium[key] = cost * 1.30 + SPREAD  # +30%: the trail on
+    market.premium[key] = cost * 1.30 + SPREAD
     await market.check(at(4, 14, 30))
     await market.check(at(4, 15, 29))  # carried
-    assert await market.trades() == []
-    market.premium[key] = cost * 1.05 + SPREAD  # a gap open under the stop
-    out = await market.check(at(5, 9, 15, 1))
-    [trade] = await market.trades()
-    assert trade.exit_reason == "trailing_stop" and out.state.get("position") is None
+    market.premium[key] = cost * 1.05 + SPREAD  # a gap open well under the high
+    kept = await market.check(at(5, 9, 15, 1))
+    assert kept.state["position"]["option_type"] == "CE" and await market.trades() == []
 
 
 async def test_on_its_expiry_day_the_held_option_is_rolled_to_next_weeks_at_noon(market):
@@ -303,33 +303,27 @@ async def test_a_position_from_version_7_drops_its_averages_and_keeps_on(market)
     assert p["option_type"] == "CE" and "last_mark" not in kept.state and await market.trades() == []
 
 
-async def test_the_trail_starts_at_plus_15_percent_then_sells_5_percent_under_the_highest_bid(market):
-    """17 Nov (version 3): +15% / 5% on the bid, read every second; after it, flat until the next close."""
+async def test_version_11_has_no_trailing_stop_and_a_position_from_version_10_loses_its_trail(market):
+    """27 Nov (version 11): the +15% / 5% trail is gone -- up 30% then back to +5% is held; only a flip sells it."""
     await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
-    p = (await market.check(at(4, 9, 30, 4))).state["position"]
+    ctx = await market.check(at(4, 9, 30, 4))
+    p = ctx.state["position"]
+    p.update(trail_starts_at=1.0, peak_bid=2.0, trail_stop=1.9)  # as version 10 left a position
+    ctx.state["flat_until"] = at(4, 9, 45).astimezone(timezone.utc).isoformat()
     cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
-    market.premium[key] = cost * 1.14 + SPREAD  # a bid of +14%: not yet
-    early = await market.check(at(4, 9, 35))
-    assert early.state["position"]["trail_stop"] is None and "trail starts at a bid of" in early._last_reason
-    market.premium[key] = cost * 1.30 + SPREAD  # +30%: on, the stop 5% under it
-    on = (await market.check(at(4, 9, 36))).state["position"]
-    assert on["peak_bid"] == pytest.approx(cost * 1.30, abs=0.01) and on["trail_stop"] == pytest.approx(cost * 1.30 * 0.95, abs=0.02)
-    market.premium[key] = cost * 1.25 + SPREAD  # down a little, over the stop: held, the stop where it was
-    held = (await market.check(at(4, 9, 37))).state["position"]
-    assert held["trail_stop"] == on["trail_stop"] and await market.trades() == []
-    market.premium[key] = cost * 1.22 + SPREAD  # under the stop: sold at the bid
-    out = await market.check(at(4, 9, 38))
-    [trade] = await market.trades()
-    assert trade.exit_reason == "trailing_stop" and trade.legs[0]["exit_price"] == pytest.approx(cost * 1.22, abs=0.01)
-    assert out.state.get("position") is None and out._last_reason.startswith("trailing stop:")
-    again = await market.check(at(4, 9, 40))  # flat until the next close, whatever the live candle reads
-    assert again.state.get("position") is None and "flat after the trailing stop until the 09:45 close" in again._last_reason
-    await market.record(at(4, 9, 45), put_day=5_00_000, call_day=1_00_000)  # the same side again: bought again
-    market.premium.clear()
-    assert (await market.check(at(4, 9, 45, 4))).state["position"]["option_type"] == "CE"
+    market.premium[key] = cost * 1.30 + SPREAD
+    up = await market.check(at(4, 9, 36))
+    assert not {"trail_starts_at", "peak_bid", "trail_stop"} & set(up.state["position"]) and "flat_until" not in up.state
+    market.premium[key] = cost * 1.05 + SPREAD  # back to +5%: held
+    held = await market.check(at(4, 9, 38))
+    assert held.state["position"]["option_type"] == "CE" and await market.trades() == [] and "trail" not in held._last_reason
+    market.reads(at(4, 9, 30), 1_00_000, 4_00_000)  # only the OI flip sells it
+    await market.check(at(4, 9, 40))
+    assert [t.exit_reason for t in await market.trades()] == ["oi_flip"]
 
 
-async def test_a_stop_hit_at_a_close_waits_for_the_next_one(market):
+async def test_a_fall_from_its_high_at_a_close_is_held_with_no_flat_wait(market):
+    """27 Nov (version 11): +40% then +20% at the 09:45 close -- version 10's trail sold it and waited flat; now it's held."""
     await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
     p = (await market.check(at(4, 9, 30, 4))).state["position"]
     cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
@@ -337,10 +331,8 @@ async def test_a_stop_hit_at_a_close_waits_for_the_next_one(market):
     await market.check(at(4, 9, 44))
     market.premium[key] = cost * 1.20 + SPREAD
     await market.record(at(4, 9, 45), put_day=5_00_000, call_day=1_00_000)
-    out = await market.check(at(4, 9, 45, 2))  # the stop hit just after the 09:45 close: that close isn't bought on
-    assert out.state.get("position") is None and out.state["flat_until"] == at(4, 10, 0).astimezone(timezone.utc).isoformat()
-    assert (await market.check(at(4, 9, 45, 5))).state.get("position") is None
-    assert (await market.check(at(4, 10, 0, 1))).state["position"]["option_type"] == "CE"  # the next close: the live candle again
+    out = await market.check(at(4, 9, 45, 2))
+    assert out.state["position"]["option_type"] == "CE" and "flat_until" not in out.state and await market.trades() == []
 
 
 async def test_version_8_flips_the_moment_the_live_candle_turns_mid_candle(market):
@@ -383,15 +375,15 @@ async def test_its_trades_are_charged_no_brokerage_only_the_taxes_and_fees(marke
     assert 0 < trade.charges < 20
 
 
-async def test_version_6_has_no_stop_loss_only_the_trail(market):
-    """24 Nov: version 5's Rs 1,200 a lot is gone -- a loss of any size before the trail is held to a flip or 15:29."""
+async def test_no_stop_loss_and_no_trailing_stop(market):
+    """24 Nov: version 5's Rs 1,200 a lot is gone; 27 Nov (version 11): the trail too -- a loss of any size is held to a flip."""
     await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)
     p = (await market.check(at(4, 9, 30, 4))).state["position"]
     cost, key = p["legs"]["long"]["entry_price"], (W1, 23450.0, "CE")
     market.premium[key] = cost - 40 + SPREAD  # Rs 2,600 down at the bid
     held = await market.check(at(4, 9, 36))
     assert held.state["position"] is not None and await market.trades() == []
-    assert "stop-loss" not in held._last_reason and "trail starts at a bid of" in held._last_reason
+    assert "stop-loss" not in held._last_reason and "trail" not in held._last_reason
 
 
 async def test_a_position_from_version_5_loses_its_stop_loss(market):
