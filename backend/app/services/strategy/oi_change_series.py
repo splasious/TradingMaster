@@ -3,8 +3,8 @@ card: each 15-minute trading candle's Put and Call dOI -- the PCR Analysis
 tab's records closing 09:30 to 15:30 (NIFTY, 4 expiries, ATM +-40 strikes)
 -- with the average the strategy decides on (versions 6-7: the last
 AVERAGE_CANDLES candles; version 8, 26 Nov: 1, a candle is its own) and the
-side each candle the strategy follows live (09:30-15:29: those closing
-09:45-15:30) ended on.
+side each candle the strategy follows live (version 9: 09:15-15:29, those
+closing 09:30-15:30) ended on.
 
 The latest session with a record, and the BEFORE (4) candles before its
 first, so the first closes' averages show where they come from. Read-only;
@@ -51,7 +51,7 @@ async def oi_change_series(db, now: datetime) -> dict:
         put_avg = sum(c.put_oi_change for c in window) / len(window)
         call_avg = sum(c.call_oi_change for c in window) / len(window)
         at = as_aware_utc(snap.ts).astimezone(IST)
-        decides = at.date() == session and oib.FIRST_MARK < at.time() <= oib.CANDLES_TO  # version 8: followed live 09:30-15:29
+        decides = at.date() == session and oib.FIRST_MARK <= at.time() <= oib.CANDLES_TO  # followed live 09:15-15:29 (version 9)
         out["candles"].append({
             "at": as_aware_utc(snap.ts), "session": at.date(), "spot": snap.spot,
             "put_change": snap.put_oi_change, "call_change": snap.call_oi_change, "put_avg": put_avg, "call_avg": call_avg,

@@ -36,7 +36,7 @@ from app.services.market_data.tick_engine import tick_engine  # noqa: F401 -- no
 NAMES = {"Conti Straddle 15 MIN": "03536e1f5a51afd155c25f286b3da832", "Conti Calendar 15 MIN": "2d7e8b04fc51a294499022ca4f623da4",
          "Conti Calendar 400 15 MIN": "9200a37a0cb1961c9999039f50ee90a8",
          "Conti Reverse Calendar 15 MIN": "05ad04b64bb69e9d604e579ffac1ba09",
-         "OI Change Buy 15 MIN": "883fff0ba57bb73f853ace653dfde562",
+         "OI Change Buy 15 MIN": "ebc152cdc4cd2d58ded161518bf7ecd1",
          "Synthetic Calendar 15 MIN": "1f3213ef89492d5fec775150c2d84f32", "Synthetic Calendar Reverse 15 MIN": "900e45680f84642c4189366a6a2a6ad0"}
 LISTEN_SECONDS = 6
 
@@ -126,7 +126,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                 if "put_change" in oi:  # version 8: the live candle
                     print(f"    last live reading: {oi.get('at', '-')}; put {oi.get('put_change')}, call {oi.get('call_change')}; "
                           f"buy pending: {bool(state.get('pending'))}; flat until: {state.get('flat_until', '-')}; "
-                          f"brokerage per order: {state.get('brokerage_per_order', 'the schedule')}")
+                          f"brokerage per order: {state.get('brokerage_per_order', 'the schedule')}; the 09:00 row read at the open on: "
+                          f"{state.get('opened_on', '-')}")
                 else:
                     print(f"    last 15-min close read: {state.get('last_mark', '-')}; change in OI then (15 min): "
                           f"put {oi.get('put_change_15m', '-')}, call {oi.get('call_change_15m', '-')}; buy pending: {bool(state.get('pending'))}")

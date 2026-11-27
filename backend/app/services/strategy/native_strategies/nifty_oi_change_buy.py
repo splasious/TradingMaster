@@ -2,6 +2,15 @@
 OI Change Buy 15 MIN -- one NIFTY option bought on the live 15-minute candle's change in OI, held overnight (native)
 ===================================================================================================================
 
+Version 9 (27 Nov): checking starts at the SESSION_OPEN (09:15) open, not
+the 09:30 close. At the open the side comes from the OPEN_RECORD (09:00)
+row's own change in OI -- the overnight change, Put dOI against Call dOI,
+as below -- once a day: a carried option on the other side sold and the
+other side bought FLIP_GAP later, nothing held bought. From then on the
+live candle decides, counted from the 09:15 record and each later one (a
+reading still against the 09:00 record waits for the 09:15 one). No 09:00
+record: the live candle from 09:15 straight away.
+
 Version 8 (26 Nov): the side follows the LIVE candle -- the one forming
 now -- instead of being picked at each 15-minute close; and its trades are
 charged no brokerage (BROKERAGE_PER_ORDER 0, as Kotak's intraday: STT,
@@ -110,7 +119,8 @@ FIRST_MARK = dtime(9, 30)
 LAST_MARK = dtime(15, 15)
 MARK_STEP = timedelta(minutes=15)
 DAY_CLOSE = dtime(15, 29)  # version 7: no sale then -- nothing bought after it, what's held carried overnight
-SESSION_OPEN = dtime(9, 15)  # version 7: the trail on a carried option from the next session's open
+SESSION_OPEN = dtime(9, 15)  # version 7: the trail on a carried option from the next session's open; version 9: checking from it
+OPEN_RECORD = dtime(9, 0)  # version 9: this record's own change in OI (the overnight) decides the side at the open
 ROLL_AT = dtime(12, 0)  # version 7: on the held option's expiry day, rolled to next week's weekly then
 FLIP_GAP = timedelta(seconds=5)
 AVERAGE_CANDLES = 1  # version 8: a candle is its own (2 in versions 6-7: the side from the average over this many candles)
@@ -199,14 +209,27 @@ async def live_row(now_utc: datetime) -> tuple[dict | None, str | None]:
     return await read(PCR_UNDERLYING, now_utc)
 
 
+async def open_change(db, today: date) -> dict | None:
+    """Version 9: the OPEN_RECORD (09:00) row's own Put and Call dOI -- the overnight change -- today, or None."""
+    at = datetime.combine(today, OPEN_RECORD, tzinfo=IST).astimezone(timezone.utc)
+    snap = (
+        await db.execute(select(PcrSnapshot).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts == at))
+    ).scalar_one_or_none()
+    if snap is None or snap.put_oi_change is None or snap.call_oi_change is None:
+        return None
+    return {"put": float(snap.put_oi_change), "call": float(snap.call_oi_change), "label": f"the {OPEN_RECORD:%H:%M} row (overnight)",
+            "since": at.astimezone(IST).isoformat()}
+
+
 async def read_change(ctx, now_utc: datetime) -> tuple[dict | None, str]:
     """Version 8: ({"put", "call", "label", "since"}, "") -- the live candle's Put and Call dOI so far,
-    since the latest 15-minute record -- or (None, why not). In a backtest, the latest closed candle."""
+    since the latest 15-minute record (version 9: the 09:15 one on) -- or (None, why not). In a
+    backtest, the latest closed candle."""
     now_ist = now_utc.astimezone(IST)
-    first = datetime.combine(now_ist.date(), FIRST_MARK, tzinfo=IST)
+    first = datetime.combine(now_ist.date(), SESSION_OPEN, tzinfo=IST)  # version 9: the 09:15 record on (09:30 before)
     if getattr(ctx, "is_backtest", False):
         average = await candle_average(ctx.db, now_utc)
-        if average is None or average[2][-1] < first:
+        if average is None or average[2][-1] < datetime.combine(now_ist.date(), FIRST_MARK, tzinfo=IST):
             return None, f"no {FIRST_MARK:%H:%M} change-in-OI record yet"
         return {"put": average[0], "call": average[1], "label": f"the {average[2][-1]:%H:%M} candle",
                 "since": average[2][-1].isoformat()}, ""
@@ -218,7 +241,7 @@ async def read_change(ctx, now_utc: datetime) -> tuple[dict | None, str]:
         return None, "the live reading has no change in OI yet"
     since = as_aware_utc(prev if isinstance(prev, datetime) else datetime.fromisoformat(str(prev))).astimezone(IST)
     if since < first:
-        return None, f"waiting for the {FIRST_MARK:%H:%M} record: the live candle starts there"
+        return None, f"waiting for the {SESSION_OPEN:%H:%M} record: the live candle starts there"
     read_at = as_aware_utc(row["ts"] if isinstance(row.get("ts"), datetime) else now_utc).astimezone(IST)
     return {"put": float(put), "call": float(call), "label": f"live {read_at:%H:%M:%S} (since {since:%H:%M})",
             "since": since.isoformat()}, ""
@@ -300,8 +323,11 @@ async def evaluate(ctx) -> None:
         mark = next_mark(now_ist)
         if mark is not None:
             ctx.wake_at(mark)
-        if datetime.combine(today, FIRST_MARK, tzinfo=IST) <= now_ist < day_close:
+        open_at = datetime.combine(today, SESSION_OPEN, tzinfo=IST)
+        if open_at <= now_ist < day_close:
             ctx.wake_at(now_utc + LIVE_CHECK)  # version 8: the live candle
+        elif now_ist < open_at and is_trading_day(today):
+            ctx.wake_at(open_at)  # version 9: the open's decision
         if state.get("position") and now_ist < day_close:
             ctx.wake_at(day_close)
             ctx.wake_at(now_utc + RECHECK)  # version 3: the trail read every second
@@ -323,18 +349,18 @@ async def evaluate(ctx) -> None:
             price, pnl = await close("expiry_day_close")
             ctx.note("exited", signal="SELL", reason=(
                 f"15:29 on its expiry day, not rolled at {ROLL_AT:%H:%M}: {option} sold at {price:,.2f}; P&L {pnl:+,.0f} before "
-                f"charges; next decision {next_open:%a %d %b} at the {FIRST_MARK:%H:%M} close"
+                f"charges; next decision {next_open:%a %d %b} at the {SESSION_OPEN:%H:%M} open"
             ))
             return
         if position is not None:
             ctx.note("hold", reason=(
-                f"carried overnight: {held_text()}; the trail from the {SESSION_OPEN:%H:%M} open {next_open:%a %d %b}, "
-                f"next decision at its {FIRST_MARK:%H:%M} close"
+                f"carried overnight: {held_text()}; the trail and the next decision from the {SESSION_OPEN:%H:%M} open "
+                f"{next_open:%a %d %b} (the {OPEN_RECORD:%H:%M} row's change in OI, then the live candle)"
             ))
             ctx.wake_at(next_open)
             return
         ctx.note("skipped", reason=(f"day done: nothing bought after {DAY_CLOSE:%H:%M}; next decision {next_open:%a %d %b} at the "
-                                    f"{FIRST_MARK:%H:%M} close"))
+                                    f"{SESSION_OPEN:%H:%M} open"))
         return
 
     # -- the trailing stop (version 3): on the bid, every second while held
@@ -375,9 +401,9 @@ async def evaluate(ctx) -> None:
         ctx.wake_at(due)
         return
 
-    # -- version 8: the live candle decides the side, from the 09:30 close to 15:29
+    # -- version 8: the live candle decides the side, to 15:29 -- version 9: from the 09:15 open, the 09:00 row first
     decided = ""
-    live_now = datetime.combine(today, FIRST_MARK, tzinfo=IST) <= now_ist < day_close
+    live_now = datetime.combine(today, SESSION_OPEN, tzinfo=IST) <= now_ist < day_close
     flat_until = state.get("flat_until")
     if flat_until and now_utc < datetime.fromisoformat(flat_until):
         live_now = False
@@ -387,7 +413,13 @@ async def evaluate(ctx) -> None:
     for old_key in ("last_mark",):  # version 7's: the close it last read
         state.pop(old_key, None)
     if live_now:
-        reading, why = await read_change(ctx, now_utc)
+        reading = None
+        if state.get("opened_on") != today.isoformat():  # version 9: once a day, at the open -- the 09:00 row decides
+            state["opened_on"] = today.isoformat()
+            reading = await open_change(ctx.db, today)
+        why = ""
+        if reading is None:
+            reading, why = await read_change(ctx, now_utc)
         if reading is None:
             decided = f"no live change-in-OI reading ({why}): what's held kept; "
         else:
@@ -492,9 +524,10 @@ async def evaluate(ctx) -> None:
 
 
 def _next_text(now_ist: datetime) -> str:
-    first = datetime.combine(now_ist.date(), FIRST_MARK, tzinfo=IST)
+    first = datetime.combine(now_ist.date(), SESSION_OPEN, tzinfo=IST)
     if now_ist < first and is_trading_day(now_ist.date()):
-        return f"from the {FIRST_MARK:%H:%M} close, on the live candle"
+        return f"at the {SESSION_OPEN:%H:%M} open (the {OPEN_RECORD:%H:%M} row's change in OI), then on the live candle"
     if first <= now_ist < datetime.combine(now_ist.date(), DAY_CLOSE, tzinfo=IST):
         return f"on the live candle until {DAY_CLOSE:%H:%M}"
-    return f"{next_trading_day(now_ist.date()):%a %d %b} from the {FIRST_MARK:%H:%M} close, on the live candle"
+    return (f"{next_trading_day(now_ist.date()):%a %d %b} at the {SESSION_OPEN:%H:%M} open (the {OPEN_RECORD:%H:%M} row's change "
+            f"in OI), then on the live candle")

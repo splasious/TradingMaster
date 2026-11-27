@@ -188,14 +188,14 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
                 <div className="flex justify-between gap-3"><span className="text-text-secondary">Call average</span><span className="font-financial">{lakh(h.call_avg)}</span></div>
               </>
             )}
-            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">{live ? "Ended on" : "Side"}</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : live && hhmm(h.at) === "09:30" ? "before the live candle starts" : !live && hhmm(h.at) === "15:30" ? "no decision; held overnight" : "no change")}</span></div>
+            <div className="mt-1 flex justify-between gap-3"><span className="text-text-secondary">{live ? "Ended on" : "Side"}</span><span className="font-semibold">{h.side ?? (h.session !== session ? "the day before" : !live && hhmm(h.at) === "15:30" ? "no decision; held overnight" : "no change")}</span></div>
           </div>
         )}
       </div>
       {data && n > 0 && (
         <p className="text-xs text-text-muted">
           {live
-            ? "From the 09:30 close to 15:29 the strategy follows the forming candle live: the CE while its Put ΔOI is higher, the PE while its Call ΔOI is. The strip shows the side each candle ended on; the shaded candles are the session before."
+            ? "At the 09:15 open the 09:00 row's overnight change in OI picks the side; from then until 15:29 the strategy follows the forming candle live: the CE while its Put ΔOI is higher, the PE while its Call ΔOI is. The strip shows the side each candle ended on; the shaded candles are the session before."
             : "At each close from 09:30 to 15:15 the strategy holds the CE while the put average is higher and the PE while the call average is; the shaded candles are the session before, which the first averages use."}
         </p>
       )}

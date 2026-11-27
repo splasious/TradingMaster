@@ -1,7 +1,8 @@
 """OI Change Buy 15 MIN (native_strategies/nifty_oi_change_buy.py, 16 Nov).
 Since version 8 (26 Nov) the side follows the live candle -- the PCR tab's
-LIVE row, its Put / Call dOI since the latest record -- from the 09:30 close
-to 15:29, and its trades are charged no brokerage. Before:
+LIVE row, its Put / Call dOI since the latest record -- to 15:29, and its
+trades are charged no brokerage; since version 9 (27 Nov) from the 09:15
+open, where the 09:00 row's own (overnight) change decides first. Before:
 at every 15-minute close 09:30-15:15 the PCR records' change in OI over the
 last 2 fifteen-minute candles, averaged (version 6, 24 Nov; that candle alone
 in versions 2-5, the day's in version 1) -- put side higher, one lot of the
@@ -91,25 +92,42 @@ def test_the_side_and_the_strike():  # unwinding (a negative change) compared as
     assert not oib.closes_a_candle(at(4, 9, 15)) and not oib.closes_a_candle(at(4, 9, 0))  # pre-open and overnight
 
 
-async def test_at_0930_put_side_higher_it_buys_one_lot_of_the_atm_weekly_call_at_the_ask(market):
-    early = await market.check(at(4, 9, 29))
-    assert early.state.get("position") is None and early._wake_at == at(4, 9, 30)
-    market.reads(at(4, 9, 15), put=9_00_000, call=1_00_000)  # the 09:30 record isn't in yet: the live row still against 09:15
-    waiting = await market.check(at(4, 9, 30, 1))
-    assert waiting.state.get("position") is None and "waiting for the 09:30 record: the live candle starts there" in waiting._last_reason
-    await market.record(at(4, 9, 30), put_day=6_50_000, call_day=2_10_000)  # in: the live candle from 09:30 reads the put side
-    ctx = await market.check(at(4, 9, 30, 4))
+async def test_at_the_0915_open_the_0900_row_decides_one_lot_of_the_atm_weekly_at_the_ask(market):
+    """27 Nov (version 9): the 09:00 row's own change -- the overnight -- decides at the open; then the live candle."""
+    early = await market.check(at(4, 9, 14))
+    assert early.state.get("position") is None and early._wake_at == at(4, 9, 15)
+    await market.record(at(4, 9, 0), put_day=91_34_190, call_day=32_96_605)  # the overnight: the put side higher
+    ctx = await market.check(at(4, 9, 15, 2))
     p = ctx.state["position"]
     assert (p["option"], p["option_type"], p["strike"], p["weekly_expiry"]) == ("09 Nov 23,450 CE", "CE", 23450.0, W1.isoformat())
-    assert p["bias"] == "long call" and p["regime"] == "oi change buy" and p["decided_at"] == "live 09:30:04 (since 09:30)"
+    assert p["bias"] == "long call" and p["regime"] == "oi change buy" and p["decided_at"] == "the 09:00 row (overnight)"
     leg = p["legs"]["long"]
-    assert leg["quantity"] == 65 and leg["entry_price"] == market.ltp(W1, 23450.0, "CE", at(4, 9, 30, 4), 23460.0) + SPREAD  # the ask
-    assert ctx._last_signal == "BUY" and "live 09:30:04 (since 09:30) change in OI: put +650,000, call +210,000" in ctx._last_reason
-    assert ctx._wake_at == at(4, 9, 30, 5)  # version 3: read every second while held, for the trail
+    assert leg["quantity"] == 65 and leg["entry_price"] == market.ltp(W1, 23450.0, "CE", at(4, 9, 15, 2), 23460.0) + SPREAD  # the ask
+    assert ctx._last_signal == "BUY" and "the 09:00 row (overnight) change in OI: put +9,134,190, call +3,296,605" in ctx._last_reason
+    assert ctx._wake_at == at(4, 9, 15, 3)  # version 3: read every second while held, for the trail
     assert p["trail_starts_at"] == pytest.approx(leg["entry_price"] * 1.15, abs=0.01) and p["trail_stop"] is None
-    assert "stop_loss_at" not in p and "no stop-loss" in ctx._last_reason
-    assert (p["put_change_live"], p["call_change_live"]) == (6_50_000, 2_10_000) and "put_avg" not in p
-    assert ctx.state["brokerage_per_order"] == 0.0
+    assert "stop_loss_at" not in p and "no stop-loss" in ctx._last_reason and ctx.state["opened_on"] == "2026-11-04"
+    assert (p["put_change_live"], p["call_change_live"]) == (91_34_190, 32_96_605) and ctx.state["brokerage_per_order"] == 0.0
+    waits = await market.check(at(4, 9, 15, 4))  # the live row still against 09:00: the 09:15 record not in
+    assert waits.state["position"]["option_type"] == "CE" and "waiting for the 09:15 record" in waits._last_reason
+    await market.record(at(4, 9, 15), put_day=1_00_000, call_day=4_00_000)  # in: the live candle from 09:15 reads the call side
+    flipped = await market.check(at(4, 9, 15, 9))
+    assert [t.exit_reason for t in await market.trades()] == ["oi_flip"] and flipped.state["pending"]["option_type"] == "PE"
+    assert "live 09:15:09 (since 09:15) change in OI: put +100,000, call +400,000 -- now a put" in flipped._last_reason
+
+
+async def test_the_0900_row_decides_only_once_a_day_and_without_one_the_live_candle_decides_from_0915(market):
+    await market.record(at(4, 9, 0), put_day=5_00_000, call_day=1_00_000)
+    await market.check(at(4, 9, 15, 2))
+    await market.record(at(4, 9, 15), put_day=3_00_000, call_day=1_00_000)
+    held = await market.check(at(4, 9, 20))  # the live candle: still the put side -- and the 09:00 row isn't read again
+    assert held.state["position"]["option_type"] == "CE" and "live 09:20:00 (since 09:15)" in held._last_reason
+    market.deployment.state = {**market.deployment.state, "position": None, "opened_on": "2026-11-03"}
+    fresh = await market.check(at(5, 9, 15, 2))  # 5 Nov: no 09:00 row that day -- the live candle, once the 09:15 record is in
+    assert fresh.state["opened_on"] == "2026-11-05" and fresh.state.get("position") is None
+    assert "waiting for the 09:15 record" in fresh._last_reason
+    await market.record(at(5, 9, 15), put_day=1_00_000, call_day=4_00_000)
+    assert (await market.check(at(5, 9, 15, 8))).state["position"]["option_type"] == "PE"
 
 
 async def test_the_same_side_keeps_the_option_held_and_a_flip_sells_it_then_buys_the_other_5_seconds_later(market):
@@ -158,13 +176,13 @@ async def test_at_1529_nothing_is_sold_it_is_carried_overnight_and_nothing_more_
     open_next = datetime.combine(nxt, oib.SESSION_OPEN, tzinfo=at(4, 9, 15).tzinfo)
     assert await market.trades() == [] and carried.state["position"]["option_type"] == "PE"
     assert carried._last_reason.startswith("carried overnight:") and carried._wake_at == open_next
-    assert f"the trail from the 09:15 open {nxt:%a %d %b}" in carried._last_reason
+    assert f"the trail and the next decision from the 09:15 open {nxt:%a %d %b}" in carried._last_reason
     assert oib.next_session_open(at(4, 15, 29)) == open_next and oib.next_session_open(at(5, 9, 0)) == at(5, 9, 15)
     later = await market.check(at(4, 15, 30))
     assert later.state["position"] is not None and await market.trades() == []
     morning = await market.check(at(5, 9, 16))
     assert morning.state["position"]["option_type"] == "PE" and "on 04 Nov" in morning._last_reason
-    assert "next decision from the 09:30 close, on the live candle" in morning._last_reason and morning._wake_at == at(5, 9, 16, 1)
+    assert "waiting for the 09:15 record" in morning._last_reason and morning._wake_at == at(5, 9, 16, 1)  # no 09:00 row here
     await market.record(at(5, 9, 30), put_day=1_00_000, call_day=2_00_000)  # still the put side: kept
     kept = await market.check(at(5, 9, 30, 4))
     assert kept.state["position"]["option_type"] == "PE" and await market.trades() == []
@@ -377,19 +395,19 @@ async def test_a_position_from_version_5_loses_its_stop_loss(market):
     assert "stop_loss_at" not in kept and kept["option_type"] == "CE"
 
 
-async def test_no_first_minute_buy_the_first_decision_is_the_0930_close(market):
+async def test_before_the_0915_open_nothing_is_decided(market):
     market.deployment.state = {"last_mark": at(3, 15, 15).isoformat()}
-    market.reads(at(4, 9, 15), put=9_00_000, call=1_00_000)
-    early = await market.check(at(4, 9, 15, 50))
-    assert early.state.get("position") is None and early._wake_at == at(4, 9, 30)
-    assert "next decision from the 09:30 close, on the live candle" in early._last_reason
+    await market.record(at(4, 9, 0), put_day=9_00_000, call_day=1_00_000)
+    early = await market.check(at(4, 9, 14, 50))
+    assert early.state.get("position") is None and early._wake_at == at(4, 9, 15) and "opened_on" not in early.state
+    assert "next decision at the 09:15 open (the 09:00 row's change in OI), then on the live candle" in early._last_reason
     day_done = await market.check(at(4, 15, 30))
-    assert day_done._last_reason.startswith("day done") and "at the 09:30 close" in day_done._last_reason
+    assert day_done._last_reason.startswith("day done") and "at the 09:15 open" in day_done._last_reason
 
 
 async def test_the_cards_chart_the_candles_and_the_side_each_live_candle_ended_on(market, db_session):
     """24 Nov, version 8 26 Nov: the chart under the card -- the latest session's candles, the 4 before its first,
-    and the side each candle the strategy followed live (09:30-15:29: those closing 09:45-15:30) ended on."""
+    and the side each candle the strategy followed live (version 9: 09:15-15:29, those closing 09:30-15:30) ended on."""
     from fastapi import HTTPException
 
     from app.api.v1.endpoints import paper_native_trading as ep
@@ -409,7 +427,7 @@ async def test_the_cards_chart_the_candles_and_the_side_each_live_candle_ended_o
     assert out["average_candles"] == 1 and out["session"] == at(5, 9, 30).date()
     candles = out["candles"]
     assert [c["at"] for c in candles] == [m.astimezone(timezone.utc) for m in (*marks[1:], at(5, 9, 30), at(5, 9, 45))]
-    assert [c["side"] for c in candles] == [None, None, None, None, None, "PE"]  # 09:15-09:30 isn't followed; the day before no side
+    assert [c["side"] for c in candles] == [None, None, None, None, "CE", "PE"]  # the day before shows no side
     assert (candles[5]["put_avg"], candles[5]["call_avg"]) == (0.0, 500.0)  # a candle is its own
 
     owner = await db_session.get(User, (await db_session.get(PaperPortfolio, market.portfolio.id)).user_id)
