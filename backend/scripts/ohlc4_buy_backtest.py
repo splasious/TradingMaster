@@ -1,4 +1,4 @@
-"""OHLC4 Buy backtested before it goes live (27 Nov): the 15-minute version, and the 5-minute one deployed. Read-only.
+"""OHLC4 Buy backtested before it goes live (27 Nov): deployed as OHLC4 Buy 5 MIN, "15m level, every 5m". Read-only.
 
 Asked 27 Nov: "Backtest OHLC4 first". The new strategy
 (native_strategies/nifty_ohlc4_buy.py, not deployed) replayed over every
@@ -386,9 +386,9 @@ async def main() -> None:
         if days_5m:
             modes.insert(0, "5m level")
         print()
-        print("As deployed (OHLC4 Buy 5 MIN): at each 5-minute close 09:20-15:25 the candle's close against the candle before's")
-        print("  (O+H+L+C)/4 -- the option at that close (estimated inside its 15-minute candle; the live trades 10-70 s later,")
-        print("  when the candle is in); the rest as below. The other two readings: the 15-minute version backtested before")
+        print("Deployed as OHLC4 Buy 5 MIN: '15m level, every 5m' (the live also checks at the 15-minute closes, once that")
+        print("  candle is in, where this skips them). '5m level, 5-min closes': each 5-minute close against the 5-minute candle")
+        print("  before's (O+H+L+C)/4, for comparison")
         print("Rules: the previous 15-minute NIFTY candle's (O+H+L+C)/4 the level (09:15-09:30: the session before's last); NIFTY")
         print("  above it the ATM weekly call held, under it the put, flipped on a cross; 'stop_loss' when past the candle's low /")
         print("  high; no trailing stop; held overnight, rolled 12:00 on its expiry day to the side NIFTY is on; 1 lot; bought")
@@ -413,8 +413,8 @@ async def main() -> None:
 
 
 def report(data: Data, results: dict, fine: str | None) -> None:
-    names = {fine: "15m level, every " + str(fine), "15m": "15m level, 15-min closes", "15m same": "15-min closes, same sessions",
-             "5m level": "5m level, 5-min closes"}
+    names = {fine: "15m level, every " + str(fine) + (" (deployed)" if fine == "5m" else ""), "15m": "15m level, 15-min closes",
+             "15m same": "15-min closes, same sessions", "5m level": "5m level, 5-min closes"}
     print()
     print("1 lot, points per unit, net of the half-spread and charges:")
     print(f"  {'reading':<30} {'sessions':>8} {'net':>8} {'gross':>8} {'taxes':>7} {'1st half':>8} {'2nd half':>8} {'win%':>5} "
