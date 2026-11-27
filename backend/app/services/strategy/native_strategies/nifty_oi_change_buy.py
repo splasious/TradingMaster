@@ -2,6 +2,21 @@
 OI Change Buy 15 MIN -- one NIFTY option bought on the live 15-minute candle's change in OI, held overnight (native)
 ===================================================================================================================
 
+Version 10 (27 Nov): two changes, as agreed the same day.
+  1. Each 15-minute candle's first minute (WAIT_AFTER_MARK: 09:15-09:16,
+     09:30-09:31 ... 15:15-15:16) decides nothing: the live change in OI
+     is read from 1 minute in, and no buy is made in it -- a buy due then
+     waits for the minute to pass (the trailing stop still works). The
+     09:00 row's decision is so made at 09:16.
+  2. The forming 15-minute candle's colour -- live NIFTY against its open,
+     the NIFTY of its own 15-minute record -- must agree with the side
+     bought: a PE isn't bought while the candle is green (NIFTY above its
+     open), a CE isn't while it's red; at its open (or no record) either
+     is. The OI flip still sells the held option (agreed: sell it, stay
+     flat); the buy waits, read every second, and is made once the colour
+     agrees with the side the OI then says. Every buy, the 12:00 roll's
+     too.
+
 Version 9 (27 Nov): checking starts at the SESSION_OPEN (09:15) open, not
 the 09:30 close. At the open the side comes from the OPEN_RECORD (09:00)
 row's own change in OI -- the overnight change, Put dOI against Call dOI,
@@ -123,6 +138,8 @@ SESSION_OPEN = dtime(9, 15)  # version 7: the trail on a carried option from the
 OPEN_RECORD = dtime(9, 0)  # version 9: this record's own change in OI (the overnight) decides the side at the open
 ROLL_AT = dtime(12, 0)  # version 7: on the held option's expiry day, rolled to next week's weekly then
 FLIP_GAP = timedelta(seconds=5)
+WAIT_AFTER_MARK = timedelta(minutes=1)  # version 10: each 15-minute candle's first minute decides nothing, buys nothing
+CANDLE = timedelta(minutes=15)  # version 10: the candles from 09:15
 AVERAGE_CANDLES = 1  # version 8: a candle is its own (2 in versions 6-7: the side from the average over this many candles)
 LIVE_CHECK = timedelta(seconds=15)  # version 8: how often the live candle's reading is new (pcr_live.LIVE_TTL)
 BROKERAGE_PER_ORDER = 0.0  # version 8: no brokerage, as Kotak's intraday; the taxes and fees as always (trade_record)
@@ -162,6 +179,42 @@ def next_mark(now_ist: datetime) -> datetime | None:
         return first
     mark = first + (int((now_ist - first) / MARK_STEP) + 1) * MARK_STEP
     return mark if mark <= last else None
+
+
+def candle_start(now_ist: datetime) -> datetime | None:
+    """Version 10: the 15-minute candle `now_ist` falls in (from 09:15, IST); None before 09:15."""
+    first = datetime.combine(now_ist.date(), SESSION_OPEN, tzinfo=IST)
+    if now_ist < first:
+        return None
+    return first + int((now_ist - first) / CANDLE) * CANDLE
+
+
+def first_minute_ends(now_ist: datetime) -> datetime | None:
+    """Version 10: when the first minute of the candle `now_ist` is in ends, while it's in it; None otherwise."""
+    start = candle_start(now_ist)
+    if start is None or now_ist >= start + WAIT_AFTER_MARK:
+        return None
+    return start + WAIT_AFTER_MARK
+
+
+def candle_colour(price: float | None, open_price: float | None) -> str | None:
+    """Version 10: "green" above the candle's open, "red" under it, None at it or unknown."""
+    if price is None or open_price is None or price == open_price:
+        return None
+    return "green" if price > open_price else "red"
+
+
+def colour_blocks(option_type: str, colour: str | None) -> bool:
+    """Version 10: a PE isn't bought on a green candle, a CE isn't on a red one."""
+    return (option_type == "PE" and colour == "green") or (option_type == "CE" and colour == "red")
+
+
+async def candle_open(db, start: datetime) -> float | None:
+    """Version 10: the candle's open -- the NIFTY of its own 15-minute record (taken a few seconds after the mark)."""
+    snap = (await db.execute(
+        select(PcrSnapshot.spot).where(PcrSnapshot.underlying == PCR_UNDERLYING, PcrSnapshot.ts == start.astimezone(timezone.utc))
+    )).scalars().first()
+    return float(snap) if snap is not None else None
 
 
 def leg_pnl(leg: dict, exit_price: float) -> float:
@@ -324,7 +377,10 @@ async def evaluate(ctx) -> None:
         if mark is not None:
             ctx.wake_at(mark)
         open_at = datetime.combine(today, SESSION_OPEN, tzinfo=IST)
-        if open_at <= now_ist < day_close:
+        quiet = first_minute_ends(now_ist)
+        if quiet is not None and now_ist < day_close and is_trading_day(today):
+            ctx.wake_at(quiet)  # version 10: decisions from 1 minute into the candle
+        elif open_at <= now_ist < day_close:
             ctx.wake_at(now_utc + LIVE_CHECK)  # version 8: the live candle
         elif now_ist < open_at and is_trading_day(today):
             ctx.wake_at(open_at)  # version 9: the open's decision
@@ -354,8 +410,8 @@ async def evaluate(ctx) -> None:
             return
         if position is not None:
             ctx.note("hold", reason=(
-                f"carried overnight: {held_text()}; the trail and the next decision from the {SESSION_OPEN:%H:%M} open "
-                f"{next_open:%a %d %b} (the {OPEN_RECORD:%H:%M} row's change in OI, then the live candle)"
+                f"carried overnight: {held_text()}; the trail from the {SESSION_OPEN:%H:%M} open {next_open:%a %d %b}, the next "
+                f"decision at {first_decision():%H:%M} (the {OPEN_RECORD:%H:%M} row's change in OI, then the live candle)"
             ))
             ctx.wake_at(next_open)
             return
@@ -404,6 +460,11 @@ async def evaluate(ctx) -> None:
     # -- version 8: the live candle decides the side, to 15:29 -- version 9: from the 09:15 open, the 09:00 row first
     decided = ""
     live_now = datetime.combine(today, SESSION_OPEN, tzinfo=IST) <= now_ist < day_close
+    quiet_until = first_minute_ends(now_ist) if live_now else None
+    if quiet_until is not None:  # version 10: each candle's first minute decides nothing
+        live_now = False
+        decided = (f"the first minute of the {candle_start(now_ist):%H:%M} candle: no decision until "
+                   f"{quiet_until:%H:%M}; ")
     flat_until = state.get("flat_until")
     if flat_until and now_utc < datetime.fromisoformat(flat_until):
         live_now = False
@@ -436,8 +497,8 @@ async def evaluate(ctx) -> None:
             if side is None:
                 decided = f"{text} -- no change; "
             elif pending is not None and position is None:
-                if pending["option_type"] != side and pending.get("mark") != f"{ROLL_AT:%H:%M} rollover":
-                    pending.update(option_type=side, put_change=put, call_change=call, mark=label)  # the side when it's bought
+                if pending["option_type"] != side:  # the side when it's bought -- version 10: the roll's too
+                    pending.update(option_type=side, put_change=put, call_change=call, mark=label)
                 decided = f"{text} -- a {SIDE_NAME[side]}; "
             elif position is not None and position["option_type"] == side:
                 decided = f"{text} -- still a {SIDE_NAME[side]}: held; "
@@ -465,7 +526,24 @@ async def evaluate(ctx) -> None:
             ctx.note("skipped", reason=f"{decided}the {SIDE_NAME[pending['option_type']]} is bought at {due.astimezone(IST):%H:%M:%S}")
             ctx.wake_at(due)
             return
+        side_name = SIDE_NAME[pending["option_type"]]
+        if quiet_until is not None:  # version 10: no buy in a candle's first minute
+            ctx.note("skipped", reason=f"{decided}the {side_name} is bought from {quiet_until:%H:%M}, if the candle's colour agrees")
+            ctx.wake_at(quiet_until)
+            return
         spot = await ctx.get_price(underlying.id)
+        start = candle_start(now_ist)
+        open_price = await candle_open(ctx.db, start) if start is not None else None
+        colour = candle_colour(spot, open_price)
+        state["candle_colour"] = {"candle": start.isoformat() if start else None, "open": open_price, "nifty": spot,
+                                  "colour": colour, "at": now_ist.strftime("%H:%M:%S")}
+        if colour_blocks(pending["option_type"], colour):  # version 10: flat until the colour agrees
+            ctx.note("skipped", reason=(
+                f"{decided}the {start:%H:%M} candle is {colour} (NIFTY {spot:,.2f} against its open {open_price:,.2f}): the "
+                f"{side_name} isn't bought; flat, checked every second until the colour agrees with the OI's side"
+            ))
+            ctx.wake_at(now_utc + RECHECK)
+            return
         expiries = await ctx.list_weekly_expiries(underlying.id, today)
         weekly = (expiries[1] if expiries and today == expiries[0] and len(expiries) > 1 else expiries[0]) if expiries else None
         why = None
@@ -523,11 +601,17 @@ async def evaluate(ctx) -> None:
     wake_for_next()
 
 
+def first_decision() -> dtime:
+    """Version 10: the session's first decision -- a minute into the 09:15 candle."""
+    return (datetime.combine(date(2000, 1, 1), SESSION_OPEN) + WAIT_AFTER_MARK).time()
+
+
 def _next_text(now_ist: datetime) -> str:
     first = datetime.combine(now_ist.date(), SESSION_OPEN, tzinfo=IST)
     if now_ist < first and is_trading_day(now_ist.date()):
-        return f"at the {SESSION_OPEN:%H:%M} open (the {OPEN_RECORD:%H:%M} row's change in OI), then on the live candle"
+        return f"at {first_decision():%H:%M}, a minute into the {SESSION_OPEN:%H:%M} candle (the {OPEN_RECORD:%H:%M} row's change in OI), then on the live candle"
     if first <= now_ist < datetime.combine(now_ist.date(), DAY_CLOSE, tzinfo=IST):
-        return f"on the live candle until {DAY_CLOSE:%H:%M}"
-    return (f"{next_trading_day(now_ist.date()):%a %d %b} at the {SESSION_OPEN:%H:%M} open (the {OPEN_RECORD:%H:%M} row's change "
+        return (f"on the live candle until {DAY_CLOSE:%H:%M}, from 1 minute into each 15-minute candle; a buy only when the "
+                f"candle's colour agrees")
+    return (f"{next_trading_day(now_ist.date()):%a %d %b} at {first_decision():%H:%M} (the {OPEN_RECORD:%H:%M} row's change "
             f"in OI), then on the live candle")

@@ -1370,7 +1370,9 @@ async def test_oi_change_buy_trades_closed_on_or_before_23_nov_are_deleted_the_c
 async def test_oi_change_buy_moves_onto_the_0915_open_keeping_its_option(db_engine, db_session):
     """27 Nov: OI Change Buy 15 MIN version 9 -- checking from the 09:15 open, the 09:00 row deciding there."""
     migration = _load("e6f8a0c2b4d7_oi_change_buy_open_at_0915")
-    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a8c0e2b4d6f9"
+    assert _load("c7e9a1b3d5f8_oi_change_buy_first_minute_and_colour").FROM_MD5S == {migration.TO_MD5}  # version 10 moves on
+    migration.TO_MD5 = _md5(migration.BUILT_IN)  # the built-in has moved on: the mechanics are what's tested here
+    assert migration.down_revision == "a8c0e2b4d6f9"
     code = migration.BUILT_IN.read_text(encoding="utf-8")
     assert "OPEN_RECORD = dtime(9, 0)" in code and "BROKERAGE_PER_ORDER = 0.0" in code and "AVERAGE_CANDLES = 1" in code
     assert migration.FROM_MD5S == {_load("a8c0e2b4d6f9_oi_change_buy_live_candle").TO_MD5}  # moves on from version 8
@@ -2267,3 +2269,33 @@ async def test_ohlc4_buy_is_created_with_its_pool_and_card_for_conti_calendars_o
     assert not (await db_session.execute(select(Log.action).where(Log.user_id == stranger.user_id))).scalars().all()
     await db_session.refresh(calendar)
     assert calendar.cash == 2_041_000.0  # Conti Calendar's own pool untouched
+
+
+async def test_oi_change_buy_moves_onto_the_first_minute_wait_and_the_candle_colour_keeping_its_option(db_engine, db_session):
+    """27 Nov: OI Change Buy 15 MIN version 10 -- each candle's first minute waits; a buy only when the candle's colour agrees."""
+    migration = _load("c7e9a1b3d5f8_oi_change_buy_first_minute_and_colour")
+    assert _md5(migration.BUILT_IN) == migration.TO_MD5 and migration.down_revision == "a3c5e7b9d1f4"
+    code = migration.BUILT_IN.read_text(encoding="utf-8")
+    assert "WAIT_AFTER_MARK = timedelta(minutes=1)" in code and "def colour_blocks(" in code and "OPEN_RECORD = dtime(9, 0)" in code
+    v9 = "# OI Change Buy 15 MIN, version 9: from the 09:15 open\n"
+    migration.FROM_MD5S = {_md5_text(v9)}
+    running = await _deployment(db_session, "oib10_a@tradingmaster.internal", v9)
+    (await db_session.get(Strategy, running.strategy_id)).name = "OI Change Buy 15 MIN"
+    edited = await _deployment(db_session, "oib10_b@tradingmaster.internal", "# OI Change Buy 15 MIN, edited by hand\n")
+    state = {"opened_on": "2026-11-27", "position": {"option": "01 Dec 25,700 PE", "legs": {}}}
+    running.state = state
+    ids, before = {"running": running.id, "edited": edited.id}, edited.strategy_version_id
+    await db_session.commit()
+
+    await _run(db_engine, migration)
+    await _run(db_engine, migration)  # once is all
+    db_session.expire_all()
+
+    moved = await db_session.get(PaperNativeDeployment, ids["running"])
+    numbers = (await db_session.execute(
+        select(StrategyVersion.version_number, StrategyVersion.id).where(StrategyVersion.strategy_id == moved.strategy_id)
+        .order_by(StrategyVersion.version_number)
+    )).all()
+    assert [n for n, _ in numbers] == [11, 12] and moved.strategy_version_id == numbers[-1][1] and moved.state == state
+    assert (await db_session.get(StrategyVersion, numbers[-1][1])).python_code == code
+    assert (await db_session.get(PaperNativeDeployment, ids["edited"])).strategy_version_id == before  # edited by hand: left alone

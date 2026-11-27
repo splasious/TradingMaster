@@ -195,7 +195,7 @@ export function OiChangeChart({ deploymentId }: { deploymentId: string }) {
       {data && n > 0 && (
         <p className="text-xs text-text-muted">
           {live
-            ? "At the 09:15 open the 09:00 row's overnight change in OI picks the side; from then until 15:29 the strategy follows the forming candle live: the CE while its Put ΔOI is higher, the PE while its Call ΔOI is. The strip shows the side each candle ended on; the shaded candles are the session before."
+            ? "At 09:16 the 09:00 row's overnight change in OI picks the side; from then until 15:29 the strategy follows the forming candle live: the CE while its Put ΔOI is higher, the PE while its Call ΔOI is. Each candle's first minute decides nothing, and a buy waits, flat, while the candle's colour disagrees (no PE on a green candle, no CE on a red one). The strip shows the side each candle ended on; the shaded candles are the session before."
             : "At each close from 09:30 to 15:15 the strategy holds the CE while the put average is higher and the PE while the call average is; the shaded candles are the session before, which the first averages use."}
         </p>
       )}

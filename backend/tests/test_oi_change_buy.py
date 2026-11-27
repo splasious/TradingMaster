@@ -41,7 +41,7 @@ class OIMarket(Market):
         """Version 8: the live candle since the record at `since` reads `put` / `call` from now on."""
         self.live = (since, put, call)
 
-    async def record(self, mark: datetime, put_day: float | None, call_day: float | None) -> None:
+    async def record(self, mark: datetime, put_day: float | None, call_day: float | None, spot: float | None = None) -> None:
         """The PCR Analysis tab's record for the close `mark`, a few seconds
         after it: `put_day` / `call_day` its last 15 minutes' change in OI
         (version 2) -- the day's change the other way round, so a rule on the
@@ -50,6 +50,7 @@ class OIMarket(Market):
             underlying="NIFTY", ts=mark.astimezone(timezone.utc), session_date=mark.date(),
             captured_at=(mark + timedelta(seconds=4)).astimezone(timezone.utc), source=SOURCE_LIVE, strike_window=40,
             expiries=[], put_oi_change=put_day, call_oi_change=call_day, put_oi_change_day=call_day, call_oi_change_day=put_day,
+            spot=spot,  # version 10: the candle's open (None: no colour, neither side blocked)
         ))
         await self.db.commit()
         self.reads(mark, put_day, call_day)  # version 8: the live candle from this close reads the same, for these tests
@@ -69,9 +70,21 @@ class OIMarket(Market):
 
 @pytest.fixture
 async def market(db_session, monkeypatch):
+    """Versions 8-9's mechanics: version 10's first-minute wait off (WAIT_AFTER_MARK 0), and records with no NIFTY, so no
+    candle colour -- version 10's own tests below use `v10`, with both on."""
     m = await OIMarket(db_session).build(monkeypatch)
     monkeypatch.setattr(oib, "live_row", m.live_row)
+    monkeypatch.setattr(oib, "WAIT_AFTER_MARK", timedelta(0))
     m.deployment.state = {"last_mark": at(4, 9, 15).isoformat()}  # a card already running before 09:30
+    yield m
+    tick_engine.forget([m.nifty.id, *(o.id for o in m.options)])
+
+
+@pytest.fixture
+async def v10(db_session, monkeypatch):
+    """Version 10 as it runs: each candle's first minute decides and buys nothing; a buy only when the candle's colour agrees."""
+    m = await OIMarket(db_session).build(monkeypatch)
+    monkeypatch.setattr(oib, "live_row", m.live_row)
     yield m
     tick_engine.forget([m.nifty.id, *(o.id for o in m.options)])
 
@@ -176,7 +189,7 @@ async def test_at_1529_nothing_is_sold_it_is_carried_overnight_and_nothing_more_
     open_next = datetime.combine(nxt, oib.SESSION_OPEN, tzinfo=at(4, 9, 15).tzinfo)
     assert await market.trades() == [] and carried.state["position"]["option_type"] == "PE"
     assert carried._last_reason.startswith("carried overnight:") and carried._wake_at == open_next
-    assert f"the trail and the next decision from the 09:15 open {nxt:%a %d %b}" in carried._last_reason
+    assert f"the trail from the 09:15 open {nxt:%a %d %b}, the next decision at" in carried._last_reason
     assert oib.next_session_open(at(4, 15, 29)) == open_next and oib.next_session_open(at(5, 9, 0)) == at(5, 9, 15)
     later = await market.check(at(4, 15, 30))
     assert later.state["position"] is not None and await market.trades() == []
@@ -400,7 +413,7 @@ async def test_before_the_0915_open_nothing_is_decided(market):
     await market.record(at(4, 9, 0), put_day=9_00_000, call_day=1_00_000)
     early = await market.check(at(4, 9, 14, 50))
     assert early.state.get("position") is None and early._wake_at == at(4, 9, 15) and "opened_on" not in early.state
-    assert "next decision at the 09:15 open (the 09:00 row's change in OI), then on the live candle" in early._last_reason
+    assert "next decision at" in early._last_reason and "(the 09:00 row's change in OI), then on the live candle" in early._last_reason
     day_done = await market.check(at(4, 15, 30))
     assert day_done._last_reason.startswith("day done") and "at the 09:15 open" in day_done._last_reason
 
@@ -447,3 +460,77 @@ def test_its_trades_dont_go_to_telegram():
     from app.services.notifications.trade_alerts import alerted_strategies
 
     assert "oi change buy 15 min" not in alerted_strategies()
+
+
+def test_version_10_the_first_minute_and_the_candle_colour():
+    assert (oib.WAIT_AFTER_MARK, oib.first_decision().strftime("%H:%M")) == (timedelta(minutes=1), "09:16")
+    assert oib.candle_start(at(4, 9, 14)) is None and oib.candle_start(at(4, 9, 29, 59)) == at(4, 9, 15)
+    assert oib.first_minute_ends(at(4, 9, 30, 20)) == at(4, 9, 31) and oib.first_minute_ends(at(4, 9, 31)) is None
+    assert oib.first_minute_ends(at(4, 15, 15, 59)) == at(4, 15, 16) and oib.first_minute_ends(at(4, 9, 0)) is None
+    assert (oib.candle_colour(23510, 23500), oib.candle_colour(23490, 23500), oib.candle_colour(23500, 23500)) == ("green", "red", None)
+    assert oib.candle_colour(23510, None) is None
+    assert oib.colour_blocks("PE", "green") and oib.colour_blocks("CE", "red")
+    assert not oib.colour_blocks("CE", "green") and not oib.colour_blocks("PE", "red") and not oib.colour_blocks("PE", None)
+
+
+async def test_version_10_the_0900_row_decides_a_minute_into_the_0915_candle(v10):
+    await v10.record(at(4, 9, 0), put_day=91_34_190, call_day=32_96_605)  # the overnight: the put side higher
+    await v10.record(at(4, 9, 15), put_day=1_00_000, call_day=4_00_000, spot=23440.0)  # the 09:15 candle opens 23,440
+    quiet = await v10.check(at(4, 9, 15, 2), spot=23460.0)
+    assert quiet.state.get("position") is None and "opened_on" not in quiet.state
+    assert "the first minute of the 09:15 candle: no decision until 09:16" in quiet._last_reason and quiet._wake_at == at(4, 9, 16)
+    ctx = await v10.check(at(4, 9, 16), spot=23460.0)  # green, and the 09:00 row says a call
+    p = ctx.state["position"]
+    assert (p["option"], p["decided_at"]) == ("09 Nov 23,450 CE", "the 09:00 row (overnight)") and ctx.state["opened_on"] == "2026-11-04"
+    assert ctx.state["candle_colour"]["colour"] == "green" and ctx.state["candle_colour"]["open"] == 23440.0
+
+
+async def test_version_10_no_flip_in_a_candles_first_minute(v10):
+    v10.deployment.state = {"opened_on": "2026-11-04"}
+    await v10.record(at(4, 9, 15), put_day=4_00_000, call_day=1_00_000)
+    await v10.check(at(4, 9, 20), spot=23460.0)
+    assert (await v10.check(at(4, 9, 20, 5), spot=23460.0)).state["position"]["option_type"] == "CE"
+    await v10.record(at(4, 9, 30), put_day=1_00_000, call_day=4_00_000)  # the new candle's first seconds read the call side
+    held = await v10.check(at(4, 9, 30, 20), spot=23460.0)
+    assert held.state["position"]["option_type"] == "CE" and await v10.trades() == []
+    assert "the first minute of the 09:30 candle: no decision until 09:31" in held._last_reason
+    flipped = await v10.check(at(4, 9, 31), spot=23460.0)
+    assert [t.exit_reason for t in await v10.trades()] == ["oi_flip"] and flipped.state["pending"]["option_type"] == "PE"
+
+
+async def test_version_10_the_flip_sells_but_a_put_waits_flat_while_the_candle_is_green(v10):
+    v10.deployment.state = {"opened_on": "2026-11-04"}
+    await v10.record(at(4, 9, 30), put_day=4_00_000, call_day=1_00_000, spot=23440.0)  # the 09:30 candle opens 23,440
+    await v10.check(at(4, 9, 32), spot=23460.0)  # green: a call
+    assert (await v10.check(at(4, 9, 32, 5), spot=23460.0)).state["position"]["option_type"] == "CE"
+    v10.reads(at(4, 9, 30), 1_00_000, 4_00_000)  # the live candle turns to the call side: a put wanted
+    sold = await v10.check(at(4, 9, 35), spot=23450.0)  # still green
+    assert [t.exit_reason for t in await v10.trades()] == ["oi_flip"] and sold.state.get("position") is None
+    blocked = await v10.check(at(4, 9, 35, 5), spot=23450.0)
+    assert blocked.state.get("position") is None and blocked.state["pending"]["option_type"] == "PE"
+    assert ("the 09:30 candle is green (NIFTY 23,450.00 against its open 23,440.00): the put isn't bought" in blocked._last_reason
+            and blocked._wake_at == at(4, 9, 35, 6))
+    bought = await v10.check(at(4, 9, 36), spot=23430.0)  # red: the put
+    assert (bought.state["position"]["option"], bought.state["position"]["option_type"]) == ("09 Nov 23,450 PE", "PE")
+
+
+async def test_version_10_a_call_waits_while_the_candle_is_red_and_the_buy_takes_the_side_the_oi_then_says(v10):
+    v10.deployment.state = {"opened_on": "2026-11-04"}
+    await v10.record(at(4, 9, 30), put_day=4_00_000, call_day=1_00_000, spot=23440.0)
+    blocked = await v10.check(at(4, 9, 32), spot=23420.0)  # the OI says a call, the candle is red
+    assert blocked.state.get("position") is None and "the call isn't bought" in blocked._last_reason
+    v10.reads(at(4, 9, 30), 1_00_000, 4_00_000)  # the OI turns to the put side: red agrees
+    bought = await v10.check(at(4, 9, 33), spot=23420.0)
+    assert bought.state["position"]["option_type"] == "PE" and await v10.trades() == []
+
+
+async def test_version_10_a_buy_due_in_the_next_candles_first_minute_waits_for_it_to_pass(v10):
+    v10.deployment.state = {"opened_on": "2026-11-04"}
+    await v10.record(at(4, 9, 15), put_day=4_00_000, call_day=1_00_000)
+    await v10.check(at(4, 9, 29, 50), spot=23460.0)
+    await v10.check(at(4, 9, 29, 55), spot=23460.0)  # a call held
+    v10.reads(at(4, 9, 15), 1_00_000, 4_00_000)
+    await v10.check(at(4, 9, 29, 58), spot=23460.0)  # sold; the put due 09:30:03
+    waiting = await v10.check(at(4, 9, 30, 3), spot=23460.0)
+    assert waiting.state.get("position") is None and "the put is bought from 09:31" in waiting._last_reason
+    assert waiting._wake_at == at(4, 9, 31)
