@@ -40,6 +40,7 @@ import type {
   NativePositionOut,
   NextInLineOut,
   OiChangeOut,
+  Ohlc4ChartOut,
   NativeTradeOut,
   LiveNativeTradeOut,
   LiveRunOut,
@@ -476,6 +477,16 @@ export function useOiChange(deploymentId: string, enabled: boolean) {
   return useQuery({
     queryKey: ["oi-change", deploymentId],
     queryFn: () => apiFetch<OiChangeOut>(`/api/v1/paper-trading/native-deployments/${deploymentId}/oi-change`),
+    enabled,
+    refetchInterval: 30_000,
+  });
+}
+
+/** OHLC4 Buy 5 MIN's 5-minute candle chart: re-read every 30 s (a candle lands 10-70 s after each 5-minute close). */
+export function useOhlc4Chart(deploymentId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["ohlc4-chart", deploymentId],
+    queryFn: () => apiFetch<Ohlc4ChartOut>(`/api/v1/paper-trading/native-deployments/${deploymentId}/ohlc4`),
     enabled,
     refetchInterval: 30_000,
   });

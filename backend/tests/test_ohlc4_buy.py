@@ -161,3 +161,24 @@ def test_its_trades_dont_go_to_telegram():
     from app.services.notifications.trade_alerts import alerted_strategies
 
     assert not {"ohlc4 buy 5 min", "ohlc4 buy 15 min"} & set(alerted_strategies())
+
+
+async def test_the_card_chart_shows_the_5_minute_candles_and_the_15_minute_level_each_close_was_checked_against(market):
+    from app.services.strategy import ohlc4_series as series
+
+    assert series.is_charted(" OHLC4 Buy 5 MIN ") and not series.is_charted("OI Change Buy 15 MIN")
+    await market.candle("15m", at(3, 15, 15), 23400.0, 23500.0, 23300.0, 23450.0)  # 23,412.50
+    await market.five(at(3, 15, 25), 23450.0)  # the session before: not drawn
+    for minute, close in ((15, 23400.0), (20, 23420.0), (25, 23470.0), (30, 23465.0)):
+        await market.five(at(4, 9, minute), close)
+    await market.candle("15m", at(4, 9, 15), 23460.0, 23480.0, 23440.0, 23460.0)  # 23,460, ends 09:30
+    market.prices(at(4, 9, 37), 23468.0)
+    out = await series.ohlc4_series(market.db, at(4, 9, 37).astimezone(timezone.utc))
+    assert str(out["session"]) == "2026-11-04" and len(out["candles"]) == 4 and out["spot"] == 23468.0
+    first, _, third, fourth = out["candles"]
+    assert (first["level"], first["level_low"], first["level_high"], first["side"]) == (23412.5, 23300.0, 23500.0, "PE")
+    assert (third["level"], third["side"]) == (23460.0, "CE")  # closed 09:30: the 09:15 15-minute candle by then
+    assert (fourth["level"], fourth["side"], fourth["checked"]) == (23460.0, "CE", True)
+    assert out["level_now"]["level"] == 23460.0 and out["level_now"]["level_low"] == 23440.0
+    shut = await series.ohlc4_series(market.db, at(4, 16, 0).astimezone(timezone.utc))
+    assert shut["spot"] is None and shut["level_now"] is None and len(shut["candles"]) == 4

@@ -1575,3 +1575,39 @@ export interface OiChangeOut {
   session: string | null;
   candles: OiChangeCandleOut[];
 }
+
+/** One 5-minute NIFTY candle on OHLC4 Buy 5 MIN's chart (27 Nov), with the level its close was checked against. */
+export interface Ohlc4CandleOut {
+  /** The candle's open. */
+  at: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** The latest 15-minute candle finished by its close: (O+H+L+C)/4, its low (a call's stop) and high (a put's). */
+  level: number | null;
+  level_low: number | null;
+  level_high: number | null;
+  /** That 15-minute candle's open. */
+  level_candle: string | null;
+  /** The side the check at its close picks; null at the level, or a close not checked (15:30). */
+  side: "CE" | "PE" | null;
+  checked: boolean;
+}
+
+export interface Ohlc4LevelOut {
+  level: number;
+  level_low: number;
+  level_high: number;
+  level_candle: string;
+}
+
+/** OHLC4 Buy 5 MIN's chart under its card (27 Nov). */
+export interface Ohlc4ChartOut {
+  session: string | null;
+  /** Live NIFTY while the market is open. */
+  spot: number | null;
+  /** What the forming candle's close will be checked against. */
+  level_now: Ohlc4LevelOut | null;
+  candles: Ohlc4CandleOut[];
+}

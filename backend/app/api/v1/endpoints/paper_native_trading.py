@@ -26,6 +26,7 @@ from app.schemas.paper_trading import (
     NativeTradeOut,
     NextInLineOut,
     OiChangeOut,
+    Ohlc4ChartOut,
     PayoffOut,
     PayoffPointOut,
 )
@@ -41,6 +42,7 @@ from app.services.paper_trading.native_runner import exit_native_deployment_now,
 from app.services.paper_trading.scheduler import paper_trading_scheduler
 from app.services.paper_trading.trade_record import estimate_charges, resolve_leg_details, summarize_trade
 from app.services.strategy.state_machine import StrategyStatus, can_transition
+from app.services.strategy.ohlc4_series import is_charted as is_ohlc4_charted, ohlc4_series
 from app.services.strategy.oi_change_series import is_charted, oi_change_series
 from app.services.strategy.week_high_scanner import is_scanned, next_in_line
 
@@ -521,6 +523,20 @@ async def native_deployment_oi_change(
     if strategy is None or not is_charted(strategy.name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No change-in-OI chart for this strategy.")
     return OiChangeOut(**await oi_change_series(db, datetime.now(timezone.utc)))
+
+
+@router.get("/native-deployments/{deployment_id}/ohlc4", response_model=Ohlc4ChartOut)
+async def native_deployment_ohlc4(
+    deployment_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+) -> Ohlc4ChartOut:
+    """OHLC4 Buy 5 MIN's chart under its card (27 Nov): the latest session's
+    5-minute NIFTY candles, the 15-minute level each close was checked
+    against with its low / high, and the side each check picks. Read-only."""
+    deployment, _portfolio = await _get_owned_native_deployment(db, user, deployment_id)
+    strategy = await db.get(Strategy, deployment.strategy_id)
+    if strategy is None or not is_ohlc4_charted(strategy.name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No OHLC4 chart for this strategy.")
+    return Ohlc4ChartOut(**await ohlc4_series(db, datetime.now(timezone.utc)))
 
 
 @router.post("/native-deployments/{deployment_id}/use-latest-version", response_model=NativeDeploymentOut)

@@ -337,6 +337,36 @@ class OiChangeOut(BaseModel):
     candles: list[OiChangeCandleOut]
 
 
+
+class Ohlc4CandleOut(BaseModel):
+    """One 5-minute NIFTY candle on OHLC4 Buy 5 MIN's chart (27 Nov), with the level its close was checked against."""
+
+    at: datetime  # the candle's open
+    open: float
+    high: float
+    low: float
+    close: float
+    level: float | None  # the latest 15-minute candle finished by its close: (O+H+L+C)/4
+    level_low: float | None  # that candle's low (a call's stop) and high (a put's)
+    level_high: float | None
+    level_candle: datetime | None  # that 15-minute candle's open
+    side: str | None  # "CE" / "PE" the check at its close picks; None at the level, or a close not checked (15:30)
+    checked: bool
+
+
+class Ohlc4LevelOut(BaseModel):
+    level: float
+    level_low: float
+    level_high: float
+    level_candle: datetime
+
+
+class Ohlc4ChartOut(BaseModel):
+    session: date | None
+    spot: float | None  # live NIFTY while the market is open
+    level_now: Ohlc4LevelOut | None  # what the forming candle's close will be checked against
+    candles: list[Ohlc4CandleOut]
+
 class NextInLineRowOut(BaseModel):
     """One stock 52 Week High Breakout's Friday check would take next (20 Nov)."""
 
