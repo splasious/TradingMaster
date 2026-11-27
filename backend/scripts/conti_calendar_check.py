@@ -132,6 +132,8 @@ async def describe(db, NAME: str, FILE_MD5: str) -> None:
                     opened = datetime.fromisoformat(position["opened_at"]).astimezone(IST).strftime("%d-%b %H:%M:%S")
                     print(f"    holding {position['option']} ({position['bias']}), bought {opened} at "
                           f"{position['legs']['long']['entry_price']:,.2f}; level {position.get('level')}, stop {position.get('stop')}")
+                print(f"    card chart (GET .../ohlc4): {_ohlc4_chart(card.id, s.owner_id)}")
+                print(f"    chart in the served frontend: {_frontend_has('NIFTY 5-minute candles and the level')}")
                 print(f"    last reason: {(card.last_signal_reason or '-').split(', P&L')[0].split('; P&L')[0]}")
                 closes = (await db.execute(
                     select(PaperNativeTrade.exit_reason, PaperNativeTrade.opened_at, PaperNativeTrade.closed_at, PaperNativeTrade.legs)
@@ -246,6 +248,54 @@ def _legs_at_book(deployment_id, owner_id) -> str:
     right = [leg for leg in booked if leg["current_price"] == (leg["ask"] if leg["side"] == "short" else leg["bid"])]
     return f"{len(booked)} of {len(legs)} legs at bid/ask, {len(right)} at the right side; payoff shown: {bool((position or {}).get('payoff'))}"
 
+
+
+def _ohlc4_chart(deployment_id, owner_id) -> str:
+    """OHLC4 Buy 5 MIN's card chart as the running app serves it (GET .../ohlc4, as its owner, 27 Nov): the
+    status, and counts, times and yes/no only."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"http://localhost:8000/api/v1/paper-trading/native-deployments/{deployment_id}/ohlc4",
+        headers={"Authorization": f"Bearer {create_access_token(str(owner_id), [])}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            chart = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001 -- the kind only, no detail
+        return f"not read ({type(exc).__name__})"
+    candles = chart.get("candles") or []
+    span = f" {candles[0]['at'][11:16]}-{candles[-1]['at'][11:16]} UTC" if candles else ""
+    return (f"HTTP 200: session {chart.get('session')}, {len(candles)} 5-minute candles{span}, "
+            f"{sum(c.get('level') is not None for c in candles)} with a level, {sum(c.get('side') is not None for c in candles)} with a side; "
+            f"NIFTY now shown {chart.get('spot') is not None}, level now shown {chart.get('level_now') is not None}")
+
+
+def _frontend_has(text: str) -> str:
+    """Whether the served /trading page's scripts carry `text` -- the frontend container, from inside the backend's
+    (yes/no and counts only)."""
+    import re
+    import urllib.request
+
+    for base in ("http://frontend:3000", "http://tradingmaster-frontend:3000", "http://host.docker.internal:3000"):
+        try:
+            with urllib.request.urlopen(f"{base}/trading", timeout=10) as response:
+                html = response.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            continue
+        chunks = sorted(set(re.findall(r'/_next/static/[^"\']+?\.js', html)))
+        found = 0
+        for chunk in chunks:
+            try:
+                with urllib.request.urlopen(f"{base}{chunk}", timeout=10) as response:
+                    found += text in response.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                continue
+        return f"{base.split('//')[1]}: {len(chunks)} scripts on /trading, {found} carrying it"
+    return "the frontend container wasn't reachable from here"
 
 async def stored_data(db) -> None:
     """What the server keeps for a backtest (17 Nov): the 15-minute change-in-OI
